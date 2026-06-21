@@ -8,10 +8,13 @@ Responsibilities:
 * record everything through the shared order schema + append-only order_events,
 * open the resulting position.
 
-Execution in v1 is simulated and labelled honestly: ``execution_source = mock``.
-When in paper mode with Alpaca creds, the Alpaca connector's guardrails are run
-first (it then raises AlpacaNotConnected, and we fall back to simulation with a
-logged note). No code path can place a real-money order.
+Execution in v1 is simulated internally and labelled honestly:
+``execution_provider = simulated_internal`` / ``execution_mode =
+internal_simulation`` / ``fill_source = internal_sim``. A fill is NEVER labelled
+as an Alpaca paper fill unless it comes from the real Alpaca paper API. When in
+paper mode with Alpaca creds, the Alpaca connector's guardrails are run first (it
+then raises AlpacaNotConnected, and we fall back to simulation with a logged
+note). No code path can place a real-money order.
 """
 
 from __future__ import annotations
@@ -21,12 +24,16 @@ from typing import Optional
 
 from alphaos.broker.alpaca_client import AlpacaClient, AlpacaNotConnected, AlpacaSafetyError
 from alphaos.constants import (
+    ExecutionProvider,
     ExecutionSource,
     OrderState,
     ProtectionPath,
     ReasonCode,
     Severity,
 )
+
+FILL_PRICE_BASIS = "latest_quote_or_bar"
+EXEC_MODE_SIM = "internal_simulation"
 from alphaos.execution import order_schema
 from alphaos.execution.position_manager import PositionManager
 from alphaos.safety import KillSwitch, real_trading_guard
@@ -129,19 +136,32 @@ class OrderManager:
         # Otherwise: entry + watchdog-managed exits (verifiable via monitor).
         return ProtectionPath.ENTRY_PLUS_WATCHDOG
 
+    def _data_labels(self) -> tuple[str, str]:
+        """The market-data provider/feed that priced this fill (honest labels)."""
+        provider = "alpaca_mock" if self.settings.offline_mode else "alpaca"
+        return provider, self.settings.market_data_feed
+
     def _simulate_fill(self, proposal, protection: ProtectionPath, fill_price) -> OrderResult:
         order_id = new_id("ord")
         price = float(fill_price if fill_price is not None else proposal.entry)
         side = order_schema.side_for_entry(proposal.direction)
         order_type = "bracket" if protection == ProtectionPath.BROKER_NATIVE_BRACKET else "market"
         st = timeutils.stamp()
+        data_provider, data_feed = self._data_labels()
+        src = ExecutionSource.INTERNAL_SIM.value
 
         row = order_schema.build_order_row(
             order_id=order_id,
             proposal=proposal,
             side=side,
             order_type=order_type,
-            execution_source=ExecutionSource.MOCK.value,  # honest: v1 fills are simulated
+            # v1 fills are internal simulations — never an Alpaca paper fill.
+            execution_source=src,
+            execution_provider=ExecutionProvider.SIMULATED_INTERNAL.value,
+            execution_mode=EXEC_MODE_SIM,
+            data_provider=data_provider,
+            data_feed=data_feed,
+            fill_price_basis=FILL_PRICE_BASIS,
             protection_path=protection.value,
             state=OrderState.FILLED.value,
             qty=proposal.qty,
@@ -151,8 +171,8 @@ class OrderManager:
             limit_price=proposal.entry,
             client_order_id=new_id("cli"),
             broker_order_id=new_id("sim"),
-            raw_request={"proposal_id": proposal.proposal_id, "intended_source": self._intended_source()},
-            raw_response={"simulated": True, "fill_price": price},
+            raw_request={"proposal_id": proposal.proposal_id},
+            raw_response={"simulated": True, "fill_price": price, "fill_source": src},
             submitted_at=st.utc,
             accepted_at=st.utc,
             filled_at=st.utc,
@@ -165,7 +185,7 @@ class OrderManager:
             (OrderState.SUBMITTED, OrderState.ACCEPTED),
             (OrderState.ACCEPTED, OrderState.FILLED),
         ):
-            self._event(order_id, row["broker_order_id"], prev, new, ExecutionSource.MOCK.value)
+            self._event(order_id, row["broker_order_id"], prev, new, src)
 
         fill_id = new_id("fill")
         self.journal.insert(
@@ -179,7 +199,12 @@ class OrderManager:
                 "qty": proposal.qty,
                 "price": price,
                 "commission": 0.0,
-                "execution_source": ExecutionSource.MOCK.value,
+                "execution_source": src,
+                "execution_provider": ExecutionProvider.SIMULATED_INTERNAL.value,
+                "data_provider": data_provider,
+                "data_feed": data_feed,
+                "fill_source": "internal_sim",
+                "fill_price_basis": FILL_PRICE_BASIS,
                 "filled_at": st.utc,
             },
             mirror=True,
@@ -189,16 +214,13 @@ class OrderManager:
         self.journal.log_system_event(
             Severity.INFO, "execution",
             f"Filled {proposal.symbol} x{proposal.qty} @ {price} "
-            f"({proposal.direction}, {protection.value}, simulated).",
+            f"({proposal.direction}, {protection.value}, simulated_internal, data={data_provider}/{data_feed}).",
             {"order_id": order_id, "position_id": position_id},
         )
         return OrderResult(
             blocked=False, order=row, fills=[fill_id], protection_path=protection.value,
             state=OrderState.FILLED.value, position_id=position_id,
         )
-
-    def _intended_source(self) -> str:
-        return ExecutionSource.ALPACA_PAPER.value if self.broker_connected else ExecutionSource.MOCK.value
 
     def _event(self, order_id, broker_order_id, prev: OrderState, new: OrderState, source: str, detail=None):
         self.journal.insert(
@@ -220,12 +242,17 @@ class OrderManager:
         """Persist a rejected order attempt + system event + rejection record."""
         order_id = new_id("ord")
         side = order_schema.side_for_entry(proposal.direction)
+        data_provider, data_feed = self._data_labels()
         row = order_schema.build_order_row(
             order_id=order_id,
             proposal=proposal,
             side=side,
             order_type="market",
-            execution_source=ExecutionSource.MOCK.value,
+            execution_source=ExecutionSource.INTERNAL_SIM.value,
+            execution_provider=ExecutionProvider.SIMULATED_INTERNAL.value,
+            execution_mode=EXEC_MODE_SIM,
+            data_provider=data_provider,
+            data_feed=data_feed,
             protection_path=protection_path,
             state=OrderState.REJECTED.value,
             qty=proposal.qty,

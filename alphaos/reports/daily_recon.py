@@ -82,12 +82,21 @@ class DailyRecon:
         return {"report_id": report_id, "report_date": report_date, "counts": counts, "content_md": content}
 
     def _render_markdown(self, report_date: str, c: dict) -> str:
+        market_mode = self.settings.market_data_mode
+        data_label = f"{self.settings.data_provider}/{self.settings.market_data_feed} ({market_mode})"
         return (
             f"# AlphaOS Daily Learning Report — {report_date}\n\n"
             f"_Mode: **{self.settings.mode.value}** · Approval: **{self.settings.approval_mode.value}** · "
             f"Real trading: **disabled**_\n\n"
-            "> v1 forward-evidence report. No statistical conclusions are claimed; "
-            "this records what happened and seeds the baseline-comparison data.\n\n"
+            f"_Playbook: **momentum continuation (no-news baseline)** · "
+            f"Market data: **{data_label}** · Execution: **simulated_internal** · News: **disabled_v1**_\n\n"
+            + (
+                "> ⚠️ **Market data is MOCKED (offline)** — not live.\n\n"
+                if market_mode == "mock"
+                else ""
+            )
+            + "> v1 forward-evidence report. No statistical conclusions are claimed; "
+            "this records what happened and seeds the no-news baseline-comparison data.\n\n"
             "## Activity\n"
             f"- Candidates detected: **{c['candidates']}**\n"
             f"- Proposals: **{c['proposals']}**\n"

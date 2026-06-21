@@ -20,8 +20,13 @@ from alphaos.ai.openai_client import OpenAIClient
 from alphaos.approval import ApprovalEngine
 from alphaos.config.settings import Settings, load_settings
 from alphaos.constants import (
+    BASELINE_MOMENTUM_NO_NEWS_V1,
+    CATALYST_NOT_AVAILABLE_V1,
     Decision,
+    ExecutionProvider,
+    NEWS_STATUS_DISABLED_V1,
     NewsStatus,
+    PLAYBOOK_V1,
     ReasonCode,
     Severity,
     Strategy,
@@ -42,8 +47,7 @@ from alphaos.strategy.swing_strategy import SwingStrategy
 from alphaos.strategy.daytrade_experiment import DaytradeExperiment
 from alphaos.util.ids import new_id
 
-# Block execution if price moved more than this fraction since the proposal.
-MATERIAL_MOVE_PCT = 0.01
+# Price-drift is gated by MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL via the freshness guard.
 
 
 @dataclass
@@ -69,9 +73,9 @@ class Orchestrator:
 
         self.kill_switch = KillSwitch()
         self.market = MarketDataClient(self.settings, self.journal)
-        self.freshness = FreshnessGuard(self.settings.max_data_age_seconds)
+        self.freshness = FreshnessGuard.from_settings(self.settings)
         self.scanner = CandidateScanner(self.settings, self.journal, self.market)
-        self.news = NewsService(self.settings, self.journal)
+        self.news = NewsService(self.settings, self.journal)  # v1: no-news mode
         self.openai = OpenAIClient(self.settings, self.journal)
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
@@ -125,18 +129,14 @@ class Orchestrator:
 
         for cand in scan.candidates:
             snapshot = cand.get("_snapshot", {})
-            news_items, news_status = self.news.get_news(cand["symbol"])
-            self._update_candidate_news(cand["candidate_id"], news_status)
+            # v1 NO-NEWS mode: no news fetch; evaluate on price/volume/structure.
+            self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
 
             evaluation = self.openai.evaluate(
-                cand,
-                snapshot,
-                [n.as_dict() for n in news_items],
-                news_status,
-                freshness_status="usable",  # scanner only keeps usable snapshots
+                cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
             )
             self.journal.insert("openai_evaluations", evaluation.to_row())
-            self._record_baselines(cand, evaluation, news_status)
+            self._record_baselines(cand, evaluation)
 
             decision = evaluation.decision
             if decision == Decision.REJECT.value:
@@ -235,25 +235,30 @@ class Orchestrator:
             )
             self.journal.conn.commit()
 
-        # Freshness re-check (mandatory before any order).
+        # Freshness re-check (mandatory before any order). Closed session,
+        # stale/missing quote or bar all surface here and block.
         snap = self.market.get_snapshot(proposal.symbol)
         report = self.freshness.assess(snap)
         if not report.is_usable:
             self.journal.log_system_event(
                 Severity.WARNING, "approval",
-                f"Approval blocked for {proposal.symbol}: data {report.freshness_status}.",
+                f"Approval blocked for {proposal.symbol}: {report.freshness_status} "
+                f"({report.block_reason}).",
             )
-            return False, f"data not fresh ({report.freshness_status})"
+            return False, f"data not usable ({report.freshness_status}/{report.block_reason})"
 
-        # Material price move since proposal => do not trade on a stale entry.
+        # Material price drift since proposal => do not trade on a stale entry.
         cur = snap.get("last_price")
-        if cur and proposal.entry and abs(cur - proposal.entry) / proposal.entry > MATERIAL_MOVE_PCT:
+        drift_ok, drift_bps = self.freshness.check_price_drift(proposal.entry, cur)
+        if not drift_ok:
             self.journal.log_system_event(
                 Severity.WARNING, "approval",
-                f"Approval blocked for {proposal.symbol}: price moved "
-                f"{proposal.entry}->{cur} beyond {MATERIAL_MOVE_PCT:.1%}.",
+                f"Approval blocked for {proposal.symbol}: price drift {drift_bps} bps "
+                f"> {self.settings.max_price_drift_bps_since_proposal} bps "
+                f"({proposal.entry}->{cur}).",
+                {"reason_code": ReasonCode.PRICE_DRIFT.value},
             )
-            return False, "price moved materially since proposal"
+            return False, f"price drift {drift_bps} bps exceeds limit since proposal"
 
         # Risk re-check.
         risk = self.risk.assess(
@@ -340,8 +345,8 @@ class Orchestrator:
             "candidates",
             {
                 "candidate_id": cand_id, "symbol": symbol, "direction": TradeDirection.LONG.value,
-                "strategy": Strategy.SWING.value, "momentum_score": 0.7, "news_status": "available",
-                "status": "demo", "notes_json": {"demo": True},
+                "strategy": Strategy.SWING.value, "momentum_score": 0.7,
+                "news_status": NEWS_STATUS_DISABLED_V1, "status": "demo", "notes_json": {"demo": True},
             },
         )
         risk = self.risk.assess(direction="long", entry=entry, stop=stop, snapshot=snap)
@@ -388,10 +393,10 @@ class Orchestrator:
         self.journal.conn.commit()
 
     def _reject_candidate(self, cand, stage, evaluation, reason: Optional[str] = None) -> None:
-        news_status = cand.get("news_status")
         if reason is None:
-            if not evaluation.news_sources and stage == "openai":
-                reason = ReasonCode.NO_VERIFIABLE_NEWS.value
+            # No-news mode: rejections come from data/validation/risk, not "no news".
+            if evaluation.validation_status not in (None, "", "passed"):
+                reason = ReasonCode.INVENTED_CATALYST.value
             else:
                 reason = ReasonCode.OPENAI_REJECT.value
         self.journal.insert(
@@ -410,24 +415,68 @@ class Orchestrator:
         )
         self._set_candidate_status(cand["candidate_id"], "rejected")
 
-    def _record_baselines(self, cand, evaluation, news_status) -> None:
-        status = news_status.value if isinstance(news_status, NewsStatus) else str(news_status)
+    def _record_baselines(self, cand, evaluation) -> None:
+        """Record the v1 no-news baseline (the live measurement path).
+
+        News-dependent fields are written as NULL so the news layer can populate
+        them later without a migration.
+        """
         ref_price = cand.get("last_price")
-        common = {
-            "candidate_id": cand["candidate_id"],
-            "symbol": cand["symbol"],
-            "direction": evaluation.direction,
-            "reference_price": ref_price,
-            "ref_timestamp": evaluation.raw.get("news_status") if evaluation.raw else None,
-            "ai_decision": evaluation.decision,
-            "claude_consulted": 0,
+        self.journal.insert(
+            "baseline_outcomes",
+            {
+                "baseline_id": new_id("base"),
+                "candidate_id": cand["candidate_id"],
+                "symbol": cand["symbol"],
+                "baseline_type": BASELINE_MOMENTUM_NO_NEWS_V1,
+                "direction": evaluation.direction,
+                "reference_price": ref_price,
+                "ref_timestamp": cand.get("_snapshot", {}).get("quote_timestamp"),
+                "ai_decision": evaluation.decision,
+                "claude_consulted": 0,
+                "news_status": NEWS_STATUS_DISABLED_V1,
+                "catalyst": CATALYST_NOT_AVAILABLE_V1,
+                "no_news_baseline": 1,
+                # news-dependent fields left NULL for the future news layer:
+                "news_confirmed_subset": None,
+                "news_provider": None,
+                "news_sources": None,
+                "catalyst_type": None,
+                "catalyst_confidence": None,
+                "notes_json": {"confidence": evaluation.confidence, "momentum": cand.get("momentum_score")},
+            },
+        )
+
+    # --------------------------------------------------------- system health
+    def system_health(self) -> dict:
+        """Structured health for the dashboard/CLI: mocked/deferred/disabled/live
+        layers are all explicitly labelled."""
+        s = self.settings
+        last_snap = self.journal.one(
+            "SELECT freshness_status, market_session FROM price_snapshots ORDER BY id DESC LIMIT 1"
+        )
+        freshness = (last_snap or {}).get("freshness_status") or "n/a"
+        return {
+            "playbook": PLAYBOOK_V1,
+            "ai_primary": f"openai / {'configured' if s.has_openai_key else 'missing key (mock)'}",
+            "ai_reviewer": f"anthropic / optional / {'configured' if s.has_anthropic_key else 'missing key'}",
+            "market_data_provider": s.data_provider,
+            "market_data_feed": s.market_data_feed,
+            "market_data_mode": s.market_data_mode,         # live / mock
+            "market_data_limited": "free/IEX — limited-market data",
+            "market_data_freshness": freshness,
+            "news_provider": "disabled_v1",
+            "benzinga": "deferred_v1",
+            "web_scraper": "disabled_v1",
+            "massive": "deferred_v1",
+            "execution_provider": s.execution_provider,     # simulated_internal
+            "real_alpaca_paper_execution": "not_enabled_v1",
+            "real_money_trading": "unreachable",
+            "manual_approval": "required" if s.effective_approval_mode.value == "manual" else "auto (capped)",
+            "kill_switch": "ENGAGED" if self.kill_switch.is_engaged() else "off",
+            "broker_connected": self.orders.broker_connected,
+            "open_positions": self.journal.count_open_positions(),
         }
-        for btype in ("momentum_only", "no_news", "openai_only"):
-            row = dict(common)
-            row["baseline_id"] = new_id("base")
-            row["baseline_type"] = btype
-            row["notes_json"] = {"news_status": status, "confidence": evaluation.confidence}
-            self.journal.insert("baseline_outcomes", row)
 
     def close(self) -> None:
         self.journal.close()

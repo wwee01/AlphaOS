@@ -64,9 +64,12 @@ class Strategy(StrEnum):
 
 
 class ExecutionSource(StrEnum):
-    """Where an order was executed. Mock and Alpaca-paper share one schema."""
+    """Low-level fill source. v1 fills are internal simulations; a real Alpaca
+    paper fill (ALPACA_PAPER) is only ever set when it comes from the real
+    Alpaca paper API. Mock/Alpaca-paper share one schema."""
 
     MOCK = "mock"
+    INTERNAL_SIM = "internal_sim"
     ALPACA_PAPER = "alpaca_paper"
 
 
@@ -131,6 +134,30 @@ class FreshnessStatus(StrEnum):
     USABLE = "usable"
     STALE = "stale"
     UNVERIFIABLE = "unverifiable"
+    MISSING = "missing"
+    CLOSED_SESSION = "closed_session"
+
+
+class DataProvider(StrEnum):
+    """Active market-data providers. v1: Alpaca only."""
+
+    ALPACA = "alpaca"
+
+
+class MarketDataFeed(StrEnum):
+    IEX = "iex"
+    SIP = "sip"
+
+
+class MarketDataMode(StrEnum):
+    LIVE = "live"
+    MOCK = "mock"
+
+
+class ExecutionProvider(StrEnum):
+    """Execution remains simulated internally in v1 — never a real broker fill."""
+
+    SIMULATED_INTERNAL = "simulated_internal"
 
 
 class MarketSession(StrEnum):
@@ -143,6 +170,7 @@ class MarketSession(StrEnum):
 class NewsStatus(StrEnum):
     AVAILABLE = "available"
     NEWS_UNAVAILABLE = "NEWS_UNAVAILABLE"
+    DISABLED_V1 = "disabled_v1"
 
 
 class Severity(StrEnum):
@@ -163,8 +191,17 @@ class UniverseTier(StrEnum):
 class ReasonCode(StrEnum):
     NO_VERIFIABLE_NEWS = "NO_VERIFIABLE_NEWS"
     NEWS_UNAVAILABLE = "NEWS_UNAVAILABLE"
+    NEWS_DISABLED = "NEWS_DISABLED_V1"
     STALE_DATA = "STALE_DATA"
+    STALE_QUOTE = "STALE_QUOTE"
+    STALE_BAR = "STALE_BAR"
+    MISSING_QUOTE = "MISSING_QUOTE"
+    MISSING_BAR = "MISSING_BAR"
+    CLOSED_SESSION = "CLOSED_SESSION"
+    PRICE_DRIFT = "PRICE_DRIFT"
     UNVERIFIABLE_DATA = "UNVERIFIABLE_DATA"
+    INVALID_DATA_PROVIDER = "INVALID_DATA_PROVIDER"
+    INVENTED_CATALYST = "INVENTED_CATALYST_IN_NO_NEWS_MODE"
     WIDE_SPREAD = "WIDE_SPREAD"
     LOW_LIQUIDITY = "LOW_LIQUIDITY"
     RISK_OVERSIZED = "RISK_OVERSIZED"
@@ -191,6 +228,37 @@ TEST_FIXTURE_NEWS_LABEL = "TEST_FIXTURE_NEWS"
 
 # The one and only acceptable value of REAL_TRADING_ENABLED in v1.
 REAL_TRADING_REQUIRED_VALUE = "false"
+
+# --- v1 no-news sentinels (enforced in OpenAI output validation) -------------
+CATALYST_NOT_AVAILABLE_V1 = "not_available_v1"
+NEWS_STATUS_DISABLED_V1 = "disabled_v1"
+BASELINE_MOMENTUM_NO_NEWS_V1 = "momentum_continuation_no_news_v1"
+PLAYBOOK_V1 = "momentum continuation (no-news baseline)"
+FAILED_VALIDATION_INVENTED_CATALYST = "invented_catalyst_in_no_news_mode"
+
+# Raised by any deferred connector if the active runtime calls it by accident.
+DEFERRED_IN_V1 = "deferred in v1"
+
+# Phrases that indicate the model invented a catalyst while in no-news mode.
+INVENTED_CATALYST_MARKERS = (
+    "upgrade",
+    "downgrade",
+    "earnings",
+    "fda",
+    "merger",
+    "acquisition",
+    "m&a",
+    "rumor",
+    "analyst",
+    "headline",
+    "news-driven",
+    "news driven",
+    "press release",
+    "guidance raise",
+    "social media",
+    "tweet",
+    "reported that",
+)
 
 # Timezones we stamp events with.
 TZ_UTC = "UTC"

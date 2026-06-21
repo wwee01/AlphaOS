@@ -45,12 +45,9 @@ def cmd_status(orch: Orchestrator) -> int:
     _print(
         {
             "mode": orch.settings.mode.value,
-            "approval_mode": orch.settings.approval_mode.value,
             "real_trading_enabled_raw": orch.settings.real_trading_enabled_raw,
             "real_trading_value_ok": orch.settings.real_trading_value_ok,
-            "kill_switch_engaged": orch.kill_switch.is_engaged(),
-            "broker_connected": orch.orders.broker_connected,
-            "open_positions": orch.journal.count_open_positions(),
+            "system_health": orch.system_health(),
             "startup_checks": [c.as_dict() for c in checks],
         }
     )

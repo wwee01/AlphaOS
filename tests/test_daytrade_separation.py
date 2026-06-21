@@ -20,7 +20,7 @@ def test_daytrade_disabled_by_default():
 
 
 def test_auto_mode_cannot_approve_daytrade(journal):
-    s = make_settings(APPROVAL_MODE="auto")
+    s = make_settings(APPROVAL_MODE="auto", REQUIRE_MANUAL_APPROVAL="false")
     eng = ApprovalEngine(s, journal)
     prop = make_proposal(strategy=Strategy.DAYTRADE_EXPERIMENT.value)
     outcome = eng.consider(prop, risk_ok=True, freshness_ok=True)

@@ -69,8 +69,17 @@ def parse_iso(value: str) -> Optional[datetime]:
     if not value:
         return None
     try:
-        # Support trailing 'Z'
-        v = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        v = value.strip()
+        # Support trailing 'Z'.
+        if v.endswith("Z"):
+            v = v[:-1] + "+00:00"
+        # Alpaca emits RFC3339 with nanoseconds; datetime.fromisoformat only
+        # accepts up to microseconds, so truncate the fractional part to 6 digits.
+        import re as _re
+
+        m = _re.match(r"^(.*\.\d{6})\d+(.*)$", v)
+        if m:
+            v = m.group(1) + m.group(2)
         dt = datetime.fromisoformat(v)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=_UTC)
