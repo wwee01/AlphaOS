@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alphaos"
+version = "0.1.0"
+description = "AlphaOS — a learning-first, paper-trading operating system (v1 skeleton)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# Live connectors are optional; mock mode + tests need none of them.
+live = ["streamlit>=1.30", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", "requests>=2.31"]
+test = ["pytest>=7.0", "tzdata>=2023.3"]
+
+[tool.setuptools.packages.find]
+include = ["alphaos*"]
+
+[tool.pytest.ini_options]
+# "." makes `import alphaos` work; "tests" makes `from conftest import ...` work.
+pythonpath = [".", "tests"]
+testpaths = ["tests"]
+addopts = "-q"

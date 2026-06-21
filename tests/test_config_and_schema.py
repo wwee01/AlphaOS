@@ -1,0 +1,57 @@
+"""Config startup-safety and database schema completeness."""
+
+from __future__ import annotations
+
+from alphaos.journal.schema import ALL_TABLES
+from conftest import make_settings
+
+
+REQUIRED_TABLES = {
+    "universe", "price_snapshots", "news_items", "candidates", "openai_evaluations",
+    "claude_reviews", "trade_proposals", "approvals", "paper_orders", "paper_fills",
+    "positions", "exits", "trade_outcomes", "rejected_candidates", "baseline_outcomes",
+    "daily_learning_reports", "system_events", "config_versions",
+}
+
+
+def test_all_required_tables_present(journal):
+    existing = {
+        r["name"]
+        for r in journal.query("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    missing = REQUIRED_TABLES - existing
+    assert not missing, f"missing tables: {missing}"
+    assert REQUIRED_TABLES.issubset(set(ALL_TABLES))
+
+
+def test_mock_startup_is_ok_without_keys():
+    s = make_settings()
+    assert s.startup_ok() is True
+
+
+def test_paper_mode_without_keys_refuses_execution():
+    s = make_settings(ALPHAOS_MODE="paper")  # no alpaca keys
+    ok, failing = s.paper_execution_allowed()
+    assert ok is False
+    assert any(c.name in ("alpaca_credentials", "alpaca_base_url", "alpaca_paper_flag") for c in failing)
+
+
+def test_paper_mode_with_full_safe_config_allows_execution():
+    s = make_settings(
+        ALPHAOS_MODE="paper",
+        ALPACA_PAPER="true",
+        ALPACA_BASE_URL="https://paper-api.alpaca.markets",
+        ALPACA_API_KEY="k",
+        ALPACA_SECRET_KEY="s",
+        REAL_TRADING_ENABLED="false",
+    )
+    ok, failing = s.paper_execution_allowed()
+    assert ok is True, [f.name for f in failing]
+
+
+def test_config_version_recorded(journal, settings):
+    journal.record_config_version(settings)
+    rows = journal.query("SELECT * FROM config_versions")
+    assert len(rows) == 1
+    assert rows[0]["real_trading_enabled_raw"] == "false"
+    assert "openai_api_key" not in rows[0]["config_json"]  # secrets never stored

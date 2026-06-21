@@ -1,0 +1,2 @@
+# Runtime data lives here (SQLite journal, kill-switch marker).
+# Contents are git-ignored; this file just keeps the directory.
