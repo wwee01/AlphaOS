@@ -24,12 +24,17 @@ from alphaos.constants import (
     ACTIVE_MODES,
     STUB_MODES,
     ApprovalMode,
+    DataProvider,
+    ExecutionProvider,
+    MarketDataFeed,
+    MarketDataMode,
     REAL_TRADING_REQUIRED_VALUE,
     RuntimeMode,
     Severity,
 )
 
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 
 
 class SettingsError(Exception):
@@ -115,7 +120,15 @@ class Settings:
     anthropic_api_key: str
     claude_review_model: str
 
-    # --- data / news ---
+    # --- market data (v1: Alpaca only, IEX feed) ---
+    data_provider: str
+    market_data_feed: str
+
+    # --- news (v1: disabled / no-news mode) ---
+    news_enabled: bool
+    news_provider: str
+
+    # --- deferred provider keys (NOT used in v1) ---
     massive_api_key: str
     benzinga_api_key: str
 
@@ -125,6 +138,11 @@ class Settings:
     alpaca_paper: bool
     alpaca_base_url: str
 
+    # --- execution (v1: simulated internally) ---
+    execution_provider: str
+    allow_real_orders_raw: str
+    require_manual_approval: bool
+
     # --- notifications ---
     ntfy_topic: str
 
@@ -132,6 +150,8 @@ class Settings:
     mode: RuntimeMode
     approval_mode: ApprovalMode
     real_trading_enabled_raw: str
+    run_mode: str
+    offline_mode_flag: bool
 
     # --- risk limits ---
     max_risk_per_trade_pct: float
@@ -145,6 +165,11 @@ class Settings:
 
     # --- freshness ---
     max_data_age_seconds: float
+    max_quote_age_seconds_rth: float
+    max_bar_age_seconds_rth: float
+    max_quote_age_seconds_premarket: float
+    max_bar_age_seconds_premarket: float
+    max_price_drift_bps_since_proposal: float
 
     # --- storage / dev ---
     db_path: str
@@ -173,6 +198,35 @@ class Settings:
     @property
     def real_trading_value_ok(self) -> bool:
         return self.real_trading_enabled_raw == REAL_TRADING_REQUIRED_VALUE
+
+    @property
+    def allow_real_orders(self) -> bool:
+        """Never True in v1 — real orders are unreachable regardless of raw value."""
+        return False
+
+    @property
+    def allow_real_orders_value_ok(self) -> bool:
+        return self.allow_real_orders_raw == "false"
+
+    @property
+    def offline_mode(self) -> bool:
+        """True when market data should be mocked (no live provider calls).
+
+        Driven by mock runtime mode or the explicit OFFLINE_MODE / RUN_MODE=mock
+        toggles. Mock mode is always explicit and surfaced in System Health.
+        """
+        return self.is_mock or self.offline_mode_flag or self.run_mode == "mock"
+
+    @property
+    def market_data_mode(self) -> str:
+        return MarketDataMode.MOCK.value if self.offline_mode else MarketDataMode.LIVE.value
+
+    @property
+    def effective_approval_mode(self) -> ApprovalMode:
+        """Auto only if APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL is off."""
+        if self.approval_mode == ApprovalMode.AUTO and not self.require_manual_approval:
+            return ApprovalMode.AUTO
+        return ApprovalMode.MANUAL
 
     @property
     def has_openai_key(self) -> bool:
@@ -286,6 +340,73 @@ class Settings:
                 )
             )
 
+        # 5b) Market-data provider must be Alpaca (the only active v1 provider).
+        provider_ok = self.data_provider == DataProvider.ALPACA.value
+        checks.append(
+            StartupCheck(
+                "data_provider",
+                provider_ok,
+                f"DATA_PROVIDER={self.data_provider} (feed={self.market_data_feed})"
+                if provider_ok
+                else f"DATA_PROVIDER must be 'alpaca' in v1, got {self.data_provider!r}",
+                Severity.CRITICAL,
+            )
+        )
+
+        # 5c) Live market data requires Alpaca creds — never a silent fallback.
+        if not self.offline_mode:
+            checks.append(
+                StartupCheck(
+                    "market_data_credentials",
+                    self.has_alpaca_keys,
+                    "Alpaca market-data credentials present"
+                    if self.has_alpaca_keys
+                    else "live market data requires Alpaca creds; NO silent fallback to mock/other",
+                    Severity.CRITICAL,
+                )
+            )
+        else:
+            checks.append(
+                StartupCheck(
+                    "market_data_mode",
+                    True,
+                    "market data is MOCKED (offline); clearly labelled, not live.",
+                    Severity.WARNING,
+                )
+            )
+
+        # 5d) News must be disabled in v1 (no-news mode).
+        checks.append(
+            StartupCheck(
+                "news_disabled_v1",
+                not self.news_enabled,
+                "news disabled (no-news momentum baseline)"
+                if not self.news_enabled
+                else "NEWS_ENABLED=true is unsupported in v1",
+                Severity.CRITICAL,
+            )
+        )
+
+        # 5e) Execution stays simulated-internal; real orders unreachable.
+        checks.append(
+            StartupCheck(
+                "execution_simulated",
+                self.execution_provider == ExecutionProvider.SIMULATED_INTERNAL.value,
+                f"execution_provider={self.execution_provider}",
+                Severity.CRITICAL,
+            )
+        )
+        checks.append(
+            StartupCheck(
+                "real_orders_disabled",
+                self.allow_real_orders_value_ok,
+                "ALLOW_REAL_ORDERS=false"
+                if self.allow_real_orders_value_ok
+                else f"ALLOW_REAL_ORDERS must be 'false', got {self.allow_real_orders_raw!r}",
+                Severity.CRITICAL,
+            )
+        )
+
         # 6) Risk limits sanity.
         risk_ok = (
             self.max_risk_per_trade_pct > 0
@@ -352,22 +473,60 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     except ValueError:
         approval_mode = ApprovalMode.MANUAL
 
+    # --- v1 fail-fast config validation -------------------------------------
+    data_provider = _get(src, "DATA_PROVIDER", "alpaca").lower()
+    if data_provider != DataProvider.ALPACA.value:
+        raise SettingsError(
+            f"DATA_PROVIDER={data_provider!r} is not supported in v1. "
+            f"Alpaca is the only active market-data provider (Massive is deferred)."
+        )
+
+    news_enabled = _get_bool(src, "NEWS_ENABLED", False)
+    if news_enabled:
+        raise SettingsError(
+            "NEWS_ENABLED=true is unsupported in v1. The system runs in no-news mode; "
+            "Benzinga/web news are deferred. Set NEWS_ENABLED=false."
+        )
+
+    execution_provider = _get(src, "EXECUTION_PROVIDER", "simulated_internal").lower()
+    if execution_provider != ExecutionProvider.SIMULATED_INTERNAL.value:
+        raise SettingsError(
+            f"EXECUTION_PROVIDER={execution_provider!r} is not supported in v1. "
+            f"Execution is simulated internally; real Alpaca paper execution is not yet wired."
+        )
+
+    allow_real_orders_raw = _get(src, "ALLOW_REAL_ORDERS", "false").lower()
+    if allow_real_orders_raw != "false":
+        raise SettingsError(
+            f"ALLOW_REAL_ORDERS={allow_real_orders_raw!r} is not allowed in v1. "
+            f"Real orders are unreachable; ALLOW_REAL_ORDERS must be 'false'."
+        )
+
     return Settings(
         openai_api_key=_get(src, "OPENAI_API_KEY"),
         openai_primary_model=_get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
         openai_review_model=_get(src, "OPENAI_REVIEW_MODEL", "gpt-4o-mini"),
         anthropic_api_key=_get(src, "ANTHROPIC_API_KEY"),
         claude_review_model=_get(src, "CLAUDE_REVIEW_MODEL", "claude-sonnet-4-6"),
+        data_provider=data_provider,
+        market_data_feed=_get(src, "MARKET_DATA_FEED", "iex").lower(),
+        news_enabled=news_enabled,
+        news_provider=_get(src, "NEWS_PROVIDER", "disabled").lower(),
         massive_api_key=_get(src, "MASSIVE_API_KEY"),
         benzinga_api_key=_get(src, "BENZINGA_API_KEY"),
         alpaca_api_key=_get(src, "ALPACA_API_KEY"),
         alpaca_secret_key=_get(src, "ALPACA_SECRET_KEY"),
         alpaca_paper=_get_bool(src, "ALPACA_PAPER", True),
         alpaca_base_url=_get(src, "ALPACA_BASE_URL", PAPER_BASE_URL),
+        execution_provider=execution_provider,
+        allow_real_orders_raw=allow_real_orders_raw,
+        require_manual_approval=_get_bool(src, "REQUIRE_MANUAL_APPROVAL", True),
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,
         real_trading_enabled_raw=_get(src, "REAL_TRADING_ENABLED", "false").lower(),
+        run_mode=_get(src, "RUN_MODE", "").lower(),
+        offline_mode_flag=_get_bool(src, "OFFLINE_MODE", False),
         max_risk_per_trade_pct=_get_float(src, "MAX_RISK_PER_TRADE_PCT", 0.01),
         max_paper_trades_per_day=_get_int(src, "MAX_PAPER_TRADES_PER_DAY", 5),
         max_open_positions=_get_int(src, "MAX_OPEN_POSITIONS", 5),
@@ -377,6 +536,11 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         max_spread_pct=_get_float(src, "MAX_SPREAD_PCT", 0.01),
         min_dollar_volume=_get_float(src, "MIN_DOLLAR_VOLUME", 2_000_000.0),
         max_data_age_seconds=_get_float(src, "MAX_DATA_AGE_SECONDS", 120.0),
+        max_quote_age_seconds_rth=_get_float(src, "MAX_QUOTE_AGE_SECONDS_RTH", 60.0),
+        max_bar_age_seconds_rth=_get_float(src, "MAX_BAR_AGE_SECONDS_RTH", 180.0),
+        max_quote_age_seconds_premarket=_get_float(src, "MAX_QUOTE_AGE_SECONDS_PREMARKET", 300.0),
+        max_bar_age_seconds_premarket=_get_float(src, "MAX_BAR_AGE_SECONDS_PREMARKET", 600.0),
+        max_price_drift_bps_since_proposal=_get_float(src, "MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL", 50.0),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

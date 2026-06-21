@@ -1,9 +1,7 @@
-"""News connectors (Benzinga primary, isolated web fallback) + news service.
+"""News layer — v1 runs in NO-NEWS mode.
 
-Hard rule (resolved decision): mock/fixture news is NEVER used for runtime
-candidate evaluation. Connectors return real items or nothing. Fixtures carry
-the TEST_FIXTURE_NEWS label and are filtered out defensively here, so they can
-only ever be used inside tests.
+The active runtime imports nothing from the deferred Benzinga/web connectors.
+Only the no-news ``NewsService`` and the ``NewsItem`` shape live here.
 """
 
 from alphaos.news.news_service import NewsItem, NewsService

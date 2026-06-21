@@ -30,9 +30,10 @@ def test_full_pipeline_runs_offline():
     assert report["report_date"]
     assert "AlphaOS Daily Learning Report" in report["content_md"]
 
-    # Order journal is consistent and labelled as simulated mock execution.
-    orders = orch.journal.query("SELECT DISTINCT execution_source FROM paper_orders")
-    assert all(o["execution_source"] == ExecutionSource.MOCK.value for o in orders)
+    # Order journal is consistent and labelled as internal simulation.
+    orders = orch.journal.query("SELECT DISTINCT execution_source, execution_provider FROM paper_orders")
+    assert all(o["execution_source"] == ExecutionSource.INTERNAL_SIM.value for o in orders)
+    assert all(o["execution_provider"] == "simulated_internal" for o in orders)
     orch.close()
 
 

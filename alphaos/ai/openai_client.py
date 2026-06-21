@@ -1,25 +1,28 @@
-"""OpenAI primary scoring engine.
+"""OpenAI primary scoring engine — v1 NO-NEWS mode.
 
-* Live (key present, non-mock): calls OpenAI with a JSON-object response format,
-  instructs JSON-only, and parses defensively via util.structured_json.
-* Mock (no key or mock mode): produces a deterministic, schema-valid evaluation
-  WITHOUT fabricating news — it honors the supplied news status. With no
-  verifiable news it returns 'watch'/'reject' (NO_VERIFIABLE_NEWS), matching the
-  news-confirmed momentum playbook.
+The active v1 playbook is *momentum continuation (no-news baseline)*. The model
+evaluates on price/volume/structure only and must NOT invent a catalyst:
+* output carries the sentinels ``catalyst='not_available_v1'``,
+  ``news_status='disabled_v1'``, ``news_sources=[]``,
+* output is validated; any invented/inferred catalyst => the evaluation is
+  rejected and marked ``invented_catalyst_in_no_news_mode``.
 
-Either way the output conforms to the same OpenAIEvaluation structure, so the
-journal looks identical regardless of source.
+Mock (no key / offline) produces a deterministic, schema-valid no-news
+evaluation. Live (key present) calls OpenAI with a JSON-object response format
+and the no-news prompt, then validates defensively.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 
 from alphaos.ai import prompt_templates as pt
+from alphaos.ai.validation import enforce_no_news_sentinels, validate_no_news_eval
 from alphaos.constants import (
+    CATALYST_NOT_AVAILABLE_V1,
     Decision,
-    NewsStatus,
+    NEWS_STATUS_DISABLED_V1,
     ReasonCode,
     Severity,
     TradeDirection,
@@ -28,6 +31,7 @@ from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
 HTTP_TIMEOUT = 30
+PROPOSE_MOMENTUM_THRESHOLD = 0.40
 
 
 @dataclass
@@ -47,9 +51,11 @@ class OpenAIEvaluation:
     reasoning_summary: str
     news_sources: list = field(default_factory=list)
     data_freshness_status: str = "usable"
-    catalyst_type: Optional[str] = None
+    catalyst_type: Optional[str] = CATALYST_NOT_AVAILABLE_V1
+    news_status: str = NEWS_STATUS_DISABLED_V1
     sentiment: Optional[str] = None
     risk_flags: list = field(default_factory=list)
+    validation_status: str = "passed"
     raw: Optional[dict] = None
     is_mock: bool = False
 
@@ -71,8 +77,10 @@ class OpenAIEvaluation:
             "news_sources_json": self.news_sources,
             "data_freshness_status": self.data_freshness_status,
             "catalyst_type": self.catalyst_type,
+            "news_status": self.news_status,
             "sentiment": self.sentiment,
             "risk_flags_json": self.risk_flags,
+            "validation_status": self.validation_status,
             "raw_json": self.raw or {},
             "is_mock": 1 if self.is_mock else 0,
         }
@@ -85,79 +93,39 @@ class OpenAIClient:
         self.use_mock = settings.is_mock or not settings.has_openai_key
         self.model = settings.openai_primary_model
 
-    def evaluate(
-        self,
-        candidate: dict,
-        snapshot: dict,
-        news_items: list[dict],
-        news_status: NewsStatus | str,
-        freshness_status: str = "usable",
-    ) -> OpenAIEvaluation:
-        status = news_status.value if isinstance(news_status, NewsStatus) else str(news_status)
+    def evaluate(self, candidate: dict, snapshot: dict, freshness_status: str = "usable") -> OpenAIEvaluation:
+        """Evaluate a candidate in no-news mode (the v1 path)."""
         if self.use_mock:
-            return self._mock_eval(candidate, snapshot, news_items, status, freshness_status)
+            return self._mock_eval(candidate, snapshot, freshness_status)
         try:
-            return self._live_eval(candidate, snapshot, news_items, status, freshness_status)
+            return self._live_eval(candidate, snapshot, freshness_status)
         except Exception as exc:  # pragma: no cover - live path
             if self.journal is not None:
                 self.journal.log_system_event(
-                    Severity.ERROR,
-                    "openai",
+                    Severity.ERROR, "openai",
                     f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
                     {"error": str(exc)},
                 )
-            # Fail safe: a failed evaluation is a rejection, never a silent pass.
-            return self._rejection(
-                candidate, "OpenAI call failed; rejected for safety.", [ReasonCode.OPENAI_REJECT.value]
-            )
+            return self._rejection(candidate, "OpenAI call failed; rejected for safety.",
+                                   [ReasonCode.OPENAI_REJECT.value])
 
     # ------------------------------------------------------------------- mock
-    def _mock_eval(self, candidate, snapshot, news_items, status, freshness_status):
+    def _mock_eval(self, candidate, snapshot, freshness_status) -> OpenAIEvaluation:
         symbol = candidate.get("symbol")
         direction = candidate.get("direction") or TradeDirection.LONG.value
         last = snapshot.get("last_price")
 
-        # Stale/unverifiable data => reject (never trade on bad data).
         if freshness_status != "usable":
             return self._rejection(
-                candidate,
-                f"Data freshness '{freshness_status}'; cannot trade on unreliable data.",
-                [ReasonCode.STALE_DATA.value],
-                freshness_status=freshness_status,
+                candidate, f"Data freshness '{freshness_status}'; cannot trade on unreliable data.",
+                [ReasonCode.STALE_DATA.value], freshness_status=freshness_status,
             )
 
-        # No verifiable news => not 'propose' (news-confirmed momentum playbook).
-        if status == NewsStatus.NEWS_UNAVAILABLE.value or not news_items:
-            return OpenAIEvaluation(
-                eval_id=new_id("eval"),
-                candidate_id=candidate.get("candidate_id", ""),
-                symbol=symbol,
-                model="mock",
-                direction=direction,
-                entry=last,
-                stop=None,
-                target=None,
-                max_holding_days=None,
-                expected_r=None,
-                confidence=0.2,
-                decision=Decision.WATCH.value,
-                reasoning_summary=(
-                    "No verifiable news catalyst. News-confirmed momentum playbook "
-                    "requires a catalyst; downgraded to watch."
-                ),
-                news_sources=[],
-                data_freshness_status=freshness_status,
-                catalyst_type=None,
-                sentiment="unclear",
-                risk_flags=[ReasonCode.NO_VERIFIABLE_NEWS.value],
-                raw={"mock": True, "news_status": status},
-                is_mock=True,
-            )
+        momentum = float(candidate.get("momentum_score") or 0.0)
+        entry = float(last) if last else None
+        if entry is None:
+            return self._rejection(candidate, "No usable price; rejected.", [ReasonCode.STALE_DATA.value])
 
-        # News present + usable data => propose a structured swing trade.
-        momentum = float(candidate.get("momentum_score") or 0.5)
-        confidence = round(min(0.95, 0.45 + 0.5 * momentum), 3)
-        entry = float(last) if last else 100.0
         if direction == TradeDirection.SHORT.value:
             stop = round(entry * 1.03, 2)
             target = round(entry * 0.94, 2)
@@ -165,10 +133,17 @@ class OpenAIClient:
             stop = round(entry * 0.97, 2)
             target = round(entry * 1.06, 2)
         risk_per_share = abs(entry - stop)
-        reward = abs(target - entry)
-        expected_r = round(reward / risk_per_share, 2) if risk_per_share else None
-        sources = [n.get("source_url") or n.get("source_name") for n in news_items]
-        catalyst = news_items[0].get("catalyst_type") or "news_catalyst"
+        expected_r = round(abs(target - entry) / risk_per_share, 2) if risk_per_share else None
+        confidence = round(min(0.9, 0.4 + 0.5 * momentum), 3)
+
+        # No-news baseline: momentum/structure decides propose vs watch.
+        decision = Decision.PROPOSE.value if momentum >= PROPOSE_MOMENTUM_THRESHOLD else Decision.WATCH.value
+        reasoning = (
+            "No-news momentum baseline: thesis from price action, volume, relative "
+            "strength, and trend structure; no catalyst used."
+            if decision == Decision.PROPOSE.value
+            else "No-news baseline: momentum/structure too weak to propose; watching."
+        )
 
         return OpenAIEvaluation(
             eval_id=new_id("eval"),
@@ -182,65 +157,78 @@ class OpenAIClient:
             max_holding_days=3,
             expected_r=expected_r,
             confidence=confidence,
-            decision=Decision.PROPOSE.value,
-            reasoning_summary=(
-                f"Momentum continuation with a news catalyst ({catalyst}); "
-                f"swing 1-5d, {direction}."
-            ),
-            news_sources=[s for s in sources if s],
+            decision=decision,
+            reasoning_summary=reasoning,
+            news_sources=[],
             data_freshness_status=freshness_status,
-            catalyst_type=catalyst,
+            catalyst_type=CATALYST_NOT_AVAILABLE_V1,
+            news_status=NEWS_STATUS_DISABLED_V1,
             sentiment="bullish" if direction == TradeDirection.LONG.value else "bearish",
             risk_flags=[],
-            raw={"mock": True, "news_status": status},
+            validation_status="passed",
+            raw={"mock": True, "mode": "no_news_v1"},
             is_mock=True,
         )
 
-    def _rejection(self, candidate, reason, flags, freshness_status="usable"):
+    def _rejection(self, candidate, reason, flags, freshness_status="usable", validation_status="passed"):
         return OpenAIEvaluation(
             eval_id=new_id("eval"),
             candidate_id=candidate.get("candidate_id", ""),
             symbol=candidate.get("symbol"),
             model="mock" if self.use_mock else self.model,
             direction=candidate.get("direction") or TradeDirection.LONG.value,
-            entry=None,
-            stop=None,
-            target=None,
-            max_holding_days=None,
-            expected_r=None,
-            confidence=0.0,
+            entry=None, stop=None, target=None, max_holding_days=None,
+            expected_r=None, confidence=0.0,
             decision=Decision.REJECT.value,
             reasoning_summary=reason,
             news_sources=[],
             data_freshness_status=freshness_status,
-            catalyst_type=None,
+            catalyst_type=CATALYST_NOT_AVAILABLE_V1,
+            news_status=NEWS_STATUS_DISABLED_V1,
             sentiment="unclear",
             risk_flags=flags,
+            validation_status=validation_status,
             raw={"mock": self.use_mock},
             is_mock=self.use_mock,
         )
 
     # ------------------------------------------------------------------- live
-    def _live_eval(self, candidate, snapshot, news_items, status, freshness_status):  # pragma: no cover
+    def _live_eval(self, candidate, snapshot, freshness_status) -> OpenAIEvaluation:  # pragma: no cover
         from openai import OpenAI  # lazy import; optional dependency
 
         client = OpenAI(api_key=self.settings.openai_api_key)
-        user_prompt = pt.build_openai_user_prompt(candidate, snapshot, news_items, freshness_status)
+        user_prompt = pt.build_no_news_user_prompt(candidate, snapshot, freshness_status)
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": pt.OPENAI_SYSTEM_PROMPT},
+                {"role": "system", "content": pt.NO_NEWS_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             timeout=HTTP_TIMEOUT,
         )
-        text = resp.choices[0].message.content
-        obj = structured_json.parse_json_object(text)
-        structured_json.require_keys(obj, pt.OPENAI_EVAL_KEYS)
+        obj = structured_json.parse_json_object(resp.choices[0].message.content)
+        structured_json.require_keys(obj, pt.NO_NEWS_EVAL_KEYS)
+
+        # Enforce no-news output: reject any invented/inferred catalyst.
+        failure = validate_no_news_eval(obj)
+        if failure:
+            if self.journal is not None:
+                self.journal.log_system_event(
+                    Severity.WARNING, "openai",
+                    f"Rejected {candidate.get('symbol')}: {failure}.",
+                )
+            rej = self._rejection(
+                candidate, f"failed_validation: {failure}",
+                [ReasonCode.INVENTED_CATALYST.value], freshness_status=freshness_status,
+                validation_status=failure,
+            )
+            return rej
+
+        obj = enforce_no_news_sentinels(obj)
         return self._from_json(candidate, obj, freshness_status)
 
-    def _from_json(self, candidate, obj, freshness_status):  # pragma: no cover - live path
+    def _from_json(self, candidate, obj, freshness_status) -> OpenAIEvaluation:  # pragma: no cover
         try:
             decision = Decision(str(obj.get("decision", "reject")).lower()).value
         except ValueError:
@@ -259,11 +247,13 @@ class OpenAIClient:
             confidence=obj.get("confidence"),
             decision=decision,
             reasoning_summary=obj.get("reasoning_summary", ""),
-            news_sources=obj.get("news_sources", []),
+            news_sources=[],
             data_freshness_status=obj.get("data_freshness_status", freshness_status),
-            catalyst_type=obj.get("catalyst_type"),
+            catalyst_type=CATALYST_NOT_AVAILABLE_V1,
+            news_status=NEWS_STATUS_DISABLED_V1,
             sentiment=obj.get("sentiment"),
             risk_flags=obj.get("risk_flags", []),
+            validation_status="passed",
             raw=obj,
             is_mock=False,
         )

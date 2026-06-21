@@ -8,7 +8,7 @@ from conftest import make_settings, make_proposal
 
 
 def test_auto_approves_up_to_cap_then_denies(journal):
-    s = make_settings(APPROVAL_MODE="auto", MAX_AUTO_APPROVALS_PER_DAY="1")
+    s = make_settings(APPROVAL_MODE="auto", REQUIRE_MANUAL_APPROVAL="false", MAX_AUTO_APPROVALS_PER_DAY="1")
     eng = ApprovalEngine(s, journal)
 
     first = eng.consider(make_proposal(symbol="AAPL"), risk_ok=True, freshness_ok=True)
@@ -22,7 +22,7 @@ def test_auto_approves_up_to_cap_then_denies(journal):
 
 
 def test_auto_never_bypasses_risk_or_freshness(journal):
-    s = make_settings(APPROVAL_MODE="auto", MAX_AUTO_APPROVALS_PER_DAY="5")
+    s = make_settings(APPROVAL_MODE="auto", REQUIRE_MANUAL_APPROVAL="false", MAX_AUTO_APPROVALS_PER_DAY="5")
     eng = ApprovalEngine(s, journal)
 
     r = eng.consider(make_proposal(), risk_ok=False, freshness_ok=True)
@@ -35,7 +35,7 @@ def test_auto_never_bypasses_risk_or_freshness(journal):
 
 
 def test_auto_cannot_enable_margin_short(journal):
-    s = make_settings(APPROVAL_MODE="auto", MAX_AUTO_APPROVALS_PER_DAY="5")
+    s = make_settings(APPROVAL_MODE="auto", REQUIRE_MANUAL_APPROVAL="false", MAX_AUTO_APPROVALS_PER_DAY="5")
     eng = ApprovalEngine(s, journal)
     prop = make_proposal(direction="short", entry=100.0, stop=103.0, target=94.0, requires_margin=True)
     out = eng.consider(prop, risk_ok=True, freshness_ok=True)

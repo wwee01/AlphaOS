@@ -43,8 +43,13 @@ class ApprovalEngine:
 
     # ------------------------------------------------------------- pipeline
     def consider(self, proposal, risk_ok: bool, freshness_ok: bool) -> ApprovalOutcome:
-        """Called by the scan pipeline after risk + freshness are known."""
-        if self.settings.approval_mode != ApprovalMode.AUTO:
+        """Called by the scan pipeline after risk + freshness are known.
+
+        Auto applies only when APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL is
+        off (effective_approval_mode); otherwise the proposal awaits manual
+        approval.
+        """
+        if self.settings.effective_approval_mode != ApprovalMode.AUTO:
             # Manual mode: never auto-submit. Await explicit user approval.
             return ApprovalOutcome(False, "pending_manual", reason=ReasonCode.APPROVAL_REQUIRED.value)
 

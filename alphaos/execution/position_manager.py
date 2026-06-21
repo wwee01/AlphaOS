@@ -19,10 +19,13 @@ from alphaos.constants import (
     Severity,
     TradeDirection,
 )
+from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+
+FILL_PRICE_BASIS = "latest_quote_or_bar"
 
 
 class PositionManager:
@@ -30,7 +33,11 @@ class PositionManager:
         self.settings = settings
         self.journal = journal
         self._market = market_data  # lazily created in monitor() if needed
-        self.freshness = FreshnessGuard(settings.max_data_age_seconds)
+        self.freshness = FreshnessGuard.from_settings(settings)
+
+    def _data_labels(self) -> tuple[str, str]:
+        provider = "alpaca_mock" if self.settings.offline_mode else "alpaca"
+        return provider, self.settings.market_data_feed
 
     # -------------------------------------------------------------- open
     def open_position(self, order_row: dict, fill_price: float) -> str:
@@ -256,6 +263,8 @@ class PositionManager:
         order_id = new_id("ord")
         side = side_for_exit(pos["direction"])
         st = timeutils.stamp()
+        src = ExecutionSource.INTERNAL_SIM.value
+        data_provider, data_feed = self._data_labels()
         self.journal.insert(
             "paper_orders",
             {
@@ -269,14 +278,19 @@ class PositionManager:
                 "order_type": "market",
                 "qty": pos["qty"],
                 "entry_price": exit_price,
-                "execution_source": ExecutionSource.MOCK.value,
+                "execution_source": src,
+                "execution_provider": ExecutionProvider.SIMULATED_INTERNAL.value,
+                "execution_mode": "internal_simulation",
+                "data_provider": data_provider,
+                "data_feed": data_feed,
+                "fill_price_basis": FILL_PRICE_BASIS,
                 "protection_path": None,
                 "state": OrderState.FILLED.value,
                 "is_short": pos.get("is_short", 0),
                 "strategy": pos.get("strategy"),
                 "is_demo": pos.get("is_demo", 0),
                 "filled_at": st.utc,
-                "raw_response_json": {"simulated": True, "exit_reason": exit_reason},
+                "raw_response_json": {"simulated": True, "exit_reason": exit_reason, "fill_source": src},
             },
             mirror=True,
         )
@@ -287,7 +301,7 @@ class PositionManager:
                 "order_id": order_id,
                 "prev_state": OrderState.SUBMITTED.value,
                 "new_state": OrderState.FILLED.value,
-                "execution_source": ExecutionSource.MOCK.value,
+                "execution_source": src,
                 "message": f"exit fill ({exit_reason})",
             },
             mirror=True,
@@ -301,7 +315,12 @@ class PositionManager:
                 "side": side,
                 "qty": pos["qty"],
                 "price": exit_price,
-                "execution_source": ExecutionSource.MOCK.value,
+                "execution_source": src,
+                "execution_provider": ExecutionProvider.SIMULATED_INTERNAL.value,
+                "data_provider": data_provider,
+                "data_feed": data_feed,
+                "fill_source": "internal_sim",
+                "fill_price_basis": FILL_PRICE_BASIS,
                 "filled_at": st.utc,
             },
             mirror=True,

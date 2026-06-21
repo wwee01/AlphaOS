@@ -16,7 +16,7 @@ live = ["streamlit>=1.30", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", 
 test = ["pytest>=7.0", "tzdata>=2023.3"]
 
 [tool.setuptools.packages.find]
-include = ["alphaos*"]
+include = ["alphaos*", "connectors*"]
 
 [tool.pytest.ini_options]
 # "." makes `import alphaos` work; "tests" makes `from conftest import ...` work.

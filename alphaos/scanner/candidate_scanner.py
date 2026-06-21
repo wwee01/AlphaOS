@@ -49,7 +49,7 @@ class CandidateScanner:
         self.settings = settings
         self.journal = journal
         self.market = market_data or MarketDataClient(settings, journal)
-        self.freshness = FreshnessGuard(settings.max_data_age_seconds)
+        self.freshness = FreshnessGuard.from_settings(settings)
 
     def build_universe(self, scan_id: str, symbols: Optional[list[str]] = None) -> list[str]:
         symbols = symbols or DEFAULT_UNIVERSE
@@ -165,6 +165,8 @@ class CandidateScanner:
                 "snapshot_id": snapshot_id,
                 "symbol": snapshot.get("symbol"),
                 "provider": snapshot.get("provider"),
+                "feed": snapshot.get("feed"),
+                "is_mock": 1 if snapshot.get("is_mock") else 0,
                 "last_price": snapshot.get("last_price"),
                 "bid": snapshot.get("bid"),
                 "ask": snapshot.get("ask"),
@@ -176,6 +178,10 @@ class CandidateScanner:
                 "bar_high": snapshot.get("bar_high"),
                 "bar_low": snapshot.get("bar_low"),
                 "bar_close": snapshot.get("bar_close"),
+                "quote_timestamp": report.quote_timestamp,
+                "bar_timestamp": report.bar_timestamp,
+                "quote_age_seconds": report.quote_age_seconds,
+                "bar_age_seconds": report.bar_age_seconds,
                 "source_timestamp": report.source_timestamp,
                 "received_at": report.received_at,
                 "data_delay_seconds": report.data_delay_seconds,

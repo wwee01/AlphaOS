@@ -139,14 +139,39 @@ def tab_closed_trades(orch: Orchestrator) -> None:
 def tab_system_health(orch: Orchestrator) -> None:
     st.subheader("System Health")
     s = orch.settings
+    health = orch.system_health()
     checks = orch.settings.validate_startup()
+
+    st.caption(f"Playbook: **{health['playbook']}**")
     c1, c2, c3 = st.columns(3)
     c1.metric("Mode", s.mode.value)
-    c2.metric("Approval", s.approval_mode.value)
-    c3.metric("Real trading", "disabled")
-    c1.metric("Broker connected", str(orch.orders.broker_connected))
-    c2.metric("Kill switch", "ENGAGED" if KillSwitch().is_engaged() else "off")
-    c3.metric("Open positions", orch.journal.count_open_positions())
+    c2.metric("Approval", health["manual_approval"])
+    c3.metric("Real-money trading", health["real_money_trading"])
+    c1.metric("Market data", f"{health['market_data_provider']}/{health['market_data_feed']}")
+    c2.metric("Market data mode", health["market_data_mode"])
+    c3.metric("Data freshness", health["market_data_freshness"])
+    c1.metric("Execution", health["execution_provider"])
+    c2.metric("Kill switch", health["kill_switch"])
+    c3.metric("Open positions", health["open_positions"])
+
+    st.markdown("#### Layers (mocked / deferred / disabled / live)")
+    st.json(
+        {
+            "AI primary": health["ai_primary"],
+            "AI reviewer": health["ai_reviewer"],
+            "Market data provider": health["market_data_provider"],
+            "Market data feed": f"{health['market_data_feed']} ({health['market_data_limited']})",
+            "Market data mode": health["market_data_mode"],
+            "News provider": health["news_provider"],
+            "Benzinga": health["benzinga"],
+            "Web scraper": health["web_scraper"],
+            "Massive": health["massive"],
+            "Execution provider": health["execution_provider"],
+            "Real Alpaca paper execution": health["real_alpaca_paper_execution"],
+            "Real-money trading": health["real_money_trading"],
+            "Manual approval": health["manual_approval"],
+        }
+    )
 
     st.markdown("#### Startup safety checks")
     for c in checks:
