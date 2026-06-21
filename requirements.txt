@@ -1,0 +1,19 @@
+# AlphaOS v1 dependencies.
+#
+# CORE + TESTS run on the Python standard library alone (sqlite3, zoneinfo,
+# urllib, json, dataclasses). The only hard test dependency is pytest, plus
+# tzdata as a fallback for systems without an OS timezone database.
+#
+# Everything below the "optional" line is lazily imported and only required
+# when you actually connect a live provider. Mock mode needs none of it.
+
+# --- core / test ---
+pytest>=7.0
+tzdata>=2023.3            # fallback IANA tz database for zoneinfo
+
+# --- optional live connectors (import-guarded; not needed for mock mode) ---
+# streamlit>=1.30          # dashboard UI
+# openai>=1.0              # OpenAI primary engine (live)
+# anthropic>=0.25          # Claude manual reviewer (live, optional)
+# alpaca-py>=0.20          # Alpaca paper broker (live)
+# requests>=2.31           # used by some live connectors (stdlib urllib is the default)

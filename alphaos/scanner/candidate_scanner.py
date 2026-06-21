@@ -1,0 +1,201 @@
+"""Candidate scanner.
+
+Builds a liquid US stock/ETF universe, pulls Massive snapshots (with source
+timestamps), gates each on data freshness, and detects momentum candidates:
+relative strength / recent momentum, unusual volume, clean trend, acceptable
+liquidity and spread.
+
+Stale/unverifiable or illiquid names are not silently dropped — they are written
+to ``rejected_candidates`` with a reason. News and AI evaluation happen later in
+the orchestrator (the scanner does not touch news).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+from alphaos.constants import (
+    NewsStatus,
+    ReasonCode,
+    Severity,
+    Strategy,
+    TradeDirection,
+    UniverseTier,
+)
+from alphaos.data.freshness_guard import FreshnessGuard
+from alphaos.data.market_data import MarketDataClient
+from alphaos.util.ids import new_id
+
+# A small, deliberately liquid default universe for v1 (core tier). Illiquid
+# small caps / penny stocks are intentionally excluded.
+DEFAULT_UNIVERSE = [
+    "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "AMZN",
+    "GOOGL", "META", "NFLX", "AVGO", "JPM", "XLK", "XLE", "XLF", "SMH", "COST",
+]
+
+
+@dataclass
+class ScanResult:
+    scan_id: str
+    candidates: list = field(default_factory=list)
+    snapshots: int = 0
+    blocked_stale: int = 0
+    rejected_illiquid: int = 0
+
+
+class CandidateScanner:
+    def __init__(self, settings, journal, market_data: Optional[MarketDataClient] = None):
+        self.settings = settings
+        self.journal = journal
+        self.market = market_data or MarketDataClient(settings, journal)
+        self.freshness = FreshnessGuard(settings.max_data_age_seconds)
+
+    def build_universe(self, scan_id: str, symbols: Optional[list[str]] = None) -> list[str]:
+        symbols = symbols or DEFAULT_UNIVERSE
+        for sym in symbols:
+            self.journal.insert(
+                "universe",
+                {
+                    "symbol": sym,
+                    "asset_class": "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock",
+                    "tier": UniverseTier.CORE.value,
+                    "is_active": 1,
+                    "scan_id": scan_id,
+                },
+            )
+        return symbols
+
+    def scan(self, symbols: Optional[list[str]] = None) -> ScanResult:
+        scan_id = new_id("scan")
+        result = ScanResult(scan_id=scan_id)
+        symbols = self.build_universe(scan_id, symbols)
+        self.journal.log_system_event(
+            Severity.INFO, "scanner", f"Scan {scan_id} over {len(symbols)} symbols started."
+        )
+
+        for sym in symbols:
+            snapshot = self.market.get_snapshot(sym)
+            report = self.freshness.assess(snapshot)
+            snapshot_id = new_id("snap")
+            self._persist_snapshot(snapshot_id, snapshot, report)
+            result.snapshots += 1
+
+            # Freshness gate: never evaluate a candidate on stale/unverifiable data.
+            if not report.is_usable:
+                result.blocked_stale += 1
+                self._reject(
+                    None, sym, "scan", report.block_reason or ReasonCode.STALE_DATA.value,
+                    f"freshness={report.freshness_status}", snapshot,
+                )
+                continue
+
+            # Liquidity / spread gate.
+            if not self._liquid_enough(snapshot):
+                result.rejected_illiquid += 1
+                reason = (
+                    ReasonCode.LOW_LIQUIDITY.value
+                    if (snapshot.get("dollar_volume") or 0) < self.settings.min_dollar_volume
+                    else ReasonCode.WIDE_SPREAD.value
+                )
+                self._reject(None, sym, "scan", reason, "liquidity/spread gate", snapshot)
+                continue
+
+            cand = self._maybe_candidate(scan_id, sym, snapshot, snapshot_id)
+            if cand is not None:
+                result.candidates.append(cand)
+
+        self.journal.log_system_event(
+            Severity.INFO,
+            "scanner",
+            f"Scan {scan_id} done: {len(result.candidates)} candidates, "
+            f"{result.blocked_stale} stale-blocked, {result.rejected_illiquid} illiquid.",
+        )
+        return result
+
+    # ------------------------------------------------------------- internals
+    def _liquid_enough(self, snapshot: dict) -> bool:
+        dv = snapshot.get("dollar_volume")
+        sp = snapshot.get("spread_pct")
+        if dv is not None and dv < self.settings.min_dollar_volume:
+            return False
+        if sp is not None and sp > self.settings.max_spread_pct:
+            return False
+        return True
+
+    def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[dict]:
+        change = float(snapshot.get("change_pct") or 0.0)
+        rel_vol = float(snapshot.get("rel_volume") or 1.0)
+        # Momentum candidate: meaningful move OR unusual volume.
+        is_candidate = abs(change) >= 0.02 or rel_vol >= 1.5
+        if not is_candidate:
+            return None
+        direction = TradeDirection.LONG.value if change >= 0 else TradeDirection.SHORT.value
+        momentum_score = round(min(1.0, (abs(change) / 0.08) * 0.6 + min(rel_vol / 3.0, 1.0) * 0.4), 3)
+        trend_quality = round(min(1.0, abs(change) * 10), 3)
+
+        candidate_id = new_id("cand")
+        cand = {
+            "candidate_id": candidate_id,
+            "scan_id": scan_id,
+            "symbol": sym,
+            "direction": direction,
+            "strategy": Strategy.SWING.value,
+            "momentum_score": momentum_score,
+            "rel_strength": round(change, 4),
+            "unusual_volume": rel_vol,
+            "trend_quality": trend_quality,
+            "liquidity_ok": 1,
+            "spread_ok": 1,
+            "news_status": NewsStatus.NEWS_UNAVAILABLE.value,  # set later by orchestrator
+            "price_snapshot_id": snapshot_id,
+            "status": "detected",
+            "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
+        }
+        self.journal.insert("candidates", cand)
+        # Keep a dict the orchestrator can use directly (with last_price handy).
+        cand["last_price"] = snapshot.get("last_price")
+        cand["_snapshot"] = snapshot
+        return cand
+
+    def _persist_snapshot(self, snapshot_id, snapshot, report) -> None:
+        self.journal.insert(
+            "price_snapshots",
+            {
+                "snapshot_id": snapshot_id,
+                "symbol": snapshot.get("symbol"),
+                "provider": snapshot.get("provider"),
+                "last_price": snapshot.get("last_price"),
+                "bid": snapshot.get("bid"),
+                "ask": snapshot.get("ask"),
+                "spread": snapshot.get("spread"),
+                "spread_pct": snapshot.get("spread_pct"),
+                "volume": snapshot.get("volume"),
+                "dollar_volume": snapshot.get("dollar_volume"),
+                "bar_open": snapshot.get("bar_open"),
+                "bar_high": snapshot.get("bar_high"),
+                "bar_low": snapshot.get("bar_low"),
+                "bar_close": snapshot.get("bar_close"),
+                "source_timestamp": report.source_timestamp,
+                "received_at": report.received_at,
+                "data_delay_seconds": report.data_delay_seconds,
+                "market_session": report.market_session,
+                "freshness_status": report.freshness_status,
+                "is_usable": 1 if report.is_usable else 0,
+                "block_reason": report.block_reason,
+            },
+        )
+
+    def _reject(self, candidate_id, symbol, stage, reason_code, detail, snapshot) -> None:
+        self.journal.insert(
+            "rejected_candidates",
+            {
+                "rejection_id": new_id("rej"),
+                "candidate_id": candidate_id,
+                "symbol": symbol,
+                "stage": stage,
+                "reason_code": reason_code,
+                "reason_detail": detail,
+                "would_be_entry": snapshot.get("last_price") if snapshot else None,
+            },
+        )
