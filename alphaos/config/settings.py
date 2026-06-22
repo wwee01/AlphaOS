@@ -176,6 +176,11 @@ class Settings:
     cost_min_commission: float
     cost_slippage_bps: float
 
+    # --- trade sizing (stop distance fraction of entry / target reward:risk) ---
+    stop_loss_pct: float
+    target_reward_risk: float
+    min_reward_risk: float
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -536,6 +541,20 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"Real orders are unreachable; ALLOW_REAL_ORDERS must be 'false'."
         )
 
+    # --- trade sizing: stop distance + target reward:risk (drive the mock
+    # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
+    stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
+    target_reward_risk = _get_float(src, "TARGET_REWARD_RISK", 1.5)
+    min_reward_risk = _get_float(src, "MIN_REWARD_RISK", 1.2)
+    if not (0.0 < stop_loss_pct < 0.5):
+        raise SettingsError(
+            f"STOP_LOSS_PCT={stop_loss_pct!r} must be a fraction of entry in (0, 0.5)."
+        )
+    if target_reward_risk <= 0:
+        raise SettingsError(f"TARGET_REWARD_RISK={target_reward_risk!r} must be > 0.")
+    if min_reward_risk < 0:
+        raise SettingsError(f"MIN_REWARD_RISK={min_reward_risk!r} must be >= 0.")
+
     return Settings(
         openai_api_key=_get(src, "OPENAI_API_KEY"),
         openai_primary_model=_get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
@@ -578,6 +597,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         cost_commission_per_share=_get_float(src, "COST_COMMISSION_PER_SHARE", 0.0),
         cost_min_commission=_get_float(src, "COST_MIN_COMMISSION", 0.0),
         cost_slippage_bps=_get_float(src, "COST_SLIPPAGE_BPS", 1.0),
+        stop_loss_pct=stop_loss_pct,
+        target_reward_risk=target_reward_risk,
+        min_reward_risk=min_reward_risk,
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),
