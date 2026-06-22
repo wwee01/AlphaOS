@@ -56,6 +56,12 @@ class ClaudeReview:
             "raw_json": self.raw or {},
             "is_mock": 1 if self.is_mock else 0,
             "triggered_by": self.triggered_by,
+            # --- Trade Packet v1 metadata (Claude review stays manual-only and
+            #     never approves; these are audit fields). ---
+            "proposal_id": None,
+            "user_requested": 1,
+            "disagreement_with_openai": (None if self.agrees_with_openai else "disagrees"),
+            "final_user_action_after_review": None,
         }
 
 

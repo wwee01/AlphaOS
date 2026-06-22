@@ -69,6 +69,11 @@ class PositionManager:
                 "is_short": order_row.get("is_short", 0),
                 "requires_margin": proposal.get("requires_margin", 0),
                 "is_demo": order_row.get("is_demo", 0),
+                # --- Trade Packet v1 traceability ---
+                "trade_id": order_row.get("trade_id"),
+                "candidate_id": (proposal or {}).get("candidate_id"),
+                "proposal_id": (proposal or {}).get("proposal_id"),
+                "eval_id": (proposal or {}).get("eval_id"),
                 # Target-profile evidence relayed from the proposal (tracking only).
                 **target_profile_bundle(proposal),
             },
@@ -106,6 +111,7 @@ class PositionManager:
             sym = pos["symbol"]
             if price_overrides is not None and sym in price_overrides:
                 price = float(price_overrides[sym])
+                freshness_status = "override"
             else:
                 snap = market.get_snapshot(sym)
                 report = self.freshness.assess(snap)
@@ -116,6 +122,7 @@ class PositionManager:
                     )
                     continue
                 price = snap.get("last_price")
+                freshness_status = report.freshness_status
             if price is None:
                 continue
 
@@ -127,7 +134,72 @@ class PositionManager:
                     exits.append(ex)
             else:
                 self._mark_to_market(pos, price)
+            # Audit snapshot AFTER the exit is acted on, and never allowed to
+            # raise: a best-effort evidence write must never be able to suppress a
+            # stop/target/time exit or abort the watchdog pass.
+            try:
+                self._record_monitoring_snapshot(pos, price, decision, freshness_status)
+            except Exception as exc:  # pragma: no cover - defensive (audit-only)
+                try:
+                    self.journal.log_system_event(
+                        Severity.WARNING, "monitor",
+                        f"monitoring snapshot failed for {pos.get('position_id')}; exit unaffected.",
+                        {"error": str(exc)},
+                    )
+                except Exception:
+                    pass
         return exits
+
+    def _record_monitoring_snapshot(self, pos, price, decision, freshness_status) -> None:
+        """Write one monitoring_snapshots row per open position per pass (audit
+        only; never influences the exit decision or mark-to-market)."""
+        qty = float(pos.get("qty") or 0)
+        entry = float(pos.get("avg_entry_price") or 0)
+        is_short = pos.get("direction") == TradeDirection.SHORT.value
+        unrealized_pnl = round(((entry - price) if is_short else (price - entry)) * qty, 2)
+        risk_per_share = abs(entry - (pos.get("stop_price") or entry)) or None
+        unrealized_r = (
+            round(unrealized_pnl / (risk_per_share * qty), 4)
+            if (risk_per_share and qty) else None
+        )
+        # Fold the current unrealized_r into the running MFE/MAE for this position.
+        prior = self.journal.one(
+            "SELECT MAX(mfe) AS max_mfe, MIN(mae) AS min_mae FROM monitoring_snapshots "
+            "WHERE position_id = ?",
+            (pos["position_id"],),
+        ) or {}
+        candidates_mfe = [v for v in (unrealized_r, prior.get("max_mfe")) if v is not None]
+        candidates_mae = [v for v in (unrealized_r, prior.get("min_mae")) if v is not None]
+        mfe = max(candidates_mfe) if candidates_mfe else None
+        mae = min(candidates_mae) if candidates_mae else None
+
+        st = timeutils.stamp()
+        self.journal.insert(
+            "monitoring_snapshots",
+            {
+                "monitoring_snapshot_id": new_id("mon"),
+                "position_id": pos["position_id"],
+                "trade_id": pos.get("trade_id"),
+                "symbol": pos["symbol"],
+                "direction": pos.get("direction"),
+                "snapshot_at_utc": st.utc,
+                "snapshot_at_sgt": st.local_sgt,
+                "market_session": timeutils.market_session().value,
+                "current_price": price,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_r": unrealized_r,
+                "mfe": mfe,
+                "mae": mae,
+                "stop_price": pos.get("stop_price"),
+                "target_price": pos.get("target_price"),
+                "target_profile": pos.get("target_profile"),
+                "stop_hit": 1 if decision == "stop" else 0,
+                "target_hit": 1 if decision == "target" else 0,
+                "time_stop_status": "expired" if decision == "time_expiry" else "active",
+                "data_freshness_status": freshness_status,
+                "action_taken": "exit_simulated" if decision is not None else "none",
+            },
+        )
 
     def _check_exit(self, pos: dict, price: float) -> Optional[str]:
         direction = pos["direction"]
@@ -224,6 +296,16 @@ class PositionManager:
                 "triggered_by": triggered_by,
                 "market_date": timeutils.market_date().isoformat(),
                 "target_profile": target_profile_bundle(pos)["target_profile"],
+                # --- Trade Packet v1 traceability ---
+                "trade_id": pos.get("trade_id"),
+                "candidate_id": pos.get("candidate_id"),
+                "proposal_id": pos.get("proposal_id"),
+                "hold_duration_minutes": (holding_days * 1440) if holding_days is not None else None,
+                "same_day_exit_classification": (classification.value if same_day else "not_same_day"),
+                "gross_pnl": gross_pnl,
+                "estimated_costs": costs,
+                "net_pnl": net_pnl,
+                "realized_r": realized_r,
             },
         )
 
@@ -251,6 +333,14 @@ class PositionManager:
                 "mfe": mfe,
                 "mae": mae,
                 "win": 1 if net_pnl > 0 else 0,
+                # --- Trade Packet v1 traceability ---
+                "trade_id": pos.get("trade_id"),
+                "candidate_id": pos.get("candidate_id"),
+                "proposal_id": pos.get("proposal_id"),
+                "exit_id": exit_id,
+                "playbook_name": pos.get("strategy"),
+                "outcome_classification": ("win" if net_pnl > 0 else "loss" if net_pnl < 0 else "breakeven"),
+                "hold_duration_minutes": (holding_days * 1440) if holding_days is not None else None,
                 # Target-profile evidence relayed from the position (tracking only).
                 **target_profile_bundle(pos),
             },
@@ -319,6 +409,7 @@ class PositionManager:
                 "strategy": pos.get("strategy"),
                 "is_demo": pos.get("is_demo", 0),
                 "target_profile": target_profile_bundle(pos)["target_profile"],
+                "trade_id": pos.get("trade_id"),
                 "filled_at": st.utc,
                 "raw_response_json": {"simulated": not is_real, "exit_reason": exit_reason, "fill_source": fill_source},
             },
@@ -352,6 +443,8 @@ class PositionManager:
                 "fill_source": fill_source,
                 "fill_price_basis": "alpaca_fill" if is_real else FILL_PRICE_BASIS,
                 "filled_at": st.utc,
+                "trade_id": pos.get("trade_id"),
+                "position_id": pos.get("position_id"),
             },
             mirror=True,
         )

@@ -213,6 +213,64 @@ class TargetSource(StrEnum):
     BASELINE = "baseline"
 
 
+class ScanType(StrEnum):
+    """What kind of scan produced a batch (audit only)."""
+
+    PREMARKET = "premarket"
+    POST_OPEN = "post_open"
+    FOLLOW_UP = "follow_up"
+    MANUAL = "manual"
+    TEST = "test"
+    UNKNOWN = "unknown"
+
+
+class RunStatus(StrEnum):
+    """Lifecycle status of a scan batch / scheduler run."""
+
+    STARTED = "started"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PARTIAL = "partial"
+
+
+class SchedulerRunType(StrEnum):
+    """What a scheduler run did (records exist even without a real scheduler)."""
+
+    SCAN = "scan"
+    MONITOR = "monitor"
+    REPORT = "report"
+    NOTIFY = "notify"
+    TEST = "test"
+
+
+class TriggerSource(StrEnum):
+    """Who triggered a run (v1 is manual/CLI; scheduler is future)."""
+
+    MANUAL_CLI = "manual_cli"
+    DASHBOARD = "dashboard"
+    FUTURE_SCHEDULER = "future_scheduler"
+    TEST = "test"
+    CLI = "cli"
+
+
+class BaselineType(StrEnum):
+    """Comparison baselines tracked alongside live decisions."""
+
+    MOMENTUM_ONLY = "momentum_only"
+    NO_NEWS = "no_news"
+    AI_REJECTED_TRACKING = "ai_rejected_tracking"
+    OPENAI_ONLY = "openai_only"
+    OPENAI_PLUS_CLAUDE_REVIEWED = "openai_plus_claude_reviewed"
+
+
+class OutcomeClass(StrEnum):
+    """Coarse trade outcome classification."""
+
+    WIN = "win"
+    LOSS = "loss"
+    BREAKEVEN = "breakeven"
+
+
 # Target-profile evidence fields carried through proposal -> order -> position ->
 # exit -> outcome (tracking only; no effect on trading behavior).
 TARGET_PROFILE_FIELDS = (

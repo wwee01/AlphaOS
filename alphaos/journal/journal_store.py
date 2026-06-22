@@ -48,10 +48,14 @@ class JournalStore:
         cur = self.conn.cursor()
         for _name, ddl in SCHEMA:
             cur.execute(ddl)
+        self.conn.commit()
+        # Reconcile additive columns BEFORE building indexes: an index may target a
+        # column that an older DB is missing until _migrate() adds it.
+        self._migrate()
+        cur = self.conn.cursor()
         for idx in INDEXES:
             cur.execute(idx)
         self.conn.commit()
-        self._migrate()
         self._columns.clear()
 
     # ------------------------------------------------------------ migration
@@ -366,4 +370,85 @@ class JournalStore:
         return self.one(
             "SELECT * FROM approvals WHERE proposal_id = ? ORDER BY id DESC LIMIT 1",
             (proposal_id,),
+        )
+
+    # ----------------------------------------------- trade-packet lookups
+    def candidate_by_id(self, candidate_id: str) -> Optional[dict]:
+        return self.one("SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,))
+
+    def position_by_id(self, position_id: str) -> Optional[dict]:
+        return self.one("SELECT * FROM positions WHERE position_id = ?", (position_id,))
+
+    def order_by_id(self, order_id: str) -> Optional[dict]:
+        return self.one("SELECT * FROM paper_orders WHERE order_id = ?", (order_id,))
+
+    def orders_for_proposal(self, proposal_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM paper_orders WHERE proposal_id = ? ORDER BY id ASC", (proposal_id,)
+        )
+
+    def fills_for_order(self, order_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM paper_fills WHERE order_id = ? ORDER BY id ASC", (order_id,)
+        )
+
+    def order_events_for_order(self, order_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM order_events WHERE order_id = ? ORDER BY id ASC", (order_id,)
+        )
+
+    def exits_for_position(self, position_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM exits WHERE position_id = ? ORDER BY id ASC", (position_id,)
+        )
+
+    def outcome_for_position(self, position_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM trade_outcomes WHERE position_id = ? ORDER BY id DESC LIMIT 1",
+            (position_id,),
+        )
+
+    def risk_check_for_proposal(self, proposal_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM risk_checks WHERE proposal_id = ? ORDER BY id DESC LIMIT 1",
+            (proposal_id,),
+        )
+
+    def monitoring_snapshots_for_position(self, position_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM monitoring_snapshots WHERE position_id = ? ORDER BY id ASC",
+            (position_id,),
+        )
+
+    def baseline_for_candidate(self, candidate_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM baseline_outcomes WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+            (candidate_id,),
+        )
+
+    def rejections_for_candidate(self, candidate_id: str) -> list[dict]:
+        return self.query(
+            "SELECT * FROM rejected_candidates WHERE candidate_id = ? ORDER BY id ASC",
+            (candidate_id,),
+        )
+
+    def scan_batch_by_id(self, scan_batch_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM scan_batches WHERE scan_batch_id = ?", (scan_batch_id,)
+        )
+
+    def recent_scan_batches(self, limit: int = 50) -> list[dict]:
+        return self.query("SELECT * FROM scan_batches ORDER BY id DESC LIMIT ?", (limit,))
+
+    def recent_scheduler_runs(self, limit: int = 50) -> list[dict]:
+        return self.query("SELECT * FROM scheduler_runs ORDER BY id DESC LIMIT ?", (limit,))
+
+    def position_for_trade(self, trade_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM positions WHERE trade_id = ? ORDER BY id DESC LIMIT 1", (trade_id,)
+        )
+
+    def outcome_for_trade(self, trade_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM trade_outcomes WHERE trade_id = ? ORDER BY id DESC LIMIT 1", (trade_id,)
         )

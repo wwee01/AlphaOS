@@ -41,7 +41,18 @@ class TradeProposal:
     stop_loss_pct: Optional[float] = None
     target_price_source: Optional[str] = None
     stop_price_source: Optional[str] = None
+    # --- traceability (Trade Packet v1) ---
+    risk_check_id: Optional[str] = None
+    claude_review_id: Optional[str] = None
+    playbook_name: Optional[str] = None
+    setup_classification: Optional[str] = None
+    expected_hold_days: Optional[int] = None
+    scan_batch_id: Optional[str] = None
+    proposal_reason: Optional[str] = None
     proposal_id: str = field(default_factory=lambda: new_id("prop"))
+    # Every proposal is born with a stable trade_id — the central correlation key
+    # that survives proposal -> order -> position -> exit -> outcome.
+    trade_id: str = field(default_factory=lambda: new_id("trade"))
 
     @classmethod
     def from_row(cls, row: dict) -> "TradeProposal":
@@ -72,7 +83,15 @@ class TradeProposal:
             stop_loss_pct=row.get("stop_loss_pct"),
             target_price_source=row.get("target_price_source"),
             stop_price_source=row.get("stop_price_source"),
+            risk_check_id=row.get("risk_check_id"),
+            claude_review_id=row.get("claude_review_id"),
+            playbook_name=row.get("playbook_name"),
+            setup_classification=row.get("setup_classification"),
+            expected_hold_days=row.get("expected_hold_days"),
+            scan_batch_id=row.get("scan_batch_id"),
+            proposal_reason=row.get("proposal_reason"),
             proposal_id=row["proposal_id"],
+            trade_id=row.get("trade_id") or new_id("trade"),
         )
 
     def to_row(self) -> dict:
@@ -103,4 +122,12 @@ class TradeProposal:
             "stop_loss_pct": self.stop_loss_pct,
             "target_price_source": self.target_price_source,
             "stop_price_source": self.stop_price_source,
+            "trade_id": self.trade_id,
+            "risk_check_id": self.risk_check_id,
+            "claude_review_id": self.claude_review_id,
+            "playbook_name": self.playbook_name,
+            "setup_classification": self.setup_classification,
+            "expected_hold_days": self.expected_hold_days,
+            "scan_batch_id": self.scan_batch_id,
+            "proposal_reason": self.proposal_reason,
         }

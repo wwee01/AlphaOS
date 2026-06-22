@@ -203,11 +203,23 @@ class OrderManager:
                 "fill_source": "internal_sim",
                 "fill_price_basis": FILL_PRICE_BASIS,
                 "filled_at": st.utc,
+                # --- Trade Packet v1 traceability ---
+                "trade_id": getattr(proposal, "trade_id", None),
             },
             mirror=True,
         )
 
         position_id = self.positions.open_position(row, price)
+        # Back-link the fill to the opened position (best-effort; must never abort
+        # an otherwise-successful fill/open).
+        if position_id:
+            try:
+                self.journal.conn.execute(
+                    "UPDATE paper_fills SET position_id = ? WHERE fill_id = ?", (position_id, fill_id)
+                )
+                self.journal.conn.commit()
+            except Exception:  # pragma: no cover - audit back-link is best-effort
+                pass
         self.journal.log_system_event(
             Severity.INFO, "execution",
             f"Filled {proposal.symbol} x{proposal.qty} @ {price} "
@@ -279,10 +291,11 @@ class OrderManager:
 
     def _open_real_position(self, row: dict, norm: dict) -> str:
         st = timeutils.stamp()
+        fill_id = new_id("fill")
         self.journal.insert(
             "paper_fills",
             {
-                "fill_id": new_id("fill"), "order_id": row["order_id"],
+                "fill_id": fill_id, "order_id": row["order_id"],
                 "broker_order_id": norm.get("broker_order_id"), "symbol": row["symbol"],
                 "side": row["side"], "qty": norm.get("filled_qty") or row["qty"],
                 "price": norm.get("filled_avg_price") or row["entry_price"],
@@ -290,10 +303,21 @@ class OrderManager:
                 "execution_provider": ExecutionProvider.ALPACA_PAPER.value,
                 "data_provider": row["data_provider"], "data_feed": row["data_feed"],
                 "fill_source": "alpaca_paper", "fill_price_basis": "alpaca_fill", "filled_at": st.utc,
+                # --- Trade Packet v1 traceability ---
+                "trade_id": row.get("trade_id"),
             },
             mirror=True,
         )
-        return self.positions.open_position(row, norm.get("filled_avg_price") or row["entry_price"])
+        position_id = self.positions.open_position(row, norm.get("filled_avg_price") or row["entry_price"])
+        if position_id:
+            try:
+                self.journal.conn.execute(
+                    "UPDATE paper_fills SET position_id = ? WHERE fill_id = ?", (position_id, fill_id)
+                )
+                self.journal.conn.commit()
+            except Exception:  # pragma: no cover - audit back-link is best-effort
+                pass
+        return position_id
 
     def reconcile(self) -> dict:
         """Reconcile open Alpaca paper orders against the broker: open positions

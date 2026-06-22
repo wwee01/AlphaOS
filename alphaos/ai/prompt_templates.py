@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 
+# Prompt-template generation marker (recorded on each evaluation for audit).
+PROMPT_TEMPLATE_VERSION = "v1"
+
 # Required keys in the OpenAI evaluation JSON object.
 OPENAI_EVAL_KEYS = [
     "symbol",
