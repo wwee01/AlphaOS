@@ -20,6 +20,7 @@ import streamlit as st
 from alphaos.ai.claude_reviewer import ClaudeUnavailable
 from alphaos.config.settings import load_settings
 from alphaos.orchestrator import Orchestrator
+from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
 
 
@@ -206,13 +207,60 @@ def tab_system_health(orch: Orchestrator) -> None:
         )
 
 
+def tab_trade_packet(orch: Orchestrator) -> None:
+    st.subheader("Trade Packet (audit)")
+    st.caption("Assemble the full lifecycle for a candidate_id or trade_id (read-only).")
+    cands = orch.journal.recent_candidates(100)
+    options = [c["candidate_id"] for c in cands]
+    chosen = st.selectbox("Recent candidate_id", options) if options else None
+    manual = st.text_input("…or paste a candidate_id / trade_id").strip()
+    anchor = manual or chosen
+    if not anchor:
+        st.info("No candidates yet — run scan_once from the sidebar.")
+        return
+    kwargs = {"trade_id": anchor} if anchor.startswith("trade_") else {"candidate_id": anchor}
+    st.json(assemble_trade_packet(orch.journal, **kwargs))
+
+
+def tab_scan_batches(orch: Orchestrator) -> None:
+    st.subheader("Scan Batches")
+    rows = orch.journal.recent_scan_batches(50)
+    if rows:
+        st.dataframe(rows, width="stretch")
+    else:
+        st.info("No scan batches yet — run scan_once from the sidebar.")
+
+
+def tab_scheduler_runs(orch: Orchestrator) -> None:
+    st.subheader("Scheduler Runs")
+    rows = orch.journal.recent_scheduler_runs(50)
+    if rows:
+        st.dataframe(rows, width="stretch")
+    else:
+        st.info("No scheduler runs recorded yet.")
+
+
+def tab_system_events(orch: Orchestrator) -> None:
+    st.subheader("System Events")
+    rows = orch.journal.recent_system_events(200)
+    if rows:
+        st.dataframe(rows, width="stretch")
+    else:
+        st.info("No system events yet.")
+
+
 def main() -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
     orch = get_orchestrator()
     orch.startup()
     render_sidebar(orch)
     st.title("AlphaOS — paper trading (v1)")
-    t1, t2, t3, t4 = st.tabs(["Candidates / Proposals", "Open Trades", "Closed Trades", "System Health"])
+    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(
+        [
+            "Candidates / Proposals", "Open Trades", "Closed Trades", "System Health",
+            "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
+        ]
+    )
     with t1:
         tab_candidates(orch)
     with t2:
@@ -221,6 +269,14 @@ def main() -> None:
         tab_closed_trades(orch)
     with t4:
         tab_system_health(orch)
+    with t5:
+        tab_trade_packet(orch)
+    with t6:
+        tab_scan_batches(orch)
+    with t7:
+        tab_scheduler_runs(orch)
+    with t8:
+        tab_system_events(orch)
 
 
 if __name__ == "__main__":

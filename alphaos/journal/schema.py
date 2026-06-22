@@ -93,6 +93,9 @@ SCHEMA: list[tuple[str, str]] = [
             freshness_status TEXT,
             is_usable INTEGER,
             block_reason TEXT,
+            price_used_for_decision REAL,
+            price_at_order_submission REAL,
+            price_move_since_proposal_pct REAL,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL,
             created_at_market TEXT
@@ -119,6 +122,11 @@ SCHEMA: list[tuple[str, str]] = [
             parsing_notes TEXT,
             is_fixture INTEGER DEFAULT 0,
             label TEXT,
+            candidate_id TEXT,
+            source_type TEXT,
+            catalyst_quality_score REAL,
+            contradiction_flags TEXT,
+            openai_news_classification_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -144,6 +152,17 @@ SCHEMA: list[tuple[str, str]] = [
             price_snapshot_id TEXT,
             status TEXT,
             notes_json TEXT,
+            scan_batch_id TEXT,
+            asset_type TEXT,
+            playbook_name TEXT,
+            setup_classification TEXT,
+            status_reason TEXT,
+            block_reason TEXT,
+            reject_reason TEXT,
+            watch_reason TEXT,
+            price_at_scan REAL,
+            volume_at_scan REAL,
+            market_regime TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -176,6 +195,13 @@ SCHEMA: list[tuple[str, str]] = [
             validation_status TEXT,
             raw_json TEXT,
             is_mock INTEGER DEFAULT 0,
+            prompt_template_version TEXT,
+            schema_version TEXT,
+            thesis_summary TEXT,
+            counter_thesis TEXT,
+            expected_hold_days INTEGER,
+            same_day_exit_allowed INTEGER,
+            reasons_to_reject TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -198,6 +224,10 @@ SCHEMA: list[tuple[str, str]] = [
             raw_json TEXT,
             is_mock INTEGER DEFAULT 0,
             triggered_by TEXT,
+            proposal_id TEXT,
+            disagreement_with_openai TEXT,
+            user_requested INTEGER,
+            final_user_action_after_review TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -234,6 +264,14 @@ SCHEMA: list[tuple[str, str]] = [
             stop_loss_pct REAL,
             target_price_source TEXT,
             stop_price_source TEXT,
+            trade_id TEXT,
+            risk_check_id TEXT,
+            claude_review_id TEXT,
+            scan_batch_id TEXT,
+            playbook_name TEXT,
+            setup_classification TEXT,
+            expected_hold_days INTEGER,
+            proposal_reason TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -298,6 +336,15 @@ SCHEMA: list[tuple[str, str]] = [
             raw_request_json TEXT,
             raw_response_json TEXT,
             target_profile TEXT,
+            trade_id TEXT,
+            risk_check_id TEXT,
+            order_class TEXT,
+            intended_entry_price REAL,
+            submitted_price REAL,
+            broker_response_summary TEXT,
+            error_message TEXT,
+            updated_at_utc TEXT,
+            updated_at_sgt TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL,
             created_at_market TEXT
@@ -342,6 +389,12 @@ SCHEMA: list[tuple[str, str]] = [
             fill_source TEXT,
             fill_price_basis TEXT,
             filled_at TEXT,
+            trade_id TEXT,
+            position_id TEXT,
+            slippage_amount REAL,
+            slippage_bps REAL,
+            estimated_costs REAL,
+            raw_broker_fill_reference TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -378,6 +431,10 @@ SCHEMA: list[tuple[str, str]] = [
             stop_loss_pct REAL,
             target_price_source TEXT,
             stop_price_source TEXT,
+            trade_id TEXT,
+            candidate_id TEXT,
+            proposal_id TEXT,
+            eval_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -401,6 +458,15 @@ SCHEMA: list[tuple[str, str]] = [
             triggered_by TEXT,
             market_date TEXT,
             target_profile TEXT,
+            trade_id TEXT,
+            candidate_id TEXT,
+            proposal_id TEXT,
+            hold_duration_minutes REAL,
+            same_day_exit_classification TEXT,
+            gross_pnl REAL,
+            estimated_costs REAL,
+            net_pnl REAL,
+            realized_r REAL,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -438,6 +504,15 @@ SCHEMA: list[tuple[str, str]] = [
             stop_loss_pct REAL,
             target_price_source TEXT,
             stop_price_source TEXT,
+            trade_id TEXT,
+            candidate_id TEXT,
+            proposal_id TEXT,
+            exit_id TEXT,
+            playbook_name TEXT,
+            setup_classification TEXT,
+            outcome_classification TEXT,
+            hold_duration_minutes REAL,
+            lessons_learned TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -457,6 +532,7 @@ SCHEMA: list[tuple[str, str]] = [
             direction TEXT,
             would_be_entry REAL,
             would_be_stop REAL,
+            scan_batch_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -486,6 +562,16 @@ SCHEMA: list[tuple[str, str]] = [
             catalyst_confidence REAL,
             notes_json TEXT,
             target_profile TEXT,
+            trade_id TEXT,
+            hypothetical_entry REAL,
+            hypothetical_stop REAL,
+            hypothetical_target REAL,
+            hypothetical_exit REAL,
+            gross_pnl REAL,
+            estimated_costs REAL,
+            net_pnl REAL,
+            realized_r REAL,
+            outcome_notes TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -514,6 +600,131 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        "scan_batches",
+        """
+        CREATE TABLE IF NOT EXISTS scan_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_batch_id TEXT NOT NULL UNIQUE,
+            scheduler_run_id TEXT,
+            scan_type TEXT,
+            source TEXT,
+            started_at_utc TEXT,
+            started_at_sgt TEXT,
+            completed_at_utc TEXT,
+            completed_at_sgt TEXT,
+            status TEXT,
+            market_session TEXT,
+            universe_count INTEGER,
+            candidates_found INTEGER,
+            proposals_created INTEGER,
+            watch_count INTEGER,
+            rejected_count INTEGER,
+            blocked_count INTEGER,
+            errors_count INTEGER,
+            notes TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "scheduler_runs",
+        """
+        CREATE TABLE IF NOT EXISTS scheduler_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scheduler_run_id TEXT NOT NULL UNIQUE,
+            run_type TEXT,
+            trigger_source TEXT,
+            started_at_utc TEXT,
+            started_at_sgt TEXT,
+            completed_at_utc TEXT,
+            completed_at_sgt TEXT,
+            status TEXT,
+            scan_batch_id TEXT,
+            candidates_found INTEGER,
+            proposals_created INTEGER,
+            orders_touched INTEGER,
+            positions_touched INTEGER,
+            reports_created INTEGER,
+            notifications_sent INTEGER,
+            system_events_created INTEGER,
+            error_count INTEGER,
+            error_summary TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "risk_checks",
+        """
+        CREATE TABLE IF NOT EXISTS risk_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            risk_check_id TEXT NOT NULL UNIQUE,
+            proposal_id TEXT,
+            candidate_id TEXT,
+            trade_id TEXT,
+            result TEXT,
+            fail_reason TEXT,
+            max_risk_amount REAL,
+            max_risk_pct REAL,
+            position_size REAL,
+            entry_price REAL,
+            stop_price REAL,
+            target_price REAL,
+            reward_risk REAL,
+            min_reward_risk REAL,
+            stop_loss_pct REAL,
+            target_reward_risk REAL,
+            target_profile TEXT,
+            liquidity_check_result TEXT,
+            spread_check_result TEXT,
+            daily_loss_check_result TEXT,
+            max_trades_check_result TEXT,
+            max_open_positions_check_result TEXT,
+            short_margin_assumption TEXT,
+            margin_or_leverage_required INTEGER,
+            user_approval_required_for_margin_or_leverage INTEGER,
+            block_reasons_json TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        "monitoring_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS monitoring_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            monitoring_snapshot_id TEXT NOT NULL UNIQUE,
+            position_id TEXT,
+            trade_id TEXT,
+            symbol TEXT,
+            direction TEXT,
+            snapshot_at_utc TEXT,
+            snapshot_at_sgt TEXT,
+            market_session TEXT,
+            current_price REAL,
+            unrealized_pnl REAL,
+            unrealized_r REAL,
+            mfe REAL,
+            mae REAL,
+            stop_price REAL,
+            target_price REAL,
+            target_profile TEXT,
+            invalidation_status TEXT,
+            stop_hit INTEGER,
+            target_hit INTEGER,
+            time_stop_status TEXT,
+            data_freshness_status TEXT,
+            action_taken TEXT,
+            notes TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -531,6 +742,12 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_outcomes_position ON trade_outcomes(position_id)",
     "CREATE INDEX IF NOT EXISTS idx_sysevents_sev ON system_events(severity)",
     "CREATE INDEX IF NOT EXISTS idx_approvals_label ON approvals(label)",
+    "CREATE INDEX IF NOT EXISTS idx_candidates_scan_batch ON candidates(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_positions_trade ON positions(trade_id)",
+    "CREATE INDEX IF NOT EXISTS idx_outcomes_trade ON trade_outcomes(trade_id)",
+    "CREATE INDEX IF NOT EXISTS idx_riskchecks_proposal ON risk_checks(proposal_id)",
+    "CREATE INDEX IF NOT EXISTS idx_monitoring_position ON monitoring_snapshots(position_id)",
+    "CREATE INDEX IF NOT EXISTS idx_scheduler_runs_batch ON scheduler_runs(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
@@ -544,4 +761,4 @@ ALL_TABLES = [name for name, _ in SCHEMA]
 # keeps working across pulls. Bump it only when introducing a change the additive
 # reconciler cannot express (a destructive/transforming migration) and add that
 # explicit, version-gated step in ``_migrate``.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3

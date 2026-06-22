@@ -83,6 +83,14 @@ class OpenAIEvaluation:
             "validation_status": self.validation_status,
             "raw_json": self.raw or {},
             "is_mock": 1 if self.is_mock else 0,
+            # --- Trade Packet v1 metadata (audit only; no decision change) ---
+            "prompt_template_version": pt.PROMPT_TEMPLATE_VERSION,
+            "schema_version": "v1",
+            "thesis_summary": self.reasoning_summary,
+            "expected_hold_days": self.max_holding_days,
+            "same_day_exit_allowed": None,
+            "counter_thesis": None,
+            "reasons_to_reject": None,
         }
 
 

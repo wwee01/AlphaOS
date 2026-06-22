@@ -17,6 +17,7 @@ from typing import Optional
 
 from alphaos.constants import (
     NewsStatus,
+    PLAYBOOK_V1,
     ReasonCode,
     Severity,
     Strategy,
@@ -66,8 +67,14 @@ class CandidateScanner:
             )
         return symbols
 
-    def scan(self, symbols: Optional[list[str]] = None) -> ScanResult:
-        scan_id = new_id("scan")
+    def scan(
+        self, symbols: Optional[list[str]] = None, scan_batch_id: Optional[str] = None
+    ) -> ScanResult:
+        # When the orchestrator mints a scan_batch_id, use it as the scan_id so
+        # candidates.scan_id == the batch id and a candidate row also carries the
+        # explicit scan_batch_id link.
+        scan_id = scan_batch_id or new_id("scan")
+        self._scan_batch_id = scan_batch_id
         result = ScanResult(scan_id=scan_id)
         symbols = self.build_universe(scan_id, symbols)
         self.journal.log_system_event(
@@ -138,9 +145,11 @@ class CandidateScanner:
         trend_quality = round(min(1.0, abs(change) * 10), 3)
 
         candidate_id = new_id("cand")
+        asset_type = "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock"
         cand = {
             "candidate_id": candidate_id,
             "scan_id": scan_id,
+            "scan_batch_id": getattr(self, "_scan_batch_id", None),
             "symbol": sym,
             "direction": direction,
             "strategy": Strategy.SWING.value,
@@ -153,6 +162,13 @@ class CandidateScanner:
             "news_status": NewsStatus.NEWS_UNAVAILABLE.value,  # set later by orchestrator
             "price_snapshot_id": snapshot_id,
             "status": "detected",
+            # --- Trade Packet v1 evidence fields ---
+            "asset_type": asset_type,
+            "playbook_name": PLAYBOOK_V1,
+            "setup_classification": "momentum_continuation",
+            "status_reason": "detected",
+            "price_at_scan": snapshot.get("last_price"),
+            "volume_at_scan": snapshot.get("volume"),
             "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
         }
         self.journal.insert("candidates", cand)
@@ -206,5 +222,6 @@ class CandidateScanner:
                 "reason_code": reason_code,
                 "reason_detail": detail,
                 "would_be_entry": snapshot.get("last_price") if snapshot else None,
+                "scan_batch_id": getattr(self, "_scan_batch_id", None),
             },
         )

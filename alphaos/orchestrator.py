@@ -21,6 +21,7 @@ from alphaos.approval import ApprovalEngine
 from alphaos.config.settings import Settings, load_settings
 from alphaos.constants import (
     BASELINE_MOMENTUM_NO_NEWS_V1,
+    BaselineType,
     CATALYST_NOT_AVAILABLE_V1,
     Decision,
     ExecutionProvider,
@@ -28,12 +29,18 @@ from alphaos.constants import (
     NewsStatus,
     PLAYBOOK_V1,
     ReasonCode,
+    RunStatus,
+    ScanType,
+    SchedulerRunType,
     Severity,
     Strategy,
     TargetProfile,
     TargetSource,
     TradeDirection,
+    TriggerSource,
 )
+from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+from alphaos.util import timeutils
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.order_manager import OrderManager
@@ -62,6 +69,8 @@ class ScanSummary:
     risk_blocked: int = 0
     auto_submitted: int = 0
     pending_manual: int = 0
+    scan_batch_id: Optional[str] = None
+    scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -121,8 +130,51 @@ class Orchestrator:
     # ------------------------------------------------------------- scan_once
     def run_scan_once(self) -> ScanSummary:
         self._ensure_startup()
-        scan = self.scanner.scan()
-        summary = ScanSummary(scan_id=scan.scan_id, candidates=len(scan.candidates))
+
+        # --- Mint a scan batch + a scheduler run (records exist even though v1
+        #     has no real scheduler; trigger is manual CLI). ------------------
+        scan_batch_id = new_id("scan")
+        scheduler_run_id = new_id("schr")
+        st = timeutils.stamp()
+        session = timeutils.market_session()
+        if session.value == "regular":
+            scan_type = ScanType.POST_OPEN.value
+        elif session.value == "premarket":
+            scan_type = ScanType.PREMARKET.value
+        else:
+            scan_type = ScanType.MANUAL.value
+        self.journal.insert(
+            "scan_batches",
+            {
+                "scan_batch_id": scan_batch_id,
+                "scheduler_run_id": scheduler_run_id,
+                "scan_type": scan_type,
+                "source": "cli",
+                "started_at_utc": st.utc,
+                "started_at_sgt": st.local_sgt,
+                "status": RunStatus.STARTED.value,
+                "market_session": session.value,
+                "universe_count": len(DEFAULT_UNIVERSE),
+            },
+        )
+        self.journal.insert(
+            "scheduler_runs",
+            {
+                "scheduler_run_id": scheduler_run_id,
+                "run_type": SchedulerRunType.SCAN.value,
+                "trigger_source": TriggerSource.MANUAL_CLI.value,
+                "started_at_utc": st.utc,
+                "started_at_sgt": st.local_sgt,
+                "status": RunStatus.STARTED.value,
+                "scan_batch_id": scan_batch_id,
+            },
+        )
+
+        scan = self.scanner.scan(scan_batch_id=scan_batch_id)
+        summary = ScanSummary(
+            scan_id=scan.scan_id, candidates=len(scan.candidates),
+            scan_batch_id=scan_batch_id, scheduler_run_id=scheduler_run_id,
+        )
 
         if self.kill_switch.is_engaged():
             self.journal.log_system_event(
@@ -151,9 +203,32 @@ class Orchestrator:
                 continue
 
             # decision == propose
-            handled = self._handle_proposal(cand, evaluation, summary)
+            handled = self._handle_proposal(cand, evaluation, summary, scan_batch_id=scan_batch_id)
             if not handled:
                 summary.rejected += 1
+
+        # --- Close out the batch + scheduler run (raw UPDATE, like
+        #     _set_proposal_status). -----------------------------------------
+        done = timeutils.stamp()
+        self.journal.conn.execute(
+            "UPDATE scan_batches SET status = ?, completed_at_utc = ?, completed_at_sgt = ?, "
+            "candidates_found = ?, proposals_created = ?, watch_count = ?, rejected_count = ?, "
+            "blocked_count = ?, errors_count = ? WHERE scan_batch_id = ?",
+            (
+                RunStatus.COMPLETED.value, done.utc, done.local_sgt,
+                summary.candidates, summary.proposed, summary.watch, summary.rejected,
+                summary.risk_blocked, 0, scan_batch_id,
+            ),
+        )
+        self.journal.conn.execute(
+            "UPDATE scheduler_runs SET status = ?, completed_at_utc = ?, completed_at_sgt = ?, "
+            "candidates_found = ?, proposals_created = ?, error_count = ? WHERE scheduler_run_id = ?",
+            (
+                RunStatus.COMPLETED.value, done.utc, done.local_sgt,
+                summary.candidates, summary.proposed, 0, scheduler_run_id,
+            ),
+        )
+        self.journal.conn.commit()
 
         self.journal.log_system_event(
             Severity.INFO, "scan",
@@ -163,7 +238,7 @@ class Orchestrator:
         )
         return summary
 
-    def _handle_proposal(self, cand, evaluation, summary: ScanSummary) -> bool:
+    def _handle_proposal(self, cand, evaluation, summary: ScanSummary, scan_batch_id=None) -> bool:
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
         snapshot = cand.get("_snapshot", {})
@@ -182,6 +257,13 @@ class Orchestrator:
         if not risk.approved or risk.sizing is None:
             proposal = self.swing.build_proposal(evaluation, risk.sizing or _zero_sizing(evaluation))
             self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+            proposal.scan_batch_id = scan_batch_id
+            proposal.playbook_name = PLAYBOOK_V1
+            proposal.setup_classification = "momentum_continuation"
+            proposal.expected_hold_days = evaluation.max_holding_days
+            # Persist the risk check (does NOT change whether the trade proceeds).
+            rc_id = self._record_risk_check(proposal, evaluation, risk)
+            proposal.risk_check_id = rc_id
             proposal.status = "blocked"
             self.journal.insert("trade_proposals", proposal.to_row())
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
@@ -190,8 +272,20 @@ class Orchestrator:
 
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
         self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+        proposal.scan_batch_id = scan_batch_id
+        proposal.playbook_name = PLAYBOOK_V1
+        proposal.setup_classification = "momentum_continuation"
+        proposal.expected_hold_days = evaluation.max_holding_days
+        rc_id = self._record_risk_check(proposal, evaluation, risk)
+        proposal.risk_check_id = rc_id
         proposal.status = "pending_approval"
         self.journal.insert("trade_proposals", proposal.to_row())
+        # Link the pre-trade baseline for this candidate to the trade's id.
+        self.journal.conn.execute(
+            "UPDATE baseline_outcomes SET trade_id = ? WHERE candidate_id = ? AND trade_id IS NULL",
+            (proposal.trade_id, cand["candidate_id"]),
+        )
+        self.journal.conn.commit()
         self._set_candidate_status(cand["candidate_id"], "proposed")
         summary.proposed += 1
 
@@ -276,6 +370,15 @@ class Orchestrator:
             requires_margin=proposal.requires_margin,
             margin_approved=proposal.margin_approved,
         )
+        # Persist the manual-approval re-check (audit only; the decision above
+        # already determined whether the trade proceeds) and keep the proposal's
+        # denormalized risk_check_id pointing at the approval-time check.
+        rc_id = self._record_risk_check(proposal, _eval_view_from_proposal(proposal), risk)
+        if rc_id:
+            self.journal.conn.execute(
+                "UPDATE trade_proposals SET risk_check_id = ? WHERE proposal_id = ?", (rc_id, proposal_id)
+            )
+            self.journal.conn.commit()
         if not risk.approved:
             self._set_proposal_status(proposal_id, "blocked")
             return False, f"risk blocked: {risk.primary_reason}"
@@ -317,12 +420,36 @@ class Orchestrator:
     # ------------------------------------------------------------- monitor
     def run_monitor_once(self, price_overrides: Optional[dict] = None) -> dict:
         self._ensure_startup()
+        # Record a scheduler run for this monitor pass (records exist even though
+        # v1 has no real scheduler). Keep the monitor behavior itself unchanged.
+        scheduler_run_id = new_id("schr")
+        st = timeutils.stamp()
+        positions_seen = self.journal.count_open_positions()
+        self.journal.insert(
+            "scheduler_runs",
+            {
+                "scheduler_run_id": scheduler_run_id,
+                "run_type": SchedulerRunType.MONITOR.value,
+                "trigger_source": TriggerSource.MANUAL_CLI.value,
+                "started_at_utc": st.utc,
+                "started_at_sgt": st.local_sgt,
+                "status": RunStatus.STARTED.value,
+                "positions_touched": positions_seen,
+            },
+        )
         # Reconcile real Alpaca paper orders first (broker-managed bracket OCO):
         # opens positions on entry fills, closes them on TP/SL leg fills.
         recon = self.orders.reconcile()
         # Local watchdog handles only simulated_internal positions.
         exits = self.positions.monitor(price_overrides=price_overrides)
         all_exits = list(recon.get("exits", [])) + exits
+        done = timeutils.stamp()
+        self.journal.conn.execute(
+            "UPDATE scheduler_runs SET status = ?, completed_at_utc = ?, completed_at_sgt = ?, "
+            "positions_touched = ?, error_count = ? WHERE scheduler_run_id = ?",
+            (RunStatus.COMPLETED.value, done.utc, done.local_sgt, positions_seen, 0, scheduler_run_id),
+        )
+        self.journal.conn.commit()
         self.journal.log_system_event(
             Severity.INFO, "monitor",
             f"monitor_once complete: {len(all_exits)} exit(s); "
@@ -334,6 +461,7 @@ class Orchestrator:
             "reconciled": recon.get("reconciled", 0),
             "opened": recon.get("opened", []),
             "open_positions": self.journal.count_open_positions(),
+            "scheduler_run_id": scheduler_run_id,
         }
 
     # --------------------------------------------------------------- report
@@ -410,6 +538,56 @@ class Orchestrator:
         )
         self.journal.conn.commit()
 
+    def _record_risk_check(self, proposal, evaluation, risk) -> str:
+        """Persist a risk_checks row for the proposal. Pure audit: it never
+        changes whether the trade proceeds (the RiskDecision already decided)."""
+        risk_check_id = new_id("rchk")
+        codes = {b.get("code") for b in (risk.block_reasons or [])}
+
+        def gate(*reason_codes) -> str:
+            return "fail" if codes.intersection(reason_codes) else "pass"
+
+        requires_margin = getattr(proposal, "requires_margin", False)
+        margin_approved = getattr(proposal, "margin_approved", False)
+        is_short = proposal.direction == TradeDirection.SHORT.value
+        sizing = risk.sizing
+        self.journal.insert(
+            "risk_checks",
+            {
+                "risk_check_id": risk_check_id,
+                "proposal_id": proposal.proposal_id,
+                "candidate_id": proposal.candidate_id,
+                "trade_id": proposal.trade_id,
+                "result": "pass" if risk.approved else "fail",
+                "fail_reason": risk.primary_reason,
+                "max_risk_amount": (sizing.risk_budget if sizing else None),
+                "max_risk_pct": self.settings.max_risk_per_trade_pct,
+                "position_size": (sizing.shares if sizing else None),
+                "entry_price": evaluation.entry,
+                "stop_price": evaluation.stop,
+                "target_price": evaluation.target,
+                "reward_risk": evaluation.expected_r,
+                "min_reward_risk": self.settings.min_reward_risk,
+                "stop_loss_pct": self.settings.stop_loss_pct,
+                "target_reward_risk": self.settings.target_reward_risk,
+                "target_profile": TargetProfile.CONFIGURED_STANDARD.value,
+                "liquidity_check_result": gate(ReasonCode.LOW_LIQUIDITY.value),
+                "spread_check_result": gate(
+                    ReasonCode.WIDE_SPREAD.value, ReasonCode.CROSSED_QUOTE.value
+                ),
+                "daily_loss_check_result": gate(ReasonCode.DAILY_LOSS_LIMIT.value),
+                "max_trades_check_result": gate(ReasonCode.DAILY_TRADE_LIMIT.value),
+                "max_open_positions_check_result": gate(ReasonCode.TOO_MANY_POSITIONS.value),
+                "short_margin_assumption": ("short_requires_margin" if is_short else None),
+                "margin_or_leverage_required": 1 if requires_margin else 0,
+                "user_approval_required_for_margin_or_leverage": (
+                    1 if (requires_margin and not margin_approved) else 0
+                ),
+                "block_reasons_json": risk.block_reasons,
+            },
+        )
+        return risk_check_id
+
     def _tag_target_profile(self, proposal, *, from_config: bool) -> None:
         """Record target-profile evidence on a proposal. Tracking only: it does
         not change the stop/target levels or any behavior. Every system-generated
@@ -459,7 +637,11 @@ class Orchestrator:
                 "baseline_id": new_id("base"),
                 "candidate_id": cand["candidate_id"],
                 "symbol": cand["symbol"],
+                # The persisted value stays the v1 no-news baseline constant
+                # (BaselineType.NO_NEWS is the semantic equivalent). trade_id is
+                # filled later once a trade exists; hypothetical_* left nullable.
                 "baseline_type": BASELINE_MOMENTUM_NO_NEWS_V1,
+                "trade_id": None,
                 "target_profile": TargetProfile.CONFIGURED_STANDARD.value,
                 "direction": evaluation.direction,
                 "reference_price": ref_price,
@@ -519,3 +701,25 @@ def _zero_sizing(evaluation):
 
     rps = abs((evaluation.entry or 0) - (evaluation.stop or 0))
     return PositionSizing(shares=0, risk_per_share=rps, dollar_risk=0.0, position_value=0.0, risk_budget=0.0)
+
+
+@dataclass
+class _EvalView:
+    """Minimal evaluation-shaped view used to re-record a risk_check from a
+    rebuilt proposal during manual approval (entry/stop/target/expected_r)."""
+
+    entry: Optional[float]
+    stop: Optional[float]
+    target: Optional[float]
+    expected_r: Optional[float]
+    max_holding_days: Optional[int] = None
+
+
+def _eval_view_from_proposal(proposal) -> _EvalView:
+    return _EvalView(
+        entry=proposal.entry,
+        stop=proposal.stop,
+        target=proposal.target,
+        expected_r=proposal.expected_r,
+        max_holding_days=proposal.max_holding_days,
+    )
