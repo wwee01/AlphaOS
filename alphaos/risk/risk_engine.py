@@ -18,6 +18,7 @@ from typing import Optional
 
 from alphaos.constants import ReasonCode, TradeDirection
 from alphaos.config.settings import Settings
+from alphaos.data.freshness_guard import quote_crossed_or_invalid
 
 
 @dataclass
@@ -159,8 +160,17 @@ class RiskEngine:
 
         # 5) Spread + liquidity (from the freshness-checked snapshot).
         if snapshot:
+            # 5a) Reject crossed/non-positive quotes before the spread gate, so a
+            #     malformed quote (ask<=0 or ask<bid -> negative spread) can't slip.
+            if quote_crossed_or_invalid(snapshot):
+                blocks.append(
+                    {
+                        "code": ReasonCode.CROSSED_QUOTE.value,
+                        "detail": f"crossed/invalid quote bid={snapshot.get('bid')} ask={snapshot.get('ask')}",
+                    }
+                )
             spread_pct = snapshot.get("spread_pct")
-            if spread_pct is not None and spread_pct > self.s.max_spread_pct:
+            if spread_pct is not None and spread_pct >= 0 and spread_pct > self.s.max_spread_pct:
                 blocks.append(
                     {
                         "code": ReasonCode.WIDE_SPREAD.value,

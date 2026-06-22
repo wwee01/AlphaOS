@@ -120,7 +120,7 @@ def tab_open_trades(orch: Orchestrator) -> None:
     st.subheader("Open Trades (paper, simulated)")
     rows = orch.journal.open_positions()
     if rows:
-        st.dataframe(rows, use_container_width=True)
+        st.dataframe(rows, width="stretch")
     else:
         st.info("No open positions.")
 
@@ -129,7 +129,7 @@ def tab_closed_trades(orch: Orchestrator) -> None:
     st.subheader("Closed Trades (paper, simulated)")
     rows = orch.journal.closed_outcomes(200)
     if rows:
-        st.dataframe(rows, use_container_width=True)
+        st.dataframe(rows, width="stretch")
         net = round(sum((r.get("net_pnl") or 0) for r in rows), 2)
         st.metric("Realized net P&L (paper)", net)
     else:
@@ -183,14 +183,14 @@ def tab_system_health(orch: Orchestrator) -> None:
         "FROM price_snapshots ORDER BY id DESC LIMIT 20"
     )
     if snaps:
-        st.dataframe(snaps, use_container_width=True)
+        st.dataframe(snaps, width="stretch")
 
     st.markdown("#### Recent system events")
     events = orch.journal.recent_system_events(30)
     if events:
         st.dataframe(
             [{k: e[k] for k in ("created_at_utc", "severity", "category", "message")} for e in events],
-            use_container_width=True,
+            width="stretch",
         )
 
 

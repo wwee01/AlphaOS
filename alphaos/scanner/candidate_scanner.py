@@ -23,7 +23,7 @@ from alphaos.constants import (
     TradeDirection,
     UniverseTier,
 )
-from alphaos.data.freshness_guard import FreshnessGuard
+from alphaos.data.freshness_guard import FreshnessGuard, quote_crossed_or_invalid
 from alphaos.data.market_data import MarketDataClient
 from alphaos.util.ids import new_id
 
@@ -90,15 +90,11 @@ class CandidateScanner:
                 )
                 continue
 
-            # Liquidity / spread gate.
-            if not self._liquid_enough(snapshot):
+            # Tradeability gate: crossed/invalid quote, liquidity, spread.
+            reason = self._tradeability_reason(snapshot)
+            if reason is not None:
                 result.rejected_illiquid += 1
-                reason = (
-                    ReasonCode.LOW_LIQUIDITY.value
-                    if (snapshot.get("dollar_volume") or 0) < self.settings.min_dollar_volume
-                    else ReasonCode.WIDE_SPREAD.value
-                )
-                self._reject(None, sym, "scan", reason, "liquidity/spread gate", snapshot)
+                self._reject(None, sym, "scan", reason, "tradeability gate", snapshot)
                 continue
 
             cand = self._maybe_candidate(scan_id, sym, snapshot, snapshot_id)
@@ -114,14 +110,21 @@ class CandidateScanner:
         return result
 
     # ------------------------------------------------------------- internals
-    def _liquid_enough(self, snapshot: dict) -> bool:
+    def _tradeability_reason(self, snapshot: dict) -> Optional[str]:
+        """Return a reason code if the symbol is not tradeable, else None.
+
+        Rejects crossed/non-positive quotes (a negative spread must not pass the
+        ``spread_pct > max`` gate), then liquidity, then spread.
+        """
+        if quote_crossed_or_invalid(snapshot):
+            return ReasonCode.CROSSED_QUOTE.value
         dv = snapshot.get("dollar_volume")
-        sp = snapshot.get("spread_pct")
         if dv is not None and dv < self.settings.min_dollar_volume:
-            return False
-        if sp is not None and sp > self.settings.max_spread_pct:
-            return False
-        return True
+            return ReasonCode.LOW_LIQUIDITY.value
+        sp = snapshot.get("spread_pct")
+        if sp is not None and sp >= 0 and sp > self.settings.max_spread_pct:
+            return ReasonCode.WIDE_SPREAD.value
+        return None
 
     def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[dict]:
         change = float(snapshot.get("change_pct") or 0.0)
