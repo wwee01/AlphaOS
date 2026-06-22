@@ -126,14 +126,26 @@ def tab_open_trades(orch: Orchestrator) -> None:
 
 
 def tab_closed_trades(orch: Orchestrator) -> None:
-    st.subheader("Closed Trades (paper, simulated)")
-    rows = orch.journal.closed_outcomes(200)
-    if rows:
-        st.dataframe(rows, width="stretch")
-        net = round(sum((r.get("net_pnl") or 0) for r in rows), 2)
-        st.metric("Realized net P&L (paper)", net)
-    else:
+    st.subheader("Closed Trades (paper) — net of modelled costs")
+    rows = orch.journal.closed_outcomes(500)
+    if not rows:
         st.info("No closed trades yet.")
+        return
+    from alphaos.reports.metrics import compute_metrics
+
+    m = compute_metrics(rows)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Net P&L", m["net_pnl"])
+    c2.metric("Win rate", m["win_rate"])
+    c3.metric("Expectancy/trade", m["expectancy"])
+    c4.metric("Profit factor", m["profit_factor"])
+    c1.metric("Gross P&L", m["gross_pnl"])
+    c2.metric("Total costs", m["total_costs"])
+    c3.metric("Max drawdown", m["max_drawdown"])
+    c4.metric("Same-day rate", m["same_day_exit_rate"])
+    if m["small_sample"]:
+        st.caption(f"⚠️ {m['note']}")
+    st.dataframe(rows, width="stretch")
 
 
 def tab_system_health(orch: Orchestrator) -> None:

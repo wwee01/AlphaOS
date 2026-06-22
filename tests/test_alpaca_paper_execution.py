@@ -153,7 +153,10 @@ def test_alpaca_paper_full_lifecycle():
     assert journal.count_open_positions() == 0
 
     outcome = journal.one("SELECT * FROM trade_outcomes WHERE position_id = ?", (pos["position_id"],))
-    assert outcome["net_pnl"] == round((106.0 - 100.0) * 10, 2)
+    # Gross is clean; net is after modelled costs (slippage by default).
+    assert outcome["gross_pnl"] == round((106.0 - 100.0) * 10, 2)
+    assert outcome["costs"] >= 0
+    assert outcome["net_pnl"] == round(outcome["gross_pnl"] - outcome["costs"], 2)
     # The exit is labelled as a real alpaca_paper fill, not internal_sim.
     exit_order = journal.one(
         "SELECT * FROM paper_orders WHERE side = 'sell' AND execution_source = ?",
@@ -174,7 +177,8 @@ def test_stop_leg_fill_closes_as_risk_control():
     rec = om.reconcile()
     assert rec["exits"][0]["classification"] == "risk-control"
     out = journal.one("SELECT * FROM trade_outcomes WHERE symbol = 'MSFT'")
-    assert out["net_pnl"] == round((194.0 - 200.0) * 5, 2)  # loss
+    assert out["gross_pnl"] == round((194.0 - 200.0) * 5, 2)  # loss
+    assert out["net_pnl"] == round(out["gross_pnl"] - out["costs"], 2)
 
 
 def test_alpaca_paper_requires_paper_mode():

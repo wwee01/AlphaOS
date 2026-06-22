@@ -171,6 +171,11 @@ class Settings:
     max_bar_age_seconds_premarket: float
     max_price_drift_bps_since_proposal: float
 
+    # --- cost model (realistic-cost accounting) ---
+    cost_commission_per_share: float
+    cost_min_commission: float
+    cost_slippage_bps: float
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -570,6 +575,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         max_quote_age_seconds_premarket=_get_float(src, "MAX_QUOTE_AGE_SECONDS_PREMARKET", 300.0),
         max_bar_age_seconds_premarket=_get_float(src, "MAX_BAR_AGE_SECONDS_PREMARKET", 600.0),
         max_price_drift_bps_since_proposal=_get_float(src, "MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL", 50.0),
+        cost_commission_per_share=_get_float(src, "COST_COMMISSION_PER_SHARE", 0.0),
+        cost_min_commission=_get_float(src, "COST_MIN_COMMISSION", 0.0),
+        cost_slippage_bps=_get_float(src, "COST_SLIPPAGE_BPS", 1.0),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

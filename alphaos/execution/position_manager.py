@@ -22,6 +22,7 @@ from alphaos.constants import (
 from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
+from alphaos.execution.costs import CostModel
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -34,6 +35,7 @@ class PositionManager:
         self.journal = journal
         self._market = market_data  # lazily created in monitor() if needed
         self.freshness = FreshnessGuard.from_settings(settings)
+        self.cost_model = CostModel.from_settings(settings)
 
     def _data_labels(self) -> tuple[str, str]:
         provider = "alpaca_mock" if self.settings.offline_mode else "alpaca"
@@ -181,7 +183,7 @@ class PositionManager:
         is_short = direction == TradeDirection.SHORT.value
         pnl_per_share = (entry - exit_price) if is_short else (exit_price - entry)
         gross_pnl = round(pnl_per_share * qty, 2)
-        costs = 0.0  # v1: cost modelling is a documented gap
+        costs = self.cost_model.costs(qty, entry, exit_price).total
         net_pnl = round(gross_pnl - costs, 2)
         risk_per_share = abs(entry - (pos["stop_price"] or entry)) or None
         realized_r = round(pnl_per_share / risk_per_share, 3) if risk_per_share else None

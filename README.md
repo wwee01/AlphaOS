@@ -228,7 +228,7 @@ reports, and the dashboard's System Health view.
 
 ```
 python -m pytest
-82 passed, 2 skipped   # the 2 skips are gated live Alpaca tests (RUN_LIVE_ALPACA_TESTS)
+90 passed, 3 skipped   # the 3 skips are gated live Alpaca tests (RUN_LIVE_ALPACA_TESTS)
 ```
 
 Tests prove: real-money trading is disabled/unreachable (even with
@@ -261,7 +261,8 @@ daily auto-approval cap without bypassing gates.
   via `EXECUTION_PROVIDER=alpaca_paper` (paper mode + creds); no fill is labelled
   alpaca_paper unless it came from the real Alpaca paper API.
 - **News is off (no-news baseline).** Benzinga/web/Massive are deferred seams.
-- **Costs are not modelled** (net P&L == gross). MFE/MAE are exit-time approximations.
+- **Costs are modelled** (commission + slippage; net P&L = gross − costs, configurable
+  via `COST_*`). MFE/MAE are still exit-time approximations, not intra-trade path tracking.
 - **No market-holiday calendar** in session classification (weekend-aware only).
 - **Baseline comparison** records the no-news baseline structure/fields only; no
   statistical claims are made on the (currently tiny) forward sample.
