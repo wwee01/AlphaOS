@@ -96,18 +96,45 @@ class OpenAIClient:
     def evaluate(self, candidate: dict, snapshot: dict, freshness_status: str = "usable") -> OpenAIEvaluation:
         """Evaluate a candidate in no-news mode (the v1 path)."""
         if self.use_mock:
-            return self._mock_eval(candidate, snapshot, freshness_status)
-        try:
-            return self._live_eval(candidate, snapshot, freshness_status)
-        except Exception as exc:  # pragma: no cover - live path
+            evaluation = self._mock_eval(candidate, snapshot, freshness_status)
+        else:
+            try:
+                evaluation = self._live_eval(candidate, snapshot, freshness_status)
+            except Exception as exc:  # pragma: no cover - live path
+                if self.journal is not None:
+                    self.journal.log_system_event(
+                        Severity.ERROR, "openai",
+                        f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
+                        {"error": str(exc)},
+                    )
+                return self._rejection(candidate, "OpenAI call failed; rejected for safety.",
+                                       [ReasonCode.OPENAI_REJECT.value])
+        return self._enforce_min_reward_risk(evaluation, candidate)
+
+    def _enforce_min_reward_risk(self, evaluation: OpenAIEvaluation, candidate: dict) -> OpenAIEvaluation:
+        """A proposal must clear the configured minimum reward:risk. Guards the
+        live engine (which sets its own levels); a no-op for the mock baseline
+        whose reward:risk equals TARGET_REWARD_RISK by construction."""
+        floor = self.settings.min_reward_risk
+        if (
+            evaluation.decision == Decision.PROPOSE.value
+            and floor > 0
+            and evaluation.expected_r is not None
+            and evaluation.expected_r < floor
+        ):
             if self.journal is not None:
                 self.journal.log_system_event(
-                    Severity.ERROR, "openai",
-                    f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
-                    {"error": str(exc)},
+                    Severity.INFO, "openai",
+                    f"{evaluation.symbol}: reward:risk {evaluation.expected_r} below "
+                    f"minimum {floor}; downgraded to reject.",
                 )
-            return self._rejection(candidate, "OpenAI call failed; rejected for safety.",
-                                   [ReasonCode.OPENAI_REJECT.value])
+            return self._rejection(
+                candidate,
+                f"reward:risk {evaluation.expected_r} below minimum {floor}.",
+                [ReasonCode.REWARD_RISK_TOO_LOW.value],
+                freshness_status=evaluation.data_freshness_status,
+            )
+        return evaluation
 
     # ------------------------------------------------------------------- mock
     def _mock_eval(self, candidate, snapshot, freshness_status) -> OpenAIEvaluation:
@@ -126,12 +153,16 @@ class OpenAIClient:
         if entry is None:
             return self._rejection(candidate, "No usable price; rejected.", [ReasonCode.STALE_DATA.value])
 
+        # Stop is a configurable fraction of entry; the target sits at that
+        # distance scaled by the configured reward:risk (so expected_r == rr).
+        stop_pct = self.settings.stop_loss_pct
+        rr = self.settings.target_reward_risk
         if direction == TradeDirection.SHORT.value:
-            stop = round(entry * 1.03, 2)
-            target = round(entry * 0.94, 2)
+            stop = round(entry * (1 + stop_pct), 2)
+            target = round(entry * (1 - stop_pct * rr), 2)
         else:
-            stop = round(entry * 0.97, 2)
-            target = round(entry * 1.06, 2)
+            stop = round(entry * (1 - stop_pct), 2)
+            target = round(entry * (1 + stop_pct * rr), 2)
         risk_per_share = abs(entry - stop)
         expected_r = round(abs(target - entry) / risk_per_share, 2) if risk_per_share else None
         confidence = round(min(0.9, 0.4 + 0.5 * momentum), 3)
