@@ -61,6 +61,8 @@ class PositionManager:
                 "status": "open",
                 "current_price": fill_price,
                 "unrealized_pnl": 0.0,
+                "execution_source": order_row.get("execution_source"),
+                "broker_order_id": order_row.get("broker_order_id"),
                 "is_short": order_row.get("is_short", 0),
                 "requires_margin": proposal.get("requires_margin", 0),
                 "is_demo": order_row.get("is_demo", 0),
@@ -77,7 +79,13 @@ class PositionManager:
         exit — it is logged and skipped.
         """
         exits: list[dict] = []
-        open_positions = self.journal.open_positions()
+        # Broker-managed (alpaca_paper) positions have their exits handled by the
+        # Alpaca bracket OCO and are reconciled separately — the local watchdog
+        # only manages simulated_internal positions, so it never double-exits.
+        open_positions = [
+            p for p in self.journal.open_positions()
+            if p.get("execution_source") != ExecutionSource.ALPACA_PAPER.value
+        ]
         if not open_positions:
             return exits
 
@@ -160,6 +168,8 @@ class PositionManager:
         exit_price: float,
         exit_reason: str,
         triggered_by: str = "system",
+        execution_source: Optional[str] = None,
+        broker_order_id: Optional[str] = None,
     ) -> Optional[dict]:
         pos = self.journal.one("SELECT * FROM positions WHERE position_id = ?", (position_id,))
         if not pos or pos["status"] != "open":
@@ -184,8 +194,13 @@ class PositionManager:
         same_day = exit_rules.is_same_day_exit(pos.get("opened_market_date"))
         classification = exit_rules.classify_exit(exit_reason, net_pnl)
 
-        # Simulated exit order (keeps the lifecycle complete).
-        exit_order_id = self._record_exit_order(pos, exit_price, exit_reason)
+        # Record the exit order. For broker-reconciled (alpaca_paper) closes this
+        # represents the real Alpaca leg fill; otherwise it's an internal sim exit.
+        exit_order_id = self._record_exit_order(
+            pos, exit_price, exit_reason,
+            execution_source=execution_source or ExecutionSource.INTERNAL_SIM.value,
+            broker_order_id=broker_order_id,
+        )
 
         exit_id = new_id("exit")
         self.journal.insert(
@@ -257,19 +272,25 @@ class PositionManager:
             "realized_r": realized_r,
         }
 
-    def _record_exit_order(self, pos: dict, exit_price: float, exit_reason: str) -> str:
+    def _record_exit_order(self, pos: dict, exit_price: float, exit_reason: str,
+                           execution_source: Optional[str] = None,
+                           broker_order_id: Optional[str] = None) -> str:
         from alphaos.execution.order_schema import side_for_exit
 
         order_id = new_id("ord")
         side = side_for_exit(pos["direction"])
         st = timeutils.stamp()
-        src = ExecutionSource.INTERNAL_SIM.value
+        src = execution_source or ExecutionSource.INTERNAL_SIM.value
+        is_real = src == ExecutionSource.ALPACA_PAPER.value
+        exec_provider = "alpaca_paper" if is_real else ExecutionProvider.SIMULATED_INTERNAL.value
+        exec_mode = "alpaca_paper" if is_real else "internal_simulation"
+        fill_source = "alpaca_paper" if is_real else "internal_sim"
         data_provider, data_feed = self._data_labels()
         self.journal.insert(
             "paper_orders",
             {
                 "order_id": order_id,
-                "broker_order_id": new_id("sim"),
+                "broker_order_id": broker_order_id or new_id("sim"),
                 "proposal_id": None,
                 "candidate_id": None,
                 "symbol": pos["symbol"],
@@ -279,18 +300,18 @@ class PositionManager:
                 "qty": pos["qty"],
                 "entry_price": exit_price,
                 "execution_source": src,
-                "execution_provider": ExecutionProvider.SIMULATED_INTERNAL.value,
-                "execution_mode": "internal_simulation",
+                "execution_provider": exec_provider,
+                "execution_mode": exec_mode,
                 "data_provider": data_provider,
                 "data_feed": data_feed,
-                "fill_price_basis": FILL_PRICE_BASIS,
+                "fill_price_basis": "alpaca_fill" if is_real else FILL_PRICE_BASIS,
                 "protection_path": None,
                 "state": OrderState.FILLED.value,
                 "is_short": pos.get("is_short", 0),
                 "strategy": pos.get("strategy"),
                 "is_demo": pos.get("is_demo", 0),
                 "filled_at": st.utc,
-                "raw_response_json": {"simulated": True, "exit_reason": exit_reason, "fill_source": src},
+                "raw_response_json": {"simulated": not is_real, "exit_reason": exit_reason, "fill_source": fill_source},
             },
             mirror=True,
         )
@@ -316,11 +337,11 @@ class PositionManager:
                 "qty": pos["qty"],
                 "price": exit_price,
                 "execution_source": src,
-                "execution_provider": ExecutionProvider.SIMULATED_INTERNAL.value,
+                "execution_provider": exec_provider,
                 "data_provider": data_provider,
                 "data_feed": data_feed,
-                "fill_source": "internal_sim",
-                "fill_price_basis": FILL_PRICE_BASIS,
+                "fill_source": fill_source,
+                "fill_price_basis": "alpaca_fill" if is_real else FILL_PRICE_BASIS,
                 "filled_at": st.utc,
             },
             mirror=True,

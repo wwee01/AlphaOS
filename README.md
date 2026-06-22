@@ -22,7 +22,7 @@ not wired into the runtime.
 - **AI:** OpenAI is the primary runtime engine (no-news mode; never fabricates a catalyst); Claude is an optional, **manual-only** second-opinion reviewer.
 - **Market data:** **Alpaca only**, free **IEX** tier (limited-market data). Massive is deferred.
 - **News:** **off in v1.** Benzinga + web scraper are deferred.
-- **Broker / execution:** Alpaca **paper** only; v1 fills are **simulated internally** (`execution_provider=simulated_internal`). A fill is never labelled an Alpaca paper fill unless it comes from the real Alpaca paper API.
+- **Broker / execution:** Alpaca **paper** only. Default `execution_provider=simulated_internal` (fills simulated). Set `EXECUTION_PROVIDER=alpaca_paper` (paper mode + Alpaca paper creds) to place **real broker-native bracket orders on the Alpaca paper API** — still no real money. A fill is never labelled an Alpaca paper fill unless it comes from the real Alpaca paper API.
 - **Source of truth:** SQLite journal.
 
 This is not NightDesk and does not depend on it.
@@ -45,8 +45,9 @@ This is not NightDesk and does not depend on it.
 ## Quick start (mock mode, zero external keys)
 
 ```bash
-# Python 3.9+ (developed on 3.11). Only test deps are needed for mock mode.
-pip install pytest tzdata          # or: pip install -e ".[test]"
+# Python 3.11+ (developed on 3.11/3.12). Only test deps are needed for mock mode.
+pip install -e ".[test]"           # pytest + tzdata
+# For real Alpaca paper execution, also: pip install -e ".[live]"  (adds alpaca-py)
 
 # Run the test suite (offline, in-memory SQLite):
 python -m pytest                   # 48 tests, ~0.2s
@@ -227,33 +228,38 @@ reports, and the dashboard's System Health view.
 
 ```
 python -m pytest
-73 passed
+82 passed, 2 skipped   # the 2 skips are gated live Alpaca tests (RUN_LIVE_ALPACA_TESTS)
 ```
 
-Tests prove: real-money trading is disabled/unreachable; manual approval is
-required before any order; the freshness guard blocks stale/missing quote or bar
-and labels closed sessions; price drift since proposal is blocked; the risk
-engine blocks invalid stops, oversized trades, too many positions, daily
-trade/loss breaches, wide spreads, low liquidity, and unapproved margin;
-Alpaca is the only active data provider and live mode never silently falls back;
-no-news evaluations carry the sentinels and invented catalysts are rejected;
-Massive/Benzinga are unreachable from the runtime (import-graph + direct-call
-guards); config validation fails fast on unsupported v1 settings; `live`
-mode cannot be enabled; mock and Alpaca-paper share one order schema; same-day
-exits classify into the six categories; the day-trade experiment is gated and
-book-separated; auto mode respects the daily auto-approval cap and never bypasses
-gates; and mock/fixture news never reaches the runtime path.
+Tests prove: real-money trading is disabled/unreachable (even with
+`alpaca_paper` execution, `REAL_TRADING_ENABLED!=false` blocks every order);
+manual approval is required before any order; the freshness guard blocks
+stale/missing quote or bar, crossed/zero quotes, and labels closed sessions;
+price drift since proposal is blocked; the risk engine blocks invalid stops,
+oversized trades, too many positions, daily trade/loss breaches, wide spreads,
+low liquidity, crossed quotes, and unapproved margin; Alpaca is the only active
+data provider and live mode never silently falls back; no-news evaluations carry
+the sentinels and invented catalysts are rejected; Massive/Benzinga are
+unreachable from the runtime; config validation fails fast on unsupported
+settings; `live` mode cannot be enabled; the real Alpaca **paper** execution
+lifecycle (bracket submit → entry-fill reconcile → TP/SL leg-fill close) works
+with honest `alpaca_paper` labelling and the watchdog never double-exits a
+broker-managed position; same-day exits classify into the six categories; the
+day-trade experiment is gated and book-separated; and auto mode respects the
+daily auto-approval cap without bypassing gates.
 
 ---
 
-## Known gaps / honest limitations (v1)
+## Known gaps / honest limitations
 
-- **Execution is simulated internally.** The Alpaca paper connector is a guarded
-  stub; wiring real `alpaca-py` paper calls (broker-native brackets/OCO + order
-  reconciliation) is the next step. No fill is labelled an Alpaca paper fill unless real.
-- **Live Alpaca data is implemented but not exercised here.** The `AlpacaDataProvider`
-  IEX snapshot mapping runs only behind `RUN_LIVE_ALPACA_TESTS=true` (none ran in
-  this environment — reported as skipped, not passed). Free/IEX is limited-market data.
+- **Real Alpaca paper execution is wired but its live submit path is unexercised here.**
+  The bracket submit + entry/leg reconciliation lifecycle is fully tested
+  hermetically (fake TradingClient); the real `alpaca-py` submit/reconcile and the
+  live `AlpacaDataProvider` IEX mapping only run behind `RUN_LIVE_ALPACA_TESTS=true`
+  (skipped in CI/offline — never reported as passed). Free/IEX is limited-market data.
+- **Default execution stays `simulated_internal`.** Real paper orders are opt-in
+  via `EXECUTION_PROVIDER=alpaca_paper` (paper mode + creds); no fill is labelled
+  alpaca_paper unless it came from the real Alpaca paper API.
 - **News is off (no-news baseline).** Benzinga/web/Massive are deferred seams.
 - **Costs are not modelled** (net P&L == gross). MFE/MAE are exit-time approximations.
 - **No market-holiday calendar** in session classification (weekend-aware only).
@@ -264,9 +270,9 @@ gates; and mock/fixture news never reaches the runtime path.
 
 ## Recommended next build step
 
-Wire the **real Alpaca paper connector** behind the existing guardrails
-(broker-native bracket/OCO with capability checks, order-status reconciliation
-feeding `order_events`), validate the live `AlpacaDataProvider` IEX mapping under
-`RUN_LIVE_ALPACA_TESTS=true`, and run a forward **no-news** paper sample to start
+Run the live Alpaca paper path during RTH on the Mac mini
+(`EXECUTION_PROVIDER=alpaca_paper`, `RUN_LIVE_ALPACA_TESTS=true`) to exercise a
+real bracket submit + reconcile end-to-end, then run a forward **no-news** paper
+sample to start
 populating the baseline-comparison tables. Re-introduce the news layer only after
 that baseline is proven (see `connectors/deferred/DEFERRED.md` for the triggers).

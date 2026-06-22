@@ -155,9 +155,12 @@ class MarketDataMode(StrEnum):
 
 
 class ExecutionProvider(StrEnum):
-    """Execution remains simulated internally in v1 — never a real broker fill."""
+    """How orders are executed. ``simulated_internal`` fills are simulated;
+    ``alpaca_paper`` places real orders against the Alpaca PAPER API (still no
+    real money). Real-money execution does not exist."""
 
     SIMULATED_INTERNAL = "simulated_internal"
+    ALPACA_PAPER = "alpaca_paper"
 
 
 class MarketSession(StrEnum):
@@ -213,6 +216,7 @@ class ReasonCode(StrEnum):
     NO_VALID_EXIT_PROTECTION = "NO_VALID_EXIT_PROTECTION"
     REAL_TRADING_BLOCKED = "REAL_TRADING_BLOCKED"
     PAPER_SAFETY_FAILED = "PAPER_SAFETY_FAILED"
+    ALPACA_SUBMIT_FAILED = "ALPACA_SUBMIT_FAILED"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
     INVALID_STOP = "INVALID_STOP"
     OPENAI_REJECT = "OPENAI_REJECT"

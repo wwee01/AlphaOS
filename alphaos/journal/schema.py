@@ -360,6 +360,8 @@ SCHEMA: list[tuple[str, str]] = [
             status TEXT,
             current_price REAL,
             unrealized_pnl REAL,
+            execution_source TEXT,
+            broker_order_id TEXT,
             is_short INTEGER DEFAULT 0,
             requires_margin INTEGER DEFAULT 0,
             is_demo INTEGER DEFAULT 0,

@@ -222,6 +222,11 @@ class Settings:
         return MarketDataMode.MOCK.value if self.offline_mode else MarketDataMode.LIVE.value
 
     @property
+    def real_paper_execution(self) -> bool:
+        """True when real Alpaca PAPER orders should be placed (still no real money)."""
+        return self.execution_provider == ExecutionProvider.ALPACA_PAPER.value
+
+    @property
     def effective_approval_mode(self) -> ApprovalMode:
         """Auto only if APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL is off."""
         if self.approval_mode == ApprovalMode.AUTO and not self.require_manual_approval:
@@ -388,14 +393,32 @@ class Settings:
         )
 
         # 5e) Execution stays simulated-internal; real orders unreachable.
+        exec_ok = self.execution_provider in (
+            ExecutionProvider.SIMULATED_INTERNAL.value,
+            ExecutionProvider.ALPACA_PAPER.value,
+        )
         checks.append(
             StartupCheck(
-                "execution_simulated",
-                self.execution_provider == ExecutionProvider.SIMULATED_INTERNAL.value,
-                f"execution_provider={self.execution_provider}",
+                "execution_provider",
+                exec_ok,
+                f"execution_provider={self.execution_provider}"
+                + (" (real Alpaca PAPER orders; no real money)" if self.real_paper_execution else " (simulated)"),
                 Severity.CRITICAL,
             )
         )
+        # Real paper execution needs the full Alpaca paper safety set.
+        if self.real_paper_execution:
+            checks.append(
+                StartupCheck(
+                    "alpaca_paper_exec_ready",
+                    self.is_paper and self.has_alpaca_keys and self.alpaca_paper
+                    and self.alpaca_base_url.rstrip("/") == PAPER_BASE_URL,
+                    "alpaca_paper execution prerequisites met"
+                    if (self.is_paper and self.has_alpaca_keys)
+                    else "alpaca_paper execution requires paper mode + Alpaca paper creds + paper base URL",
+                    Severity.CRITICAL,
+                )
+            )
         checks.append(
             StartupCheck(
                 "real_orders_disabled",
@@ -489,10 +512,16 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         )
 
     execution_provider = _get(src, "EXECUTION_PROVIDER", "simulated_internal").lower()
-    if execution_provider != ExecutionProvider.SIMULATED_INTERNAL.value:
+    _valid_exec = {ExecutionProvider.SIMULATED_INTERNAL.value, ExecutionProvider.ALPACA_PAPER.value}
+    if execution_provider not in _valid_exec:
         raise SettingsError(
-            f"EXECUTION_PROVIDER={execution_provider!r} is not supported in v1. "
-            f"Execution is simulated internally; real Alpaca paper execution is not yet wired."
+            f"EXECUTION_PROVIDER={execution_provider!r} is not supported. "
+            f"Valid: simulated_internal | alpaca_paper (paper-only)."
+        )
+    if execution_provider == ExecutionProvider.ALPACA_PAPER.value and mode != RuntimeMode.PAPER:
+        raise SettingsError(
+            "EXECUTION_PROVIDER=alpaca_paper requires ALPHAOS_MODE=paper "
+            "(real paper orders need live Alpaca connectivity)."
         )
 
     allow_real_orders_raw = _get(src, "ALLOW_REAL_ORDERS", "false").lower()

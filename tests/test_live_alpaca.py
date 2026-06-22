@@ -29,3 +29,19 @@ def test_live_alpaca_snapshot_has_source_timestamps():  # pragma: no cover - gat
     # Live data must carry provider timestamps for the freshness guard.
     assert snap["source_timestamp"] is not None
     assert snap["quote_timestamp"] is not None
+
+
+def test_live_alpaca_account_is_paper_readonly():  # pragma: no cover - gated
+    """Read-only connectivity check to the Alpaca PAPER account. Places NO
+    orders. Confirms the TradingClient builds with paper=True and responds."""
+    from alphaos.broker.alpaca_client import AlpacaClient
+    from alphaos.config.settings import load_settings
+
+    settings = load_settings()
+    if not settings.has_alpaca_keys:
+        import pytest
+
+        pytest.skip("no Alpaca credentials")
+    acct = AlpacaClient(settings).get_account()
+    assert acct["status"] is not None
+    assert acct.get("trading_blocked") in (False, None)
