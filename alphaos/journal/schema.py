@@ -514,3 +514,13 @@ INDEXES: list[str] = [
 
 # Canonical table-name list (used by tests to assert completeness).
 ALL_TABLES = [name for name, _ in SCHEMA]
+
+# Schema generation marker, recorded in SQLite's ``PRAGMA user_version``.
+#
+# Additive column changes do NOT require bumping this: JournalStore reconciles
+# any column present in SCHEMA but missing from an existing DB automatically on
+# open (see ``JournalStore._migrate``), so a ledger written by an older build
+# keeps working across pulls. Bump it only when introducing a change the additive
+# reconciler cannot express (a destructive/transforming migration) and add that
+# explicit, version-gated step in ``_migrate``.
+SCHEMA_VERSION = 1
