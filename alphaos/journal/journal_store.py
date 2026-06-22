@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any, Iterable, Optional
 
 from alphaos.constants import Severity
-from alphaos.journal.schema import INDEXES, SCHEMA
+from alphaos.journal.schema import INDEXES, SCHEMA, SCHEMA_VERSION
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -51,7 +51,80 @@ class JournalStore:
         for idx in INDEXES:
             cur.execute(idx)
         self.conn.commit()
+        self._migrate()
         self._columns.clear()
+
+    # ------------------------------------------------------------ migration
+    def _migrate(self) -> None:
+        """Forward-only, lightweight schema migration.
+
+        Keeps the ledger/positions schema stable across pulls: any column added
+        to SCHEMA is reconciled onto an existing DB automatically (additive,
+        idempotent), so a ledger written by an older build keeps working. SQLite's
+        ``PRAGMA user_version`` records the schema generation for diagnostics and
+        as a hook for future destructive/transforming steps (which the additive
+        reconciler cannot express and must be added here explicitly).
+        """
+        try:
+            added = self._reconcile_columns()
+        except sqlite3.Error as exc:  # surface loudly; never run on a half-migrated DB
+            raise RuntimeError(f"schema migration failed: {exc}") from exc
+        self.conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
+        self.conn.commit()
+        if added:
+            try:
+                self.log_system_event(
+                    Severity.WARNING,
+                    "schema_migration",
+                    f"Aligned DB to schema v{SCHEMA_VERSION}: added {len(added)} missing column(s).",
+                    {"added": added},
+                )
+            except sqlite3.Error:  # pragma: no cover - audit log is best-effort
+                pass
+
+    def _reconcile_columns(self) -> list[str]:
+        """Add any column present in SCHEMA but missing from the live DB.
+
+        Additive only: existing rows are preserved and re-added columns are
+        nullable (SQLite cannot add a NOT NULL column to a populated table without
+        a default). Returns the ``table.column`` names that were added.
+        """
+        added: list[str] = []
+        for table, coldefs in self._expected_columns().items():
+            info = self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if not info:  # table just created by init_schema; defensive skip
+                continue
+            actual = {r["name"] for r in info}
+            for name, coldef in coldefs.items():
+                if name not in actual:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+                    added.append(f"{table}.{name}")
+        return added
+
+    @staticmethod
+    def _expected_columns() -> dict[str, dict[str, str]]:
+        """Columns each table should have, derived from SCHEMA (the source of
+        truth), as ``{table: {column: "<add-column-ddl>"}}``."""
+        probe = sqlite3.connect(":memory:")
+        try:
+            for _name, ddl in SCHEMA:
+                probe.execute(ddl)
+            expected: dict[str, dict[str, str]] = {}
+            for (table,) in probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall():
+                cols: dict[str, str] = {}
+                for _cid, name, ctype, _notnull, dflt, _pk in probe.execute(
+                    f"PRAGMA table_info({table})"
+                ).fetchall():
+                    coldef = f"{name} {ctype or 'TEXT'}"
+                    if dflt is not None:
+                        coldef += f" DEFAULT {dflt}"
+                    cols[name] = coldef
+                expected[table] = cols
+            return expected
+        finally:
+            probe.close()
 
     def close(self) -> None:
         try:
