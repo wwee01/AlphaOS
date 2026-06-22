@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+from alphaos.constants import TargetProfile
 from alphaos.util.ids import new_id
 
 
@@ -33,6 +34,13 @@ class TradeProposal:
     protection_path: Optional[str] = None
     status: str = "proposed"
     is_demo: bool = False
+    # --- target-profile tracking (evidence only; no behavior change) ---
+    target_profile: str = TargetProfile.CONFIGURED_STANDARD.value
+    target_reward_risk: Optional[float] = None
+    min_reward_risk: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    target_price_source: Optional[str] = None
+    stop_price_source: Optional[str] = None
     proposal_id: str = field(default_factory=lambda: new_id("prop"))
 
     @classmethod
@@ -58,6 +66,12 @@ class TradeProposal:
             protection_path=row.get("protection_path"),
             status=row.get("status") or "proposed",
             is_demo=bool(row.get("is_demo")),
+            target_profile=row.get("target_profile") or TargetProfile.CONFIGURED_STANDARD.value,
+            target_reward_risk=row.get("target_reward_risk"),
+            min_reward_risk=row.get("min_reward_risk"),
+            stop_loss_pct=row.get("stop_loss_pct"),
+            target_price_source=row.get("target_price_source"),
+            stop_price_source=row.get("stop_price_source"),
             proposal_id=row["proposal_id"],
         )
 
@@ -83,4 +97,10 @@ class TradeProposal:
             "protection_path": self.protection_path,
             "status": self.status,
             "is_demo": 1 if self.is_demo else 0,
+            "target_profile": self.target_profile,
+            "target_reward_risk": self.target_reward_risk,
+            "min_reward_risk": self.min_reward_risk,
+            "stop_loss_pct": self.stop_loss_pct,
+            "target_price_source": self.target_price_source,
+            "stop_price_source": self.stop_price_source,
         }

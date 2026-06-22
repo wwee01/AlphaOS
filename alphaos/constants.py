@@ -191,6 +191,50 @@ class UniverseTier(StrEnum):
 
 
 # --- Reason codes (free-form-ish, but the common ones are named) -------------
+class TargetProfile(StrEnum):
+    """How a proposal's target was styled. Tracking only in v1 — every
+    system-generated trade uses CONFIGURED_STANDARD; the others are reserved for
+    later experiments and are never auto-selected yet."""
+
+    CONFIGURED_STANDARD = "configured_standard"
+    CONSERVATIVE = "conservative"
+    EXTENDED = "extended"
+    AI_SUGGESTED = "ai_suggested"
+    MANUAL_OVERRIDE = "manual_override"
+
+
+class TargetSource(StrEnum):
+    """Where a stop/target price actually came from."""
+
+    CONFIG = "config"
+    OPENAI = "openai"
+    MANUAL = "manual"
+    BROKER = "broker"
+    BASELINE = "baseline"
+
+
+# Target-profile evidence fields carried through proposal -> order -> position ->
+# exit -> outcome (tracking only; no effect on trading behavior).
+TARGET_PROFILE_FIELDS = (
+    "target_profile",
+    "target_reward_risk",
+    "min_reward_risk",
+    "stop_loss_pct",
+    "target_price_source",
+    "stop_price_source",
+)
+
+
+def target_profile_bundle(src) -> dict:
+    """Extract the target-profile fields from a proposal object or a journal row,
+    defaulting target_profile to configured_standard when absent."""
+    get = src.get if isinstance(src, dict) else (lambda k: getattr(src, k, None))
+    bundle = {k: get(k) for k in TARGET_PROFILE_FIELDS}
+    if not bundle.get("target_profile"):
+        bundle["target_profile"] = TargetProfile.CONFIGURED_STANDARD.value
+    return bundle
+
+
 class ReasonCode(StrEnum):
     NO_VERIFIABLE_NEWS = "NO_VERIFIABLE_NEWS"
     NEWS_UNAVAILABLE = "NEWS_UNAVAILABLE"

@@ -77,6 +77,21 @@ def compute_metrics(outcomes: list[dict]) -> dict:
     }
 
 
+def compute_metrics_by_target_profile(outcomes: list[dict]) -> dict:
+    """Group closed-trade outcomes by ``target_profile`` and compute the same
+    descriptive metric set per group (win rate, expectancy, profit factor, avg
+    hold, cost drag, ...). The small-sample caveat applies *per group*: under
+    MIN_MEANINGFUL_SAMPLE trades a group's numbers are descriptive only, never a
+    significance claim. In v1 every system trade is ``configured_standard``, so
+    this typically yields a single group until other profiles are introduced.
+    """
+    groups: dict[str, list] = {}
+    for o in outcomes:
+        key = o.get("target_profile") or "configured_standard"
+        groups.setdefault(key, []).append(o)
+    return {profile: compute_metrics(rows) for profile, rows in sorted(groups.items())}
+
+
 def _max_drawdown(nets: list[float]) -> float:
     """Peak-to-trough drawdown of the cumulative net-P&L equity curve."""
     equity = 0.0

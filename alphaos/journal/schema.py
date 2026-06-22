@@ -228,6 +228,12 @@ SCHEMA: list[tuple[str, str]] = [
             protection_path TEXT,
             status TEXT,
             is_demo INTEGER DEFAULT 0,
+            target_profile TEXT,
+            target_reward_risk REAL,
+            min_reward_risk REAL,
+            stop_loss_pct REAL,
+            target_price_source TEXT,
+            stop_price_source TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -291,6 +297,7 @@ SCHEMA: list[tuple[str, str]] = [
             filled_at TEXT,
             raw_request_json TEXT,
             raw_response_json TEXT,
+            target_profile TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL,
             created_at_market TEXT
@@ -365,6 +372,12 @@ SCHEMA: list[tuple[str, str]] = [
             is_short INTEGER DEFAULT 0,
             requires_margin INTEGER DEFAULT 0,
             is_demo INTEGER DEFAULT 0,
+            target_profile TEXT,
+            target_reward_risk REAL,
+            min_reward_risk REAL,
+            stop_loss_pct REAL,
+            target_price_source TEXT,
+            stop_price_source TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -387,6 +400,7 @@ SCHEMA: list[tuple[str, str]] = [
             is_same_day INTEGER,
             triggered_by TEXT,
             market_date TEXT,
+            target_profile TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -418,6 +432,12 @@ SCHEMA: list[tuple[str, str]] = [
             model_confidence REAL,
             catalyst_type TEXT,
             win INTEGER,
+            target_profile TEXT,
+            target_reward_risk REAL,
+            min_reward_risk REAL,
+            stop_loss_pct REAL,
+            target_price_source TEXT,
+            stop_price_source TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -465,6 +485,7 @@ SCHEMA: list[tuple[str, str]] = [
             catalyst_type TEXT,
             catalyst_confidence REAL,
             notes_json TEXT,
+            target_profile TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -523,4 +544,4 @@ ALL_TABLES = [name for name, _ in SCHEMA]
 # keeps working across pulls. Bump it only when introducing a change the additive
 # reconciler cannot express (a destructive/transforming migration) and add that
 # explicit, version-gated step in ``_migrate``.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2

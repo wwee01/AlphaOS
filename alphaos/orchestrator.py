@@ -30,6 +30,8 @@ from alphaos.constants import (
     ReasonCode,
     Severity,
     Strategy,
+    TargetProfile,
+    TargetSource,
     TradeDirection,
 )
 from alphaos.data.freshness_guard import FreshnessGuard
@@ -179,6 +181,7 @@ class Orchestrator:
         )
         if not risk.approved or risk.sizing is None:
             proposal = self.swing.build_proposal(evaluation, risk.sizing or _zero_sizing(evaluation))
+            self._tag_target_profile(proposal, from_config=evaluation.is_mock)
             proposal.status = "blocked"
             self.journal.insert("trade_proposals", proposal.to_row())
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
@@ -186,6 +189,7 @@ class Orchestrator:
             return False
 
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
+        self._tag_target_profile(proposal, from_config=evaluation.is_mock)
         proposal.status = "pending_approval"
         self.journal.insert("trade_proposals", proposal.to_row())
         self._set_candidate_status(cand["candidate_id"], "proposed")
@@ -372,6 +376,7 @@ class Orchestrator:
             expected_r=2.0, same_day_exit_eligible=True, candidate_id=cand_id,
             eval_id="demo", is_demo=True, status="pending_approval",
         )
+        self._tag_target_profile(proposal, from_config=True)
         self.journal.insert("trade_proposals", proposal.to_row())
         self.journal.log_system_event(
             Severity.WARNING, "demo",
@@ -404,6 +409,19 @@ class Orchestrator:
             "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?", (status, proposal_id)
         )
         self.journal.conn.commit()
+
+    def _tag_target_profile(self, proposal, *, from_config: bool) -> None:
+        """Record target-profile evidence on a proposal. Tracking only: it does
+        not change the stop/target levels or any behavior. Every system-generated
+        trade uses configured_standard; the source reflects config (mock baseline)
+        vs the live OpenAI engine."""
+        proposal.target_profile = TargetProfile.CONFIGURED_STANDARD.value
+        proposal.target_reward_risk = self.settings.target_reward_risk
+        proposal.min_reward_risk = self.settings.min_reward_risk
+        proposal.stop_loss_pct = self.settings.stop_loss_pct
+        src = TargetSource.CONFIG.value if from_config else TargetSource.OPENAI.value
+        proposal.target_price_source = src
+        proposal.stop_price_source = src
 
     def _reject_candidate(self, cand, stage, evaluation, reason: Optional[str] = None) -> None:
         if reason is None:
@@ -442,6 +460,7 @@ class Orchestrator:
                 "candidate_id": cand["candidate_id"],
                 "symbol": cand["symbol"],
                 "baseline_type": BASELINE_MOMENTUM_NO_NEWS_V1,
+                "target_profile": TargetProfile.CONFIGURED_STANDARD.value,
                 "direction": evaluation.direction,
                 "reference_price": ref_price,
                 "ref_timestamp": cand.get("_snapshot", {}).get("quote_timestamp"),

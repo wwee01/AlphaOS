@@ -7,7 +7,7 @@ only — no statistical claims on a small forward sample.
 
 from __future__ import annotations
 
-from alphaos.reports.metrics import compute_metrics
+from alphaos.reports.metrics import compute_metrics, compute_metrics_by_target_profile
 from alphaos.util import timeutils
 
 
@@ -26,4 +26,5 @@ class WeeklyReview:
             "mode": self.settings.mode.value,
             "execution_provider": self.settings.execution_provider,
             **metrics,
+            "by_target_profile": compute_metrics_by_target_profile(outcomes),
         }
