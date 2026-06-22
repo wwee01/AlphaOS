@@ -67,6 +67,7 @@ class OrderManager:
         self.positions = position_manager or PositionManager(settings, journal)
         self.kill_switch = kill_switch or KillSwitch()
         self.alpaca = alpaca
+        self.real_paper = settings.real_paper_execution
         self.broker_connected = settings.is_paper and settings.has_alpaca_keys
         if self.broker_connected and self.alpaca is None:
             self.alpaca = AlpacaClient(settings, journal)
@@ -100,20 +101,16 @@ class OrderManager:
                 Severity.ERROR, protection_path=protection.value,
             )
 
-        # --- Paper-mode broker guardrails (when Alpaca creds present) --------
-        if self.broker_connected:
-            try:
-                # Guardrails run inside submit_order; stub then raises NotConnected.
-                self.alpaca.submit_order({"symbol": proposal.symbol})
-            except AlpacaSafetyError as exc:
+        # --- Route: real Alpaca paper execution, else internal simulation ----
+        if self.real_paper:
+            if not self.broker_connected:
                 return self._blocked(
-                    proposal, ReasonCode.PAPER_SAFETY_FAILED.value, str(exc), Severity.CRITICAL,
-                    protection_path=protection.value,
+                    proposal, ReasonCode.PAPER_SAFETY_FAILED.value,
+                    "EXECUTION_PROVIDER=alpaca_paper but Alpaca paper not connected.",
+                    Severity.CRITICAL, protection_path=protection.value,
                 )
-            except AlpacaNotConnected:
-                pass  # expected in v1 — fall back to simulated execution
+            return self._submit_alpaca_paper(proposal, protection)
 
-        # --- Simulated fill (v1) --------------------------------------------
         return self._simulate_fill(proposal, protection, fill_price)
 
     # ----------------------------------------------------------- internals
@@ -221,6 +218,144 @@ class OrderManager:
             blocked=False, order=row, fills=[fill_id], protection_path=protection.value,
             state=OrderState.FILLED.value, position_id=position_id,
         )
+
+    # ------------------------------------------------- real Alpaca paper path
+    def _submit_alpaca_paper(self, proposal, protection: ProtectionPath) -> OrderResult:
+        """Submit a real broker-native bracket to the Alpaca PAPER API."""
+        try:
+            norm = self.alpaca.submit_bracket(proposal)
+        except AlpacaSafetyError as exc:
+            return self._blocked(proposal, ReasonCode.PAPER_SAFETY_FAILED.value, str(exc),
+                                 Severity.CRITICAL, protection_path=protection.value)
+        except Exception as exc:  # pragma: no cover - network/SDK failure
+            self.journal.log_system_event(
+                Severity.ERROR, "execution", f"Alpaca paper submit failed for {proposal.symbol}.",
+                {"error": str(exc)},
+            )
+            return self._blocked(proposal, ReasonCode.ALPACA_SUBMIT_FAILED.value, str(exc),
+                                 Severity.ERROR, protection_path=protection.value)
+
+        order_id = new_id("ord")
+        side = order_schema.side_for_entry(proposal.direction)
+        state = norm.get("state") or OrderState.SUBMITTED.value
+        filled_price = norm.get("filled_avg_price")
+        data_provider, data_feed = self._data_labels()
+        src = ExecutionSource.ALPACA_PAPER.value
+
+        row = order_schema.build_order_row(
+            order_id=order_id, proposal=proposal, side=side, order_type="bracket",
+            execution_source=src, execution_provider=ExecutionProvider.ALPACA_PAPER.value,
+            execution_mode="alpaca_paper", data_provider=data_provider, data_feed=data_feed,
+            fill_price_basis="alpaca_fill", protection_path=protection.value, state=state,
+            qty=proposal.qty, entry_price=(filled_price if filled_price is not None else proposal.entry),
+            take_profit_price=proposal.target, stop_loss_price=proposal.stop, limit_price=proposal.entry,
+            broker_order_id=norm.get("broker_order_id"), client_order_id=norm.get("client_order_id"),
+            raw_request={"proposal_id": proposal.proposal_id},
+            raw_response=norm, submitted_at=norm.get("submitted_at"), filled_at=norm.get("filled_at"),
+        )
+        self.journal.insert("paper_orders", row, mirror=True)
+        self._event(order_id, norm.get("broker_order_id"), OrderState.APPROVED, OrderState.SUBMITTED, src)
+        if state != OrderState.SUBMITTED.value:
+            self._event(order_id, norm.get("broker_order_id"), OrderState.SUBMITTED, OrderState(state), src,
+                        {"alpaca_status": norm.get("status")})
+
+        position_id = None
+        if state == OrderState.FILLED.value and (norm.get("filled_qty") or 0) > 0:
+            position_id = self._open_real_position(row, norm)
+            self.journal.log_system_event(
+                Severity.INFO, "execution",
+                f"Alpaca PAPER bracket FILLED {proposal.symbol} @ {filled_price} (real paper order).",
+                {"order_id": order_id, "position_id": position_id, "broker_order_id": norm.get("broker_order_id")},
+            )
+        else:
+            self.journal.log_system_event(
+                Severity.INFO, "execution",
+                f"Alpaca PAPER bracket submitted {proposal.symbol} (status={norm.get('status')}); "
+                f"awaiting fill — will reconcile.",
+                {"order_id": order_id, "broker_order_id": norm.get("broker_order_id")},
+            )
+        return OrderResult(blocked=False, order=row, protection_path=protection.value,
+                           state=state, position_id=position_id)
+
+    def _open_real_position(self, row: dict, norm: dict) -> str:
+        st = timeutils.stamp()
+        self.journal.insert(
+            "paper_fills",
+            {
+                "fill_id": new_id("fill"), "order_id": row["order_id"],
+                "broker_order_id": norm.get("broker_order_id"), "symbol": row["symbol"],
+                "side": row["side"], "qty": norm.get("filled_qty") or row["qty"],
+                "price": norm.get("filled_avg_price") or row["entry_price"],
+                "execution_source": ExecutionSource.ALPACA_PAPER.value,
+                "execution_provider": ExecutionProvider.ALPACA_PAPER.value,
+                "data_provider": row["data_provider"], "data_feed": row["data_feed"],
+                "fill_source": "alpaca_paper", "fill_price_basis": "alpaca_fill", "filled_at": st.utc,
+            },
+            mirror=True,
+        )
+        return self.positions.open_position(row, norm.get("filled_avg_price") or row["entry_price"])
+
+    def reconcile(self) -> dict:
+        """Reconcile open Alpaca paper orders against the broker: open positions
+        on entry fills, close them when a bracket leg (TP/SL) fills. Exits are
+        managed by Alpaca's OCO, not the local watchdog."""
+        results = {"reconciled": 0, "opened": [], "exits": []}
+        if not (self.real_paper and self.broker_connected and self.alpaca):
+            return results
+        terminal_no_fill = {OrderState.REJECTED.value, OrderState.CANCELLED.value,
+                            OrderState.EXPIRED.value, OrderState.FAILED.value}
+        rows = self.journal.query(
+            "SELECT * FROM paper_orders WHERE execution_source = ? AND order_type = 'bracket'",
+            (ExecutionSource.ALPACA_PAPER.value,),
+        )
+        for row in rows:
+            order_id, boid = row["order_id"], row.get("broker_order_id")
+            pos = self.journal.one("SELECT * FROM positions WHERE order_id = ?", (order_id,))
+            if pos and pos["status"] == "closed":
+                continue
+            if pos is None and row["state"] in terminal_no_fill:
+                continue
+            try:
+                norm = self.alpaca.get_order(boid)
+            except Exception as exc:  # pragma: no cover - network
+                self.journal.log_system_event(
+                    Severity.WARNING, "reconcile", f"get_order failed for {boid}.", {"error": str(exc)}
+                )
+                continue
+            results["reconciled"] += 1
+
+            if norm.get("state") and norm["state"] != row["state"]:
+                self._event(order_id, boid, OrderState(row["state"]) if row["state"] else OrderState.SUBMITTED,
+                            OrderState(norm["state"]), ExecutionSource.ALPACA_PAPER.value, {"reconcile": True})
+                self.journal.conn.execute(
+                    "UPDATE paper_orders SET state = ? WHERE order_id = ?", (norm["state"], order_id)
+                )
+                self.journal.conn.commit()
+
+            # Entry fill -> open position.
+            if pos is None and (norm.get("filled_qty") or 0) > 0:
+                pid = self._open_real_position(row, norm)
+                results["opened"].append(pid)
+                pos = self.journal.one("SELECT * FROM positions WHERE position_id = ?", (pid,))
+
+            # Bracket leg fill -> close position (TP=target, SL=stop), via OCO.
+            if pos and pos["status"] == "open":
+                for leg in norm.get("legs", []):
+                    if leg.get("role") in ("take_profit", "stop_loss") \
+                            and leg.get("state") == OrderState.FILLED.value and (leg.get("filled_qty") or 0) > 0:
+                        reason = "target" if leg["role"] == "take_profit" else "stop"
+                        exit_price = leg.get("filled_avg_price") or (
+                            pos["target_price"] if reason == "target" else pos["stop_price"]
+                        )
+                        ex = self.positions.close_position(
+                            pos["position_id"], exit_price, reason, triggered_by="alpaca_reconcile",
+                            execution_source=ExecutionSource.ALPACA_PAPER.value,
+                            broker_order_id=leg.get("broker_order_id"),
+                        )
+                        if ex:
+                            results["exits"].append(ex)
+                        break
+        return results
 
     def _event(self, order_id, broker_order_id, prev: OrderState, new: OrderState, source: str, detail=None):
         self.journal.insert(

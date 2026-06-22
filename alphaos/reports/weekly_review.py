@@ -1,13 +1,13 @@
-"""Weekly review — v1 stub.
+"""Weekly review.
 
-The full weekly review (expectancy, profit factor, drawdown, fill rate, missed-
-vs-taken performance, rule adherence) needs a meaningful forward sample. v1
-ships a placeholder that aggregates the week's outcomes without claiming
-conclusions.
+Aggregates recent closed-trade outcomes into the standard metric set
+(expectancy, profit factor, win rate, drawdown, cost drag, ...). Descriptive
+only — no statistical claims on a small forward sample.
 """
 
 from __future__ import annotations
 
+from alphaos.reports.metrics import compute_metrics
 from alphaos.util import timeutils
 
 
@@ -16,15 +16,14 @@ class WeeklyReview:
         self.settings = settings
         self.journal = journal
 
-    def generate(self) -> dict:
-        outcomes = self.journal.query("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 500")
-        wins = [o for o in outcomes if (o.get("win") or 0) == 1]
-        net = round(sum((o.get("net_pnl") or 0) for o in outcomes), 2)
+    def generate(self, limit: int = 500) -> dict:
+        outcomes = self.journal.query(
+            "SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        metrics = compute_metrics(outcomes)
         return {
             "as_of": timeutils.market_date().isoformat(),
-            "trades": len(outcomes),
-            "wins": len(wins),
-            "win_rate": round(len(wins) / len(outcomes), 3) if outcomes else None,
-            "net_pnl": net,
-            "note": "v1 stub — no statistical conclusions; sample too small.",
+            "mode": self.settings.mode.value,
+            "execution_provider": self.settings.execution_provider,
+            **metrics,
         }

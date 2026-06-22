@@ -201,14 +201,18 @@ class JournalStore:
         now = now or timeutils.now_utc()
         md = timeutils.market_date(now)
         # Midnight ET on the market date, expressed in UTC.
-        from datetime import datetime as _dt, time as _t
+        from datetime import datetime as _dt, time as _t, timezone as _tz
 
         try:
             from zoneinfo import ZoneInfo
 
             et = ZoneInfo("America/New_York")
             start_et = _dt.combine(md, _t(0, 0), tzinfo=et)
-            return timeutils.to_iso(start_et.astimezone())
+            # Normalize to UTC: created_at_utc is stored as +00:00 and the daily-cap
+            # queries compare it as a string, so the boundary must also be +00:00.
+            # A bare .astimezone() would use the host's local zone and break the
+            # lexical comparison for part of each UTC day.
+            return timeutils.to_iso(start_et.astimezone(_tz.utc))
         except Exception:  # pragma: no cover
             return timeutils.to_iso(_dt.combine(md, _t(0, 0)))
 

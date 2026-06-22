@@ -313,11 +313,24 @@ class Orchestrator:
     # ------------------------------------------------------------- monitor
     def run_monitor_once(self, price_overrides: Optional[dict] = None) -> dict:
         self._ensure_startup()
+        # Reconcile real Alpaca paper orders first (broker-managed bracket OCO):
+        # opens positions on entry fills, closes them on TP/SL leg fills.
+        recon = self.orders.reconcile()
+        # Local watchdog handles only simulated_internal positions.
         exits = self.positions.monitor(price_overrides=price_overrides)
+        all_exits = list(recon.get("exits", [])) + exits
         self.journal.log_system_event(
-            Severity.INFO, "monitor", f"monitor_once complete: {len(exits)} exit(s)."
+            Severity.INFO, "monitor",
+            f"monitor_once complete: {len(all_exits)} exit(s); "
+            f"reconciled {recon.get('reconciled', 0)} alpaca_paper order(s), "
+            f"opened {len(recon.get('opened', []))}.",
         )
-        return {"exits": exits, "open_positions": self.journal.count_open_positions()}
+        return {
+            "exits": all_exits,
+            "reconciled": recon.get("reconciled", 0),
+            "opened": recon.get("opened", []),
+            "open_positions": self.journal.count_open_positions(),
+        }
 
     # --------------------------------------------------------------- report
     def generate_daily_report(self) -> dict:
@@ -469,8 +482,8 @@ class Orchestrator:
             "benzinga": "deferred_v1",
             "web_scraper": "disabled_v1",
             "massive": "deferred_v1",
-            "execution_provider": s.execution_provider,     # simulated_internal
-            "real_alpaca_paper_execution": "not_enabled_v1",
+            "execution_provider": s.execution_provider,     # simulated_internal | alpaca_paper
+            "real_alpaca_paper_execution": "enabled" if s.real_paper_execution else "not_enabled_v1",
             "real_money_trading": "unreachable",
             "manual_approval": "required" if s.effective_approval_mode.value == "manual" else "auto (capped)",
             "kill_switch": "ENGAGED" if self.kill_switch.is_engaged() else "off",

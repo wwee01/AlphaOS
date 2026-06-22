@@ -22,6 +22,24 @@ from alphaos.constants import FreshnessStatus, MarketSession, ReasonCode
 from alphaos.util import timeutils
 
 
+def quote_crossed_or_invalid(snapshot: dict) -> bool:
+    """True if a present quote is crossed or non-positive (bad IEX data).
+
+    A crossed/zero quote (ask <= 0, bid <= 0, or ask < bid) yields a negative
+    spread that would otherwise slip a ``spread_pct > max`` gate. Missing
+    quotes (None) are handled by the freshness guard, not here.
+    """
+    bid = snapshot.get("bid")
+    ask = snapshot.get("ask")
+    if ask is not None and ask <= 0:
+        return True
+    if bid is not None and bid <= 0:
+        return True
+    if bid is not None and ask is not None and ask < bid:
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class FreshnessReport:
     provider: Optional[str]

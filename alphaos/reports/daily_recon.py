@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Optional
 
 from alphaos.constants import Severity
+from alphaos.reports.metrics import compute_metrics
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -54,10 +55,19 @@ class DailyRecon:
             "open_positions": j.count_open_positions(),
         }
 
+    def _today_metrics(self) -> dict:
+        start = self.journal.start_of_trading_day_utc()
+        outcomes = self.journal.query(
+            "SELECT * FROM trade_outcomes WHERE created_at_utc >= ?", (start,)
+        )
+        return compute_metrics(outcomes)
+
     def generate(self) -> dict:
         report_date = timeutils.market_date().isoformat()
         counts = self._counts()
-        content = self._render_markdown(report_date, counts)
+        metrics = self._today_metrics()
+        counts["metrics"] = metrics
+        content = self._render_markdown(report_date, counts, metrics)
         report_id = new_id("rep")
         self.journal.insert(
             "daily_learning_reports",
@@ -81,15 +91,16 @@ class DailyRecon:
         self.journal.log_system_event(Severity.INFO, "report", f"Daily report {report_date} generated.")
         return {"report_id": report_id, "report_date": report_date, "counts": counts, "content_md": content}
 
-    def _render_markdown(self, report_date: str, c: dict) -> str:
+    def _render_markdown(self, report_date: str, c: dict, m: dict) -> str:
         market_mode = self.settings.market_data_mode
+        exec_label = self.settings.execution_provider
         data_label = f"{self.settings.data_provider}/{self.settings.market_data_feed} ({market_mode})"
         return (
             f"# AlphaOS Daily Learning Report — {report_date}\n\n"
             f"_Mode: **{self.settings.mode.value}** · Approval: **{self.settings.approval_mode.value}** · "
             f"Real trading: **disabled**_\n\n"
             f"_Playbook: **momentum continuation (no-news baseline)** · "
-            f"Market data: **{data_label}** · Execution: **simulated_internal** · News: **disabled_v1**_\n\n"
+            f"Market data: **{data_label}** · Execution: **{exec_label}** · News: **disabled_v1**_\n\n"
             + (
                 "> ⚠️ **Market data is MOCKED (offline)** — not live.\n\n"
                 if market_mode == "mock"
@@ -105,9 +116,16 @@ class DailyRecon:
             f"- Fills: **{c['fills']}**\n"
             f"- Open positions: **{c['open_positions']}**\n"
             f"- Same-day exits: **{c['same_day_exits']}**\n\n"
-            "## P&L (paper, simulated)\n"
-            f"- Realized net P&L today: **{c['net_pnl']}**\n\n"
+            "## P&L (paper) — after modelled costs\n"
+            f"- Trades closed: **{m['trades']}**\n"
+            f"- Gross P&L: **{m['gross_pnl']}** · Costs: **{m['total_costs']}** · "
+            f"**Net P&L: {m['net_pnl']}**\n"
+            f"- Win rate: **{m['win_rate']}** · Expectancy/trade: **{m['expectancy']}** · "
+            f"Profit factor: **{m['profit_factor']}**\n"
+            f"- Avg win / avg loss: **{m['avg_win']}** / **{m['avg_loss']}** · "
+            f"Max drawdown: **{m['max_drawdown']}**\n"
+            f"- Avg hold (days): **{m['avg_hold_days']}** · Same-day-exit rate: **{m['same_day_exit_rate']}**\n\n"
             "## Notes\n"
-            "- Costs are not yet modelled (net == gross); MFE/MAE are exit-time approximations.\n"
-            "- Baseline comparisons are being logged but require a larger forward sample.\n"
+            "- Net P&L is **after modelled costs** (commission + slippage); MFE/MAE are exit-time approximations.\n"
+            f"- {m['note']}. Baseline comparisons are logged but need a larger forward sample.\n"
         )
