@@ -18,6 +18,7 @@ from alphaos.constants import (
     OrderState,
     Severity,
     TradeDirection,
+    target_profile_bundle,
 )
 from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
@@ -68,6 +69,8 @@ class PositionManager:
                 "is_short": order_row.get("is_short", 0),
                 "requires_margin": proposal.get("requires_margin", 0),
                 "is_demo": order_row.get("is_demo", 0),
+                # Target-profile evidence relayed from the proposal (tracking only).
+                **target_profile_bundle(proposal),
             },
         )
         return position_id
@@ -220,6 +223,7 @@ class PositionManager:
                 "is_same_day": 1 if same_day else 0,
                 "triggered_by": triggered_by,
                 "market_date": timeutils.market_date().isoformat(),
+                "target_profile": target_profile_bundle(pos)["target_profile"],
             },
         )
 
@@ -247,6 +251,8 @@ class PositionManager:
                 "mfe": mfe,
                 "mae": mae,
                 "win": 1 if net_pnl > 0 else 0,
+                # Target-profile evidence relayed from the position (tracking only).
+                **target_profile_bundle(pos),
             },
         )
 
@@ -312,6 +318,7 @@ class PositionManager:
                 "is_short": pos.get("is_short", 0),
                 "strategy": pos.get("strategy"),
                 "is_demo": pos.get("is_demo", 0),
+                "target_profile": target_profile_bundle(pos)["target_profile"],
                 "filled_at": st.utc,
                 "raw_response_json": {"simulated": not is_real, "exit_reason": exit_reason, "fill_source": fill_source},
             },

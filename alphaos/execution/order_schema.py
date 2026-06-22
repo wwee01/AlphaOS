@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from alphaos.constants import TradeDirection
+from alphaos.constants import TargetProfile, TradeDirection
 
 # The canonical set of columns a paper_orders row carries (excluding the DB id
 # and the auto-stamped created_at_* columns). Used by tests to prove parity.
@@ -42,6 +42,7 @@ ORDER_ROW_FIELDS = [
     "is_short",
     "strategy",
     "is_demo",
+    "target_profile",
     "submitted_at",
     "accepted_at",
     "filled_at",
@@ -115,6 +116,7 @@ def build_order_row(
         "is_short": 1 if proposal.direction == TradeDirection.SHORT.value else 0,
         "strategy": proposal.strategy,
         "is_demo": 1 if getattr(proposal, "is_demo", False) else 0,
+        "target_profile": getattr(proposal, "target_profile", None) or TargetProfile.CONFIGURED_STANDARD.value,
         "submitted_at": submitted_at,
         "accepted_at": accepted_at,
         "filled_at": filled_at,
