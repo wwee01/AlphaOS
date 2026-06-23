@@ -89,13 +89,13 @@ class PositionManager:
         exit — it is logged and skipped.
         """
         exits: list[dict] = []
+        # The local watchdog owns exits for simulated_internal positions only.
         # Broker-managed (alpaca_paper) positions have their exits handled by the
-        # Alpaca bracket OCO and are reconciled separately — the local watchdog
-        # only manages simulated_internal positions, so it never double-exits.
-        open_positions = [
-            p for p in self.journal.open_positions()
-            if p.get("execution_source") != ExecutionSource.ALPACA_PAPER.value
-        ]
+        # Alpaca bracket OCO and applied via OrderManager.reconcile(); the
+        # watchdog must NEVER exit them (it would fight the broker). It still
+        # records an audit-only monitoring snapshot for them so the evidence chain
+        # (proposal -> ... -> position -> monitor snapshot) stays complete.
+        open_positions = self.journal.open_positions()
         if not open_positions:
             return exits
 
@@ -109,6 +109,7 @@ class PositionManager:
 
         for pos in open_positions:
             sym = pos["symbol"]
+            broker_managed = pos.get("execution_source") == ExecutionSource.ALPACA_PAPER.value
             if price_overrides is not None and sym in price_overrides:
                 price = float(price_overrides[sym])
                 freshness_status = "override"
@@ -126,19 +127,26 @@ class PositionManager:
             if price is None:
                 continue
 
-            decision = self._check_exit(pos, price)
-            if decision is not None:
-                reason = decision
-                ex = self.close_position(pos["position_id"], price, reason, triggered_by="watchdog")
-                if ex:
-                    exits.append(ex)
-            else:
+            if broker_managed:
+                # Exits are owned by the broker OCO + reconcile(); never exit
+                # a broker-managed position locally. Mark-to-market only.
+                decision = None
                 self._mark_to_market(pos, price)
-            # Audit snapshot AFTER the exit is acted on, and never allowed to
+            else:
+                decision = self._check_exit(pos, price)
+                if decision is not None:
+                    ex = self.close_position(pos["position_id"], price, decision, triggered_by="watchdog")
+                    if ex:
+                        exits.append(ex)
+                else:
+                    self._mark_to_market(pos, price)
+            # Audit snapshot AFTER any exit is acted on, and never allowed to
             # raise: a best-effort evidence write must never be able to suppress a
             # stop/target/time exit or abort the watchdog pass.
             try:
-                self._record_monitoring_snapshot(pos, price, decision, freshness_status)
+                self._record_monitoring_snapshot(
+                    pos, price, decision, freshness_status, broker_managed=broker_managed
+                )
             except Exception as exc:  # pragma: no cover - defensive (audit-only)
                 try:
                     self.journal.log_system_event(
@@ -150,9 +158,12 @@ class PositionManager:
                     pass
         return exits
 
-    def _record_monitoring_snapshot(self, pos, price, decision, freshness_status) -> None:
+    def _record_monitoring_snapshot(self, pos, price, decision, freshness_status,
+                                    broker_managed: bool = False) -> None:
         """Write one monitoring_snapshots row per open position per pass (audit
-        only; never influences the exit decision or mark-to-market)."""
+        only; never influences the exit decision or mark-to-market). For
+        broker-managed positions the watchdog takes no exit action, so the row is
+        labelled ``broker_managed``."""
         qty = float(pos.get("qty") or 0)
         entry = float(pos.get("avg_entry_price") or 0)
         is_short = pos.get("direction") == TradeDirection.SHORT.value
@@ -197,7 +208,10 @@ class PositionManager:
                 "target_hit": 1 if decision == "target" else 0,
                 "time_stop_status": "expired" if decision == "time_expiry" else "active",
                 "data_freshness_status": freshness_status,
-                "action_taken": "exit_simulated" if decision is not None else "none",
+                "action_taken": (
+                    "broker_managed" if broker_managed
+                    else ("exit_simulated" if decision is not None else "none")
+                ),
             },
         )
 
