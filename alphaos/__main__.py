@@ -40,6 +40,13 @@ def cmd_generate_daily_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_interest_scan(orch: Orchestrator) -> int:
+    """Roadmap 2.3: interest scan -> candidate packets -> AI category labels ->
+    existing gates -> proposals (manual approval still required; no auto-exec)."""
+    _print({"interest_scan": orch.run_scan_once().as_dict()})
+    return 0
+
+
 def cmd_proposals(orch: Orchestrator) -> int:
     views = orch.list_open_proposals()
     _print({"open_proposals": views, "count": len(views)})
@@ -118,7 +125,8 @@ def cmd_dashboard(_: Orchestrator) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m alphaos", description="AlphaOS v1 CLI")
     sub = p.add_subparsers(dest="command", required=True)
-    sub.add_parser("scan_once", help="run one scan/propose pass")
+    sub.add_parser("scan_once", help="run one scan/propose pass (legacy alias of interest_scan)")
+    sub.add_parser("interest_scan", help="interest scan -> packet -> AI label -> propose (manual approval)")
     sub.add_parser("monitor_once", help="run one watchdog/exit pass")
     sub.add_parser("generate_daily_report", help="generate today's learning report")
     sub.add_parser("status", help="show mode/safety/startup status")
@@ -151,6 +159,8 @@ def main(argv=None) -> int:
     try:
         if args.command == "scan_once":
             return cmd_scan_once(orch)
+        if args.command == "interest_scan":
+            return cmd_interest_scan(orch)
         if args.command == "monitor_once":
             return cmd_monitor_once(orch)
         if args.command == "generate_daily_report":

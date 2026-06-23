@@ -185,9 +185,17 @@ def _fake_st():
     st.text_input.return_value = ""
     st.selectbox.return_value = None
     st.tabs.side_effect = lambda labels: [MagicMock(name=f"tab{i}") for i in range(len(labels))]
-    st.columns.side_effect = lambda spec: [
-        MagicMock(name=f"col{i}") for i in range(spec if isinstance(spec, int) else len(spec))
-    ]
+
+    def _cols(spec):
+        n = spec if isinstance(spec, int) else len(spec)
+        out = []
+        for i in range(n):
+            col = MagicMock(name=f"col{i}")
+            col.button.return_value = False   # column-buttons are never "pressed" on render
+            out.append(col)
+        return out
+
+    st.columns.side_effect = _cols
     return st
 
 

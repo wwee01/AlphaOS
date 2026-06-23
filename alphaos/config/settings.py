@@ -181,6 +181,17 @@ class Settings:
     target_reward_risk: float
     min_reward_risk: float
 
+    # --- interest scanner + AI category labelling (Roadmap 2.3) ---
+    labelling_enabled: bool
+    interest_scan_top_n: int
+    max_candidates_to_ai: int
+    label_model: str
+    label_max_output_tokens: int
+    label_propose_threshold: float
+    label_min_confidence_to_propose: float
+    interest_near_extreme_pct: float
+    interest_min_score: float
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -600,6 +611,15 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         stop_loss_pct=stop_loss_pct,
         target_reward_risk=target_reward_risk,
         min_reward_risk=min_reward_risk,
+        labelling_enabled=_get_bool(src, "LABELLING_ENABLED", True),
+        interest_scan_top_n=_get_int(src, "INTEREST_SCAN_TOP_N", 15),
+        max_candidates_to_ai=_get_int(src, "MAX_CANDIDATES_TO_AI", 15),
+        label_model=_get(src, "LABEL_MODEL", "") or _get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
+        label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 220),
+        label_propose_threshold=_get_float(src, "LABEL_PROPOSE_THRESHOLD", 0.40),
+        label_min_confidence_to_propose=_get_float(src, "LABEL_MIN_CONFIDENCE_TO_PROPOSE", 0.50),
+        interest_near_extreme_pct=_get_float(src, "INTEREST_NEAR_EXTREME_PCT", 0.005),
+        interest_min_score=_get_float(src, "INTEREST_MIN_SCORE", 0.5),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

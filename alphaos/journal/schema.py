@@ -163,6 +163,18 @@ SCHEMA: list[tuple[str, str]] = [
             price_at_scan REAL,
             volume_at_scan REAL,
             market_regime TEXT,
+            interest_score REAL,
+            interest_rank INTEGER,
+            shortlist_reason TEXT,
+            primary_label TEXT,
+            secondary_labels_json TEXT,
+            candidate_tags_json TEXT,
+            risk_tags_json TEXT,
+            label_confidence REAL,
+            label_decision TEXT,
+            label_version TEXT,
+            label_source TEXT,
+            label_frozen_at_utc TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -759,6 +771,73 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.3: compact evidence packet per shortlisted candidate (the
+        # only data sent to the AI labeller). Placeholder context fields are
+        # explicit 'unavailable' markers — no news/last30days integration in v1.
+        "candidate_packets",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_packets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            packet_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            interest_score REAL,
+            interest_rank INTEGER,
+            shortlist_reason TEXT,
+            packet_json TEXT,
+            missing_data_flags_json TEXT,
+            catalyst_status TEXT,
+            official_news_context TEXT,
+            last30days_context TEXT,
+            sentiment_context TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # Roadmap 2.3: AI category/playbook label per shortlisted candidate.
+        # primary_label MUST be in OFFICIAL_LABELS; suggested_new_tags are stored
+        # UNOFFICIAL. label_decision is ADVISORY (downgrade-only at decision time).
+        # History is append-only; post_trade_review_label is reserved (NULL in v1)
+        # so a later review never rewrites the decision-time label.
+        "candidate_labels",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            primary_label TEXT,
+            secondary_labels_json TEXT,
+            candidate_tags_json TEXT,
+            risk_tags_json TEXT,
+            direction TEXT,
+            label_decision TEXT,
+            label_confidence REAL,
+            reason_for_label TEXT,
+            thesis_stub TEXT,
+            invalidation TEXT,
+            main_risk TEXT,
+            missing_context_json TEXT,
+            suggested_new_tags_json TEXT,
+            label_version TEXT,
+            label_source TEXT,
+            validation_status TEXT,
+            model TEXT,
+            is_mock INTEGER DEFAULT 0,
+            raw_json TEXT,
+            label_frozen_at_utc TEXT,
+            post_trade_review_label TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -784,6 +863,10 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_scheduler_runs_batch ON scheduler_runs(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_calibration_trade ON execution_calibration(trade_id)",
     "CREATE INDEX IF NOT EXISTS idx_calibration_order ON execution_calibration(order_id)",
+    "CREATE INDEX IF NOT EXISTS idx_packets_candidate ON candidate_packets(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_packets_scan_batch ON candidate_packets(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_labels_candidate ON candidate_labels(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_labels_scan_batch ON candidate_labels(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

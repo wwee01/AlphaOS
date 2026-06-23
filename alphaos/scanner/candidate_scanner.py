@@ -26,6 +26,7 @@ from alphaos.constants import (
 )
 from alphaos.data.freshness_guard import FreshnessGuard, quote_crossed_or_invalid
 from alphaos.data.market_data import MarketDataClient
+from alphaos.scanner.interest_scanner import InterestScanner
 from alphaos.util.ids import new_id
 
 # A small, deliberately liquid default universe for v1 (core tier). Illiquid
@@ -51,6 +52,9 @@ class CandidateScanner:
         self.journal = journal
         self.market = market_data or MarketDataClient(settings, journal)
         self.freshness = FreshnessGuard.from_settings(settings)
+        self.interest = InterestScanner(settings)   # Roadmap 2.3: deterministic interest scoring
+        self._spy = None
+        self._qqq = None
 
     def build_universe(self, scan_id: str, symbols: Optional[list[str]] = None) -> list[str]:
         symbols = symbols or DEFAULT_UNIVERSE
@@ -77,6 +81,12 @@ class CandidateScanner:
         self._scan_batch_id = scan_batch_id
         result = ScanResult(scan_id=scan_id)
         symbols = self.build_universe(scan_id, symbols)
+        # Index references for relative-strength signals (best-effort; never fatal).
+        try:
+            self._spy = self.market.get_snapshot("SPY")
+            self._qqq = self.market.get_snapshot("QQQ")
+        except Exception:  # pragma: no cover - defensive; rel-strength just degrades
+            self._spy = self._qqq = None
         self.journal.log_system_event(
             Severity.INFO, "scanner", f"Scan {scan_id} over {len(symbols)} symbols started."
         )
@@ -136,8 +146,14 @@ class CandidateScanner:
     def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[dict]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
-        # Momentum candidate: meaningful move OR unusual volume.
-        is_candidate = abs(change) >= 0.02 or rel_vol >= 1.5
+        # Roadmap 2.3: deterministic market-interest signals (broadens discovery
+        # beyond pure momentum: gap / near hi-lo / rel-strength / breakout /
+        # reversal / volatility). "Interesting" != "trade" — the trade decision
+        # is still owned by the OpenAI eval + the existing safety gates.
+        signals = self.interest.score(snapshot, self._spy, self._qqq)
+        # Candidate if momentum-y OR interesting enough for AI classification.
+        is_momentum = abs(change) >= 0.02 or rel_vol >= 1.5
+        is_candidate = is_momentum or signals.interest_score >= self.settings.interest_min_score
         if not is_candidate:
             return None
         direction = TradeDirection.LONG.value if change >= 0 else TradeDirection.SHORT.value
@@ -169,12 +185,16 @@ class CandidateScanner:
             "status_reason": "detected",
             "price_at_scan": snapshot.get("last_price"),
             "volume_at_scan": snapshot.get("volume"),
+            # --- Roadmap 2.3: deterministic interest evidence (rank assigned later) ---
+            "interest_score": signals.interest_score,
+            "shortlist_reason": signals.shortlist_reason,
             "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
         }
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).
         cand["last_price"] = snapshot.get("last_price")
         cand["_snapshot"] = snapshot
+        cand["_interest"] = signals   # full InterestSignals for the packet builder
         return cand
 
     def _persist_snapshot(self, snapshot_id, snapshot, report) -> None:

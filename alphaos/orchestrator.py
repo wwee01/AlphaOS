@@ -12,6 +12,7 @@ the dashboard and CLI share one code path. Every step is journaled.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -52,6 +53,8 @@ from alphaos.risk.risk_engine import RiskEngine
 from alphaos.reports.daily_recon import DailyRecon
 from alphaos.safety import KillSwitch
 from alphaos.scanner.candidate_scanner import CandidateScanner
+from alphaos.scanner.candidate_packet import build_packet
+from alphaos.ai.playbook_classifier import PlaybookClassifier
 from alphaos.strategy.proposal import TradeProposal
 from alphaos.strategy.swing_strategy import SwingStrategy
 from alphaos.strategy.daytrade_experiment import DaytradeExperiment
@@ -70,6 +73,8 @@ class ScanSummary:
     risk_blocked: int = 0
     auto_submitted: int = 0
     pending_manual: int = 0
+    labelled: int = 0
+    shortlisted: int = 0
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
@@ -89,6 +94,7 @@ class Orchestrator:
         self.scanner = CandidateScanner(self.settings, self.journal, self.market)
         self.news = NewsService(self.settings, self.journal)  # v1: no-news mode
         self.openai = OpenAIClient(self.settings, self.journal)
+        self.labeller = PlaybookClassifier(self.settings, self.journal)  # Roadmap 2.3: AI category labelling
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
         self.swing = SwingStrategy()
@@ -182,10 +188,34 @@ class Orchestrator:
                 Severity.WARNING, "scan", "Kill switch engaged: no proposals will be executed."
             )
 
+        # --- Roadmap 2.3: rank candidates by deterministic interest, then label
+        #     only the top-N shortlist (cost cap). Labelling is ADVISORY — it can
+        #     only DOWNGRADE the trade decision, never create a PROPOSE. With
+        #     labelling disabled this is the exact legacy momentum path. ---
+        labelling = self.settings.labelling_enabled
+        shortlist: set = set()
+        if labelling:
+            self._rank_candidates(scan.candidates)
+            # The AI-labelling shortlist is the top interest-ranked candidates,
+            # bounded by BOTH the shortlist size and the hard AI cost cap.
+            cap = min(self.settings.interest_scan_top_n, self.settings.max_candidates_to_ai)
+            shortlist = {
+                c["candidate_id"] for c in scan.candidates
+                if (c.get("interest_rank") or 10 ** 9) <= cap
+            }
+            summary.shortlisted = len(shortlist)
+
         for cand in scan.candidates:
             snapshot = cand.get("_snapshot", {})
             # v1 NO-NEWS mode: no news fetch; evaluate on price/volume/structure.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
+
+            # AI category/playbook label for the shortlist only (advisory, journaled,
+            # cost-capped). It never executes anything and is applied downgrade-only.
+            classification = None
+            if labelling and cand["candidate_id"] in shortlist:
+                classification = self._label_candidate(cand, snapshot, scan_batch_id)
+                summary.labelled += 1
 
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
@@ -194,8 +224,18 @@ class Orchestrator:
             self._record_baselines(cand, evaluation)
 
             decision = evaluation.decision
+            if classification is not None:
+                decision = self._apply_label_floor(decision, classification.label_decision)
+
             if decision == Decision.REJECT.value:
-                self._reject_candidate(cand, "openai", evaluation)
+                if (classification is not None
+                        and classification.label_decision == Decision.REJECT.value
+                        and evaluation.decision != Decision.REJECT.value):
+                    # Label-driven reject (e.g. fail-safe / Other-Unclassified).
+                    self._reject_candidate(cand, "ai_label", evaluation,
+                                           reason=ReasonCode.LABEL_UNCLASSIFIED.value)
+                else:
+                    self._reject_candidate(cand, "openai", evaluation)
                 summary.rejected += 1
                 continue
             if decision == Decision.WATCH.value:
@@ -659,6 +699,75 @@ class Orchestrator:
             "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?", (status, proposal_id)
         )
         self.journal.conn.commit()
+
+    # -------------------------------------------- 2.3 interest ranking + labels
+    def _rank_candidates(self, candidates: list) -> None:
+        """Assign interest_rank (1-based; highest interest first) and persist it.
+        Rank is metadata for the AI-labelling shortlist + dashboard; it does not
+        reorder the scan or change any trade decision."""
+        ordered = sorted(
+            candidates,
+            key=lambda c: (c.get("interest_score") or 0.0, c.get("momentum_score") or 0.0),
+            reverse=True,
+        )
+        for rank, c in enumerate(ordered, start=1):
+            c["interest_rank"] = rank
+            self.journal.conn.execute(
+                "UPDATE candidates SET interest_rank = ? WHERE candidate_id = ?",
+                (rank, c["candidate_id"]),
+            )
+        self.journal.conn.commit()
+
+    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id):
+        """Build the compact packet, journal it, AI-classify it, and freeze the
+        label onto the candidate. Returns the PlaybookClassification (advisory)."""
+        signals = cand.get("_interest")
+        if signals is None:  # defensive: recompute if the scanner didn't attach it
+            from alphaos.scanner.interest_scanner import InterestScanner
+
+            signals = InterestScanner(self.settings).score(snapshot)
+        packet = build_packet(cand, snapshot, signals, cand.get("interest_rank"))
+        self.journal.insert("candidate_packets", packet.to_row(scan_batch_id))
+        classification = self.labeller.classify(packet)
+        self._freeze_label(cand, packet, classification, scan_batch_id)
+        return classification
+
+    def _freeze_label(self, cand, packet, classification, scan_batch_id) -> None:
+        """Persist the label (append-only history) + freeze the current view onto
+        the candidate. History is never rewritten (post_trade_review_label stays
+        NULL for a future, separate review)."""
+        frozen_at = timeutils.now_utc().isoformat()
+        self.journal.insert(
+            "candidate_labels",
+            classification.to_row(packet.packet_id, scan_batch_id, frozen_at),
+        )
+        self.journal.conn.execute(
+            "UPDATE candidates SET primary_label = ?, secondary_labels_json = ?, "
+            "candidate_tags_json = ?, risk_tags_json = ?, label_confidence = ?, "
+            "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ? "
+            "WHERE candidate_id = ?",
+            (
+                classification.primary_label,
+                json.dumps(classification.secondary_labels),
+                json.dumps(classification.candidate_tags),
+                json.dumps(classification.risk_tags),
+                classification.confidence,
+                classification.label_decision,
+                classification.label_version,
+                classification.label_source,
+                frozen_at,
+                cand["candidate_id"],
+            ),
+        )
+        self.journal.conn.commit()
+
+    @staticmethod
+    def _apply_label_floor(base_decision: str, label_decision: str) -> str:
+        """Downgrade-only: the AI label can RESTRICT the trade decision but never
+        expand it. Returns the more restrictive of the two."""
+        order = {Decision.REJECT.value: 0, Decision.WATCH.value: 1, Decision.PROPOSE.value: 2}
+        inv = {0: Decision.REJECT.value, 1: Decision.WATCH.value, 2: Decision.PROPOSE.value}
+        return inv[min(order.get(base_decision, 0), order.get(label_decision, 0))]
 
     def _record_risk_check(self, proposal, evaluation, risk) -> str:
         """Persist a risk_checks row for the proposal. Pure audit: it never

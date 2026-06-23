@@ -326,6 +326,10 @@ class ReasonCode(StrEnum):
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     MARGIN_APPROVAL_REQUIRED = "MARGIN_APPROVAL_REQUIRED"
     DAYTRADE_GATED = "DAYTRADE_GATED"
+    # --- Roadmap 2.3: AI category/playbook labelling ---
+    LABEL_UNCLASSIFIED = "LABEL_UNCLASSIFIED"
+    LABEL_MALFORMED = "LABEL_MALFORMED"
+    LABEL_LOW_CONFIDENCE = "LABEL_LOW_CONFIDENCE"
 
 
 # --- Labels & sentinels ------------------------------------------------------
@@ -372,3 +376,37 @@ INVENTED_CATALYST_MARKERS = (
 TZ_UTC = "UTC"
 TZ_LOCAL = "Asia/Singapore"
 TZ_MARKET = "America/New_York"
+
+
+# --- Roadmap 2.3: AI category / playbook labelling ----------------------------
+# The FIXED official label set. The AI labeller may ONLY choose a primary_label
+# from this set; it may suggest new tags, but those are stored as UNOFFICIAL
+# candidate tags and never promoted to official labels automatically.
+OFFICIAL_LABELS = frozenset(
+    {
+        "Momentum",
+        "Breakout",
+        "Dip Buy",
+        "Mean Reversion",
+        "News Reaction",
+        "Earnings Reaction",
+        "Sector Sympathy Move",
+        "Other/Unclassified",
+    }
+)
+LABEL_OTHER = "Other/Unclassified"
+LABEL_VERSION_V1 = "v1"
+
+
+class LabelSource(StrEnum):
+    """Where a candidate's playbook label came from."""
+
+    OPENAI = "openai"
+    MOCK = "mock"
+    FAIL_SAFE = "fail_safe"   # malformed/missing AI output -> safe default
+
+
+# Placeholder context sentinels (Roadmap 2.3): news/catalyst/last30days are NOT
+# implemented yet. These are clean, explicit "unavailable" markers so the schema
+# and packets are ready for later enrichment without faking any data now.
+CONTEXT_UNAVAILABLE_V1 = "unavailable"
