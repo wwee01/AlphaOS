@@ -361,6 +361,16 @@ class OrderManager:
                 pid = self._open_real_position(row, norm)
                 results["opened"].append(pid)
                 pos = self.journal.one("SELECT * FROM positions WHERE position_id = ?", (pid,))
+                # Status lifecycle: the proposal was 'submitted' at approval; the
+                # entry fill is what makes it 'filled'. Never resurrect a
+                # rejected/blocked proposal.
+                if pid and row.get("proposal_id"):
+                    self.journal.conn.execute(
+                        "UPDATE trade_proposals SET status = 'filled' "
+                        "WHERE proposal_id = ? AND status NOT IN ('rejected', 'blocked', 'filled')",
+                        (row["proposal_id"],),
+                    )
+                    self.journal.conn.commit()
 
             # Bracket leg fill -> close position (TP=target, SL=stop), via OCO.
             if pos and pos["status"] == "open":

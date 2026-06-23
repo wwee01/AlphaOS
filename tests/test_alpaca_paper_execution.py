@@ -206,6 +206,23 @@ def test_watchdog_records_audit_snapshot_for_broker_position_without_exiting():
     assert snaps[0]["stop_hit"] == 0 and snaps[0]["target_hit"] == 0
 
 
+def test_reconcile_marks_proposal_filled():
+    """Status lifecycle: a proposal is 'submitted' once the broker accepts it, and
+    only becomes 'filled' when reconcile confirms the entry fill."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    prop = make_proposal(symbol="TSLA", entry=250.0, stop=240.0, target=270.0, qty=2)
+    prop.status = "submitted"  # the state the orchestrator sets after broker-accept
+    _seed_proposal(journal, prop)
+
+    om.execute_proposal(prop)  # accepted, not filled yet
+    assert journal.proposal_by_id(prop.proposal_id)["status"] == "submitted"
+
+    fake.fill_entry("TSLA", price=250.0)
+    om.reconcile()
+    assert journal.proposal_by_id(prop.proposal_id)["status"] == "filled"
+
+
 def test_alpaca_paper_requires_paper_mode():
     # alpaca_paper execution in mock mode must fail fast.
     with pytest.raises(SettingsError):

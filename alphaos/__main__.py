@@ -58,6 +58,27 @@ def cmd_reject(orch: Orchestrator, proposal_id: str, reason: str) -> int:
     return 0 if ok else 1
 
 
+def cmd_calibration_report(orch: Orchestrator) -> int:
+    from alphaos.reports.cost_calibration import render_markdown
+
+    rep = orch.calibration_report()
+    print(render_markdown(rep))
+    print()
+    _print({"calibration": rep["summary"], "recommended_model": rep["recommended_model"]})
+    return 0
+
+
+def cmd_flatten(orch: Orchestrator) -> int:
+    res = orch.flatten_paper_account()
+    _print({"flatten": res})
+    return 0 if res.get("ok") else 1
+
+
+def cmd_reconcile_report(orch: Orchestrator) -> int:
+    _print({"broker_ledger_reconciliation": orch.broker_ledger_report()})
+    return 0
+
+
 def cmd_status(orch: Orchestrator) -> int:
     checks = orch.startup()
     _print(
@@ -108,6 +129,9 @@ def build_parser() -> argparse.ArgumentParser:
     rj = sub.add_parser("reject", help="reject a proposal (removes it from the actionable queue)")
     rj.add_argument("proposal_id")
     rj.add_argument("--reason", default="cli rejected")
+    sub.add_parser("calibration_report", help="cost-model calibration: modeled vs actual paper execution")
+    sub.add_parser("flatten", help="PAPER-ONLY: cancel open Alpaca paper orders + close paper positions")
+    sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
@@ -139,6 +163,12 @@ def main(argv=None) -> int:
             return cmd_approve(orch, args.proposal_id, args.margin)
         if args.command == "reject":
             return cmd_reject(orch, args.proposal_id, args.reason)
+        if args.command == "calibration_report":
+            return cmd_calibration_report(orch)
+        if args.command == "flatten":
+            return cmd_flatten(orch)
+        if args.command == "reconcile_report":
+            return cmd_reconcile_report(orch)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
         if args.command == "dashboard":

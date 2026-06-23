@@ -136,8 +136,38 @@ class AlpacaClient:
         client = self._trading_client()
         return [order_mapping.normalize_position(p) for p in client.get_all_positions()]
 
+    def list_open_orders(self) -> list[dict]:
+        client = self._trading_client()
+        return [order_mapping.normalize_order(o) for o in client.get_orders()]
+
     def cancel_order(self, broker_order_id: str) -> None:
         self._trading_client().cancel_order_by_id(broker_order_id)
+
+    def flatten_paper(self) -> dict:
+        """Cancel ALL open paper orders and close ALL open paper positions.
+
+        Paper-only: ``preflight()`` is enforced and the client is hard-wired
+        ``paper=True``, so this can never act on a real-money account. Returns a
+        summary of what was cancelled/closed."""
+        self.preflight()
+        client = self._trading_client()
+        orders_before = len(client.get_orders())
+        positions_before = len(client.get_all_positions())
+        try:
+            client.cancel_orders()
+        except Exception:  # best-effort; close_all_positions(cancel_orders=True) also cancels
+            pass
+        closed = client.close_all_positions(cancel_orders=True)
+        if self.journal is not None:
+            self.journal.log_system_event(
+                Severity.WARNING, "broker",
+                f"Alpaca PAPER flatten: cancelled {orders_before} order(s), closed {positions_before} position(s).",
+            )
+        return {
+            "cancelled_orders": orders_before,
+            "closed_positions": positions_before,
+            "close_responses": (len(closed) if closed is not None else positions_before),
+        }
 
     def get_account(self) -> dict:
         client = self._trading_client()
