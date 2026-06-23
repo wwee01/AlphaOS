@@ -37,7 +37,8 @@ def render_sidebar(orch: Orchestrator) -> None:
     st.sidebar.markdown(
         f"**Mode:** `{s.mode.value}`  \n"
         f"**Approval:** `{s.approval_mode.value}`  \n"
-        f"**Real trading:** `disabled`"
+        f"**Real trading:** `disabled`  \n"
+        f"**DB:** `{s.db_path}`"
     )
     ks = KillSwitch()
     if ks.is_engaged():
@@ -51,6 +52,7 @@ def render_sidebar(orch: Orchestrator) -> None:
             st.rerun()
 
     st.sidebar.divider()
+    st.sidebar.caption("⚠️ Actions below WRITE to the connected ledger.")
     if st.sidebar.button("Run scan_once"):
         summ = orch.run_scan_once()
         st.sidebar.success(f"Scan: {summ.proposed} proposed, {summ.watch} watch, {summ.rejected} rejected")
@@ -63,6 +65,64 @@ def render_sidebar(orch: Orchestrator) -> None:
     if st.sidebar.button("Seed demo trade (simulated)"):
         d = orch.seed_demo()
         st.sidebar.info(f"Demo: {d['message']}")
+
+
+def tab_approval_center(orch: Orchestrator) -> None:
+    """The actionable approval queue. Listing is read-only; ledger writes happen
+    only when the user clicks Approve/Reject (each is an explicit action)."""
+    st.subheader("Approval Center")
+    st.caption(
+        "Open proposals awaiting your decision. Approving RE-RUNS freshness, "
+        "price-drift, spread and risk checks at approval time before any paper order "
+        "is created. Manual approval is required — nothing here is auto-submitted."
+    )
+    views = orch.list_open_proposals()
+    if not views:
+        st.info("No open proposals. Run a scan from the sidebar to generate proposals.")
+        return
+
+    st.dataframe(
+        [
+            {
+                "proposal_id": v["proposal_id"], "trade_id": v["trade_id"], "symbol": v["symbol"],
+                "side": v["side"], "entry": v["entry"], "stop": v["stop"], "target": v["target"],
+                "qty": v["qty"], "R:R": v["reward_risk"], "risk_$": v["risk_amount"],
+                "last_freshness": v["last_known_freshness"], "generated_sgt": v["generated_at_sgt"],
+            }
+            for v in views
+        ],
+        width="stretch",
+    )
+    st.divider()
+    for v in views:
+        pid = v["proposal_id"]
+        with st.expander(
+            f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · {pid}"
+        ):
+            st.write(
+                {
+                    "trade_id": v["trade_id"], "candidate_id": v["candidate_id"],
+                    "entry": v["entry"], "stop": v["stop"], "target": v["target"],
+                    "risk_per_share": v["risk_per_share"], "risk_amount": v["risk_amount"],
+                    "expected_r": v["expected_r"], "requires_margin": v["requires_margin"],
+                    "last_known_freshness": v["last_known_freshness"],
+                    "generated_at_utc": v["generated_at_utc"],
+                }
+            )
+            approve_margin = False
+            if v["requires_margin"]:
+                approve_margin = st.checkbox(
+                    "Explicitly approve margin/borrow for this short", key=f"acmgn_{pid}"
+                )
+            c1, c2 = st.columns(2)
+            if c1.button("Approve + submit (paper)", key=f"acap_{pid}"):
+                ok, msg = orch.approve_proposal(pid, approve_margin=approve_margin)
+                (st.success if ok else st.error)(msg)
+                st.rerun()
+            if c2.button("Reject", key=f"acrj_{pid}"):
+                ok, msg = orch.reject_proposal(pid)
+                st.warning(msg)
+                st.rerun()
 
 
 def tab_candidates(orch: Orchestrator) -> None:
@@ -249,33 +309,46 @@ def tab_system_events(orch: Orchestrator) -> None:
         st.info("No system events yet.")
 
 
-def main() -> None:
+def main(orch: Orchestrator | None = None) -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
-    orch = get_orchestrator()
-    orch.startup()
+    orch = orch or get_orchestrator()
+    # IMPORTANT: do NOT call orch.startup() here. startup() WRITES (a config
+    # snapshot + one system_event per check); calling it on render made the
+    # dashboard dirty the ledger on every page load. Each orchestrator action
+    # (scan/approve/monitor/report/seed) runs _ensure_startup() itself, so the
+    # startup-safety checks still run before any write — the render path stays
+    # strictly read-only.
     render_sidebar(orch)
+    s = orch.settings
     st.title("AlphaOS — paper trading (v1)")
-    t1, t2, t3, t4, t5, t6, t7, t8 = st.tabs(
+    st.caption(
+        f"🟢 Read-only on load · connected DB `{s.db_path}` · mode `{s.mode.value}` · "
+        f"real-money trading unreachable · writes happen ONLY via explicit actions "
+        f"(Run scan / Approve / Reject / Monitor / Seed)."
+    )
+    tabs = st.tabs(
         [
-            "Candidates / Proposals", "Open Trades", "Closed Trades", "System Health",
-            "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
+            "Approval Center", "Candidates / Proposals", "Open Trades", "Closed Trades",
+            "System Health", "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
         ]
     )
-    with t1:
+    with tabs[0]:
+        tab_approval_center(orch)
+    with tabs[1]:
         tab_candidates(orch)
-    with t2:
+    with tabs[2]:
         tab_open_trades(orch)
-    with t3:
+    with tabs[3]:
         tab_closed_trades(orch)
-    with t4:
+    with tabs[4]:
         tab_system_health(orch)
-    with t5:
+    with tabs[5]:
         tab_trade_packet(orch)
-    with t6:
+    with tabs[6]:
         tab_scan_batches(orch)
-    with t7:
+    with tabs[7]:
         tab_scheduler_runs(orch)
-    with t8:
+    with tabs[8]:
         tab_system_events(orch)
 
 

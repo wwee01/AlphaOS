@@ -27,6 +27,7 @@ from alphaos.constants import (
     ExecutionProvider,
     NEWS_STATUS_DISABLED_V1,
     NewsStatus,
+    OrderState,
     PLAYBOOK_V1,
     ReasonCode,
     RunStatus,
@@ -315,6 +316,17 @@ class Orchestrator:
             return False, f"proposal not approvable (status={row['status']})"
         proposal = TradeProposal.from_row(row)
 
+        # Idempotency (belt-and-suspenders on top of the status guard): if a live
+        # entry order already exists for this proposal, never create a duplicate.
+        # Exit orders carry proposal_id=NULL, so only the entry order matches here.
+        _dead = (
+            OrderState.REJECTED.value, OrderState.CANCELLED.value,
+            OrderState.EXPIRED.value, OrderState.FAILED.value,
+        )
+        existing = [o for o in self.journal.orders_for_proposal(proposal_id) if o.get("state") not in _dead]
+        if existing:
+            return False, f"already approved/executed (order {existing[0]['order_id']})"
+
         if self.kill_switch.is_engaged():
             return False, "kill switch engaged"
 
@@ -380,6 +392,14 @@ class Orchestrator:
             )
             self.journal.conn.commit()
         if not risk.approved:
+            # Journal the block explicitly (uniform with the freshness/drift
+            # blocks above); the risk_check row recorded just above carries the
+            # per-gate detail.
+            self.journal.log_system_event(
+                Severity.WARNING, "approval",
+                f"Approval blocked for {proposal.symbol}: risk {risk.primary_reason}.",
+                {"proposal_id": proposal_id, "reason_code": risk.primary_reason},
+            )
             self._set_proposal_status(proposal_id, "blocked")
             return False, f"risk blocked: {risk.primary_reason}"
 
@@ -399,6 +419,41 @@ class Orchestrator:
         self.approvals.reject_manually(proposal, approver=approver, reason=reason)
         self._set_proposal_status(proposal_id, "rejected")
         return True, "rejected"
+
+    # ----------------------------------------------------- approval center view
+    def list_open_proposals(self) -> list[dict]:
+        """Read-only Approval Center view: the actionable proposal queue enriched
+        with derived decision-support fields. PURE READS — never writes, so it is
+        safe to call on every dashboard render. Live freshness/spread/risk are
+        re-checked at approval time, not here (that would fetch + persist data)."""
+        views: list[dict] = []
+        for row in self.journal.open_proposals():
+            direction = row.get("direction") or TradeDirection.LONG.value
+            fresh = self.journal.latest_freshness_for_symbol(row["symbol"]) or {}
+            views.append(
+                {
+                    "proposal_id": row.get("proposal_id"),
+                    "trade_id": row.get("trade_id"),
+                    "candidate_id": row.get("candidate_id"),
+                    "symbol": row.get("symbol"),
+                    "direction": direction,
+                    "side": "sell_short" if direction == TradeDirection.SHORT.value else "buy",
+                    "entry": row.get("entry"),
+                    "stop": row.get("stop"),
+                    "target": row.get("target"),
+                    "qty": row.get("qty"),
+                    "risk_per_share": row.get("risk_per_share"),
+                    "risk_amount": row.get("dollar_risk"),
+                    "expected_r": row.get("expected_r"),
+                    "reward_risk": _reward_risk(direction, row.get("entry"), row.get("stop"), row.get("target")),
+                    "requires_margin": bool(row.get("requires_margin")),
+                    "status": row.get("status"),
+                    "generated_at_utc": row.get("created_at_utc"),
+                    "generated_at_sgt": row.get("created_at_sgt"),
+                    "last_known_freshness": fresh.get("freshness_status") or "n/a (re-checked at approval)",
+                }
+            )
+        return views
 
     # ------------------------------------------------------- claude review
     def request_claude_review(self, candidate_id: str, triggered_by: str = "user"):
@@ -694,6 +749,19 @@ class Orchestrator:
 
     def close(self) -> None:
         self.journal.close()
+
+
+def _reward_risk(direction, entry, stop, target):
+    """Reward:risk from levels (read-only display helper). None if undefined."""
+    try:
+        entry, stop, target = float(entry), float(stop), float(target)
+    except (TypeError, ValueError):
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    reward = (entry - target) if direction == TradeDirection.SHORT.value else (target - entry)
+    return round(reward / risk, 2)
 
 
 def _zero_sizing(evaluation):
