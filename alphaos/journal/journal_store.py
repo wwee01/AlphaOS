@@ -346,6 +346,28 @@ class JournalStore:
     def recent_proposals(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM trade_proposals ORDER BY id DESC LIMIT ?", (limit,))
 
+    def open_proposals(self, limit: int = 200) -> list[dict]:
+        """Proposals still awaiting an explicit approve/reject decision.
+
+        This is the actionable approval queue: a proposal leaves it once it is
+        approved (filled), rejected, or blocked. Read-only — newest first.
+        """
+        return self.query(
+            "SELECT * FROM trade_proposals WHERE status IN ('pending_approval', 'proposed') "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+
+    def latest_freshness_for_symbol(self, symbol: str) -> Optional[dict]:
+        """Most recent stored data-freshness for a symbol (read-only; does NOT
+        fetch live data). Used to show last-known freshness in the approval queue
+        without writing a snapshot on render."""
+        return self.one(
+            "SELECT freshness_status, is_usable, source_timestamp "
+            "FROM price_snapshots WHERE symbol = ? ORDER BY id DESC LIMIT 1",
+            (symbol,),
+        )
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 

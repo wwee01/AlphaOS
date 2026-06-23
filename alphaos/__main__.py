@@ -40,6 +40,24 @@ def cmd_generate_daily_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_proposals(orch: Orchestrator) -> int:
+    views = orch.list_open_proposals()
+    _print({"open_proposals": views, "count": len(views)})
+    return 0
+
+
+def cmd_approve(orch: Orchestrator, proposal_id: str, approve_margin: bool) -> int:
+    ok, msg = orch.approve_proposal(proposal_id, approver="cli", approve_margin=approve_margin)
+    _print({"approve": {"proposal_id": proposal_id, "ok": ok, "message": msg}})
+    return 0 if ok else 1
+
+
+def cmd_reject(orch: Orchestrator, proposal_id: str, reason: str) -> int:
+    ok, msg = orch.reject_proposal(proposal_id, approver="cli", reason=reason)
+    _print({"reject": {"proposal_id": proposal_id, "ok": ok, "message": msg}})
+    return 0 if ok else 1
+
+
 def cmd_status(orch: Orchestrator) -> int:
     checks = orch.startup()
     _print(
@@ -83,6 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("monitor_once", help="run one watchdog/exit pass")
     sub.add_parser("generate_daily_report", help="generate today's learning report")
     sub.add_parser("status", help="show mode/safety/startup status")
+    sub.add_parser("proposals", help="list open proposals awaiting approval")
+    ap = sub.add_parser("approve", help="approve + submit a proposal (paper); re-checks safety/risk/freshness")
+    ap.add_argument("proposal_id")
+    ap.add_argument("--margin", action="store_true", help="explicitly approve margin/borrow for a short")
+    rj = sub.add_parser("reject", help="reject a proposal (removes it from the actionable queue)")
+    rj.add_argument("proposal_id")
+    rj.add_argument("--reason", default="cli rejected")
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
@@ -108,6 +133,12 @@ def main(argv=None) -> int:
             return cmd_generate_daily_report(orch)
         if args.command == "status":
             return cmd_status(orch)
+        if args.command == "proposals":
+            return cmd_proposals(orch)
+        if args.command == "approve":
+            return cmd_approve(orch, args.proposal_id, args.margin)
+        if args.command == "reject":
+            return cmd_reject(orch, args.proposal_id, args.reason)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
         if args.command == "dashboard":
