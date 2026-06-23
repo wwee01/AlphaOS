@@ -408,8 +408,19 @@ class Orchestrator:
         if result.blocked:
             self._set_proposal_status(proposal_id, "blocked")
             return False, f"execution blocked: {result.block_reason}"
-        self._set_proposal_status(proposal_id, "filled")
-        return True, f"approved + filled ({result.protection_path})"
+        # Status lifecycle: a real broker order may be ACCEPTED but not yet filled
+        # (it fills later via reconcile). Only mark 'filled' once the fill is
+        # confirmed; otherwise mark 'submitted'. Simulated fills are immediate.
+        if result.state == OrderState.FILLED.value:
+            self._set_proposal_status(proposal_id, "filled")
+            verb = "filled"
+        else:
+            self._set_proposal_status(proposal_id, "submitted")
+            verb = "submitted"
+        # Cost-model calibration capture (best-effort, AFTER the order — never gates
+        # execution). Records the approval-time market context + modeled assumptions.
+        self._record_execution_calibration(proposal, snap, result)
+        return True, f"approved + {verb} ({result.protection_path})"
 
     def reject_proposal(self, proposal_id: str, approver: str = "user", reason: str = "user rejected"):
         row = self.journal.proposal_by_id(proposal_id)
@@ -524,6 +535,41 @@ class Orchestrator:
         self._ensure_startup()
         return self.recon.generate()
 
+    # ------------------------------------------- cost calibration / broker hygiene
+    def calibration_report(self) -> dict:
+        """Cost-model calibration: modeled vs actual Alpaca paper execution."""
+        from alphaos.reports.cost_calibration import build_calibration_report
+
+        return build_calibration_report(self.journal, self.settings)
+
+    def flatten_paper_account(self) -> dict:
+        """Paper-ONLY: cancel all open Alpaca paper orders + close all open Alpaca
+        paper positions. Refuses unless the paper-only guardrails hold; the broker
+        connector is hard-wired paper=True, so this can never touch real money."""
+        self._ensure_startup()
+        alpaca = getattr(self.orders, "alpaca", None)
+        if not (self.settings.is_paper and self.settings.has_alpaca_keys and alpaca):
+            return {"ok": False, "reason": "alpaca paper not connected (need paper mode + Alpaca creds)"}
+        try:
+            alpaca.preflight()
+        except Exception as exc:
+            return {"ok": False, "reason": f"paper-only preflight failed: {exc}"}
+        summary = alpaca.flatten_paper()
+        self.journal.log_system_event(
+            Severity.WARNING, "broker",
+            f"FLATTEN paper account: cancelled {summary.get('cancelled_orders')} order(s), "
+            f"closed {summary.get('closed_positions')} position(s).",
+            summary,
+        )
+        return {"ok": True, **summary}
+
+    def broker_ledger_report(self) -> dict:
+        """Broker-vs-ledger reconciliation: detect mismatches, orphan broker
+        orders/positions, and orphan ledger positions. Read-only."""
+        from alphaos.reports.broker_recon import build_broker_ledger_report
+
+        return build_broker_ledger_report(self.journal, getattr(self.orders, "alpaca", None))
+
     # ----------------------------------------------------------- demo seed
     def seed_demo(self) -> dict:
         """Create a clearly-labelled DEMO proposal that exercises the execution +
@@ -573,6 +619,27 @@ class Orchestrator:
     def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None):
         self._set_proposal_status(proposal.proposal_id, "approved")
         return self.orders.execute_proposal(proposal, fill_price=fill_price)
+
+    def _record_execution_calibration(self, proposal, snap, result) -> None:
+        """Persist a cost-calibration row for an approved order (best-effort audit
+        write AFTER execution; never raises into the approval/execution path)."""
+        try:
+            if not result or result.blocked or not result.order:
+                return
+            from alphaos.reports.cost_calibration import build_calibration_row
+
+            row = build_calibration_row(self.settings, proposal, snap or {}, result.order)
+            self.journal.insert("execution_calibration", row)
+        except Exception as exc:  # pragma: no cover - defensive (audit-only)
+            try:
+                self.journal.log_system_event(
+                    Severity.WARNING, "calibration",
+                    f"calibration capture failed for {getattr(proposal, 'proposal_id', None)}; "
+                    "order unaffected.",
+                    {"error": str(exc)},
+                )
+            except Exception:
+                pass
 
     def _update_candidate_news(self, candidate_id: str, news_status) -> None:
         status = news_status.value if isinstance(news_status, NewsStatus) else str(news_status)

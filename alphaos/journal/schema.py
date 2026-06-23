@@ -725,6 +725,40 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Cost-model calibration (Roadmap 1.5): one row per approved/submitted
+        # order capturing the EXPECTED/approval-time market context + modeled
+        # cost assumptions. Actuals (fill price, delay, status sequence) are
+        # DERIVED at report time by joining paper_orders/paper_fills/order_events,
+        # so this table never needs an update after the initial capture.
+        "execution_calibration",
+        """
+        CREATE TABLE IF NOT EXISTS execution_calibration (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            calibration_id TEXT NOT NULL UNIQUE,
+            proposal_id TEXT,
+            candidate_id TEXT,
+            trade_id TEXT,
+            order_id TEXT,
+            symbol TEXT,
+            side TEXT,
+            execution_provider TEXT,
+            broker_managed INTEGER,
+            expected_entry REAL,
+            approval_bid REAL,
+            approval_ask REAL,
+            approval_mid REAL,
+            approval_spread REAL,
+            approval_spread_pct REAL,
+            submitted_limit_price REAL,
+            modeled_slippage_bps REAL,
+            modeled_cost_estimate REAL,
+            notes TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -748,6 +782,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_riskchecks_proposal ON risk_checks(proposal_id)",
     "CREATE INDEX IF NOT EXISTS idx_monitoring_position ON monitoring_snapshots(position_id)",
     "CREATE INDEX IF NOT EXISTS idx_scheduler_runs_batch ON scheduler_runs(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_calibration_trade ON execution_calibration(trade_id)",
+    "CREATE INDEX IF NOT EXISTS idx_calibration_order ON execution_calibration(order_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
