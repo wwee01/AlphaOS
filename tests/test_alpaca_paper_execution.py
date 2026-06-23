@@ -181,6 +181,31 @@ def test_stop_leg_fill_closes_as_risk_control():
     assert out["net_pnl"] == round(out["gross_pnl"] - out["costs"], 2)
 
 
+def test_watchdog_records_audit_snapshot_for_broker_position_without_exiting():
+    """A broker-managed (alpaca_paper) position must never be exited by the local
+    watchdog (Alpaca OCO owns exits), but it DOES get an audit monitoring
+    snapshot linked by trade_id so the evidence chain stays complete."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    prop = make_proposal(symbol="NVDA", entry=120.0, stop=110.0, target=140.0, qty=3)
+    _seed_proposal(journal, prop)
+    om.execute_proposal(prop)
+    fake.fill_entry("NVDA", price=120.0)
+    om.reconcile()
+    pos = journal.open_positions()[0]
+    assert pos["execution_source"] == ExecutionSource.ALPACA_PAPER.value
+
+    # Even at a stop-trigger price: NO exit, but an audit snapshot is recorded.
+    exits = om.positions.monitor(price_overrides={"NVDA": 1.0})
+    assert exits == []
+    assert journal.count_open_positions() == 1
+    snaps = journal.monitoring_snapshots_for_position(pos["position_id"])
+    assert len(snaps) == 1
+    assert snaps[0]["trade_id"] == prop.trade_id
+    assert snaps[0]["action_taken"] == "broker_managed"
+    assert snaps[0]["stop_hit"] == 0 and snaps[0]["target_hit"] == 0
+
+
 def test_alpaca_paper_requires_paper_mode():
     # alpaca_paper execution in mock mode must fail fast.
     with pytest.raises(SettingsError):
