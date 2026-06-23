@@ -309,6 +309,76 @@ def tab_system_events(orch: Orchestrator) -> None:
         st.info("No system events yet.")
 
 
+def tab_candidate_flow(orch: Orchestrator) -> None:
+    """Read-only Roadmap 2.3 candidate flow: labels summary + proposed / watch /
+    rejected / blocked sections. All reads — render writes nothing to the ledger."""
+    st.subheader("Candidate Flow — interest scan → AI labels")
+    st.caption(
+        "The deterministic interest scanner shortlists; the AI labels the shortlist. "
+        "Labels are ADVISORY (downgrade-only) and never bypass freshness / spread / "
+        "risk / approval gates. Nothing here executes a trade."
+    )
+    j = orch.journal
+
+    def _rows(cands):
+        return [
+            {
+                "symbol": c.get("symbol"), "primary_label": c.get("primary_label"),
+                "label_decision": c.get("label_decision"), "confidence": c.get("label_confidence"),
+                "interest": c.get("interest_score"), "rank": c.get("interest_rank"),
+                "status": c.get("status"), "reason": c.get("shortlist_reason"),
+            }
+            for c in cands
+        ]
+
+    st.markdown("#### Labels summary")
+    ls = j.label_summary()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption("by primary label")
+        if ls["by_primary_label"]:
+            st.dataframe(ls["by_primary_label"], width="stretch")
+        else:
+            st.info("No labels yet — run an interest scan.")
+    with c2:
+        st.caption("by advisory decision")
+        if ls["by_label_decision"]:
+            st.dataframe(ls["by_label_decision"], width="stretch")
+        else:
+            st.info("No labels yet.")
+
+    st.markdown("#### Proposed candidates")
+    prop = j.proposed_candidates(100)
+    if prop:
+        st.dataframe(_rows(prop), width="stretch")
+    else:
+        st.info("No proposed candidates.")
+
+    with st.expander("Watch candidates"):
+        w = j.watch_candidates(200)
+        st.dataframe(_rows(w), width="stretch") if w else st.info("None.")
+
+    with st.expander("Rejected candidates"):
+        r = j.rejected_candidates_recent(200)
+        if r:
+            st.dataframe(
+                [{k: x.get(k) for k in ("symbol", "stage", "reason_code", "reason_detail")} for x in r],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
+
+    with st.expander("Blocked by gate (proposals)"):
+        b = j.blocked_proposals(200)
+        if b:
+            st.dataframe(
+                [{k: x.get(k) for k in ("symbol", "proposal_id", "trade_id", "status")} for x in b],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
+
+
 def main(orch: Orchestrator | None = None) -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
     orch = orch or get_orchestrator()
@@ -328,8 +398,9 @@ def main(orch: Orchestrator | None = None) -> None:
     )
     tabs = st.tabs(
         [
-            "Approval Center", "Candidates / Proposals", "Open Trades", "Closed Trades",
-            "System Health", "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
+            "Approval Center", "Candidates / Proposals", "Candidate Flow", "Open Trades",
+            "Closed Trades", "System Health", "Trade Packet", "Scan Batches",
+            "Scheduler Runs", "System Events",
         ]
     )
     with tabs[0]:
@@ -337,18 +408,20 @@ def main(orch: Orchestrator | None = None) -> None:
     with tabs[1]:
         tab_candidates(orch)
     with tabs[2]:
-        tab_open_trades(orch)
+        tab_candidate_flow(orch)
     with tabs[3]:
-        tab_closed_trades(orch)
+        tab_open_trades(orch)
     with tabs[4]:
-        tab_system_health(orch)
+        tab_closed_trades(orch)
     with tabs[5]:
-        tab_trade_packet(orch)
+        tab_system_health(orch)
     with tabs[6]:
-        tab_scan_batches(orch)
+        tab_trade_packet(orch)
     with tabs[7]:
-        tab_scheduler_runs(orch)
+        tab_scan_batches(orch)
     with tabs[8]:
+        tab_scheduler_runs(orch)
+    with tabs[9]:
         tab_system_events(orch)
 
 

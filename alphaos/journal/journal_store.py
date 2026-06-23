@@ -368,6 +368,52 @@ class JournalStore:
             (symbol,),
         )
 
+    # --------------------------------------- 2.3 candidate-flow / label views
+    def candidates_by_status(self, status: str, limit: int = 200) -> list[dict]:
+        return self.query(
+            "SELECT * FROM candidates WHERE status = ? ORDER BY id DESC LIMIT ?", (status, limit)
+        )
+
+    def proposed_candidates(self, limit: int = 200) -> list[dict]:
+        return self.candidates_by_status("proposed", limit)
+
+    def watch_candidates(self, limit: int = 200) -> list[dict]:
+        return self.candidates_by_status("watch", limit)
+
+    def rejected_candidates_recent(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM rejected_candidates ORDER BY id DESC LIMIT ?", (limit,))
+
+    def blocked_proposals(self, limit: int = 200) -> list[dict]:
+        return self.query(
+            "SELECT * FROM trade_proposals WHERE status = 'blocked' ORDER BY id DESC LIMIT ?", (limit,)
+        )
+
+    def label_for_candidate(self, candidate_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM candidate_labels WHERE candidate_id = ? ORDER BY id DESC LIMIT 1", (candidate_id,)
+        )
+
+    def packet_for_candidate(self, candidate_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM candidate_packets WHERE candidate_id = ? ORDER BY id DESC LIMIT 1", (candidate_id,)
+        )
+
+    def recent_candidate_labels(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM candidate_labels ORDER BY id DESC LIMIT ?", (limit,))
+
+    def label_summary(self) -> dict:
+        """Counts by primary_label and by advisory label_decision (read-only)."""
+        return {
+            "by_primary_label": self.query(
+                "SELECT primary_label AS label, COUNT(*) AS n FROM candidate_labels "
+                "GROUP BY primary_label ORDER BY n DESC"
+            ),
+            "by_label_decision": self.query(
+                "SELECT label_decision AS decision, COUNT(*) AS n FROM candidate_labels "
+                "GROUP BY label_decision ORDER BY n DESC"
+            ),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 
