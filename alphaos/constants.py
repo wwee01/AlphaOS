@@ -406,7 +406,62 @@ class LabelSource(StrEnum):
     FAIL_SAFE = "fail_safe"   # malformed/missing AI output -> safe default
 
 
-# Placeholder context sentinels (Roadmap 2.3): news/catalyst/last30days are NOT
+# Placeholder context sentinels (Roadmap 2.3): last30days/sentiment are NOT
 # implemented yet. These are clean, explicit "unavailable" markers so the schema
 # and packets are ready for later enrichment without faking any data now.
 CONTEXT_UNAVAILABLE_V1 = "unavailable"
+
+
+# --- Roadmap 2.4: official news / catalyst enrichment -------------------------
+# Catalyst context is CONTEXT, not execution authority: it can add risk tags +
+# explanation, suggest a label review, and shape the AI thesis — but it NEVER
+# forces a proposal, bypasses a gate, mints an official label, or executes.
+class CatalystStatus(StrEnum):
+    CONFIRMED = "confirmed"
+    POSSIBLE = "possible"
+    NONE_FOUND = "none_found"
+    STALE = "stale"
+    CONFLICTING = "conflicting"
+    UNAVAILABLE = "unavailable"   # no provider configured / disabled
+    ERROR = "error"              # provider call failed (fail-safe)
+
+
+class CatalystType(StrEnum):
+    EARNINGS = "earnings"
+    ANALYST_UPGRADE = "analyst_upgrade"
+    ANALYST_DOWNGRADE = "analyst_downgrade"
+    COMPANY_NEWS = "company_news"
+    SEC_FILING = "sec_filing"
+    PRODUCT_LAUNCH = "product_launch"
+    PARTNERSHIP = "partnership"
+    M_AND_A = "m_and_a"
+    LEGAL_REGULATORY = "legal_regulatory"
+    SECTOR_NEWS = "sector_news"
+    MACRO = "macro"
+    NO_CLEAR_CATALYST = "no_clear_catalyst"
+    UNKNOWN = "unknown"
+
+
+class EnrichmentSource(StrEnum):
+    MOCK = "mock"
+    ALPACA = "alpaca"
+    DISABLED = "disabled"
+    NONE = "none"
+
+
+# Maps a catalyst type to the OFFICIAL label it would imply, used ONLY to compute
+# an advisory ``catalyst_suggested_label`` + ``label_review_required`` flag. It
+# never overwrites the frozen primary_label (no auto-relabelling in v1).
+CATALYST_TYPE_TO_LABEL = {
+    CatalystType.EARNINGS.value: "Earnings Reaction",
+    CatalystType.ANALYST_UPGRADE.value: "News Reaction",
+    CatalystType.ANALYST_DOWNGRADE.value: "News Reaction",
+    CatalystType.COMPANY_NEWS.value: "News Reaction",
+    CatalystType.SEC_FILING.value: "News Reaction",
+    CatalystType.PRODUCT_LAUNCH.value: "News Reaction",
+    CatalystType.PARTNERSHIP.value: "News Reaction",
+    CatalystType.M_AND_A.value: "News Reaction",
+    CatalystType.LEGAL_REGULATORY.value: "News Reaction",
+    CatalystType.SECTOR_NEWS.value: "Sector Sympathy Move",
+    CatalystType.MACRO.value: "Sector Sympathy Move",
+}

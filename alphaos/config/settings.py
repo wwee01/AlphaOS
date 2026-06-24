@@ -192,6 +192,19 @@ class Settings:
     interest_near_extreme_pct: float
     interest_min_score: float
 
+    # --- official news / catalyst enrichment (Roadmap 2.4) ---
+    # DISTINCT from the no-news posture (NEWS_ENABLED / NEWS_PROVIDER): this layer
+    # adds OFFICIAL catalyst CONTEXT to the candidate packet + dashboard. It never
+    # reaches the OpenAI momentum eval (which stays no-news) and never executes.
+    news_enrichment_enabled: bool
+    news_enrichment_provider: str          # mock | alpaca | disabled
+    news_lookback_hours: float
+    news_max_articles_per_symbol: int
+    news_max_symbols_per_scan: int
+    news_max_age_hours: float
+    news_timeout_seconds: float
+    news_fail_open_as_unavailable: bool
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -620,6 +633,14 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         label_min_confidence_to_propose=_get_float(src, "LABEL_MIN_CONFIDENCE_TO_PROPOSE", 0.50),
         interest_near_extreme_pct=_get_float(src, "INTEREST_NEAR_EXTREME_PCT", 0.005),
         interest_min_score=_get_float(src, "INTEREST_MIN_SCORE", 0.5),
+        news_enrichment_enabled=_get_bool(src, "NEWS_ENRICHMENT_ENABLED", True),
+        news_enrichment_provider=_get(src, "NEWS_ENRICHMENT_PROVIDER", "mock").lower(),
+        news_lookback_hours=_get_float(src, "NEWS_LOOKBACK_HOURS", 48.0),
+        news_max_articles_per_symbol=_get_int(src, "NEWS_MAX_ARTICLES_PER_SYMBOL", 5),
+        news_max_symbols_per_scan=_get_int(src, "NEWS_MAX_SYMBOLS_PER_SCAN", 10),
+        news_max_age_hours=_get_float(src, "NEWS_MAX_AGE_HOURS", 48.0),
+        news_timeout_seconds=_get_float(src, "NEWS_TIMEOUT_SECONDS", 8.0),
+        news_fail_open_as_unavailable=_get_bool(src, "NEWS_FAIL_OPEN_AS_UNAVAILABLE", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

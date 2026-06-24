@@ -414,6 +414,29 @@ class JournalStore:
             ),
         }
 
+    # ---------------------------------------------- 2.4 catalyst enrichment views
+    def catalyst_for_candidate(self, candidate_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM candidate_catalysts WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+            (candidate_id,),
+        )
+
+    def recent_catalysts(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM candidate_catalysts ORDER BY id DESC LIMIT ?", (limit,))
+
+    def catalyst_summary(self) -> dict:
+        """Counts by catalyst_status and catalyst_type (read-only)."""
+        return {
+            "by_status": self.query(
+                "SELECT catalyst_status AS status, COUNT(*) AS n FROM candidate_catalysts "
+                "GROUP BY catalyst_status ORDER BY n DESC"
+            ),
+            "by_type": self.query(
+                "SELECT catalyst_type AS type, COUNT(*) AS n FROM candidate_catalysts "
+                "GROUP BY catalyst_type ORDER BY n DESC"
+            ),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 

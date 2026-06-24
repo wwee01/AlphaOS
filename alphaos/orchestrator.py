@@ -55,6 +55,7 @@ from alphaos.safety import KillSwitch
 from alphaos.scanner.candidate_scanner import CandidateScanner
 from alphaos.scanner.candidate_packet import build_packet
 from alphaos.ai.playbook_classifier import PlaybookClassifier
+from alphaos.news.catalyst_enricher import CatalystEnricher
 from alphaos.strategy.proposal import TradeProposal
 from alphaos.strategy.swing_strategy import SwingStrategy
 from alphaos.strategy.daytrade_experiment import DaytradeExperiment
@@ -75,6 +76,7 @@ class ScanSummary:
     pending_manual: int = 0
     labelled: int = 0
     shortlisted: int = 0
+    catalyst_enriched: int = 0
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
@@ -95,6 +97,7 @@ class Orchestrator:
         self.news = NewsService(self.settings, self.journal)  # v1: no-news mode
         self.openai = OpenAIClient(self.settings, self.journal)
         self.labeller = PlaybookClassifier(self.settings, self.journal)  # Roadmap 2.3: AI category labelling
+        self.enricher = CatalystEnricher(self.settings, self.journal)    # Roadmap 2.4: official catalyst context
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
         self.swing = SwingStrategy()
@@ -205,17 +208,25 @@ class Orchestrator:
             }
             summary.shortlisted = len(shortlist)
 
+        # Catalyst enrichment is separately cost-capped per scan (Roadmap 2.4).
+        enrich_budget = (self.settings.news_max_symbols_per_scan
+                         if (labelling and self.settings.news_enrichment_enabled) else 0)
+
         for cand in scan.candidates:
             snapshot = cand.get("_snapshot", {})
-            # v1 NO-NEWS mode: no news fetch; evaluate on price/volume/structure.
+            # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
 
             # AI category/playbook label for the shortlist only (advisory, journaled,
             # cost-capped). It never executes anything and is applied downgrade-only.
             classification = None
             if labelling and cand["candidate_id"] in shortlist:
-                classification = self._label_candidate(cand, snapshot, scan_batch_id)
+                do_enrich = enrich_budget > 0
+                classification = self._label_candidate(cand, snapshot, scan_batch_id, enrich=do_enrich)
                 summary.labelled += 1
+                if do_enrich:
+                    enrich_budget -= 1
+                    summary.catalyst_enriched += 1
 
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
@@ -718,33 +729,58 @@ class Orchestrator:
             )
         self.journal.conn.commit()
 
-    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id):
-        """Build the compact packet, journal it, AI-classify it, and freeze the
-        label onto the candidate. Returns the PlaybookClassification (advisory)."""
+    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id, enrich: bool = True):
+        """Build the compact packet, (optionally) enrich it with catalyst context,
+        journal it, AI-classify it, and freeze the label + catalyst view onto the
+        candidate. Returns the PlaybookClassification (advisory)."""
         signals = cand.get("_interest")
         if signals is None:  # defensive: recompute if the scanner didn't attach it
             from alphaos.scanner.interest_scanner import InterestScanner
 
             signals = InterestScanner(self.settings).score(snapshot)
         packet = build_packet(cand, snapshot, signals, cand.get("interest_rank"))
+        # Roadmap 2.4: official catalyst enrichment BEFORE labelling, so the AI can
+        # use catalyst context for thesis/risk. Fail-safe, context only — never
+        # forces a decision, bypasses a gate, or executes. Cost-capped via `enrich`.
+        catalyst = None
+        if enrich:
+            catalyst = self.enricher.enrich(packet)
+            packet.apply_catalyst(catalyst)
         self.journal.insert("candidate_packets", packet.to_row(scan_batch_id))
         classification = self.labeller.classify(packet)
-        self._freeze_label(cand, packet, classification, scan_batch_id)
+        if catalyst is not None:
+            # Advisory label-review: if the catalyst implies a different OFFICIAL
+            # label than the frozen one, flag for review — NEVER overwrite primary_label.
+            catalyst.label_review_required = bool(
+                catalyst.catalyst_suggested_label
+                and catalyst.catalyst_suggested_label != classification.primary_label
+            )
+            self.journal.insert(
+                "candidate_catalysts",
+                catalyst.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
+            )
+        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst)
         return classification
 
-    def _freeze_label(self, cand, packet, classification, scan_batch_id) -> None:
+    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None) -> None:
         """Persist the label (append-only history) + freeze the current view onto
-        the candidate. History is never rewritten (post_trade_review_label stays
-        NULL for a future, separate review)."""
+        the candidate, including the advisory catalyst view (Roadmap 2.4). History
+        is never rewritten (post_trade_review_label stays NULL); the catalyst NEVER
+        overwrites primary_label — only catalyst_suggested_label/label_review_required."""
         frozen_at = timeutils.now_utc().isoformat()
         self.journal.insert(
             "candidate_labels",
             classification.to_row(packet.packet_id, scan_batch_id, frozen_at),
         )
+        cs = catalyst.catalyst_status if catalyst else None
+        ct = catalyst.catalyst_type if catalyst else None
+        csl = catalyst.catalyst_suggested_label if catalyst else None
+        lrr = 1 if (catalyst and catalyst.label_review_required) else 0
         self.journal.conn.execute(
             "UPDATE candidates SET primary_label = ?, secondary_labels_json = ?, "
             "candidate_tags_json = ?, risk_tags_json = ?, label_confidence = ?, "
-            "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ? "
+            "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ?, "
+            "catalyst_status = ?, catalyst_type = ?, catalyst_suggested_label = ?, label_review_required = ? "
             "WHERE candidate_id = ?",
             (
                 classification.primary_label,
@@ -756,6 +792,7 @@ class Orchestrator:
                 classification.label_version,
                 classification.label_source,
                 frozen_at,
+                cs, ct, csl, lrr,
                 cand["candidate_id"],
             ),
         )
