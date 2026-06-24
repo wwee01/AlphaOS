@@ -28,7 +28,11 @@ PROMPT_KEYS = (
     "structure_hint", "setup_hint", "tradeable_volatility",
     "interest_score", "shortlist_reason", "momentum_score",
     "missing_data_flags",
-    "catalyst_status", "official_news_context", "last30days_context", "sentiment_context",
+    # --- catalyst context (Roadmap 2.4; "unavailable" until enriched) ---
+    "catalyst_status", "catalyst_type", "catalyst_summary", "catalyst_confidence",
+    "catalyst_age_minutes", "catalyst_sources", "catalyst_risk_tags",
+    "official_news_context", "analyst_context", "earnings_context", "filing_context",
+    "sector_context", "macro_context", "last30days_context", "sentiment_context",
 )
 
 
@@ -58,11 +62,41 @@ class CandidatePacket:
     shortlist_reason: str
     momentum_score: Optional[float]
     missing_data_flags: list = field(default_factory=list)
-    # placeholder context — always these literals in v1 (no news/catalyst yet)
+    # --- catalyst context: "unavailable" until apply_catalyst() runs (Roadmap 2.4).
+    #     last30days/sentiment remain unavailable (explicit follow-ups). ---
     catalyst_status: str = CONTEXT_UNAVAILABLE_V1
+    catalyst_type: str = CONTEXT_UNAVAILABLE_V1
+    catalyst_summary: str = CONTEXT_UNAVAILABLE_V1
+    catalyst_confidence: float = 0.0
+    catalyst_age_minutes: Optional[float] = None
+    catalyst_sources: list = field(default_factory=list)
+    catalyst_risk_tags: list = field(default_factory=list)
     official_news_context: str = CONTEXT_UNAVAILABLE_V1
+    analyst_context: str = CONTEXT_UNAVAILABLE_V1
+    earnings_context: str = CONTEXT_UNAVAILABLE_V1
+    filing_context: str = CONTEXT_UNAVAILABLE_V1
+    sector_context: str = CONTEXT_UNAVAILABLE_V1
+    macro_context: str = CONTEXT_UNAVAILABLE_V1
     last30days_context: str = CONTEXT_UNAVAILABLE_V1
     sentiment_context: str = CONTEXT_UNAVAILABLE_V1
+
+    def apply_catalyst(self, ctx) -> None:
+        """Populate catalyst context from a CatalystContext (Roadmap 2.4). Context
+        only — never changes interest/momentum/decision fields."""
+        d = ctx.to_packet_dict()
+        self.catalyst_status = d["catalyst_status"]
+        self.catalyst_type = d["catalyst_type"]
+        self.catalyst_summary = d["catalyst_summary"]
+        self.catalyst_confidence = d["catalyst_confidence"]
+        self.catalyst_age_minutes = d["catalyst_age_minutes"]
+        self.catalyst_sources = list(d["catalyst_sources"])
+        self.catalyst_risk_tags = list(d["catalyst_risk_tags"])
+        self.official_news_context = d["official_news_context"]
+        self.analyst_context = d["analyst_context"]
+        self.earnings_context = d["earnings_context"]
+        self.filing_context = d["filing_context"]
+        self.sector_context = d["sector_context"]
+        self.macro_context = d["macro_context"]
 
     def to_prompt_dict(self) -> dict:
         """The compact dict sent to the AI. Whitelist only — never raw data."""
@@ -89,7 +123,18 @@ class CandidatePacket:
             "momentum_score": self.momentum_score,
             "missing_data_flags": list(self.missing_data_flags),
             "catalyst_status": self.catalyst_status,
+            "catalyst_type": self.catalyst_type,
+            "catalyst_summary": self.catalyst_summary,
+            "catalyst_confidence": self.catalyst_confidence,
+            "catalyst_age_minutes": self.catalyst_age_minutes,
+            "catalyst_sources": list(self.catalyst_sources),
+            "catalyst_risk_tags": list(self.catalyst_risk_tags),
             "official_news_context": self.official_news_context,
+            "analyst_context": self.analyst_context,
+            "earnings_context": self.earnings_context,
+            "filing_context": self.filing_context,
+            "sector_context": self.sector_context,
+            "macro_context": self.macro_context,
             "last30days_context": self.last30days_context,
             "sentiment_context": self.sentiment_context,
         }

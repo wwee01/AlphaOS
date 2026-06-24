@@ -175,6 +175,10 @@ SCHEMA: list[tuple[str, str]] = [
             label_version TEXT,
             label_source TEXT,
             label_frozen_at_utc TEXT,
+            catalyst_status TEXT,
+            catalyst_type TEXT,
+            catalyst_suggested_label TEXT,
+            label_review_required INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -838,6 +842,48 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.4: official news/catalyst enrichment per shortlisted candidate.
+        # Context only — never execution authority. EVERY enriched candidate is
+        # journaled (confirmed / possible / none_found / stale / conflicting /
+        # unavailable / error) so AlphaOS can later learn if catalyst-backed trades
+        # perform better. catalyst_suggested_label is ADVISORY (never overwrites
+        # the frozen primary_label).
+        "candidate_catalysts",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_catalysts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            catalyst_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            catalyst_status TEXT,
+            catalyst_type TEXT,
+            catalyst_summary TEXT,
+            catalyst_confidence REAL,
+            catalyst_sources_json TEXT,
+            catalyst_timestamp_utc TEXT,
+            catalyst_age_minutes REAL,
+            source_count INTEGER,
+            official_news_context TEXT,
+            analyst_context TEXT,
+            earnings_context TEXT,
+            filing_context TEXT,
+            sector_context TEXT,
+            macro_context TEXT,
+            catalyst_risk_tags_json TEXT,
+            catalyst_missing_context_json TEXT,
+            catalyst_suggested_label TEXT,
+            label_review_required INTEGER,
+            enrichment_source TEXT,
+            enrichment_status TEXT,
+            enrichment_error TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -867,6 +913,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_packets_scan_batch ON candidate_packets(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_labels_candidate ON candidate_labels(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_labels_scan_batch ON candidate_labels(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_catalysts_candidate ON candidate_catalysts(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_catalysts_scan_batch ON candidate_catalysts(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

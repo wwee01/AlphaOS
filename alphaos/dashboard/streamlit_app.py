@@ -326,10 +326,45 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                 "symbol": c.get("symbol"), "primary_label": c.get("primary_label"),
                 "label_decision": c.get("label_decision"), "confidence": c.get("label_confidence"),
                 "interest": c.get("interest_score"), "rank": c.get("interest_rank"),
+                "catalyst": c.get("catalyst_status"), "catalyst_type": c.get("catalyst_type"),
+                "review?": "yes" if c.get("label_review_required") else "",
                 "status": c.get("status"), "reason": c.get("shortlist_reason"),
             }
             for c in cands
         ]
+
+    st.markdown("#### Catalyst enrichment summary")
+    st.caption("Official catalyst context (Roadmap 2.4) — advisory only; never bypasses gates or approval.")
+    cs = j.catalyst_summary()
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.caption("by catalyst status")
+        if cs["by_status"]:
+            st.dataframe(cs["by_status"], width="stretch")
+        else:
+            st.info("No catalyst enrichment yet.")
+    with cc2:
+        st.caption("by catalyst type")
+        if cs["by_type"]:
+            st.dataframe(cs["by_type"], width="stretch")
+        else:
+            st.info("—")
+    with st.expander("Catalyst detail (latest enriched candidates)"):
+        cats = j.recent_catalysts(100)
+        if cats:
+            st.dataframe(
+                [
+                    {k: x.get(k) for k in (
+                        "symbol", "catalyst_status", "catalyst_type", "catalyst_confidence",
+                        "catalyst_age_minutes", "catalyst_suggested_label", "label_review_required",
+                        "enrichment_status", "catalyst_summary",
+                    )}
+                    for x in cats
+                ],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
 
     st.markdown("#### Labels summary")
     ls = j.label_summary()
