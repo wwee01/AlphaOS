@@ -25,11 +25,13 @@ from alphaos.constants import (
     BaselineType,
     CATALYST_NOT_AVAILABLE_V1,
     CatalystStatus,
+    CatalystType,
     DecisionAdjustment,
     Decision,
     EnrichmentSource,
     Last30DaysProvider,
     Last30DaysStatus,
+    SentimentLabel,
     ExecutionProvider,
     NEWS_STATUS_DISABLED_V1,
     NewsStatus,
@@ -888,29 +890,56 @@ class Orchestrator:
             and not self.settings.is_mock
         )
 
+    # Catalyst types that clearly OPPOSE a direction — never a positive upgrade
+    # driver for it (an analyst downgrade / legal-regulatory hit can't upgrade a
+    # long; an upgrade / launch / partnership can't upgrade a short).
+    _BEARISH_CATALYSTS = frozenset({CatalystType.ANALYST_DOWNGRADE.value,
+                                    CatalystType.LEGAL_REGULATORY.value})
+    _BULLISH_CATALYSTS = frozenset({CatalystType.ANALYST_UPGRADE.value,
+                                    CatalystType.PRODUCT_LAUNCH.value,
+                                    CatalystType.PARTNERSHIP.value})
+
     @staticmethod
-    def _real_decision_driver(catalyst, last30) -> tuple:
-        """Return (has_real_driver, driver_str, detail) — whether a LIVE catalyst or
-        LIVE last30days sentiment exists to justify moving the decision. Mock /
-        unavailable / 'unknown' signals never qualify, so a symmetric move is only
-        ever backed by real narrative."""
+    def _real_decision_driver(catalyst, last30, direction) -> tuple:
+        """Return (has_real_positive_driver, driver_str, detail) — whether a real,
+        LIVE, POSITIVE driver exists to ARM an upgrade aligned with the trade
+        direction. ONLY these qualify:
+
+        * a LIVE catalyst (source not mock/disabled/none) that is **confirmed or
+          possible** AND whose type does not clearly oppose the direction; or
+        * LIVE last30days (cli) that is **available** with sentiment **supportive**
+          of the direction (bullish for long, bearish for short).
+
+        Everything else is rejected: mock sources, conflicting / stale / none_found
+        / unavailable / error catalysts, 'unknown'/neutral/mixed sentiment, and
+        signals that oppose the direction. (Downgrades never need a driver — they
+        are always the safe direction.)
+        """
+        is_long = (direction or TradeDirection.LONG.value) != TradeDirection.SHORT.value
         drivers, detail = [], {}
+
         cs = getattr(catalyst, "catalyst_status", None)
         csrc = getattr(catalyst, "enrichment_source", None)
+        ctype = getattr(catalyst, "catalyst_type", None)
         if (csrc not in (None, EnrichmentSource.MOCK.value, EnrichmentSource.DISABLED.value,
                          EnrichmentSource.NONE.value)
-                and cs in (CatalystStatus.CONFIRMED.value, CatalystStatus.POSSIBLE.value,
-                           CatalystStatus.CONFLICTING.value)):
-            drivers.append(f"catalyst:{cs}:{getattr(catalyst, 'catalyst_type', '')}")
-            detail["catalyst"] = {"status": cs, "type": getattr(catalyst, "catalyst_type", None),
-                                  "source": csrc}
+                and cs in (CatalystStatus.CONFIRMED.value, CatalystStatus.POSSIBLE.value)):
+            opposing = (ctype in Orchestrator._BEARISH_CATALYSTS) if is_long \
+                else (ctype in Orchestrator._BULLISH_CATALYSTS)
+            if not opposing:
+                drivers.append(f"catalyst:{cs}:{ctype}")
+                detail["catalyst"] = {"status": cs, "type": ctype, "source": csrc}
+
         ls = getattr(last30, "last30days_status", None)
         lsrc = getattr(last30, "provider", None)
         sent = getattr(last30, "sentiment_label", None)
+        supportive = (sent == SentimentLabel.BULLISH.value) if is_long \
+            else (sent == SentimentLabel.BEARISH.value)
         if (lsrc == Last30DaysProvider.CLI.value and ls == Last30DaysStatus.AVAILABLE.value
-                and sent and sent != "unknown"):
+                and supportive):
             drivers.append(f"last30days:{sent}")
             detail["last30days"] = {"status": ls, "sentiment": sent, "provider": lsrc}
+
         return (bool(drivers), "; ".join(drivers), detail)
 
     def _combine_decision(self, base: str, label: str, eval_levels_ok: bool,
@@ -939,7 +968,8 @@ class Orchestrator:
         label = classification.label_decision
         catalyst = cand.get("_catalyst")
         last30 = cand.get("_last30")
-        has_driver, driver_str, driver_detail = self._real_decision_driver(catalyst, last30)
+        has_driver, driver_str, driver_detail = self._real_decision_driver(
+            catalyst, last30, evaluation.direction)
         override_active = self._override_armed() and has_driver
         eval_levels_ok = (
             evaluation.entry is not None and evaluation.stop is not None

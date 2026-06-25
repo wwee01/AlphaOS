@@ -83,34 +83,100 @@ def test_override_armed_only_with_real_ai_and_flag():
 
 
 # ------------------------------------------------------- real-driver gate
-def test_real_driver_rejects_mock_signals():
-    o = _orch()
-    catalyst = SimpleNamespace(catalyst_status=CatalystStatus.CONFIRMED.value,
-                               catalyst_type="earnings", enrichment_source=EnrichmentSource.MOCK.value)
-    last30 = SimpleNamespace(last30days_status=Last30DaysStatus.AVAILABLE.value,
-                             provider=Last30DaysProvider.MOCK.value, sentiment_label="bullish")
-    has, driver, _ = o._real_decision_driver(catalyst, last30)
-    assert has is False and driver == ""
-    o.close()
+def _cat(status, ctype="analyst_upgrade", source=EnrichmentSource.ALPACA.value):
+    return SimpleNamespace(catalyst_status=status, catalyst_type=ctype, enrichment_source=source)
 
 
-def test_real_driver_accepts_live_catalyst():
+def _l30(status=Last30DaysStatus.AVAILABLE.value, sentiment="bullish",
+         provider=Last30DaysProvider.CLI.value):
+    return SimpleNamespace(last30days_status=status, provider=provider, sentiment_label=sentiment)
+
+
+def test_real_driver_accepts_live_positive_catalyst():
     o = _orch()
-    catalyst = SimpleNamespace(catalyst_status=CatalystStatus.CONFIRMED.value,
-                               catalyst_type="earnings", enrichment_source=EnrichmentSource.ALPACA.value)
-    has, driver, detail = o._real_decision_driver(catalyst, None)
+    has, driver, detail = o._real_decision_driver(_cat(CatalystStatus.CONFIRMED.value), None, "long")
     assert has is True and "catalyst:confirmed" in driver and "catalyst" in detail
     o.close()
 
 
-def test_real_driver_accepts_live_sentiment_but_not_unknown():
+def test_real_driver_accepts_live_supportive_sentiment():
     o = _orch()
-    live_known = SimpleNamespace(last30days_status=Last30DaysStatus.AVAILABLE.value,
-                                 provider=Last30DaysProvider.CLI.value, sentiment_label="bearish")
-    live_unknown = SimpleNamespace(last30days_status=Last30DaysStatus.AVAILABLE.value,
-                                   provider=Last30DaysProvider.CLI.value, sentiment_label="unknown")
-    assert o._real_decision_driver(None, live_known)[0] is True
-    assert o._real_decision_driver(None, live_unknown)[0] is False
+    assert o._real_decision_driver(None, _l30(sentiment="bullish"), "long")[0] is True
+    assert o._real_decision_driver(None, _l30(sentiment="bearish"), "short")[0] is True
+    o.close()
+
+
+# Rule 1 — mock sources must not arm an upgrade
+def test_rule1_mock_catalyst_cannot_upgrade():
+    o = _orch()
+    cat = _cat(CatalystStatus.CONFIRMED.value, source=EnrichmentSource.MOCK.value)
+    l30 = _l30(provider=Last30DaysProvider.MOCK.value)
+    assert o._real_decision_driver(cat, l30, "long")[0] is False
+    o.close()
+
+
+# Rule 2 — conflicting (and stale/none/unavailable/error) catalyst alone cannot upgrade
+def test_rule2_conflicting_or_weak_catalyst_alone_cannot_upgrade():
+    o = _orch()
+    for status in (CatalystStatus.CONFLICTING.value, CatalystStatus.STALE.value,
+                   CatalystStatus.NONE_FOUND.value, CatalystStatus.UNAVAILABLE.value,
+                   CatalystStatus.ERROR.value):
+        assert o._real_decision_driver(_cat(status), None, "long")[0] is False, status
+    o.close()
+
+
+# Rule 3 — last30days none_found / unknown sentiment cannot upgrade
+def test_rule3_last30days_none_or_unknown_cannot_upgrade():
+    o = _orch()
+    assert o._real_decision_driver(None, _l30(status=Last30DaysStatus.NONE_FOUND.value), "long")[0] is False
+    assert o._real_decision_driver(None, _l30(sentiment="unknown"), "long")[0] is False
+    assert o._real_decision_driver(None, _l30(sentiment="neutral"), "long")[0] is False
+    o.close()
+
+
+# Opposing real signals must not upgrade (supportive only)
+def test_opposing_signals_cannot_upgrade():
+    o = _orch()
+    # live bearish sentiment cannot upgrade a LONG (but supports a short)
+    assert o._real_decision_driver(None, _l30(sentiment="bearish"), "long")[0] is False
+    # live confirmed analyst_downgrade cannot upgrade a LONG
+    assert o._real_decision_driver(_cat(CatalystStatus.CONFIRMED.value, "analyst_downgrade"), None, "long")[0] is False
+    # ...but it does support a SHORT
+    assert o._real_decision_driver(_cat(CatalystStatus.CONFIRMED.value, "analyst_downgrade"), None, "short")[0] is True
+    o.close()
+
+
+# Rule 4 — a mixed driver upgrades only if at least one real positive driver exists
+def test_rule4_mixed_driver_requires_a_real_positive_driver():
+    o = _orch()
+    # mock catalyst + unknown sentiment -> NO positive driver
+    weak = o._real_decision_driver(_cat(CatalystStatus.CONFIRMED.value, source=EnrichmentSource.MOCK.value),
+                                   _l30(sentiment="unknown"), "long")
+    assert weak[0] is False
+    # live confirmed catalyst + live bullish sentiment -> mixed, qualifies
+    has, _, detail = o._real_decision_driver(
+        _cat(CatalystStatus.CONFIRMED.value, "product_launch"), _l30(sentiment="bullish"), "long")
+    assert has is True and set(detail.keys()) == {"catalyst", "last30days"}
+    # live bullish sentiment alone (catalyst mock) still qualifies via the one real driver
+    assert o._real_decision_driver(_cat(CatalystStatus.CONFIRMED.value, source=EnrichmentSource.MOCK.value),
+                                   _l30(sentiment="bullish"), "long")[0] is True
+    o.close()
+
+
+# Rule 5 — every upgrade is still just a PROPOSAL: gates + manual approval apply
+def test_rule5_upgrades_still_require_gates_and_manual_approval(monkeypatch):
+    o = _orch()
+    monkeypatch.setattr(o.labeller, "classify", _propose_label)
+    monkeypatch.setattr(o, "_override_armed", lambda: True)
+    monkeypatch.setattr(o, "_real_decision_driver",
+                        lambda c, l, d: (True, "last30days:bullish", {"last30days": {}}))
+    summ = o.run_scan_once()
+    assert summ.decision_upgraded > 0                       # upgrades did happen
+    assert o.journal.count_rows("paper_orders") == 0        # ...yet nothing executed
+    assert o.journal.count_rows("paper_fills") == 0
+    assert o.journal.count_open_positions() == 0
+    assert o.journal.count_rows("approvals") == 0           # manual approval still required
+    assert o.system_health()["manual_approval"] == "required"
     o.close()
 
 
@@ -182,7 +248,7 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     monkeypatch.setattr(o.labeller, "classify", _propose_label)        # force PROPOSE labels
     monkeypatch.setattr(o, "_override_armed", lambda: True)            # arm
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
+                        lambda c, l, d: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
     summ = o.run_scan_once()
 
     assert summ.decision_upgraded > 0
@@ -225,7 +291,8 @@ def test_armed_upgrade_increases_proposals_vs_downgrade_only(monkeypatch):
     armed = _orch()
     monkeypatch.setattr(armed.labeller, "classify", _propose_label)
     monkeypatch.setattr(armed, "_override_armed", lambda: True)
-    monkeypatch.setattr(armed, "_real_decision_driver", lambda c, l: (True, "catalyst:confirmed:earnings", {}))
+    monkeypatch.setattr(armed, "_real_decision_driver",
+                        lambda c, l, d: (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
     proposed_armed = armed.run_scan_once().proposed
     armed.close()
 
@@ -249,7 +316,7 @@ def test_dashboard_readonly_with_adjustments(monkeypatch):
     o = _orch()
     monkeypatch.setattr(o.labeller, "classify", _propose_label)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
-    monkeypatch.setattr(o, "_real_decision_driver", lambda c, l: (True, "forced", {}))
+    monkeypatch.setattr(o, "_real_decision_driver", lambda c, l, d: (True, "forced", {}))
     o.run_scan_once()
     j = o.journal
     assert j.count_rows("decision_adjustments") > 0
