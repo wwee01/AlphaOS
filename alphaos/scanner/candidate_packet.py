@@ -98,6 +98,14 @@ class CandidatePacket:
         self.sector_context = d["sector_context"]
         self.macro_context = d["macro_context"]
 
+    def apply_last30days(self, ctx) -> None:
+        """Populate last30days narrative context from a Last30DaysContext (Roadmap
+        2.5). Context only — never changes interest/momentum/decision fields, and
+        only called when LAST30DAYS_FEED_TO_LABELLER is on."""
+        d = ctx.to_packet_dict()
+        self.last30days_context = d["last30days_context"]
+        self.sentiment_context = d["sentiment_context"]
+
     def to_prompt_dict(self) -> dict:
         """The compact dict sent to the AI. Whitelist only — never raw data."""
         d = {

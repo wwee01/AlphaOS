@@ -179,6 +179,8 @@ SCHEMA: list[tuple[str, str]] = [
             catalyst_type TEXT,
             catalyst_suggested_label TEXT,
             label_review_required INTEGER,
+            last30days_status TEXT,
+            sentiment_label TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -884,6 +886,50 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.5: last30days research / narrative-context enrichment per
+        # shortlisted candidate. SEPARATE social/research layer from official news
+        # (2.4). Context only — never execution authority. EVERY eligible candidate
+        # is journaled, INCLUDING those skipped by the per-scan budget cap
+        # (last30days_status='skipped_budget_cap', enrichment_status='skipped'), so
+        # AlphaOS can later distinguish "checked, no narrative" (none_found) from
+        # "provider unavailable" (unavailable) from "intentionally skipped, outside
+        # the top-N budget cap" (skipped_budget_cap).
+        "candidate_last30days",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_last30days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            last30days_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            last30days_status TEXT,
+            summary TEXT,
+            top_themes_json TEXT,
+            source_coverage_json TEXT,
+            item_count INTEGER,
+            cluster_count INTEGER,
+            top_score REAL,
+            sentiment_label TEXT,
+            sentiment_score REAL,
+            newest_age_hours REAL,
+            risk_tags_json TEXT,
+            last30days_context TEXT,
+            sentiment_context TEXT,
+            label_review_required INTEGER,
+            query TEXT,
+            reason TEXT,
+            interest_rank INTEGER,
+            interest_score REAL,
+            provider TEXT,
+            enrichment_status TEXT,
+            enrichment_error TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -915,6 +961,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_labels_scan_batch ON candidate_labels(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_catalysts_candidate ON candidate_catalysts(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_catalysts_scan_batch ON candidate_catalysts(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_last30days_candidate ON candidate_last30days(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_last30days_scan_batch ON candidate_last30days(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

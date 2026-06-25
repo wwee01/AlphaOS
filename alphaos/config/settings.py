@@ -205,6 +205,24 @@ class Settings:
     news_timeout_seconds: float
     news_fail_open_as_unavailable: bool
 
+    # --- last30days research / narrative-context enrichment (Roadmap 2.5) ---
+    # SEPARATE from official news (2.4) and from the no-news eval posture. Disabled
+    # by default; the live provider shells out to a globally-installed last30days
+    # skill (no vendored code). Context only — never execution authority.
+    last30days_enabled: bool
+    last30days_provider: str               # mock | cli | disabled
+    last30days_python: str                 # interpreter for the skill (>=3.12; NOT system python3)
+    last30days_repo_path: str              # dir containing scripts/last30days.py ("" = auto-resolve)
+    last30days_cmd: str                    # full command-template override ("" = build from parts)
+    last30days_sources: str                # keyless-only by default
+    last30days_profile: str                # quick | deep
+    last30days_timeout_seconds: float
+    last30days_max_symbols_per_scan: int
+    last30days_max_themes: int
+    last30days_lookback_hours: float
+    last30days_feed_to_labeller: bool
+    last30days_fail_open_as_unavailable: bool
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -641,6 +659,19 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         news_max_age_hours=_get_float(src, "NEWS_MAX_AGE_HOURS", 48.0),
         news_timeout_seconds=_get_float(src, "NEWS_TIMEOUT_SECONDS", 8.0),
         news_fail_open_as_unavailable=_get_bool(src, "NEWS_FAIL_OPEN_AS_UNAVAILABLE", True),
+        last30days_enabled=_get_bool(src, "LAST30DAYS_ENABLED", False),
+        last30days_provider=_get(src, "LAST30DAYS_PROVIDER", "mock").lower(),
+        last30days_python=_get(src, "LAST30DAYS_PYTHON", "python3.12"),
+        last30days_repo_path=_get(src, "LAST30DAYS_REPO_PATH", ""),
+        last30days_cmd=_get(src, "LAST30DAYS_CMD", ""),
+        last30days_sources=_get(src, "LAST30DAYS_SOURCES", "reddit,hackernews,polymarket,github"),
+        last30days_profile=_get(src, "LAST30DAYS_PROFILE", "quick").lower(),
+        last30days_timeout_seconds=_get_float(src, "LAST30DAYS_TIMEOUT_SECONDS", 45.0),
+        last30days_max_symbols_per_scan=_get_int(src, "LAST30DAYS_MAX_SYMBOLS_PER_SCAN", 10),
+        last30days_max_themes=_get_int(src, "LAST30DAYS_MAX_THEMES", 5),
+        last30days_lookback_hours=_get_float(src, "LAST30DAYS_LOOKBACK_HOURS", 720.0),
+        last30days_feed_to_labeller=_get_bool(src, "LAST30DAYS_FEED_TO_LABELLER", True),
+        last30days_fail_open_as_unavailable=_get_bool(src, "LAST30DAYS_FAIL_OPEN_AS_UNAVAILABLE", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

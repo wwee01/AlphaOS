@@ -327,6 +327,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                 "label_decision": c.get("label_decision"), "confidence": c.get("label_confidence"),
                 "interest": c.get("interest_score"), "rank": c.get("interest_rank"),
                 "catalyst": c.get("catalyst_status"), "catalyst_type": c.get("catalyst_type"),
+                "last30days": c.get("last30days_status"), "sentiment": c.get("sentiment_label"),
                 "review?": "yes" if c.get("label_review_required") else "",
                 "status": c.get("status"), "reason": c.get("shortlist_reason"),
             }
@@ -360,6 +361,46 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                         "enrichment_status", "catalyst_summary",
                     )}
                     for x in cats
+                ],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
+
+    st.markdown("#### last30days research summary")
+    st.caption(
+        "Recent community narrative (Roadmap 2.5) — SEPARATE keyless social/research "
+        "layer; advisory CONTEXT only, never bypasses gates/approval and never executes. "
+        "'skipped_budget_cap' = eligible but outside the per-scan cap (NOT 'no narrative')."
+    )
+    # Map raw status -> friendly bucket so a budget-skipped candidate is never shown
+    # as "no clear narrative". Buckets: enriched / no_clear_narrative / stale /
+    # skipped_budget_cap / unavailable / error.
+    _L30_LABEL = {
+        "available": "enriched", "none_found": "no_clear_narrative", "stale": "stale",
+        "skipped_budget_cap": "skipped_budget_cap", "unavailable": "unavailable",
+        "error": "error", "disabled": "disabled",
+    }
+    l30s = j.last30days_summary()
+    if l30s["by_status"]:
+        st.dataframe(
+            [{"last30days": _L30_LABEL.get(r["status"], r["status"]), "n": r["n"]}
+             for r in l30s["by_status"]],
+            width="stretch",
+        )
+    else:
+        st.info("No last30days enrichment yet (disabled by default — set LAST30DAYS_ENABLED=true).")
+    with st.expander("last30days detail (latest enriched / skipped candidates)"):
+        l30rows = j.recent_last30days(100)
+        if l30rows:
+            st.dataframe(
+                [
+                    {**{k: x.get(k) for k in (
+                        "symbol", "last30days_status", "sentiment_label", "cluster_count",
+                        "item_count", "interest_rank", "provider", "enrichment_status",
+                        "reason", "summary",
+                    )}, "last30days": _L30_LABEL.get(x.get("last30days_status"), x.get("last30days_status"))}
+                    for x in l30rows
                 ],
                 width="stretch",
             )

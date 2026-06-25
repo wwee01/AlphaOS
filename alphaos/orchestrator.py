@@ -56,6 +56,7 @@ from alphaos.scanner.candidate_scanner import CandidateScanner
 from alphaos.scanner.candidate_packet import build_packet
 from alphaos.ai.playbook_classifier import PlaybookClassifier
 from alphaos.news.catalyst_enricher import CatalystEnricher
+from alphaos.research.last30days_enricher import Last30DaysEnricher
 from alphaos.strategy.proposal import TradeProposal
 from alphaos.strategy.swing_strategy import SwingStrategy
 from alphaos.strategy.daytrade_experiment import DaytradeExperiment
@@ -77,6 +78,8 @@ class ScanSummary:
     labelled: int = 0
     shortlisted: int = 0
     catalyst_enriched: int = 0
+    last30days_enriched: int = 0
+    last30days_skipped_budget_cap: int = 0
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
@@ -98,6 +101,7 @@ class Orchestrator:
         self.openai = OpenAIClient(self.settings, self.journal)
         self.labeller = PlaybookClassifier(self.settings, self.journal)  # Roadmap 2.3: AI category labelling
         self.enricher = CatalystEnricher(self.settings, self.journal)    # Roadmap 2.4: official catalyst context
+        self.l30_enricher = Last30DaysEnricher(self.settings, self.journal)  # Roadmap 2.5: last30days narrative context
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
         self.swing = SwingStrategy()
@@ -212,6 +216,19 @@ class Orchestrator:
         enrich_budget = (self.settings.news_max_symbols_per_scan
                          if (labelling and self.settings.news_enrichment_enabled) else 0)
 
+        # last30days narrative enrichment is a SEPARATE per-scan budget (Roadmap
+        # 2.5): the top-N shortlisted candidates BY INTEREST RANK are enriched;
+        # eligible candidates outside the cap are explicitly journaled as
+        # 'skipped_budget_cap' (never silently dropped). Selecting by rank (not loop
+        # order) guarantees the highest-interest candidates get the budget.
+        l30_enabled = labelling and self.settings.last30days_enabled
+        l30_cap = (min(cap, self.settings.last30days_max_symbols_per_scan)
+                   if l30_enabled else 0)
+        l30_set = {
+            c["candidate_id"] for c in scan.candidates
+            if l30_enabled and (c.get("interest_rank") or 10 ** 9) <= l30_cap
+        }
+
         for cand in scan.candidates:
             snapshot = cand.get("_snapshot", {})
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
@@ -222,11 +239,22 @@ class Orchestrator:
             classification = None
             if labelling and cand["candidate_id"] in shortlist:
                 do_enrich = enrich_budget > 0
-                classification = self._label_candidate(cand, snapshot, scan_batch_id, enrich=do_enrich)
+                # last30days mode: enrich (within cap) | skipped_budget_cap (eligible
+                # but outside cap) | None (last30days disabled). Context only.
+                l30_mode = None
+                if l30_enabled:
+                    l30_mode = ("enrich" if cand["candidate_id"] in l30_set
+                                else "skipped_budget_cap")
+                classification = self._label_candidate(
+                    cand, snapshot, scan_batch_id, enrich=do_enrich, l30_mode=l30_mode)
                 summary.labelled += 1
                 if do_enrich:
                     enrich_budget -= 1
                     summary.catalyst_enriched += 1
+                if l30_mode == "enrich":
+                    summary.last30days_enriched += 1
+                elif l30_mode == "skipped_budget_cap":
+                    summary.last30days_skipped_budget_cap += 1
 
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
@@ -729,10 +757,14 @@ class Orchestrator:
             )
         self.journal.conn.commit()
 
-    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id, enrich: bool = True):
-        """Build the compact packet, (optionally) enrich it with catalyst context,
-        journal it, AI-classify it, and freeze the label + catalyst view onto the
-        candidate. Returns the PlaybookClassification (advisory)."""
+    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id, enrich: bool = True,
+                         l30_mode: Optional[str] = None):
+        """Build the compact packet, (optionally) enrich it with catalyst +
+        last30days context, journal it, AI-classify it, and freeze the label +
+        catalyst + last30days view onto the candidate. Returns the
+        PlaybookClassification (advisory). ``l30_mode`` is one of: 'enrich'
+        (within the per-scan cap), 'skipped_budget_cap' (eligible but outside it),
+        or None (last30days disabled)."""
         signals = cand.get("_interest")
         if signals is None:  # defensive: recompute if the scanner didn't attach it
             from alphaos.scanner.interest_scanner import InterestScanner
@@ -746,6 +778,19 @@ class Orchestrator:
         if enrich:
             catalyst = self.enricher.enrich(packet)
             packet.apply_catalyst(catalyst)
+        # Roadmap 2.5: last30days narrative context, AFTER catalyst, BEFORE labelling.
+        # Context only — fail-safe; never forces a decision, bypasses a gate, affects
+        # sizing, overwrites a label, or executes. Only fed to the labeller when
+        # LAST30DAYS_FEED_TO_LABELLER is on; always journaled either way.
+        last30 = None
+        if l30_mode == "enrich":
+            last30 = self.l30_enricher.enrich(
+                packet, rank=cand.get("interest_rank"), interest_score=signals.interest_score)
+            if self.settings.last30days_feed_to_labeller:
+                packet.apply_last30days(last30)
+        elif l30_mode == "skipped_budget_cap":
+            last30 = self.l30_enricher.skipped_budget_cap(
+                packet, rank=cand.get("interest_rank"), interest_score=signals.interest_score)
         self.journal.insert("candidate_packets", packet.to_row(scan_batch_id))
         classification = self.labeller.classify(packet)
         if catalyst is not None:
@@ -759,14 +804,20 @@ class Orchestrator:
                 "candidate_catalysts",
                 catalyst.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
             )
-        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst)
+        if last30 is not None:
+            self.journal.insert(
+                "candidate_last30days",
+                last30.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
+            )
+        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30)
         return classification
 
-    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None) -> None:
+    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None, last30=None) -> None:
         """Persist the label (append-only history) + freeze the current view onto
-        the candidate, including the advisory catalyst view (Roadmap 2.4). History
-        is never rewritten (post_trade_review_label stays NULL); the catalyst NEVER
-        overwrites primary_label — only catalyst_suggested_label/label_review_required."""
+        the candidate, including the advisory catalyst (2.4) + last30days (2.5)
+        views. History is never rewritten (post_trade_review_label stays NULL);
+        neither catalyst nor last30days EVER overwrites primary_label — only the
+        advisory *_status / *_suggested_label / label_review_required fields."""
         frozen_at = timeutils.now_utc().isoformat()
         self.journal.insert(
             "candidate_labels",
@@ -775,12 +826,16 @@ class Orchestrator:
         cs = catalyst.catalyst_status if catalyst else None
         ct = catalyst.catalyst_type if catalyst else None
         csl = catalyst.catalyst_suggested_label if catalyst else None
-        lrr = 1 if (catalyst and catalyst.label_review_required) else 0
+        lrr = 1 if ((catalyst and catalyst.label_review_required)
+                    or (last30 and last30.label_review_required)) else 0
+        l30s = last30.last30days_status if last30 else None
+        sentl = last30.sentiment_label if last30 else None
         self.journal.conn.execute(
             "UPDATE candidates SET primary_label = ?, secondary_labels_json = ?, "
             "candidate_tags_json = ?, risk_tags_json = ?, label_confidence = ?, "
             "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ?, "
-            "catalyst_status = ?, catalyst_type = ?, catalyst_suggested_label = ?, label_review_required = ? "
+            "catalyst_status = ?, catalyst_type = ?, catalyst_suggested_label = ?, label_review_required = ?, "
+            "last30days_status = ?, sentiment_label = ? "
             "WHERE candidate_id = ?",
             (
                 classification.primary_label,
@@ -793,6 +848,7 @@ class Orchestrator:
                 classification.label_source,
                 frozen_at,
                 cs, ct, csl, lrr,
+                l30s, sentl,
                 cand["candidate_id"],
             ),
         )
@@ -930,6 +986,43 @@ class Orchestrator:
         )
 
     # --------------------------------------------------------- system health
+    def last30days_probe(self, symbol: str) -> dict:
+        """READ-ONLY manual probe: run last30days enrichment for ONE symbol and
+        return the narrative context WITHOUT writing to the ledger. Forces the
+        configured provider even if scan-time enrichment is disabled (an explicit
+        operator action), so the live CLI path can be verified before enabling it
+        in scans. Never proposes, sizes, executes, or journals a candidate row."""
+        from alphaos.research.last30days_provider import make_last30days_provider
+        from alphaos.scanner.interest_scanner import InterestScanner
+
+        symbol = (symbol or "").upper().strip()
+        snapshot = self.market.get_snapshot(symbol)
+        signals = InterestScanner(self.settings).score(snapshot)
+        cand = {"candidate_id": "probe", "symbol": symbol,
+                "direction": getattr(signals, "direction_hint", "long"), "momentum_score": None}
+        packet = build_packet(cand, snapshot, signals, None)
+        provider = make_last30days_provider(self.settings, force=True)
+        enricher = Last30DaysEnricher(self.settings, self.journal, provider=provider)
+        ctx = enricher.enrich(packet)
+        return {
+            "symbol": symbol,
+            "provider": getattr(provider, "name", "disabled"),
+            "python": self.settings.last30days_python,
+            "repo_path": self.settings.last30days_repo_path or "(auto-resolve)",
+            "sources": self.settings.last30days_sources,
+            "feed_to_labeller": self.settings.last30days_feed_to_labeller,
+            "last30days_status": ctx.last30days_status,
+            "summary": ctx.summary,
+            "top_themes": ctx.top_themes,
+            "source_coverage": ctx.source_coverage,
+            "sentiment_label": ctx.sentiment_label,
+            "risk_tags": ctx.risk_tags,
+            "last30days_context": ctx.last30days_context,
+            "sentiment_context": ctx.sentiment_context,
+            "enrichment_status": ctx.enrichment_status,
+            "enrichment_error": ctx.enrichment_error,
+        }
+
     def system_health(self) -> dict:
         """Structured health for the dashboard/CLI: mocked/deferred/disabled/live
         layers are all explicitly labelled."""
@@ -951,6 +1044,10 @@ class Orchestrator:
             "benzinga": "deferred_v1",
             "web_scraper": "disabled_v1",
             "massive": "deferred_v1",
+            "last30days_research": (
+                "disabled_v1" if not s.last30days_enabled
+                else f"{s.last30days_provider} (keyless, context-only)"
+            ),
             "execution_provider": s.execution_provider,     # simulated_internal | alpaca_paper
             "real_alpaca_paper_execution": "enabled" if s.real_paper_execution else "not_enabled_v1",
             "real_money_trading": "unreachable",
