@@ -437,6 +437,41 @@ class JournalStore:
             ),
         }
 
+    # ---------------------------------------------- 2.5 last30days research views
+    def last30days_for_candidate(self, candidate_id: str) -> Optional[dict]:
+        return self.one(
+            "SELECT * FROM candidate_last30days WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+            (candidate_id,),
+        )
+
+    def recent_last30days(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM candidate_last30days ORDER BY id DESC LIMIT ?", (limit,))
+
+    def last30days_summary(self) -> dict:
+        """Counts by last30days_status (read-only). The status set explicitly keeps
+        ``skipped_budget_cap`` distinct from ``none_found`` / ``unavailable`` /
+        ``error`` so the dashboard never mislabels a budget-skipped candidate."""
+        return {
+            "by_status": self.query(
+                "SELECT last30days_status AS status, COUNT(*) AS n FROM candidate_last30days "
+                "GROUP BY last30days_status ORDER BY n DESC"
+            ),
+        }
+
+    # ------------------------------------------- 2.6 decision-adjustment views
+    def recent_decision_adjustments(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM decision_adjustments ORDER BY id DESC LIMIT ?", (limit,))
+
+    def decision_adjustment_summary(self) -> dict:
+        """Counts by adjustment direction (read-only): upgraded / downgraded /
+        unchanged. Lets the dashboard show how often narrative moved the call."""
+        return {
+            "by_adjustment": self.query(
+                "SELECT adjustment, COUNT(*) AS n FROM decision_adjustments "
+                "GROUP BY adjustment ORDER BY n DESC"
+            ),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 

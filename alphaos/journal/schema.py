@@ -179,6 +179,10 @@ SCHEMA: list[tuple[str, str]] = [
             catalyst_type TEXT,
             catalyst_suggested_label TEXT,
             label_review_required INTEGER,
+            last30days_status TEXT,
+            sentiment_label TEXT,
+            decision_adjustment TEXT,
+            decision_adjustment_reason TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -884,6 +888,97 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.5: last30days research / narrative-context enrichment per
+        # shortlisted candidate. SEPARATE social/research layer from official news
+        # (2.4). Context only — never execution authority. EVERY eligible candidate
+        # is journaled, INCLUDING those skipped by the per-scan budget cap
+        # (last30days_status='skipped_budget_cap', enrichment_status='skipped'), so
+        # AlphaOS can later distinguish "checked, no narrative" (none_found) from
+        # "provider unavailable" (unavailable) from "intentionally skipped, outside
+        # the top-N budget cap" (skipped_budget_cap).
+        "candidate_last30days",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_last30days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            last30days_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            last30days_status TEXT,
+            summary TEXT,
+            top_themes_json TEXT,
+            source_coverage_json TEXT,
+            item_count INTEGER,
+            cluster_count INTEGER,
+            top_score REAL,
+            sentiment_label TEXT,
+            sentiment_score REAL,
+            newest_age_hours REAL,
+            risk_tags_json TEXT,
+            last30days_context TEXT,
+            sentiment_context TEXT,
+            label_review_required INTEGER,
+            query TEXT,
+            reason TEXT,
+            interest_rank INTEGER,
+            interest_score REAL,
+            provider TEXT,
+            enrichment_status TEXT,
+            enrichment_error TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # Roadmap 2.6: append-only audit of how the AI label adjusted the eval's
+        # trade decision. ONE row per labelled candidate, recording eval vs label
+        # vs final decision, the direction (upgraded/downgraded/unchanged), whether
+        # the symmetric override was armed (real signals), and the catalyst /
+        # sentiment driver behind the move — so AlphaOS can later learn whether
+        # narrative-driven adjustments actually improved outcomes. This NEVER
+        # executes; it records a decision that still passes through gates + approval.
+        "decision_adjustments",
+        """
+        CREATE TABLE IF NOT EXISTS decision_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            eval_decision TEXT,
+            label_decision TEXT,
+            final_decision TEXT,
+            adjustment TEXT,
+            override_armed INTEGER,
+            override_enabled INTEGER,
+            driver TEXT,
+            driver_source TEXT,
+            driver_detail_json TEXT,
+            evidence_json TEXT,
+            catalyst_status TEXT,
+            catalyst_type TEXT,
+            catalyst_summary TEXT,
+            catalyst_source TEXT,
+            catalyst_confidence REAL,
+            catalyst_timestamp_utc TEXT,
+            catalyst_age_minutes REAL,
+            last30days_status TEXT,
+            last30days_provider TEXT,
+            sentiment_label TEXT,
+            sentiment_score REAL,
+            last30days_summary TEXT,
+            top_themes_json TEXT,
+            source_coverage_json TEXT,
+            label_confidence REAL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -915,6 +1010,10 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_labels_scan_batch ON candidate_labels(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_catalysts_candidate ON candidate_catalysts(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_catalysts_scan_batch ON candidate_catalysts(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_last30days_candidate ON candidate_last30days(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_last30days_scan_batch ON candidate_last30days(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_decadj_candidate ON decision_adjustments(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_decadj_scan_batch ON decision_adjustments(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

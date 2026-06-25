@@ -117,6 +117,15 @@ def cmd_kill(orch: Orchestrator, action: str) -> int:
     return 0
 
 
+def cmd_last30days_probe(orch: Orchestrator, symbol: str) -> int:
+    """READ-ONLY: run last30days narrative enrichment for ONE symbol and print the
+    context. Writes nothing to the ledger; never proposes or executes. Uses the
+    configured provider (mock by default; set LAST30DAYS_PROVIDER=cli to test the
+    live keyless skill)."""
+    _print({"last30days_probe": orch.last30days_probe(symbol)})
+    return 0
+
+
 def cmd_dashboard(_: Orchestrator) -> int:
     print("Run the dashboard with:\n  streamlit run alphaos/dashboard/streamlit_app.py")
     return 0
@@ -141,6 +150,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("flatten", help="PAPER-ONLY: cancel open Alpaca paper orders + close paper positions")
     sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
+    l30 = sub.add_parser("last30days_probe",
+                         help="READ-ONLY: print last30days narrative context for one symbol (no ledger writes)")
+    l30.add_argument("symbol")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
@@ -181,6 +193,8 @@ def main(argv=None) -> int:
             return cmd_reconcile_report(orch)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
+        if args.command == "last30days_probe":
+            return cmd_last30days_probe(orch, args.symbol)
         if args.command == "dashboard":
             return cmd_dashboard(orch)
         if args.command == "kill":

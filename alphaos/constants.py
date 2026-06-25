@@ -465,3 +465,55 @@ CATALYST_TYPE_TO_LABEL = {
     CatalystType.SECTOR_NEWS.value: "Sector Sympathy Move",
     CatalystType.MACRO.value: "Sector Sympathy Move",
 }
+
+
+# --- Roadmap 2.5: last30days research / narrative-context enrichment ----------
+# A SEPARATE social/research layer (last30days skill) distinct from official news
+# (Roadmap 2.4). It is narrative CONTEXT, not execution authority: it can enrich
+# thesis/risk tags + suggest a label review only. It NEVER forces a proposal,
+# bypasses a gate, mints/overwrites an official label, affects sizing, or executes;
+# and it NEVER enters the no-news OpenAI momentum eval. Disabled by default; the
+# live provider shells out to a globally-installed skill (no vendored code).
+class Last30DaysStatus(StrEnum):
+    AVAILABLE = "available"               # ran; a usable recent narrative was found
+    NONE_FOUND = "none_found"             # ran; little/no clear narrative
+    STALE = "stale"                       # ran; narrative older than the window
+    UNAVAILABLE = "unavailable"           # provider disabled / missing / not configured
+    ERROR = "error"                       # provider call failed (fail-safe)
+    DISABLED = "disabled"                 # last30days enrichment intentionally off
+    SKIPPED_BUDGET_CAP = "skipped_budget_cap"  # eligible but outside the per-scan cap
+
+
+class Last30DaysProvider(StrEnum):
+    MOCK = "mock"
+    CLI = "cli"
+    DISABLED = "disabled"
+    NONE = "none"
+
+
+# Advisory sentiment polarity derived from the research (context only — never a
+# trade signal). "unknown" is the honest default for keyless retrieval, which has
+# no reliable polarity.
+class SentimentLabel(StrEnum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    MIXED = "mixed"
+    NEUTRAL = "neutral"
+    UNKNOWN = "unknown"
+
+
+MOCK_L30D_SOURCE = "MOCK_L30D"   # clearly-mock label so nothing is mistaken for live data
+L30D_SKIPPED_REASON = "outside LAST30DAYS_MAX_SYMBOLS_PER_SCAN cap"
+
+
+# --- Roadmap 2.6: gated labeller decision override ----------------------------
+# By default the AI label is DOWNGRADE-ONLY. When LABELLER_DECISION_OVERRIDE_ENABLED
+# is on AND real signals are present (real AI + a live catalyst/sentiment driver),
+# the label decision becomes authoritative and may move the eval's call UP or DOWN.
+# Every move is tagged + the driver recorded for learning. It still cannot bypass
+# the deterministic gates, skip manual approval, or upgrade a non-tradeable eval
+# (one with no levels / unusable freshness — i.e. a data-integrity reject).
+class DecisionAdjustment(StrEnum):
+    UPGRADED = "upgraded"       # label raised the eval's decision (real driver only)
+    DOWNGRADED = "downgraded"   # label lowered the eval's decision (always allowed)
+    UNCHANGED = "unchanged"     # label agreed with the eval / no net change
