@@ -223,6 +223,13 @@ class Settings:
     last30days_feed_to_labeller: bool
     last30days_fail_open_as_unavailable: bool
 
+    # --- gated labeller decision override (Roadmap 2.6) ---
+    # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
+    # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
+    # armed: real AI + a real (non-mock, non-'unknown') catalyst/sentiment driver.
+    # Inert while mock. Never bypasses gates / manual approval / real-money guard.
+    labeller_decision_override_enabled: bool
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -672,6 +679,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         last30days_lookback_hours=_get_float(src, "LAST30DAYS_LOOKBACK_HOURS", 720.0),
         last30days_feed_to_labeller=_get_bool(src, "LAST30DAYS_FEED_TO_LABELLER", True),
         last30days_fail_open_as_unavailable=_get_bool(src, "LAST30DAYS_FAIL_OPEN_AS_UNAVAILABLE", True),
+        labeller_decision_override_enabled=_get_bool(src, "LABELLER_DECISION_OVERRIDE_ENABLED", False),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

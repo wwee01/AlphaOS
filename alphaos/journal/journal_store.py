@@ -458,6 +458,20 @@ class JournalStore:
             ),
         }
 
+    # ------------------------------------------- 2.6 decision-adjustment views
+    def recent_decision_adjustments(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM decision_adjustments ORDER BY id DESC LIMIT ?", (limit,))
+
+    def decision_adjustment_summary(self) -> dict:
+        """Counts by adjustment direction (read-only): upgraded / downgraded /
+        unchanged. Lets the dashboard show how often narrative moved the call."""
+        return {
+            "by_adjustment": self.query(
+                "SELECT adjustment, COUNT(*) AS n FROM decision_adjustments "
+                "GROUP BY adjustment ORDER BY n DESC"
+            ),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 

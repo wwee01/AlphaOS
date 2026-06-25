@@ -181,6 +181,8 @@ SCHEMA: list[tuple[str, str]] = [
             label_review_required INTEGER,
             last30days_status TEXT,
             sentiment_label TEXT,
+            decision_adjustment TEXT,
+            decision_adjustment_reason TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -930,6 +932,43 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.6: append-only audit of how the AI label adjusted the eval's
+        # trade decision. ONE row per labelled candidate, recording eval vs label
+        # vs final decision, the direction (upgraded/downgraded/unchanged), whether
+        # the symmetric override was armed (real signals), and the catalyst /
+        # sentiment driver behind the move — so AlphaOS can later learn whether
+        # narrative-driven adjustments actually improved outcomes. This NEVER
+        # executes; it records a decision that still passes through gates + approval.
+        "decision_adjustments",
+        """
+        CREATE TABLE IF NOT EXISTS decision_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            adjustment_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            eval_decision TEXT,
+            label_decision TEXT,
+            final_decision TEXT,
+            adjustment TEXT,
+            override_armed INTEGER,
+            override_enabled INTEGER,
+            driver TEXT,
+            driver_detail_json TEXT,
+            catalyst_status TEXT,
+            catalyst_type TEXT,
+            catalyst_summary TEXT,
+            last30days_status TEXT,
+            sentiment_label TEXT,
+            last30days_summary TEXT,
+            label_confidence REAL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -963,6 +1002,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_catalysts_scan_batch ON candidate_catalysts(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_last30days_candidate ON candidate_last30days(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_last30days_scan_batch ON candidate_last30days(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_decadj_candidate ON decision_adjustments(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_decadj_scan_batch ON decision_adjustments(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

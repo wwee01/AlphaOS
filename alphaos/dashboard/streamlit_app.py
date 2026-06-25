@@ -328,6 +328,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                 "interest": c.get("interest_score"), "rank": c.get("interest_rank"),
                 "catalyst": c.get("catalyst_status"), "catalyst_type": c.get("catalyst_type"),
                 "last30days": c.get("last30days_status"), "sentiment": c.get("sentiment_label"),
+                "decision_adj": c.get("decision_adjustment"),
                 "review?": "yes" if c.get("label_review_required") else "",
                 "status": c.get("status"), "reason": c.get("shortlist_reason"),
             }
@@ -401,6 +402,35 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                         "reason", "summary",
                     )}, "last30days": _L30_LABEL.get(x.get("last30days_status"), x.get("last30days_status"))}
                     for x in l30rows
+                ],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
+
+    st.markdown("#### Decision adjustments (label vs eval)")
+    st.caption(
+        "How the advisory AI label moved the no-news eval's call (Roadmap 2.6). "
+        "Default is downgrade-only; symmetric up/down moves happen ONLY when armed "
+        "(real AI + a live catalyst/sentiment driver). Every move is recorded with "
+        "its driver. Never bypasses gates or approval; never executes."
+    )
+    das = j.decision_adjustment_summary()
+    if das["by_adjustment"]:
+        st.dataframe(das["by_adjustment"], width="stretch")
+    else:
+        st.info("No decision adjustments recorded yet.")
+    with st.expander("Decision-adjustment detail (latest)"):
+        da = j.recent_decision_adjustments(100)
+        if da:
+            st.dataframe(
+                [
+                    {k: x.get(k) for k in (
+                        "symbol", "adjustment", "eval_decision", "label_decision", "final_decision",
+                        "override_armed", "driver", "catalyst_status", "sentiment_label",
+                        "label_confidence",
+                    )}
+                    for x in da
                 ],
                 width="stretch",
             )

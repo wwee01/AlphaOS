@@ -24,7 +24,12 @@ from alphaos.constants import (
     BASELINE_MOMENTUM_NO_NEWS_V1,
     BaselineType,
     CATALYST_NOT_AVAILABLE_V1,
+    CatalystStatus,
+    DecisionAdjustment,
     Decision,
+    EnrichmentSource,
+    Last30DaysProvider,
+    Last30DaysStatus,
     ExecutionProvider,
     NEWS_STATUS_DISABLED_V1,
     NewsStatus,
@@ -80,6 +85,8 @@ class ScanSummary:
     catalyst_enriched: int = 0
     last30days_enriched: int = 0
     last30days_skipped_budget_cap: int = 0
+    decision_upgraded: int = 0
+    decision_downgraded: int = 0
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
@@ -264,7 +271,7 @@ class Orchestrator:
 
             decision = evaluation.decision
             if classification is not None:
-                decision = self._apply_label_floor(decision, classification.label_decision)
+                decision = self._resolve_decision(cand, evaluation, classification, scan_batch_id, summary)
 
             if decision == Decision.REJECT.value:
                 if (classification is not None
@@ -810,6 +817,11 @@ class Orchestrator:
                 last30.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
             )
         self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30)
+        # Stash the advisory context so _resolve_decision can (a) decide whether a
+        # real driver justifies a symmetric override and (b) record the driver.
+        cand["_catalyst"] = catalyst
+        cand["_last30"] = last30
+        cand["_packet_id"] = packet.packet_id
         return classification
 
     def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None, last30=None) -> None:
@@ -854,13 +866,138 @@ class Orchestrator:
         )
         self.journal.conn.commit()
 
+    _DECISION_ORDER = {Decision.REJECT.value: 0, Decision.WATCH.value: 1, Decision.PROPOSE.value: 2}
+    _DECISION_INV = {0: Decision.REJECT.value, 1: Decision.WATCH.value, 2: Decision.PROPOSE.value}
+
     @staticmethod
     def _apply_label_floor(base_decision: str, label_decision: str) -> str:
         """Downgrade-only: the AI label can RESTRICT the trade decision but never
         expand it. Returns the more restrictive of the two."""
-        order = {Decision.REJECT.value: 0, Decision.WATCH.value: 1, Decision.PROPOSE.value: 2}
-        inv = {0: Decision.REJECT.value, 1: Decision.WATCH.value, 2: Decision.PROPOSE.value}
-        return inv[min(order.get(base_decision, 0), order.get(label_decision, 0))]
+        order = Orchestrator._DECISION_ORDER
+        return Orchestrator._DECISION_INV[min(order.get(base_decision, 0), order.get(label_decision, 0))]
+
+    # ------------------------------------------- Roadmap 2.6: gated override
+    def _override_armed(self) -> bool:
+        """Globally ARMED only when the operator opted in AND the AI is real (a key
+        is present and we're not in mock mode). While mock, this is always False, so
+        the label stays strictly downgrade-only — the override is inert until the
+        signals driving it are real."""
+        return bool(
+            self.settings.labeller_decision_override_enabled
+            and self.settings.has_openai_key
+            and not self.settings.is_mock
+        )
+
+    @staticmethod
+    def _real_decision_driver(catalyst, last30) -> tuple:
+        """Return (has_real_driver, driver_str, detail) — whether a LIVE catalyst or
+        LIVE last30days sentiment exists to justify moving the decision. Mock /
+        unavailable / 'unknown' signals never qualify, so a symmetric move is only
+        ever backed by real narrative."""
+        drivers, detail = [], {}
+        cs = getattr(catalyst, "catalyst_status", None)
+        csrc = getattr(catalyst, "enrichment_source", None)
+        if (csrc not in (None, EnrichmentSource.MOCK.value, EnrichmentSource.DISABLED.value,
+                         EnrichmentSource.NONE.value)
+                and cs in (CatalystStatus.CONFIRMED.value, CatalystStatus.POSSIBLE.value,
+                           CatalystStatus.CONFLICTING.value)):
+            drivers.append(f"catalyst:{cs}:{getattr(catalyst, 'catalyst_type', '')}")
+            detail["catalyst"] = {"status": cs, "type": getattr(catalyst, "catalyst_type", None),
+                                  "source": csrc}
+        ls = getattr(last30, "last30days_status", None)
+        lsrc = getattr(last30, "provider", None)
+        sent = getattr(last30, "sentiment_label", None)
+        if (lsrc == Last30DaysProvider.CLI.value and ls == Last30DaysStatus.AVAILABLE.value
+                and sent and sent != "unknown"):
+            drivers.append(f"last30days:{sent}")
+            detail["last30days"] = {"status": ls, "sentiment": sent, "provider": lsrc}
+        return (bool(drivers), "; ".join(drivers), detail)
+
+    def _combine_decision(self, base: str, label: str, eval_levels_ok: bool,
+                          override_active: bool) -> str:
+        """Combine the no-news eval decision with the advisory label decision.
+
+        * Not armed -> downgrade-only (the legacy, always-safe floor).
+        * Armed -> the label is authoritative and may move the call UP or DOWN,
+          EXCEPT it can never UPGRADE a non-tradeable eval (no valid levels /
+          unusable freshness — a data-integrity reject). Narrative never overrides
+          a data-quality block.
+        """
+        order = self._DECISION_ORDER
+        if not override_active:
+            return self._apply_label_floor(base, label)
+        if order.get(label, 0) > order.get(base, 0) and not eval_levels_ok:
+            return base
+        return label
+
+    def _resolve_decision(self, cand, evaluation, classification, scan_batch_id, summary) -> str:
+        """Compute the final trade decision from the eval + label, applying the
+        gated symmetric override, and ALWAYS record how/why it moved (audit for
+        learning). Returns the final decision; downstream gates + manual approval
+        are unchanged and still authoritative."""
+        base = evaluation.decision
+        label = classification.label_decision
+        catalyst = cand.get("_catalyst")
+        last30 = cand.get("_last30")
+        has_driver, driver_str, driver_detail = self._real_decision_driver(catalyst, last30)
+        override_active = self._override_armed() and has_driver
+        eval_levels_ok = (
+            evaluation.entry is not None and evaluation.stop is not None
+            and evaluation.target is not None
+            and getattr(evaluation, "data_freshness_status", "usable") == "usable"
+        )
+        final = self._combine_decision(base, label, eval_levels_ok, override_active)
+
+        order = self._DECISION_ORDER
+        if order.get(final, 0) > order.get(base, 0):
+            adjustment = DecisionAdjustment.UPGRADED.value
+            summary.decision_upgraded += 1
+        elif order.get(final, 0) < order.get(base, 0):
+            adjustment = DecisionAdjustment.DOWNGRADED.value
+            summary.decision_downgraded += 1
+        else:
+            adjustment = DecisionAdjustment.UNCHANGED.value
+        self._record_decision_adjustment(
+            cand, evaluation, classification, base, final, adjustment,
+            override_active, driver_str, driver_detail, catalyst, last30, scan_batch_id,
+        )
+        return final
+
+    def _record_decision_adjustment(self, cand, evaluation, classification, base, final,
+                                    adjustment, override_active, driver_str, driver_detail,
+                                    catalyst, last30, scan_batch_id) -> None:
+        """Append-only audit + a denormalized tag on the candidate. Best-effort:
+        it records a decision; it never gates or executes anything."""
+        reason = (f"{adjustment} (label={classification.label_decision} vs eval={base})"
+                  + (f" — driver: {driver_str}" if driver_str else ""))
+        self.journal.insert("decision_adjustments", {
+            "adjustment_id": new_id("dadj"),
+            "candidate_id": cand["candidate_id"],
+            "packet_id": cand.get("_packet_id"),
+            "scan_batch_id": scan_batch_id,
+            "symbol": cand.get("symbol"),
+            "eval_decision": base,
+            "label_decision": classification.label_decision,
+            "final_decision": final,
+            "adjustment": adjustment,
+            "override_armed": 1 if override_active else 0,
+            "override_enabled": 1 if self.settings.labeller_decision_override_enabled else 0,
+            "driver": driver_str or None,
+            "driver_detail_json": driver_detail,
+            "catalyst_status": getattr(catalyst, "catalyst_status", None),
+            "catalyst_type": getattr(catalyst, "catalyst_type", None),
+            "catalyst_summary": getattr(catalyst, "catalyst_summary", None),
+            "last30days_status": getattr(last30, "last30days_status", None),
+            "sentiment_label": getattr(last30, "sentiment_label", None),
+            "last30days_summary": getattr(last30, "summary", None),
+            "label_confidence": getattr(classification, "confidence", None),
+        })
+        self.journal.conn.execute(
+            "UPDATE candidates SET decision_adjustment = ?, decision_adjustment_reason = ? "
+            "WHERE candidate_id = ?",
+            (adjustment, reason, cand["candidate_id"]),
+        )
+        self.journal.conn.commit()
 
     def _record_risk_check(self, proposal, evaluation, risk) -> str:
         """Persist a risk_checks row for the proposal. Pure audit: it never
@@ -1047,6 +1184,11 @@ class Orchestrator:
             "last30days_research": (
                 "disabled_v1" if not s.last30days_enabled
                 else f"{s.last30days_provider} (keyless, context-only)"
+            ),
+            "labeller_decision_override": (
+                "downgrade_only" if not s.labeller_decision_override_enabled
+                else ("armed (symmetric)" if (s.has_openai_key and not s.is_mock)
+                      else "enabled_inert_while_mock")
             ),
             "execution_provider": s.execution_provider,     # simulated_internal | alpaca_paper
             "real_alpaca_paper_execution": "enabled" if s.real_paper_execution else "not_enabled_v1",
