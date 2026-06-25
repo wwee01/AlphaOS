@@ -427,7 +427,8 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                 [
                     {k: x.get(k) for k in (
                         "symbol", "adjustment", "eval_decision", "label_decision", "final_decision",
-                        "override_armed", "driver", "catalyst_status", "sentiment_label",
+                        "override_armed", "driver_source", "driver", "catalyst_status",
+                        "catalyst_source", "catalyst_confidence", "sentiment_label", "sentiment_score",
                         "label_confidence",
                     )}
                     for x in da

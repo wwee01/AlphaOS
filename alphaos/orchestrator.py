@@ -963,11 +963,63 @@ class Orchestrator:
         )
         return final
 
+    @staticmethod
+    def _driver_source(driver_detail: dict) -> str:
+        """Categorize which real signal(s) drove an armed move: catalyst / last30days
+        / mixed / none. Derived from the qualified-driver detail (mock/'unknown'
+        signals never qualify, so they read as 'none')."""
+        keys = set((driver_detail or {}).keys())
+        if {"catalyst", "last30days"} <= keys:
+            return "mixed"
+        if keys == {"catalyst"}:
+            return "catalyst"
+        if keys == {"last30days"}:
+            return "last30days"
+        return "none"
+
+    @staticmethod
+    def _evidence_snapshot(catalyst, last30) -> dict:
+        """A COMPLETE source-level evidence snapshot captured at decision time, so a
+        later analyst can answer exactly which catalyst/sentiment evidence drove an
+        upgrade/downgrade — independent of which fields were promoted to columns."""
+        ev: dict = {}
+        if catalyst is not None:
+            ev["catalyst"] = {
+                "status": getattr(catalyst, "catalyst_status", None),
+                "type": getattr(catalyst, "catalyst_type", None),
+                "summary": getattr(catalyst, "catalyst_summary", None),
+                "confidence": getattr(catalyst, "catalyst_confidence", None),
+                "source": getattr(catalyst, "enrichment_source", None),
+                "timestamp_utc": getattr(catalyst, "catalyst_timestamp_utc", None),
+                "age_minutes": getattr(catalyst, "catalyst_age_minutes", None),
+                "sources": getattr(catalyst, "catalyst_sources", None),
+                "risk_tags": getattr(catalyst, "catalyst_risk_tags", None),
+                "enrichment_status": getattr(catalyst, "enrichment_status", None),
+            }
+        if last30 is not None:
+            ev["last30days"] = {
+                "status": getattr(last30, "last30days_status", None),
+                "sentiment_label": getattr(last30, "sentiment_label", None),
+                "sentiment_score": getattr(last30, "sentiment_score", None),
+                "summary": getattr(last30, "summary", None),
+                "top_themes": getattr(last30, "top_themes", None),
+                "source_coverage": getattr(last30, "source_coverage", None),
+                "cluster_count": getattr(last30, "cluster_count", None),
+                "item_count": getattr(last30, "item_count", None),
+                "newest_age_hours": getattr(last30, "newest_age_hours", None),
+                "provider": getattr(last30, "provider", None),
+                "enrichment_status": getattr(last30, "enrichment_status", None),
+            }
+        return ev
+
     def _record_decision_adjustment(self, cand, evaluation, classification, base, final,
                                     adjustment, override_active, driver_str, driver_detail,
                                     catalyst, last30, scan_batch_id) -> None:
-        """Append-only audit + a denormalized tag on the candidate. Best-effort:
-        it records a decision; it never gates or executes anything."""
+        """Append-only audit + a denormalized tag on the candidate. Stores enough
+        source-level evidence (catalyst + last30days, columns AND a full
+        ``evidence_json`` snapshot) to answer later: which exact catalyst/sentiment
+        evidence caused this candidate to be upgraded/downgraded? Best-effort: it
+        records a decision; it never gates or executes anything."""
         reason = (f"{adjustment} (label={classification.label_decision} vs eval={base})"
                   + (f" — driver: {driver_str}" if driver_str else ""))
         self.journal.insert("decision_adjustments", {
@@ -983,13 +1035,25 @@ class Orchestrator:
             "override_armed": 1 if override_active else 0,
             "override_enabled": 1 if self.settings.labeller_decision_override_enabled else 0,
             "driver": driver_str or None,
+            "driver_source": self._driver_source(driver_detail),
             "driver_detail_json": driver_detail,
+            "evidence_json": self._evidence_snapshot(catalyst, last30),
+            # --- catalyst evidence ---
             "catalyst_status": getattr(catalyst, "catalyst_status", None),
             "catalyst_type": getattr(catalyst, "catalyst_type", None),
             "catalyst_summary": getattr(catalyst, "catalyst_summary", None),
+            "catalyst_source": getattr(catalyst, "enrichment_source", None),
+            "catalyst_confidence": getattr(catalyst, "catalyst_confidence", None),
+            "catalyst_timestamp_utc": getattr(catalyst, "catalyst_timestamp_utc", None),
+            "catalyst_age_minutes": getattr(catalyst, "catalyst_age_minutes", None),
+            # --- last30days / sentiment evidence ---
             "last30days_status": getattr(last30, "last30days_status", None),
+            "last30days_provider": getattr(last30, "provider", None),
             "sentiment_label": getattr(last30, "sentiment_label", None),
+            "sentiment_score": getattr(last30, "sentiment_score", None),
             "last30days_summary": getattr(last30, "summary", None),
+            "top_themes_json": getattr(last30, "top_themes", None),
+            "source_coverage_json": getattr(last30, "source_coverage", None),
             "label_confidence": getattr(classification, "confidence", None),
         })
         self.journal.conn.execute(

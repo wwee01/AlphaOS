@@ -126,6 +126,36 @@ def test_scan_records_one_adjustment_per_labelled_candidate():
     o.close()
 
 
+def test_adjustment_rows_store_full_source_level_evidence():
+    """Every adjustment row must let a later analyst answer 'which exact catalyst/
+    sentiment evidence drove this move?' — not just a generic driver string."""
+    import json
+
+    # caps >= shortlist so every labelled candidate gets both enrichments
+    o = _orch(INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6",
+              NEWS_MAX_SYMBOLS_PER_SCAN="10", LAST30DAYS_MAX_SYMBOLS_PER_SCAN="10")
+    o.run_scan_once()
+    rows = o.journal.query("SELECT * FROM decision_adjustments")
+    assert rows
+    for r in rows:
+        # decision columns
+        for k in ("eval_decision", "label_decision", "final_decision", "adjustment"):
+            assert r[k]
+        assert r["driver_source"] in ("catalyst", "last30days", "mixed", "none")
+        # catalyst evidence (ran in mock -> non-null status + recorded source)
+        assert r["catalyst_status"] is not None
+        assert r["catalyst_source"] == "mock"
+        # last30days / sentiment evidence
+        assert r["last30days_status"] is not None
+        assert r["sentiment_label"] is not None
+        # complete reconstructable snapshot
+        ev = json.loads(r["evidence_json"])
+        assert "catalyst" in ev and "last30days" in ev
+        assert "source" in ev["catalyst"] and "timestamp_utc" in ev["catalyst"]
+        assert "sentiment_label" in ev["last30days"] and "source_coverage" in ev["last30days"]
+    o.close()
+
+
 def test_enabling_override_in_mock_changes_nothing():
     """Inert-while-mock: turning the flag on must not add a single proposal."""
     off = _orch(LABELLER_DECISION_OVERRIDE_ENABLED="false").run_scan_once().proposed
@@ -159,11 +189,15 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     ups = o.journal.query("SELECT * FROM decision_adjustments WHERE adjustment = ?",
                           (DecisionAdjustment.UPGRADED.value,))
     assert ups
+    import json
     for r in ups:
         assert r["eval_decision"] == Decision.WATCH.value
         assert r["final_decision"] == Decision.PROPOSE.value
         assert r["override_armed"] == 1
         assert r["driver"] == "last30days:bullish"          # driver recorded for learning
+        assert r["driver_source"] == "last30days"           # categorical source recorded
+        ev = json.loads(r["evidence_json"])                 # evidence snapshot present + parseable
+        assert ev and "last30days" in ev                    # last30days ran for every shortlisted
     tagged = o.journal.query("SELECT * FROM candidates WHERE decision_adjustment = ?",
                              (DecisionAdjustment.UPGRADED.value,))
     assert tagged and all(t["decision_adjustment_reason"] for t in tagged)
