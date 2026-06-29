@@ -163,7 +163,9 @@ class PlaybookClassifier:
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
-            max_tokens=self.settings.label_max_output_tokens,
+            # gpt-5.x chat.completions rejects `max_tokens`; `max_completion_tokens`
+            # is the supported param (and is accepted by gpt-4o too — forward-safe).
+            max_completion_tokens=self.settings.label_max_output_tokens,
             messages=[
                 {"role": "system", "content": pt.LABEL_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
