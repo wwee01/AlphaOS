@@ -169,7 +169,7 @@ def test_rule5_upgrades_still_require_gates_and_manual_approval(monkeypatch):
     monkeypatch.setattr(o.labeller, "classify", _propose_label)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l, d: (True, "last30days:bullish", {"last30days": {}}))
+                        lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {}}))
     summ = o.run_scan_once()
     assert summ.decision_upgraded > 0                       # upgrades did happen
     assert o.journal.count_rows("paper_orders") == 0        # ...yet nothing executed
@@ -248,7 +248,7 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     monkeypatch.setattr(o.labeller, "classify", _propose_label)        # force PROPOSE labels
     monkeypatch.setattr(o, "_override_armed", lambda: True)            # arm
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l, d: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
+                        lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
     summ = o.run_scan_once()
 
     assert summ.decision_upgraded > 0
@@ -292,7 +292,7 @@ def test_armed_upgrade_increases_proposals_vs_downgrade_only(monkeypatch):
     monkeypatch.setattr(armed.labeller, "classify", _propose_label)
     monkeypatch.setattr(armed, "_override_armed", lambda: True)
     monkeypatch.setattr(armed, "_real_decision_driver",
-                        lambda c, l, d: (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
+                        lambda c, l, d, p=None: (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
     proposed_armed = armed.run_scan_once().proposed
     armed.close()
 
@@ -316,7 +316,7 @@ def test_dashboard_readonly_with_adjustments(monkeypatch):
     o = _orch()
     monkeypatch.setattr(o.labeller, "classify", _propose_label)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
-    monkeypatch.setattr(o, "_real_decision_driver", lambda c, l, d: (True, "forced", {}))
+    monkeypatch.setattr(o, "_real_decision_driver", lambda c, l, d, p=None: (True, "forced", {}))
     o.run_scan_once()
     j = o.journal
     assert j.count_rows("decision_adjustments") > 0

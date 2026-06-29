@@ -499,7 +499,8 @@ class SentimentLabel(StrEnum):
     BEARISH = "bearish"
     MIXED = "mixed"
     NEUTRAL = "neutral"
-    UNKNOWN = "unknown"
+    UNCLEAR = "unclear"      # Roadmap 2.7: explicit "evidence too weak to call"
+    UNKNOWN = "unknown"      # no polarity attempted (keyless default)
 
 
 MOCK_L30D_SOURCE = "MOCK_L30D"   # clearly-mock label so nothing is mistaken for live data
@@ -517,3 +518,78 @@ class DecisionAdjustment(StrEnum):
     UPGRADED = "upgraded"       # label raised the eval's decision (real driver only)
     DOWNGRADED = "downgraded"   # label lowered the eval's decision (always allowed)
     UNCHANGED = "unchanged"     # label agreed with the eval / no net change
+
+
+# --- Roadmap 2.7: LLM-derived last30days narrative polarity --------------------
+# Interprets last30days cluster evidence into a directional polarity + a
+# narrative-driver classification. Polarity is CONTEXT that can ARM an upgrade
+# (via the gated override) when directionally aligned + high-confidence; it can
+# NEVER directly create a trade, bypass a gate, or skip manual approval. Hype /
+# meme / social-momentum / squeeze narratives are NOT auto-suppressed — they are
+# flagged as HIGH-RISK and may arm only as `high_risk_narrative` (manual-only).
+class DirectionAlignment(StrEnum):
+    ALIGNED = "aligned"
+    CONFLICTING = "conflicting"
+    NEUTRAL = "neutral"
+    UNCLEAR = "unclear"
+
+
+class SourceCoverageQuality(StrEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class NarrativeDriverType(StrEnum):
+    FUNDAMENTAL = "fundamental"
+    CATALYST = "catalyst"
+    SOCIAL_MOMENTUM = "social_momentum"
+    MEME_HYPE = "meme_hype"
+    SQUEEZE_RISK = "squeeze_risk"
+    MIXED = "mixed"
+    UNCLEAR = "unclear"
+
+
+# Narrative driver types that are short-term / crowd-driven -> arm only as HIGH-RISK.
+HIGH_RISK_NARRATIVE_TYPES = frozenset({
+    NarrativeDriverType.SOCIAL_MOMENTUM.value,
+    NarrativeDriverType.MEME_HYPE.value,
+    NarrativeDriverType.SQUEEZE_RISK.value,
+})
+
+
+class HypeRisk(StrEnum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ArmingClassification(StrEnum):
+    NORMAL_DRIVER = "normal_driver"
+    HIGH_RISK_NARRATIVE = "high_risk_narrative"
+    NON_ARMING = "non_arming"
+
+
+class PolarityParseStatus(StrEnum):
+    PARSED = "parsed"
+    INVALID_JSON = "invalid_json"
+    SCHEMA_ERROR = "schema_error"
+    MODEL_ERROR = "model_error"
+    SKIPPED = "skipped"
+
+
+# Source-coverage quality ordering for threshold comparisons (low < medium < high).
+SOURCE_COVERAGE_RANK = {
+    SourceCoverageQuality.LOW.value: 0,
+    SourceCoverageQuality.MEDIUM.value: 1,
+    SourceCoverageQuality.HIGH.value: 2,
+}
+
+POLARITY_PROMPT_VERSION = "v1"
+
+HIGH_RISK_NARRATIVE_WARNING = (
+    "This setup is partly driven by hype / social narrative / squeeze-style "
+    "attention. This may create short-term price action but carries elevated "
+    "reversal, crowding, and liquidity risk. Manual approval required."
+)
