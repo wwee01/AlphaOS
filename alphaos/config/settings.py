@@ -223,6 +223,18 @@ class Settings:
     last30days_feed_to_labeller: bool
     last30days_fail_open_as_unavailable: bool
 
+    # --- last30days narrative polarity (Roadmap 2.7) ---
+    # LLM-derived directional polarity over last30days clusters. Context only:
+    # can ARM an override upgrade when aligned + high-confidence, but never trades,
+    # bypasses a gate, or skips manual approval. Hype/meme/squeeze -> high-risk
+    # narrative (manual-only). Safe defaults: disabled + arming off.
+    last30days_polarity_enabled: bool
+    last30days_polarity_model: str
+    last30days_polarity_min_confidence: float
+    last30days_polarity_min_source_coverage: str   # low | medium | high
+    last30days_polarity_arming_allowed: bool
+    last30days_high_risk_narrative_manual_only: bool
+
     # --- gated labeller decision override (Roadmap 2.6) ---
     # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
     # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
@@ -680,6 +692,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         last30days_feed_to_labeller=_get_bool(src, "LAST30DAYS_FEED_TO_LABELLER", True),
         last30days_fail_open_as_unavailable=_get_bool(src, "LAST30DAYS_FAIL_OPEN_AS_UNAVAILABLE", True),
         labeller_decision_override_enabled=_get_bool(src, "LABELLER_DECISION_OVERRIDE_ENABLED", False),
+        last30days_polarity_enabled=_get_bool(src, "LAST30DAYS_POLARITY_ENABLED", False),
+        last30days_polarity_model=(_get(src, "LAST30DAYS_POLARITY_MODEL", "")
+                                   or _get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini")),
+        last30days_polarity_min_confidence=_get_float(src, "LAST30DAYS_POLARITY_MIN_CONFIDENCE", 0.6),
+        last30days_polarity_min_source_coverage=_get(src, "LAST30DAYS_POLARITY_MIN_SOURCE_COVERAGE", "medium").lower(),
+        last30days_polarity_arming_allowed=_get_bool(src, "LAST30DAYS_POLARITY_ARMING_ALLOWED", False),
+        last30days_high_risk_narrative_manual_only=_get_bool(src, "LAST30DAYS_HIGH_RISK_NARRATIVE_MANUAL_ONLY", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

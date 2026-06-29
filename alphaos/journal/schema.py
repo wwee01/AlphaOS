@@ -183,6 +183,10 @@ SCHEMA: list[tuple[str, str]] = [
             sentiment_label TEXT,
             decision_adjustment TEXT,
             decision_adjustment_reason TEXT,
+            polarity_label TEXT,
+            polarity_alignment TEXT,
+            narrative_driver_type TEXT,
+            arming_classification TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -292,6 +296,8 @@ SCHEMA: list[tuple[str, str]] = [
             setup_classification TEXT,
             expected_hold_days INTEGER,
             proposal_reason TEXT,
+            arming_classification TEXT,
+            narrative_warning TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -979,6 +985,47 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.7: LLM-derived last30days narrative polarity per candidate.
+        # SEPARATE evidence — never overwrites last30days / eval / label / risk /
+        # approval records. Records the classification (sentiment / driver type /
+        # hype risk / coverage), the DETERMINISTIC AlphaOS arming decision
+        # (should_arm_override + arming_classification: normal_driver /
+        # high_risk_narrative / non_arming), and parse_status for fail-safe audit.
+        # It can ARM an override upgrade but never trades or bypasses a gate/approval.
+        "last30days_polarity",
+        """
+        CREATE TABLE IF NOT EXISTS last30days_polarity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            polarity_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            provider TEXT,
+            model TEXT,
+            prompt_template_version TEXT,
+            sentiment_label TEXT,
+            sentiment_score REAL,
+            confidence REAL,
+            direction_alignment TEXT,
+            source_coverage_quality TEXT,
+            narrative_driver_type TEXT,
+            hype_or_manipulation_risk TEXT,
+            requires_user_attention INTEGER,
+            official_catalyst_conflict INTEGER,
+            should_arm_override INTEGER,
+            arming_classification TEXT,
+            warning_message TEXT,
+            reasoning_summary TEXT,
+            evidence_json TEXT,
+            raw_response_json TEXT,
+            parse_status TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1014,6 +1061,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_last30days_scan_batch ON candidate_last30days(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_decadj_candidate ON decision_adjustments(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_decadj_scan_batch ON decision_adjustments(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_polarity_candidate ON last30days_polarity(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_polarity_scan_batch ON last30days_polarity(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

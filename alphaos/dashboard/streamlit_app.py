@@ -328,7 +328,8 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                 "interest": c.get("interest_score"), "rank": c.get("interest_rank"),
                 "catalyst": c.get("catalyst_status"), "catalyst_type": c.get("catalyst_type"),
                 "last30days": c.get("last30days_status"), "sentiment": c.get("sentiment_label"),
-                "decision_adj": c.get("decision_adjustment"),
+                "polarity": c.get("polarity_label"), "narrative": c.get("narrative_driver_type"),
+                "arming": c.get("arming_classification"), "decision_adj": c.get("decision_adjustment"),
                 "review?": "yes" if c.get("label_review_required") else "",
                 "status": c.get("status"), "reason": c.get("shortlist_reason"),
             }
@@ -402,6 +403,41 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
                         "reason", "summary",
                     )}, "last30days": _L30_LABEL.get(x.get("last30days_status"), x.get("last30days_status"))}
                     for x in l30rows
+                ],
+                width="stretch",
+            )
+        else:
+            st.info("None.")
+
+    st.markdown("#### last30days narrative polarity")
+    st.caption(
+        "LLM-derived polarity over live last30days clusters (Roadmap 2.7) — advisory "
+        "CONTEXT. Aligned, high-confidence polarity can ARM an override upgrade; it "
+        "never trades, bypasses a gate, or skips approval. Hype/meme/squeeze narratives "
+        "are flagged HIGH-RISK (manual-only), not auto-suppressed."
+    )
+    ps = j.polarity_summary()
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        st.caption("by sentiment")
+        st.dataframe(ps["by_sentiment"], width="stretch") if ps["by_sentiment"] else st.info("No polarity yet.")
+    with pc2:
+        st.caption("by narrative driver")
+        st.dataframe(ps["by_driver"], width="stretch") if ps["by_driver"] else st.info("—")
+    with pc3:
+        st.caption("by arming class")
+        st.dataframe(ps["by_arming"], width="stretch") if ps["by_arming"] else st.info("—")
+    with st.expander("Polarity detail (latest) — incl. HIGH-RISK narrative flags"):
+        pol = j.recent_polarity(100)
+        if pol:
+            st.dataframe(
+                [
+                    {k: x.get(k) for k in (
+                        "symbol", "sentiment_label", "direction_alignment", "confidence",
+                        "source_coverage_quality", "narrative_driver_type", "hype_or_manipulation_risk",
+                        "arming_classification", "should_arm_override", "parse_status", "warning_message",
+                    )}
+                    for x in pol
                 ],
                 width="stretch",
             )

@@ -21,6 +21,7 @@ from alphaos.ai.openai_client import OpenAIClient
 from alphaos.approval import ApprovalEngine
 from alphaos.config.settings import Settings, load_settings
 from alphaos.constants import (
+    ArmingClassification,
     BASELINE_MOMENTUM_NO_NEWS_V1,
     BaselineType,
     CATALYST_NOT_AVAILABLE_V1,
@@ -62,6 +63,7 @@ from alphaos.safety import KillSwitch
 from alphaos.scanner.candidate_scanner import CandidateScanner
 from alphaos.scanner.candidate_packet import build_packet
 from alphaos.ai.playbook_classifier import PlaybookClassifier
+from alphaos.ai.last30days_polarity import Last30DaysPolarityClassifier, PolarityEvidence
 from alphaos.news.catalyst_enricher import CatalystEnricher
 from alphaos.research.last30days_enricher import Last30DaysEnricher
 from alphaos.strategy.proposal import TradeProposal
@@ -87,6 +89,8 @@ class ScanSummary:
     catalyst_enriched: int = 0
     last30days_enriched: int = 0
     last30days_skipped_budget_cap: int = 0
+    polarity_classified: int = 0
+    high_risk_narrative: int = 0
     decision_upgraded: int = 0
     decision_downgraded: int = 0
     scan_batch_id: Optional[str] = None
@@ -111,6 +115,7 @@ class Orchestrator:
         self.labeller = PlaybookClassifier(self.settings, self.journal)  # Roadmap 2.3: AI category labelling
         self.enricher = CatalystEnricher(self.settings, self.journal)    # Roadmap 2.4: official catalyst context
         self.l30_enricher = Last30DaysEnricher(self.settings, self.journal)  # Roadmap 2.5: last30days narrative context
+        self.polarity = Last30DaysPolarityClassifier(self.settings, self.journal)  # Roadmap 2.7: narrative polarity
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
         self.swing = SwingStrategy()
@@ -264,6 +269,8 @@ class Orchestrator:
                     summary.last30days_enriched += 1
                 elif l30_mode == "skipped_budget_cap":
                     summary.last30days_skipped_budget_cap += 1
+                if cand.get("_polarity") is not None:
+                    summary.polarity_classified += 1
 
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
@@ -369,6 +376,16 @@ class Orchestrator:
         proposal.risk_check_id = rc_id
         proposal.status = "pending_approval"
         self.journal.insert("trade_proposals", proposal.to_row())
+        # Roadmap 2.7: surface the polarity arming classification + high-risk
+        # narrative warning on the proposal (advisory; never changes levels/sizing).
+        arming_cls = cand.get("_arming_classification")
+        warning = cand.get("_narrative_warning")
+        if arming_cls or warning:
+            self.journal.conn.execute(
+                "UPDATE trade_proposals SET arming_classification = ?, narrative_warning = ? "
+                "WHERE proposal_id = ?",
+                (arming_cls, warning, proposal.proposal_id),
+            )
         # Link the pre-trade baseline for this candidate to the trade's id.
         self.journal.conn.execute(
             "UPDATE baseline_outcomes SET trade_id = ? WHERE candidate_id = ? AND trade_id IS NULL",
@@ -377,6 +394,13 @@ class Orchestrator:
         self.journal.conn.commit()
         self._set_candidate_status(cand["candidate_id"], "proposed")
         summary.proposed += 1
+
+        # HIGH-RISK narrative (hype/meme/squeeze) is MANUAL-ONLY: never auto-approve,
+        # regardless of approval mode. It still went through every risk/freshness gate.
+        if (arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
+                and self.settings.last30days_high_risk_narrative_manual_only):
+            summary.pending_manual += 1
+            return True
 
         outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True)
         if outcome.approved:
@@ -818,20 +842,42 @@ class Orchestrator:
                 "candidate_last30days",
                 last30.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
             )
-        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30)
+        # Roadmap 2.7: LLM narrative polarity over the live last30days clusters.
+        # Only when enrichment found a real narrative (status 'available'); SEPARATE
+        # evidence; fail-safe. It can ARM an override upgrade (gated, deterministic)
+        # but never trades, bypasses a gate, or skips approval.
+        polarity = None
+        if (last30 is not None and self.settings.last30days_polarity_enabled
+                and last30.last30days_status == Last30DaysStatus.AVAILABLE.value):
+            ev = PolarityEvidence(
+                candidate_id=cand["candidate_id"], symbol=packet.symbol,
+                direction=cand.get("direction") or getattr(signals, "direction_hint", "long"),
+                structure_hint=getattr(signals, "structure_hint", None),
+                provider=getattr(last30, "provider", None),
+                cluster_titles=list(getattr(last30, "top_themes", []) or []),
+                cluster_summaries=([last30.summary] if getattr(last30, "summary", None) else []),
+                source_coverage=list(getattr(last30, "source_coverage", []) or []),
+                source_coverage_count=len(getattr(last30, "source_coverage", []) or []),
+                catalyst_summary=getattr(catalyst, "catalyst_summary", None),
+                eval_decision=None, label_decision=classification.label_decision,
+            )
+            polarity = self.polarity.classify(ev)
+            self.journal.insert("last30days_polarity", polarity.to_row(scan_batch_id, packet.packet_id))
+        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30, polarity)
         # Stash the advisory context so _resolve_decision can (a) decide whether a
         # real driver justifies a symmetric override and (b) record the driver.
         cand["_catalyst"] = catalyst
         cand["_last30"] = last30
+        cand["_polarity"] = polarity
         cand["_packet_id"] = packet.packet_id
         return classification
 
-    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None, last30=None) -> None:
+    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None,
+                      last30=None, polarity=None) -> None:
         """Persist the label (append-only history) + freeze the current view onto
-        the candidate, including the advisory catalyst (2.4) + last30days (2.5)
-        views. History is never rewritten (post_trade_review_label stays NULL);
-        neither catalyst nor last30days EVER overwrites primary_label — only the
-        advisory *_status / *_suggested_label / label_review_required fields."""
+        the candidate, including the advisory catalyst (2.4) + last30days (2.5) +
+        polarity (2.7) views. History is never rewritten; none of catalyst /
+        last30days / polarity EVER overwrites primary_label — only advisory fields."""
         frozen_at = timeutils.now_utc().isoformat()
         self.journal.insert(
             "candidate_labels",
@@ -844,12 +890,17 @@ class Orchestrator:
                     or (last30 and last30.label_review_required)) else 0
         l30s = last30.last30days_status if last30 else None
         sentl = last30.sentiment_label if last30 else None
+        pol_label = polarity.sentiment_label if polarity else None
+        pol_align = polarity.direction_alignment if polarity else None
+        pol_driver = polarity.narrative_driver_type if polarity else None
+        pol_arming = polarity.arming_classification if polarity else None
         self.journal.conn.execute(
             "UPDATE candidates SET primary_label = ?, secondary_labels_json = ?, "
             "candidate_tags_json = ?, risk_tags_json = ?, label_confidence = ?, "
             "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ?, "
             "catalyst_status = ?, catalyst_type = ?, catalyst_suggested_label = ?, label_review_required = ?, "
-            "last30days_status = ?, sentiment_label = ? "
+            "last30days_status = ?, sentiment_label = ?, "
+            "polarity_label = ?, polarity_alignment = ?, narrative_driver_type = ?, arming_classification = ? "
             "WHERE candidate_id = ?",
             (
                 classification.primary_label,
@@ -863,6 +914,7 @@ class Orchestrator:
                 frozen_at,
                 cs, ct, csl, lrr,
                 l30s, sentl,
+                pol_label, pol_align, pol_driver, pol_arming,
                 cand["candidate_id"],
             ),
         )
@@ -900,20 +952,21 @@ class Orchestrator:
                                     CatalystType.PARTNERSHIP.value})
 
     @staticmethod
-    def _real_decision_driver(catalyst, last30, direction) -> tuple:
+    def _real_decision_driver(catalyst, last30, direction, polarity=None) -> tuple:
         """Return (has_real_positive_driver, driver_str, detail) — whether a real,
         LIVE, POSITIVE driver exists to ARM an upgrade aligned with the trade
         direction. ONLY these qualify:
 
         * a LIVE catalyst (source not mock/disabled/none) that is **confirmed or
           possible** AND whose type does not clearly oppose the direction; or
-        * LIVE last30days (cli) that is **available** with sentiment **supportive**
-          of the direction (bullish for long, bearish for short).
+        * a last30days POLARITY (2.7) whose DETERMINISTIC arming decision is
+          ``should_arm_override`` (aligned + high-confidence + covered + no catalyst
+          conflict + arming enabled). The arming_classification (normal_driver /
+          high_risk_narrative) is carried through in the detail.
 
-        Everything else is rejected: mock sources, conflicting / stale / none_found
-        / unavailable / error catalysts, 'unknown'/neutral/mixed sentiment, and
-        signals that oppose the direction. (Downgrades never need a driver — they
-        are always the safe direction.)
+        If polarity is absent (disabled), it falls back to the pre-2.7 raw-sentiment
+        check (which never arms for keyless 'unknown' sentiment). Everything else is
+        rejected. Downgrades never need a driver — they are always the safe direction.
         """
         is_long = (direction or TradeDirection.LONG.value) != TradeDirection.SHORT.value
         drivers, detail = [], {}
@@ -930,15 +983,30 @@ class Orchestrator:
                 drivers.append(f"catalyst:{cs}:{ctype}")
                 detail["catalyst"] = {"status": cs, "type": ctype, "source": csrc}
 
-        ls = getattr(last30, "last30days_status", None)
-        lsrc = getattr(last30, "provider", None)
-        sent = getattr(last30, "sentiment_label", None)
-        supportive = (sent == SentimentLabel.BULLISH.value) if is_long \
-            else (sent == SentimentLabel.BEARISH.value)
-        if (lsrc == Last30DaysProvider.CLI.value and ls == Last30DaysStatus.AVAILABLE.value
-                and supportive):
-            drivers.append(f"last30days:{sent}")
-            detail["last30days"] = {"status": ls, "sentiment": sent, "provider": lsrc}
+        if polarity is not None:
+            # 2.7: the AlphaOS-side deterministic arming decision already enforced
+            # alignment + confidence + coverage + no-conflict + config. Trust it here.
+            if getattr(polarity, "should_arm_override", False):
+                drivers.append(f"last30days:{polarity.sentiment_label}:{polarity.arming_classification}")
+                detail["last30days"] = {
+                    "sentiment": polarity.sentiment_label,
+                    "alignment": polarity.direction_alignment,
+                    "driver_type": polarity.narrative_driver_type,
+                    "arming_classification": polarity.arming_classification,
+                    "confidence": polarity.confidence,
+                    "provider": polarity.provider,
+                }
+        else:
+            # pre-2.7 fallback: raw supportive sentiment from a live cli provider.
+            ls = getattr(last30, "last30days_status", None)
+            lsrc = getattr(last30, "provider", None)
+            sent = getattr(last30, "sentiment_label", None)
+            supportive = (sent == SentimentLabel.BULLISH.value) if is_long \
+                else (sent == SentimentLabel.BEARISH.value)
+            if (lsrc == Last30DaysProvider.CLI.value and ls == Last30DaysStatus.AVAILABLE.value
+                    and supportive):
+                drivers.append(f"last30days:{sent}")
+                detail["last30days"] = {"status": ls, "sentiment": sent, "provider": lsrc}
 
         return (bool(drivers), "; ".join(drivers), detail)
 
@@ -968,8 +1036,9 @@ class Orchestrator:
         label = classification.label_decision
         catalyst = cand.get("_catalyst")
         last30 = cand.get("_last30")
+        polarity = cand.get("_polarity")
         has_driver, driver_str, driver_detail = self._real_decision_driver(
-            catalyst, last30, evaluation.direction)
+            catalyst, last30, evaluation.direction, polarity)
         override_active = self._override_armed() and has_driver
         eval_levels_ok = (
             evaluation.entry is not None and evaluation.stop is not None
@@ -987,6 +1056,18 @@ class Orchestrator:
             summary.decision_downgraded += 1
         else:
             adjustment = DecisionAdjustment.UNCHANGED.value
+
+        # If a high-risk narrative (hype/meme/squeeze) drove an UPGRADE, tag the
+        # candidate so the proposal carries the warning + is forced manual-only.
+        l30_detail = (driver_detail or {}).get("last30days") or {}
+        if (adjustment == DecisionAdjustment.UPGRADED.value
+                and l30_detail.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value):
+            cand["_arming_classification"] = ArmingClassification.HIGH_RISK_NARRATIVE.value
+            cand["_narrative_warning"] = getattr(polarity, "warning_message", "") or ""
+            summary.high_risk_narrative += 1
+        elif adjustment == DecisionAdjustment.UPGRADED.value and l30_detail.get("arming_classification"):
+            cand["_arming_classification"] = l30_detail.get("arming_classification")
+
         self._record_decision_adjustment(
             cand, evaluation, classification, base, final, adjustment,
             override_active, driver_str, driver_detail, catalyst, last30, scan_batch_id,
@@ -1283,6 +1364,12 @@ class Orchestrator:
                 "downgrade_only" if not s.labeller_decision_override_enabled
                 else ("armed (symmetric)" if (s.has_openai_key and not s.is_mock)
                       else "enabled_inert_while_mock")
+            ),
+            "last30days_polarity": (
+                "disabled_v1" if not s.last30days_polarity_enabled
+                else (f"{s.last30days_polarity_model} (arming "
+                      f"{'on' if s.last30days_polarity_arming_allowed else 'off'})"
+                      + ("" if (s.has_openai_key and not s.is_mock) else ", mock"))
             ),
             "execution_provider": s.execution_provider,     # simulated_internal | alpaca_paper
             "real_alpaca_paper_execution": "enabled" if s.real_paper_execution else "not_enabled_v1",

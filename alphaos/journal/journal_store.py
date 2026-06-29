@@ -472,6 +472,27 @@ class JournalStore:
             ),
         }
 
+    # ----------------------------------------------- 2.7 last30days polarity views
+    def recent_polarity(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM last30days_polarity ORDER BY id DESC LIMIT ?", (limit,))
+
+    def polarity_summary(self) -> dict:
+        """Counts by sentiment, narrative driver type, and arming classification."""
+        return {
+            "by_sentiment": self.query(
+                "SELECT sentiment_label AS label, COUNT(*) AS n FROM last30days_polarity "
+                "GROUP BY sentiment_label ORDER BY n DESC"
+            ),
+            "by_driver": self.query(
+                "SELECT narrative_driver_type AS driver, COUNT(*) AS n FROM last30days_polarity "
+                "GROUP BY narrative_driver_type ORDER BY n DESC"
+            ),
+            "by_arming": self.query(
+                "SELECT arming_classification AS arming, COUNT(*) AS n FROM last30days_polarity "
+                "GROUP BY arming_classification ORDER BY n DESC"
+            ),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 
