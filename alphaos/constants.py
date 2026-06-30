@@ -593,3 +593,88 @@ HIGH_RISK_NARRATIVE_WARNING = (
     "attention. This may create short-term price action but carries elevated "
     "reversal, crowding, and liquidity risk. Manual approval required."
 )
+
+
+# --- Roadmap 2.8: Armed Watch + labeller reasoning + User Override ------------
+# An ARMED WATCH = the override/polarity armed a support signal but the final
+# decision stayed WATCH (no proposal/order) because eval/labeller produced no
+# higher actionable decision. It is a NEAR-ACTION watchlist item, NOT a reject.
+class ArmedWatchReason(StrEnum):
+    LABELLER_DID_NOT_UPGRADE = "polarity_armed_but_labeller_did_not_upgrade"
+    EVAL_NOT_TRADEABLE = "polarity_armed_but_eval_not_tradeable"
+    ARMED_NO_UPGRADE = "armed_no_upgrade"
+
+
+# Advisory labeller readiness (Part B; visibility only — never changes behaviour).
+class ProposalReadiness(StrEnum):
+    NOT_READY = "not_ready"
+    DEVELOPING = "developing"
+    NEAR_ACTION = "near_action"
+    READY = "ready"
+    UNCLEAR = "unclear"
+
+
+# --- User Override Mode (Part C): a SEPARATE decision layer. A user override
+# NEVER rewrites AlphaOS's original recommendation; both are stored side by side.
+class UserOverrideAction(StrEnum):
+    WATCH_TO_TRADE = "watch_to_trade"
+    PROPOSE_TO_REJECT = "propose_to_reject"
+    REJECT_TO_WATCH = "reject_to_watch"
+    REJECT_TO_TRADE = "reject_to_trade"
+    LONG_TO_SHORT = "long_to_short"
+    SHORT_TO_LONG = "short_to_long"
+    NORMAL_TO_HIGH_CONVICTION = "normal_to_high_conviction"
+    REDUCE_SIZE = "reduce_size"
+    INCREASE_SIZE = "increase_size"
+    MANUAL_EXIT = "manual_exit"
+    MANUAL_HOLD = "manual_hold"
+
+
+class OverrideAggressiveness(StrEnum):
+    MORE_AGGRESSIVE = "more_aggressive"
+    MORE_CONSERVATIVE = "more_conservative"
+    DIRECTION_CHANGE = "direction_change"
+    EXIT_OVERRIDE = "exit_override"
+    HOLD_OVERRIDE = "hold_override"
+
+
+class UserReasonCode(StrEnum):
+    STRONG_CONVICTION = "strong_conviction"
+    MARKET_INTUITION = "market_intuition"
+    SECTOR_KNOWLEDGE = "sector_knowledge"
+    NEWS_JUST_BROKE = "news_just_broke"
+    DISAGREES_WITH_AI = "disagrees_with_ai"
+    TESTING_HYPOTHESIS = "testing_hypothesis"
+    WANTS_ACTION = "wants_action"
+    RISK_REDUCTION = "risk_reduction"
+    PROFIT_PROTECTION = "profit_protection"
+    STOP_LOSS_CONCERN = "stop_loss_concern"
+    OTHER = "other"
+
+
+class OverrideOutcomeStatus(StrEnum):
+    PENDING = "pending"
+    WON = "won"
+    LOST = "lost"
+    BREAKEVEN = "breakeven"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class AttributionResult(StrEnum):
+    USER_OUTPERFORMED = "user_outperformed"
+    ALPHAOS_OUTPERFORMED = "alphaos_outperformed"
+    INCONCLUSIVE = "inconclusive"
+    PENDING = "pending"
+
+
+class OverrideBlockedReason(StrEnum):
+    SAFETY_GATE_FAILED = "safety_gate_failed"
+    STALE_DATA = "stale_data"
+    WIDE_SPREAD = "wide_spread"
+    LOW_LIQUIDITY = "low_liquidity"
+    RISK_GATE_FAILED = "risk_gate_failed"
+    NO_VALID_EXIT_PROTECTION = "no_valid_exit_protection"
+    NO_OPEN_POSITION = "no_open_position"
+    NO_PROPOSAL = "no_proposal"
+    OTHER = "other"

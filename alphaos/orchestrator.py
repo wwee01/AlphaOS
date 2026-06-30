@@ -17,11 +17,18 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from alphaos.ai.claude_reviewer import ClaudeReviewer, ClaudeUnavailable
-from alphaos.ai.openai_client import OpenAIClient
+from alphaos.ai.openai_client import OpenAIClient, OpenAIEvaluation
 from alphaos.approval import ApprovalEngine
 from alphaos.config.settings import Settings, load_settings
 from alphaos.constants import (
+    ArmedWatchReason,
     ArmingClassification,
+    AttributionResult,
+    HIGH_RISK_NARRATIVE_WARNING,
+    OverrideAggressiveness,
+    OverrideBlockedReason,
+    OverrideOutcomeStatus,
+    UserOverrideAction,
     BASELINE_MOMENTUM_NO_NEWS_V1,
     BaselineType,
     CATALYST_NOT_AVAILABLE_V1,
@@ -93,6 +100,7 @@ class ScanSummary:
     high_risk_narrative: int = 0
     decision_upgraded: int = 0
     decision_downgraded: int = 0
+    armed_watch: int = 0
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
@@ -542,6 +550,231 @@ class Orchestrator:
         self.approvals.reject_manually(proposal, approver=approver, reason=reason)
         self._set_proposal_status(proposal_id, "rejected")
         return True, "rejected"
+
+    # ----------------------------------------------- Roadmap 2.8: User Override
+    _OVERRIDE_AGGRESSIVENESS = {
+        UserOverrideAction.WATCH_TO_TRADE.value: OverrideAggressiveness.MORE_AGGRESSIVE.value,
+        UserOverrideAction.REJECT_TO_TRADE.value: OverrideAggressiveness.MORE_AGGRESSIVE.value,
+        UserOverrideAction.REJECT_TO_WATCH.value: OverrideAggressiveness.MORE_AGGRESSIVE.value,
+        UserOverrideAction.INCREASE_SIZE.value: OverrideAggressiveness.MORE_AGGRESSIVE.value,
+        UserOverrideAction.NORMAL_TO_HIGH_CONVICTION.value: OverrideAggressiveness.MORE_AGGRESSIVE.value,
+        UserOverrideAction.PROPOSE_TO_REJECT.value: OverrideAggressiveness.MORE_CONSERVATIVE.value,
+        UserOverrideAction.REDUCE_SIZE.value: OverrideAggressiveness.MORE_CONSERVATIVE.value,
+        UserOverrideAction.LONG_TO_SHORT.value: OverrideAggressiveness.DIRECTION_CHANGE.value,
+        UserOverrideAction.SHORT_TO_LONG.value: OverrideAggressiveness.DIRECTION_CHANGE.value,
+        UserOverrideAction.MANUAL_EXIT.value: OverrideAggressiveness.EXIT_OVERRIDE.value,
+        UserOverrideAction.MANUAL_HOLD.value: OverrideAggressiveness.HOLD_OVERRIDE.value,
+    }
+
+    @staticmethod
+    def _eval_from_row(row: dict) -> OpenAIEvaluation:
+        return OpenAIEvaluation(
+            eval_id=row.get("eval_id") or new_id("eval"), candidate_id=row.get("candidate_id"),
+            symbol=row.get("symbol"), model=row.get("model") or "unknown",
+            direction=row.get("direction") or TradeDirection.LONG.value,
+            entry=row.get("entry"), stop=row.get("stop"), target=row.get("target"),
+            max_holding_days=row.get("max_holding_days"), expected_r=row.get("expected_r"),
+            confidence=row.get("confidence"), decision=row.get("decision") or Decision.WATCH.value,
+            reasoning_summary=row.get("reasoning_summary") or "", is_mock=bool(row.get("is_mock")),
+        )
+
+    @staticmethod
+    def _nightdesk_flag(action, arming_cls, a_final):
+        if arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value:
+            return True, "high_risk_narrative_override"
+        if action in (UserOverrideAction.WATCH_TO_TRADE.value, UserOverrideAction.REJECT_TO_TRADE.value) \
+                and a_final != Decision.PROPOSE.value:
+            return True, "user_traded_against_alphaos_recommendation"
+        if action == UserOverrideAction.PROPOSE_TO_REJECT.value:
+            return True, "user_rejected_alphaos_proposal"
+        return False, None
+
+    def create_user_override(self, candidate_id, action, reason_code=None, note=None,
+                             direction=None, size=None, approver="user") -> dict:
+        """Record a USER OVERRIDE as a SEPARATE decision layer. It NEVER rewrites
+        AlphaOS's original recommendation (both are stored), NEVER bypasses the
+        risk/freshness/spread/liquidity gates, manual approval, or the real-money
+        guard. `watch_to_trade` only ever creates a PENDING_APPROVAL proposal —
+        the user must still `approve` it. Returns {ok, message, override}."""
+        self._ensure_startup()
+        action = str(action)
+        cand = self.journal.one("SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,))
+        if not cand:
+            return {"ok": False, "message": f"candidate {candidate_id} not found"}
+        symbol = cand.get("symbol")
+        adj = self.journal.one(
+            "SELECT * FROM decision_adjustments WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+            (candidate_id,)) or {}
+        ev = self.journal.evaluation_for_candidate(candidate_id) or {}
+        a_final = adj.get("final_decision") or cand.get("label_decision") or ev.get("decision")
+        arming_cls = adj.get("arming_classification") or cand.get("arming_classification")
+        armed_watch = bool(cand.get("armed_watch") or adj.get("armed_watch"))
+
+        rec = {
+            "override_id": new_id("ovr"), "candidate_id": candidate_id, "proposal_id": None,
+            "symbol": symbol,
+            "alphaos_eval_decision": adj.get("eval_decision") or ev.get("decision"),
+            "alphaos_label_decision": adj.get("label_decision") or cand.get("label_decision"),
+            "alphaos_final_decision": a_final,
+            "alphaos_direction": ev.get("direction") or cand.get("direction"),
+            "alphaos_confidence": ev.get("confidence"),
+            "alphaos_reasoning_summary": ev.get("reasoning_summary"),
+            "armed_watch": 1 if armed_watch else 0, "arming_classification": arming_cls,
+            "user_override_action": action, "user_final_decision": None,
+            "user_direction": direction or (ev.get("direction") or cand.get("direction")),
+            "user_size_override": size, "user_reason_code": reason_code, "user_reason_text": note,
+            "override_aggressiveness": self._OVERRIDE_AGGRESSIVENESS.get(action),
+            "execution_allowed": 0, "blocked_reason": None, "execution_result": None,
+            "linked_order_id": None, "linked_trade_id": None,
+            "outcome_r": None, "outcome_pnl": None,
+            "outcome_status": OverrideOutcomeStatus.PENDING.value,
+            "alphaos_would_have_traded": 1 if a_final == Decision.PROPOSE.value else 0,
+            "user_did_trade": 0, "attribution_result": AttributionResult.PENDING.value,
+        }
+
+        if action in (UserOverrideAction.WATCH_TO_TRADE.value, UserOverrideAction.REJECT_TO_TRADE.value):
+            rec["user_final_decision"] = Decision.PROPOSE.value
+            msg = self._override_open_trade(cand, ev, rec, approver)
+        elif action == UserOverrideAction.PROPOSE_TO_REJECT.value:
+            rec["user_final_decision"] = Decision.REJECT.value
+            prop = self.journal.one(
+                "SELECT * FROM trade_proposals WHERE candidate_id = ? "
+                "AND status IN ('pending_approval','proposed') ORDER BY id DESC LIMIT 1", (candidate_id,))
+            if not prop:
+                rec["blocked_reason"] = OverrideBlockedReason.NO_PROPOSAL.value
+                msg = "no open proposal to reject"
+            else:
+                self.reject_proposal(prop["proposal_id"], approver=approver,
+                                     reason=f"user_override: {reason_code or note or 'rejected'}")
+                rec["proposal_id"] = prop["proposal_id"]
+                msg = f"AlphaOS proposal {prop['proposal_id']} rejected by user override"
+        elif action == UserOverrideAction.MANUAL_EXIT.value:
+            rec["user_final_decision"] = "exit"
+            pos = self.journal.one(
+                "SELECT * FROM positions WHERE symbol = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+                (symbol,))
+            if not pos:
+                rec["blocked_reason"] = OverrideBlockedReason.NO_OPEN_POSITION.value
+                msg = "no open position to exit"
+            else:
+                rec["linked_trade_id"] = pos.get("trade_id")
+                msg = "manual exit recorded (use `alphaos flatten` to close — PAPER-only, manual)"
+        elif action == UserOverrideAction.MANUAL_HOLD.value:
+            rec["user_final_decision"] = "hold"
+            msg = "manual hold recorded"
+        else:
+            rec["user_final_decision"] = action
+            msg = f"override '{action}' recorded (no automatic action wired in v1)"
+
+        nd, nd_reason = self._nightdesk_flag(action, arming_cls, a_final)
+        rec["nightdesk_research_candidate"] = 1 if nd else 0
+        rec["nightdesk_research_reason"] = nd_reason
+
+        self.journal.insert("user_decision_overrides", rec)
+        self.journal.log_system_event(
+            Severity.INFO, "user_override",
+            f"user override {action} for {symbol}: {msg}",
+            {"override_id": rec["override_id"], "candidate_id": candidate_id},
+        )
+        return {"ok": True, "message": msg, "override": rec}
+
+    def _override_open_trade(self, cand, ev_row, rec, approver) -> str:
+        """watch/reject -> trade: build a proposal from the stored eval, re-run the
+        SAME freshness + risk gates, and (only if they pass) create a PENDING_APPROVAL
+        proposal tagged as a user override. NEVER executes here — manual approval is
+        still required. On any gate failure the override is recorded with
+        execution_allowed=0 + a blocked_reason."""
+        symbol = cand.get("symbol")
+        if not ev_row or ev_row.get("entry") is None or ev_row.get("stop") is None or ev_row.get("target") is None:
+            rec["blocked_reason"] = OverrideBlockedReason.OTHER.value
+            rec["execution_result"] = "no usable eval levels for this candidate"
+            return "blocked: no usable eval levels (cannot build a trade)"
+        evaluation = self._eval_from_row(ev_row)
+        if rec.get("user_direction"):
+            evaluation.direction = rec["user_direction"]
+        direction = evaluation.direction or TradeDirection.LONG.value
+        requires_margin = direction == TradeDirection.SHORT.value
+
+        # Freshness re-check (mandatory before any order path).
+        snap = self.market.get_snapshot(symbol)
+        report = self.freshness.assess(snap)
+        if not report.is_usable:
+            rec["blocked_reason"] = OverrideBlockedReason.STALE_DATA.value
+            rec["execution_result"] = f"{report.freshness_status}/{report.block_reason}"
+            return f"blocked: data not usable ({report.freshness_status})"
+
+        # Risk re-check (sizing, spread, liquidity, exposure, daily cap, R:R...).
+        risk = self.risk.assess(
+            direction=direction, entry=evaluation.entry, stop=evaluation.stop, snapshot=snap,
+            open_positions=self.journal.count_open_positions(),
+            trades_today=self.journal.count_paper_orders_today(),
+            realized_pnl_today=self.journal.realized_pnl_today(),
+            requires_margin=requires_margin, margin_approved=False,
+        )
+        if not risk.approved or risk.sizing is None:
+            codes = {b.get("code") for b in (risk.block_reasons or [])}
+            if ReasonCode.WIDE_SPREAD.value in codes:
+                br = OverrideBlockedReason.WIDE_SPREAD.value
+            elif ReasonCode.LOW_LIQUIDITY.value in codes:
+                br = OverrideBlockedReason.LOW_LIQUIDITY.value
+            else:
+                br = OverrideBlockedReason.RISK_GATE_FAILED.value
+            rec["blocked_reason"] = br
+            rec["execution_result"] = risk.primary_reason
+            return f"blocked: risk gate ({risk.primary_reason})"
+
+        # Gates passed -> create a PENDING_APPROVAL proposal (NOT executed).
+        proposal = self.swing.build_proposal(evaluation, risk.sizing)
+        self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+        proposal.playbook_name = PLAYBOOK_V1
+        proposal.setup_classification = "user_override"
+        proposal.expected_hold_days = evaluation.max_holding_days
+        proposal.proposal_reason = f"user_override:{rec['user_override_action']}"
+        proposal.status = "pending_approval"
+        rc_id = self._record_risk_check(proposal, evaluation, risk)
+        proposal.risk_check_id = rc_id
+        self.journal.insert("trade_proposals", proposal.to_row())
+        warning = (HIGH_RISK_NARRATIVE_WARNING
+                   if rec.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value else None)
+        self.journal.conn.execute(
+            "UPDATE trade_proposals SET arming_classification = ?, narrative_warning = ? WHERE proposal_id = ?",
+            (rec.get("arming_classification"), warning, proposal.proposal_id),
+        )
+        self.journal.conn.commit()
+        rec["proposal_id"] = proposal.proposal_id
+        rec["linked_trade_id"] = proposal.trade_id
+        rec["execution_allowed"] = 1
+        return (f"gates passed -> PENDING_APPROVAL proposal {proposal.proposal_id} created "
+                f"(MANUAL approval still required: `alphaos approve {proposal.proposal_id}`)")
+
+    def resolve_user_override(self, override_id, outcome_r=None, outcome_pnl=None,
+                              outcome_status=None, did_trade=None) -> dict:
+        """Record the outcome of a user override after close + compute a preliminary
+        attribution (user vs AlphaOS). Heuristic only — not statistically significant
+        on small samples."""
+        row = self.journal.one("SELECT * FROM user_decision_overrides WHERE override_id = ?", (override_id,))
+        if not row:
+            return {"ok": False, "message": "override not found"}
+        status = outcome_status or row.get("outcome_status")
+        alphaos_traded = bool(row.get("alphaos_would_have_traded"))
+        attribution = AttributionResult.INCONCLUSIVE.value
+        if status == OverrideOutcomeStatus.WON.value:
+            attribution = (AttributionResult.USER_OUTPERFORMED.value if not alphaos_traded
+                           else AttributionResult.INCONCLUSIVE.value)
+        elif status == OverrideOutcomeStatus.LOST.value:
+            attribution = (AttributionResult.ALPHAOS_OUTPERFORMED.value if not alphaos_traded
+                           else AttributionResult.INCONCLUSIVE.value)
+        st = timeutils.stamp()
+        self.journal.conn.execute(
+            "UPDATE user_decision_overrides SET outcome_r = ?, outcome_pnl = ?, outcome_status = ?, "
+            "user_did_trade = ?, attribution_result = ?, resolved_at_utc = ?, resolved_at_sgt = ? "
+            "WHERE override_id = ?",
+            (outcome_r, outcome_pnl, status,
+             1 if (did_trade if did_trade is not None else row.get("user_did_trade")) else 0,
+             attribution, st.utc, st.local_sgt, override_id),
+        )
+        self.journal.conn.commit()
+        return {"ok": True, "override_id": override_id, "attribution_result": attribution}
 
     # ----------------------------------------------------- approval center view
     def list_open_proposals(self) -> list[dict]:
@@ -1060,17 +1293,32 @@ class Orchestrator:
         # If a high-risk narrative (hype/meme/squeeze) drove an UPGRADE, tag the
         # candidate so the proposal carries the warning + is forced manual-only.
         l30_detail = (driver_detail or {}).get("last30days") or {}
+        arming_cls = (l30_detail.get("arming_classification")
+                      or getattr(polarity, "arming_classification", None))
         if (adjustment == DecisionAdjustment.UPGRADED.value
-                and l30_detail.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value):
+                and arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value):
             cand["_arming_classification"] = ArmingClassification.HIGH_RISK_NARRATIVE.value
             cand["_narrative_warning"] = getattr(polarity, "warning_message", "") or ""
             summary.high_risk_narrative += 1
-        elif adjustment == DecisionAdjustment.UPGRADED.value and l30_detail.get("arming_classification"):
-            cand["_arming_classification"] = l30_detail.get("arming_classification")
+        elif adjustment == DecisionAdjustment.UPGRADED.value and arming_cls:
+            cand["_arming_classification"] = arming_cls
+
+        # Roadmap 2.8 (Part A) — ARMED WATCH: the override armed a real driver but
+        # the decision stayed WATCH (no upgrade) because eval/labeller produced no
+        # higher actionable decision. A near-action watchlist item, NOT a reject.
+        armed_watch = (override_active and final == Decision.WATCH.value
+                       and adjustment == DecisionAdjustment.UNCHANGED.value)
+        armed_watch_reason = None
+        if armed_watch:
+            armed_watch_reason = (ArmedWatchReason.LABELLER_DID_NOT_UPGRADE.value
+                                  if label != Decision.PROPOSE.value
+                                  else ArmedWatchReason.EVAL_NOT_TRADEABLE.value)
+            summary.armed_watch += 1
 
         self._record_decision_adjustment(
             cand, evaluation, classification, base, final, adjustment,
             override_active, driver_str, driver_detail, catalyst, last30, scan_batch_id,
+            armed_watch=armed_watch, armed_watch_reason=armed_watch_reason, arming_cls=arming_cls,
         )
         return final
 
@@ -1125,7 +1373,8 @@ class Orchestrator:
 
     def _record_decision_adjustment(self, cand, evaluation, classification, base, final,
                                     adjustment, override_active, driver_str, driver_detail,
-                                    catalyst, last30, scan_batch_id) -> None:
+                                    catalyst, last30, scan_batch_id, armed_watch=False,
+                                    armed_watch_reason=None, arming_cls=None) -> None:
         """Append-only audit + a denormalized tag on the candidate. Stores enough
         source-level evidence (catalyst + last30days, columns AND a full
         ``evidence_json`` snapshot) to answer later: which exact catalyst/sentiment
@@ -1166,11 +1415,19 @@ class Orchestrator:
             "top_themes_json": getattr(last30, "top_themes", None),
             "source_coverage_json": getattr(last30, "source_coverage", None),
             "label_confidence": getattr(classification, "confidence", None),
+            # --- Roadmap 2.8 (Part A) armed-watch + labeller reasoning ---
+            "arming_classification": arming_cls,
+            "armed_watch": 1 if armed_watch else 0,
+            "armed_watch_reason": armed_watch_reason,
+            "proposal_readiness": getattr(classification, "proposal_readiness", None),
+            "labeller_reason": getattr(classification, "reason_for_label", None),
+            "labeller_missing_conditions_json": getattr(classification, "missing_conditions", None),
+            "labeller_upgrade_blockers_json": getattr(classification, "upgrade_blockers", None),
         })
         self.journal.conn.execute(
-            "UPDATE candidates SET decision_adjustment = ?, decision_adjustment_reason = ? "
+            "UPDATE candidates SET decision_adjustment = ?, decision_adjustment_reason = ?, armed_watch = ? "
             "WHERE candidate_id = ?",
-            (adjustment, reason, cand["candidate_id"]),
+            (adjustment, reason, 1 if armed_watch else 0, cand["candidate_id"]),
         )
         self.journal.conn.commit()
 

@@ -493,6 +493,40 @@ class JournalStore:
             ),
         }
 
+    # -------------------------------------------- 2.8 armed watch + user override
+    def armed_watches(self, limit: int = 200) -> list[dict]:
+        """Near-action watchlist: armed but stayed WATCH (NOT rejects)."""
+        return self.query(
+            "SELECT * FROM decision_adjustments WHERE armed_watch = 1 ORDER BY id DESC LIMIT ?", (limit,))
+
+    def armed_watch_summary(self) -> dict:
+        return {
+            "by_arming": self.query(
+                "SELECT arming_classification AS arming, COUNT(*) AS n FROM decision_adjustments "
+                "WHERE armed_watch = 1 GROUP BY arming_classification ORDER BY n DESC"
+            ),
+        }
+
+    def recent_user_overrides(self, limit: int = 200) -> list[dict]:
+        return self.query("SELECT * FROM user_decision_overrides ORDER BY id DESC LIMIT ?", (limit,))
+
+    def override_by_id(self, override_id: str) -> Optional[dict]:
+        return self.one("SELECT * FROM user_decision_overrides WHERE override_id = ?", (override_id,))
+
+    def user_override_summary(self) -> dict:
+        return {
+            "by_action": self.query(
+                "SELECT user_override_action AS action, COUNT(*) AS n FROM user_decision_overrides "
+                "GROUP BY user_override_action ORDER BY n DESC"),
+            "by_attribution": self.query(
+                "SELECT attribution_result AS attribution, COUNT(*) AS n FROM user_decision_overrides "
+                "GROUP BY attribution_result ORDER BY n DESC"),
+            "executed": self.count_rows("user_decision_overrides", "execution_allowed = 1"),
+            "blocked": self.count_rows("user_decision_overrides", "blocked_reason IS NOT NULL"),
+            "pending": self.count_rows("user_decision_overrides", "outcome_status = 'pending'"),
+            "nightdesk": self.count_rows("user_decision_overrides", "nightdesk_research_candidate = 1"),
+        }
+
     def recent_system_events(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM system_events ORDER BY id DESC LIMIT ?", (limit,))
 

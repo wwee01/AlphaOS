@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from alphaos.constants import Decision, LABEL_OTHER, OFFICIAL_LABELS
+from alphaos.constants import Decision, LABEL_OTHER, OFFICIAL_LABELS, ProposalReadiness
 
 # Required keys in a well-formed AI label object.
 LABEL_OUTPUT_KEYS = [
@@ -30,6 +30,8 @@ LABEL_OUTPUT_KEYS = [
 ]
 
 THESIS_MAX_CHARS = 400
+
+_READINESS = {r.value for r in ProposalReadiness}
 
 _DECISION_MAP = {
     "propose": Decision.PROPOSE.value,
@@ -106,5 +108,14 @@ def coerce_and_validate(obj: dict, settings) -> tuple[dict, str]:
         "main_risk": str(obj.get("main_risk") or "")[:THESIS_MAX_CHARS],
         "missing_context": [str(m) for m in _as_list(obj.get("missing_context"))],
         "suggested_new_tags": suggested,
+        # Roadmap 2.8 (Part B) — ADVISORY reasoning only. These NEVER change the
+        # decision (already finalized above); they explain WHY and what would
+        # upgrade the candidate, for Armed Watch visibility + learning.
+        "missing_conditions": [str(m) for m in _as_list(obj.get("missing_conditions"))],
+        "upgrade_blockers": [str(b) for b in _as_list(obj.get("upgrade_blockers"))],
+        "proposal_readiness": (str(obj.get("proposal_readiness") or "").strip().lower()
+                               if str(obj.get("proposal_readiness") or "").strip().lower() in _READINESS
+                               else ProposalReadiness.UNCLEAR.value),
+        "what_would_upgrade": str(obj.get("what_would_upgrade") or "")[:THESIS_MAX_CHARS],
     }
     return clean, status
