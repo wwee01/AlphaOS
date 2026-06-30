@@ -1,11 +1,12 @@
 # HANDOVER
 
-**Checkpoint: 2026-06-30 · `main` @ `ca0a50b` (Roadmap 2.7 merged, PR #12) · tests 268 passed / 3 skipped · working tree clean · mode PAPER · market-data Alpaca/IEX LIVE · AI = LIVE (OpenAI `gpt-5.4-mini`) · last30days = LIVE (`cli`: Reddit/X/YouTube/HN/Polymarket/GitHub) · polarity = ON + ARMING · labeller override = ARMED (symmetric) · execution = `simulated_internal` · real-money UNREACHABLE**
+**Checkpoint: 2026-06-30 · `main` @ `0421ca0` (Roadmap 2.8 merged, PR #14) · tests 286 passed / 3 skipped · working tree clean · mode PAPER · market-data Alpaca/IEX LIVE · AI = LIVE (OpenAI `gpt-5.4-mini`) · last30days = LIVE (`cli`: Reddit/X/YouTube/HN/Polymarket/GitHub) · polarity = ON + ARMING · labeller override = ARMED (symmetric) · Armed-Watch + User-Override = LIVE · execution = `simulated_internal` · real-money UNREACHABLE**
 
 > Single entry point for the next session. This project keeps no other handover docs — everything is here. Verify state before trusting any of it (commands in §8).
 > ⚠️ **Posture changed this checkpoint:** the AI is now REAL and the whole enrichment chain is ENABLED in `.env`, so **every real `interest_scan` now makes real OpenAI calls (costs money)**. Real-money trading is still unreachable and execution is still simulated; the cost is OpenAI API only.
 
 ## Changelog (most recent first)
+- **Roadmap 2.8 — Armed Watch + labeller reasoning + User Override Mode** (`f0df6f6`, PR #14). (A) ARMED WATCH: when the override armed a real driver but the decision stayed WATCH (no proposal), it's recorded as a NEAR-ACTION watchlist item (`armed_watch`=1 + `armed_watch_reason` on `decision_adjustments`; `candidates.armed_watch`) — NOT a reject. `ScanSummary.armed_watch`, `alphaos armed_watch` CLI, dashboard section. (B) LABELLER REASONING (ADVISORY, never changes the decision): labeller emits `missing_conditions`/`upgrade_blockers`/`proposal_readiness`/`what_would_upgrade`, copied onto the armed-watch record. (C) USER OVERRIDE MODE: a SEPARATE decision layer (`user_decision_overrides` table) — `create_user_override()` stores AlphaOS's original recommendation AND the user's final decision side by side, NEVER rewriting AlphaOS. `watch_to_trade` re-runs the SAME freshness+risk gates and only on pass creates a PENDING_APPROVAL proposal (manual approval still required; never auto-executes); on failure records `execution_allowed=0` + `blocked_reason`. `propose_to_reject` rejects; `manual_exit`/`manual_hold` recorded. High-risk overrides tag the proposal warning + flag NightDesk (hook only). `resolve_user_override()` records outcome + preliminary attribution. CLI: `override` (preview without `--yes`), `overrides`. +18 tests.
 - **Roadmap 2.7 — LLM-derived last30days narrative polarity** (`063178e`, PR #12). `ai/last30days_polarity.py`: classifies live last30days clusters → bullish/bearish/neutral/unclear + confidence + direction-alignment + `narrative_driver_type` + hype risk (real `gpt-5.4-mini`, `max_completion_tokens`, defensive parse, fail-safe to `unclear`/non-arming; deterministic offline mock). The ARMING decision is recomputed DETERMINISTICALLY on the AlphaOS side (`_decide_arming`) — arms only on aligned + confidence≥min + coverage≥min + no catalyst-conflict + arming enabled. Hype/meme/squeeze → `high_risk_narrative` (arms but **manual-only**, warned), not auto-suppressed. New `last30days_polarity` table; `polarity_label`/`polarity_alignment`/`narrative_driver_type`/`arming_classification` on `candidates`; `arming_classification`/`narrative_warning` on `trade_proposals`. Polarity now supplies the last30days override driver. +23 tests.
 - **gpt-5.x compatibility fix** (`41dc2dd`). The labeller passed `max_tokens`, which `gpt-5.x` chat.completions rejects (400). Switched to `max_completion_tokens` (accepted by gpt-4o too). Required for ANY real-AI labelling.
 - **Operational enablement this checkpoint (config, not code):** real `OPENAI_API_KEY` added (model `gpt-5.4-mini`); `openai` SDK installed in `.venv` (via `uv`); **X/Twitter** authenticated free via Safari cookies (`AUTH_TOKEN`/`CT0` in `~/.config/last30days/.env`); **`yt-dlp`** installed (`~/.local/bin`) → YouTube live; full chain turned ON in `.env` (`LAST30DAYS_ENABLED/PROVIDER=cli`, `POLARITY_ENABLED`, `POLARITY_ARMING_ALLOWED`, `LABELLER_DECISION_OVERRIDE_ENABLED` = true); thresholds `MIN_CONFIDENCE=0.55`, `MIN_SOURCE_COVERAGE=medium`; `LAST30DAYS_SOURCES=reddit,hackernews,polymarket,github,x,youtube`.
@@ -18,20 +19,22 @@
 ---
 
 ## 1. Current project state
-AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). Operating mode (verified via `system_health()`): `ALPHAOS_MODE=paper`, **market data LIVE** (Alpaca free IEX), **AI = LIVE** (`OPENAI_API_KEY` set, model `gpt-5.4-mini`; eval + labeller + polarity all real), **catalyst = MOCK** (`NEWS_ENRICHMENT_PROVIDER=mock`; live Alpaca news still opt-in), **last30days = LIVE** (`cli`; sources reddit/x/youtube/hackernews/polymarket/github + web grounding), **polarity = ON + arming allowed**, **labeller override = ARMED (symmetric)**, **execution = `simulated_internal`**, **eval no-news baseline** (`NEWS_ENABLED=false`), **real-money trading `unreachable`** (`REAL_TRADING_ENABLED=false`, `ALLOW_REAL_ORDERS=false`). `main` @ `ca0a50b`, in sync with origin. Full pipeline:
-**Market Interest Scanner → Candidate Packet → AI Category/Playbook Labeller → Official Catalyst Enrichment → last30days Narrative Enrichment → last30days Polarity → label↔eval decision combine (downgrade-only OR gated symmetric override) → safety gates → manual approval → sim execution → monitor/exit → ledger / reconciliation / learning.** A Streamlit dashboard runs ephemerally at http://localhost:8502 (dies on reboot/session-end — see §7).
+AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). Operating mode (verified via `system_health()`): `ALPHAOS_MODE=paper`, **market data LIVE** (Alpaca free IEX), **AI = LIVE** (`OPENAI_API_KEY` set, model `gpt-5.4-mini`; eval + labeller + polarity all real), **catalyst = MOCK** (`NEWS_ENRICHMENT_PROVIDER=mock`; live Alpaca news still opt-in), **last30days = LIVE** (`cli`; sources reddit/x/youtube/hackernews/polymarket/github + web grounding), **polarity = ON + arming allowed**, **labeller override = ARMED (symmetric)**, **execution = `simulated_internal`**, **eval no-news baseline** (`NEWS_ENABLED=false`), **real-money trading `unreachable`** (`REAL_TRADING_ENABLED=false`, `ALLOW_REAL_ORDERS=false`). `main` @ `0421ca0`, in sync with origin. Full pipeline:
+**Market Interest Scanner → Candidate Packet → AI Category/Playbook Labeller → Official Catalyst Enrichment → last30days Narrative Enrichment → last30days Polarity → label↔eval decision combine (downgrade-only OR gated symmetric override) → [Armed Watch if armed-but-no-upgrade] → safety gates → manual approval (+ optional User Override layer) → sim execution → monitor/exit → ledger / reconciliation / learning / attribution.** A Streamlit dashboard runs ephemerally at http://localhost:8502 (dies on reboot/session-end — see §7).
 
 Config lives in three places: **AlphaOS `.env`** (chain flags, thresholds, sources, `LAST30DAYS_PYTHON`, the OpenAI key — gitignored); the **skill's** `~/.config/last30days/.env` (X cookies `AUTH_TOKEN`/`CT0`, memory dir; chmod 600); and **`~/.local/bin`** (`python3.12`, `yt-dlp`).
 
-## 2. What was just implemented (this checkpoint — Roadmap 2.7 + go-live)
-- **Polarity layer** (`ai/last30days_polarity.py`): `Last30DaysPolarityClassifier` + `PolarityEvidence` + `PolarityResult`. Runs in `orchestrator._label_candidate` AFTER last30days enrichment when status=`available`; journals a `last30days_polarity` row (full evidence + `parse_status`); freezes polarity fields onto the candidate. `_real_decision_driver` now treats `polarity.should_arm_override` as the last30days driver (carrying `arming_classification`); pre-2.7 raw-sentiment path kept as the polarity-disabled fallback. `high_risk_narrative` upgrades tag the proposal (`arming_classification`+`narrative_warning`) and are forced **manual-only**.
-- **Schema** (additive, `SCHEMA_VERSION` stays 3): `last30days_polarity` table; candidate + proposal columns above. Verified 0 data loss on a real-ledger copy.
-- **Config** (safe code-defaults OFF; turned ON in `.env` this session): `LAST30DAYS_POLARITY_ENABLED`, `_MODEL` (blank→`OPENAI_PRIMARY_MODEL`), `_MIN_CONFIDENCE=0.55`, `_MIN_SOURCE_COVERAGE=medium`, `_ARMING_ALLOWED`, `LAST30DAYS_HIGH_RISK_NARRATIVE_MANUAL_ONLY=true`.
-- **Dashboard**: polarity summary (by sentiment / driver / arming) + detail with HIGH-RISK flags, read-only.
-- **Go-live**: OpenAI key + SDK; X cookies; yt-dlp/YouTube; chain enabled.
+## 2. What was just implemented (this checkpoint — Roadmap 2.8)
+- **Armed Watch (Part A)**: in `orchestrator._resolve_decision`, when `override_active` AND `final==watch` AND `adjustment==unchanged`, the candidate is flagged `armed_watch` with an `armed_watch_reason` (`polarity_armed_but_labeller_did_not_upgrade` / `..._eval_not_tradeable`), recorded on `decision_adjustments` + `candidates.armed_watch` + `ScanSummary.armed_watch`. A NEAR-ACTION watchlist item, NOT a reject.
+- **Labeller reasoning (Part B, ADVISORY)**: the labeller now emits `missing_conditions` / `upgrade_blockers` / `proposal_readiness` / `what_would_upgrade` (prompt + `coerce_and_validate` + mock + `candidate_labels` columns). Copied onto the armed-watch row. NEVER changes the decision.
+- **User Override Mode (Part C)**: new `user_decision_overrides` table + `Orchestrator.create_user_override()` / `resolve_user_override()`. Stores AlphaOS's original recommendation AND the user's final decision side by side — NEVER rewrites AlphaOS's call. `watch_to_trade`/`reject_to_trade` re-run the SAME freshness+risk gates and only on pass create a PENDING_APPROVAL proposal (tagged `user_override`; manual approval still required; never auto-executes); failures record `execution_allowed=0` + `blocked_reason`. `propose_to_reject` rejects the proposal; `manual_exit`/`manual_hold` recorded. High-risk overrides tag the proposal warning + flag NightDesk (`nightdesk_research_candidate`, hook only). `resolve_user_override()` records outcome + a preliminary attribution (user vs AlphaOS).
+- **Schema** (additive, `SCHEMA_VERSION` stays 3): `user_decision_overrides` table; armed-watch + labeller-reasoning columns on `decision_adjustments`/`candidate_labels`; `armed_watch` on `candidates`. Verified 0 data loss on a real-ledger copy.
+- **CLI**: `alphaos armed_watch` (list near-action), `alphaos override --candidate-id .. --action .. [--reason --note --yes]` (preview without `--yes`), `alphaos overrides` (list + attribution). **Dashboard**: Armed Watch / Near Action + User Override sections (read-only; not inside rejects).
 
 ## 3. What is working (verified this checkpoint)
-- Full suite **268 passed, 3 skipped** on `main` (~1.0s). The 3 skips are the gated live-Alpaca tests.
+- Full suite **286 passed, 3 skipped** on `main` (~1.2s). The 3 skips are the gated live-Alpaca tests.
+- **Armed Watch (2.8)**: armed-but-no-upgrade flagged with reason + labeller reasoning; tagged on the candidate (not a reject); counted in the scan summary. Your AMD live case is the canonical example.
+- **User Override (2.8)**: verified end-to-end — `watch_to_trade` preserves AlphaOS's `watch`, records the user's `propose` separately, re-runs gates, creates a PENDING_APPROVAL proposal (0 orders / 0 approvals — manual approval still required), and flags NightDesk. Freshness/risk/spread gate failures correctly record `execution_allowed=0` + `blocked_reason`. `resolve_user_override` computes attribution.
 - **Real AI end-to-end**: live eval + labeller return valid output under `gpt-5.4-mini` (`is_mock=False`); labeller uses `max_completion_tokens` (a test enforces no `max_tokens`).
 - **last30days LIVE + X + YouTube**: `last30days_probe` and full scans pull real Reddit/X/YouTube/HN content; coverage went from 1 source (keyless-thin) to up to 5 (e.g. AMD: hackernews/jobs/reddit/x/youtube, 15 items).
 - **Polarity ARMED on real data (first time)**: live scan classified AMD `bullish/aligned, conf 0.68, coverage medium → high_risk_narrative`, and the decision-adjustment row shows `armed=1`. It did **not** upgrade only because the AI labeller independently chose `watch` (override can't invent a `propose` the labeller didn't make) — correct behaviour. Other names came back neutral/low-confidence → `non_arming`. **0 upgrades, all correctly gated.**
@@ -48,12 +51,15 @@ Config lives in three places: **AlphaOS `.env`** (chain flags, thresholds, sourc
 ## 5. Not done yet (deferred / future)
 - **Step 1 — clean forward-evidence calibration pass** (reset ledger → scan → approve one → monitor; needs `alpaca_paper` execution during RTH for representative fills). Still pending.
 - More sources: TikTok / Instagram / Threads (need a free `SCRAPECREATORS_API_KEY`); Perplexity/Bluesky (opt-in).
+- **2.8 follow-ups (hooks only so far):** NightDesk full import/export (only the `nightdesk_research_candidate` flag exists); the user-vs-AlphaOS attribution LEARNING loop (fields + `resolve_user_override` exist; no aggregation/report yet); `manual_exit` execution (recorded only — actual close is via `alphaos flatten`, paper-only).
 - Automatic relabelling from catalyst/narrative; scheduler automation; durable LAN dashboard hosting.
 - **Live / real-money trading** — intentionally unreachable; not on the roadmap.
 
 ## 6. Test results
-- **268 passed, 3 skipped** (`.venv/bin/python -m pytest`). 3 skips = `tests/test_live_alpaca.py` (gated behind `RUN_LIVE_ALPACA_TESTS=true`). Default suite is fully hermetic (no network / no subprocess / no real API — mock providers + monkeypatch).
-- `test_last30days_polarity.py` (+23) covers: deterministic arming (aligned-arms / bearish-arms-short / conflicting / neutral / unclear / low-conf / low-coverage / catalyst-conflict / hype→high-risk), classify guards (disabled / no-evidence / fail-safe / coerce), mock classifier, integration (normal upgrade, high-risk manual-only+warned, non-arming unchanged, no-execution/approval), and `max_completion_tokens` enforcement.
+- **286 passed, 3 skipped** (`.venv/bin/python -m pytest`). 3 skips = `tests/test_live_alpaca.py` (gated behind `RUN_LIVE_ALPACA_TESTS=true`). Default suite is fully hermetic (no network / no subprocess / no real API — mock providers + monkeypatch).
+- `test_armed_watch.py` (+7): armed-but-watch creates `armed_watch`; upgrade does not; not-armed does not; stores labeller reasoning; high-risk flagged; not a reject; reasoning advisory-only.
+- `test_user_override.py` (+11): watch_to_trade creates pending proposal + preserves AlphaOS original; blocked by freshness/risk/spread; propose_to_reject rejects; manual_exit-without-position blocked; high-risk tags warning + NightDesk; resolve→attribution; never enables real-money/auto-exec; queryable.
+- `test_last30days_polarity.py` (+23): deterministic arming, classify guards, mock classifier, integration, `max_completion_tokens` enforcement.
 
 ## 7. Known risks / blockers (no RISKS.md — recorded here)
 - **Every real scan now costs OpenAI money.** With the key live + chain on, each `interest_scan` makes ~2×(candidates) eval/label calls + ~1 polarity call per last30days-available candidate (`gpt-5.4-mini`, compact prompts — likely cents/scan; check the OpenAI usage dashboard). $0 only in `ALPHAOS_MODE=mock` or with `LAST30DAYS_POLARITY_ENABLED=false`. Scans are manual one-shots (no daemon), so cost is bounded by how often you run them.
@@ -69,15 +75,19 @@ Config lives in three places: **AlphaOS `.env`** (chain flags, thresholds, sourc
 cd "/Users/ck/Documents/Claude Playground/AlphaOS"
 
 # verify
-.venv/bin/python -m pytest                 # expect: 268 passed, 3 skipped
+.venv/bin/python -m pytest                 # expect: 286 passed, 3 skipped
 git status -sb && git log --oneline | head -6
 .venv/bin/python -m alphaos status         # expect AI configured, chain on, real_money unreachable
 
 # operate (one-shot CLI; chain is LIVE -> real OpenAI calls each run)
 .venv/bin/python -m alphaos interest_scan          # scan -> label -> catalyst -> last30days -> polarity -> propose
 .venv/bin/python -m alphaos last30days_probe AAPL  # READ-ONLY probe (set PROVIDER=cli for the live skill)
+.venv/bin/python -m alphaos armed_watch            # near-action: armed but stayed watch (2.8)
 .venv/bin/python -m alphaos proposals              # open proposals
 .venv/bin/python -m alphaos approve <proposal_id>  # re-checks gates, then sim fill (manual approval)
+# USER OVERRIDE (2.8): preview without --yes; record + create pending proposal with --yes (manual approval still required)
+.venv/bin/python -m alphaos override --candidate-id <id> --action watch_to_trade --reason strong_conviction --note "..." --yes
+.venv/bin/python -m alphaos overrides              # list overrides + attribution summary
 
 # run a scan WITHOUT cost (logic only):  ALPHAOS_MODE=mock .venv/bin/python -m alphaos interest_scan
 # run a scan into a TEMP db (keep real ledger clean):  ALPHAOS_DB_PATH=data/demo.db ... interest_scan
@@ -99,23 +109,26 @@ mv data/alphaos.db "$DIR/ledger.db"; rm -f data/alphaos.db-wal data/alphaos.db-s
 ## 9. Recommended next prompt (paste into a fresh window)
 ```
 Read HANDOVER.md in the AlphaOS repo first (single source of truth), then verify real state:
-`.venv/bin/python -m pytest` (expect 268 passed, 3 skipped), `git status -sb` (clean main @ ca0a50b),
+`.venv/bin/python -m pytest` (expect 286 passed, 3 skipped), `git status -sb` (clean main @ 0421ca0),
 and `.venv/bin/python -m alphaos status` (AI configured/gpt-5.4-mini, last30days cli, polarity arming,
 override armed, execution simulated_internal, real_money unreachable). NOTE: the chain is LIVE so real
 scans cost OpenAI money — use ALPHAOS_MODE=mock or a temp ALPHAOS_DB_PATH for safe experiments.
 
 Then do ONE of:
-(a) Tune to see a polarity-driven upgrade fire on live data: run interest_scan during RTH on a temp DB
-    and review last30days_polarity + decision_adjustments; if too conservative, lower
-    LAST30DAYS_POLARITY_MIN_CONFIDENCE / _MIN_SOURCE_COVERAGE (less safe — note the trade-off); OR
+(a) Tune to see a polarity-driven upgrade / armed-watch fire on live data: run interest_scan during RTH on
+    a temp DB and review last30days_polarity + decision_adjustments + `alphaos armed_watch`; if too
+    conservative, lower LAST30DAYS_POLARITY_MIN_CONFIDENCE / _MIN_SOURCE_COVERAGE (less safe — note it); OR
 (b) Step 1 — clean forward-evidence calibration pass: reset the ledger (§8), enable EXECUTION_PROVIDER=
     alpaca_paper, interest_scan -> approve ONE safe proposal -> monitor, to collect representative fills; OR
-(c) Add TikTok/Instagram via a free SCRAPECREATORS_API_KEY in ~/.config/last30days/.env to broaden coverage.
+(c) Exercise the 2.8 User Override loop (record a watch_to_trade / propose_to_reject via `alphaos override`,
+    approve, then `resolve_user_override` after close) and/or build the attribution learning report; OR
+(d) Add TikTok/Instagram via a free SCRAPECREATORS_API_KEY in ~/.config/last30days/.env to broaden coverage.
 
 Hard constraints (HANDOVER §10): real-money stays unreachable; manual approval non-bypassable; no AI/
-catalyst/last30days/polarity output bypasses the gates; polarity can ARM an upgrade but never trades/
-overwrites labels; hype/meme/squeeze = high_risk_narrative = manual-only; eval stays no-news; migrations
-additive only; keep tests green. Branch off main; test to green; push; merge via the web UI.
+catalyst/last30days/polarity output bypasses the gates; polarity can ARM but never trades/overwrites labels;
+hype/meme/squeeze = high_risk_narrative = manual-only; a USER OVERRIDE never rewrites AlphaOS's original
+recommendation and never bypasses gates/approval/real-money guard; eval stays no-news; migrations additive
+only; keep tests green. Branch off main; test to green; push; merge via the web UI.
 ```
 
 ## 10. Anything the next session must NOT change (hard invariants)
@@ -125,6 +138,8 @@ additive only; keep tests green. Branch off main; test to green; push; merge via
 - **AI category label is ADVISORY; the override is gated + symmetric.** Default downgrade-only (`_apply_label_floor` = `min`). When ARMED (`LABELLER_DECISION_OVERRIDE_ENABLED` + real AI + a real direction-aligned positive driver) it may move the decision UP or DOWN. It **cannot** upgrade a non-tradeable eval (null levels / unusable freshness), bypass a gate, skip approval, mint an official label, or overwrite the frozen `primary_label`. Every move is audited in `decision_adjustments` (+ `evidence_json`).
 - **Polarity (2.7) is CONTEXT that can ARM, never EXECUTE.** Arms an upgrade only when `_decide_arming` (DETERMINISTIC, AlphaOS-side — never the model's word) finds: enabled + arming_allowed + direction-aligned + `confidence ≥ MIN_CONFIDENCE` + `coverage ≥ MIN_SOURCE_COVERAGE` + no official-catalyst conflict. Hype/meme/squeeze or medium/high hype → `high_risk_narrative` (arms but manual-only + warned), NOT auto-suppressed. Fails safe to `unclear`/non-arming on any error/invalid output. Stored SEPARATELY (`last30days_polarity`); never overwrites last30days / eval / label / risk / approval records.
 - **Catalyst & last30days are CONTEXT, not execution authority.** The OpenAI momentum eval stays **no-news** — never receives catalyst / last30days / polarity context (`NEWS_ENABLED=false`, distinct from `NEWS_ENRICHMENT_*` / `LAST30DAYS_*`).
+- **User Override (2.8) is a SEPARATE decision layer; it NEVER rewrites AlphaOS's recommendation.** `create_user_override` stores AlphaOS's original eval/label/final decision AND the user's final decision side by side in `user_decision_overrides`. It NEVER bypasses the freshness/risk/spread/liquidity gates, manual approval, or the real-money guard, and NEVER auto-executes: `watch_to_trade` only ever creates a PENDING_APPROVAL proposal (the user must still `approve`). High-risk-narrative overrides stay manual-only + warned. Labeller reasoning fields (`missing_conditions`/`upgrade_blockers`/`proposal_readiness`/`what_would_upgrade`) are ADVISORY — they never change the decision.
+- **Armed Watch is a near-action watchlist item, NOT a reject.** Do not route armed-watch candidates into the rejected flow.
 - **last30days is a SEPARATE layer; no vendoring.** Calls the globally-installed skill via subprocess. Real-AI calls use `max_completion_tokens` (NOT `max_tokens`) — do not regress (gpt-5.x rejects `max_tokens`). `skipped_budget_cap` stays distinct from `none_found`.
 - **Execution = `simulated_internal`** unless deliberately enabling opt-in `alpaca_paper` (paper-only, explicit intent + paper creds).
 - **Migrations additive only.** Reconciler ADDs columns/tables; never rename/drop. `SCHEMA_VERSION` stays 3 for additive changes; bump only for destructive/transforming migrations. Never silently drop data.
