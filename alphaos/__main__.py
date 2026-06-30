@@ -126,6 +126,56 @@ def cmd_last30days_probe(orch: Orchestrator, symbol: str) -> int:
     return 0
 
 
+def cmd_armed_watch(orch: Orchestrator) -> int:
+    """List ARMED WATCH (near-action) candidates: override armed but stayed watch."""
+    rows = orch.journal.armed_watches(100)
+    view = [{k: r.get(k) for k in (
+        "symbol", "eval_decision", "label_decision", "final_decision", "arming_classification",
+        "armed_watch_reason", "sentiment_label", "label_confidence", "source_coverage_json",
+        "proposal_readiness", "labeller_reason",
+    )} for r in rows]
+    _print({"armed_watch_summary": orch.journal.armed_watch_summary(), "armed_watches": view,
+            "count": len(view)})
+    return 0
+
+
+def cmd_override(orch: Orchestrator, args) -> int:
+    """Record a USER OVERRIDE of AlphaOS's recommendation (separate decision layer).
+    Without --yes this previews AlphaOS's decision; with --yes it records the
+    override (safety gates + manual approval still apply; never auto-executes)."""
+    if not args.yes:
+        cand = orch.journal.one("SELECT * FROM candidates WHERE candidate_id = ?", (args.candidate_id,))
+        if not cand:
+            _print({"override_preview": f"candidate {args.candidate_id} not found"})
+            return 1
+        adj = orch.journal.one(
+            "SELECT eval_decision, label_decision, final_decision, armed_watch, arming_classification "
+            "FROM decision_adjustments WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
+            (args.candidate_id,)) or {}
+        _print({"override_preview": {
+            "symbol": cand.get("symbol"), "requested_action": args.action,
+            "alphaos_final_decision": adj.get("final_decision") or cand.get("label_decision"),
+            "armed_watch": bool(adj.get("armed_watch")),
+            "arming_classification": adj.get("arming_classification"),
+            "high_risk_warning": (adj.get("arming_classification") == "high_risk_narrative"),
+            "note": "re-run with --yes to record. Safety gates + manual approval still apply; "
+                    "a watch_to_trade only creates a pending_approval proposal (you must `approve` it).",
+        }})
+        return 0
+    res = orch.create_user_override(
+        args.candidate_id, args.action, reason_code=args.reason, note=args.note,
+        direction=args.direction, size=args.size)
+    _print({"override": res})
+    return 0 if res.get("ok") else 1
+
+
+def cmd_overrides(orch: Orchestrator) -> int:
+    """List user overrides + attribution summary."""
+    _print({"user_override_summary": orch.journal.user_override_summary(),
+            "recent_overrides": orch.journal.recent_user_overrides(50)})
+    return 0
+
+
 def cmd_dashboard(_: Orchestrator) -> int:
     print("Run the dashboard with:\n  streamlit run alphaos/dashboard/streamlit_app.py")
     return 0
@@ -153,6 +203,17 @@ def build_parser() -> argparse.ArgumentParser:
     l30 = sub.add_parser("last30days_probe",
                          help="READ-ONLY: print last30days narrative context for one symbol (no ledger writes)")
     l30.add_argument("symbol")
+    sub.add_parser("armed_watch", help="list ARMED WATCH (near-action) candidates: armed but stayed watch")
+    ov = sub.add_parser("override", help="record a USER OVERRIDE of AlphaOS's recommendation (gated; manual approval still required)")
+    ov.add_argument("--candidate-id", required=True)
+    ov.add_argument("--action", required=True,
+                    help="watch_to_trade | propose_to_reject | manual_exit | manual_hold | reject_to_trade | ...")
+    ov.add_argument("--reason", default=None, help="reason code (e.g. strong_conviction, disagrees_with_ai)")
+    ov.add_argument("--note", default=None, help="free-text note")
+    ov.add_argument("--direction", default=None, help="override direction (long|short), if changing")
+    ov.add_argument("--size", type=float, default=None, help="size override, if applicable")
+    ov.add_argument("--yes", action="store_true", help="confirm + record the override (otherwise preview only)")
+    sub.add_parser("overrides", help="list user overrides + attribution summary")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
@@ -195,6 +256,12 @@ def main(argv=None) -> int:
             return cmd_seed_demo(orch)
         if args.command == "last30days_probe":
             return cmd_last30days_probe(orch, args.symbol)
+        if args.command == "armed_watch":
+            return cmd_armed_watch(orch)
+        if args.command == "override":
+            return cmd_override(orch, args)
+        if args.command == "overrides":
+            return cmd_overrides(orch)
         if args.command == "dashboard":
             return cmd_dashboard(orch)
         if args.command == "kill":

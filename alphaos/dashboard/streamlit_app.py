@@ -474,6 +474,59 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("None.")
 
+    st.markdown("#### Armed Watch / Near Action")
+    st.caption(
+        "Override armed a real driver but the decision stayed WATCH (no proposal) — "
+        "near-action watchlist items (Roadmap 2.8). NOT rejects. Manual-only via "
+        "`alphaos override`; high-risk narrative requires a warning + manual confirm."
+    )
+    aw = j.armed_watches(100)
+    if aw:
+        st.dataframe(
+            [
+                {k: x.get(k) for k in (
+                    "symbol", "eval_decision", "label_decision", "final_decision",
+                    "arming_classification", "armed_watch_reason", "sentiment_label",
+                    "label_confidence", "proposal_readiness", "labeller_reason",
+                )}
+                for x in aw
+            ],
+            width="stretch",
+        )
+    else:
+        st.info("No armed-watch / near-action candidates.")
+
+    st.markdown("#### User overrides")
+    st.caption(
+        "Manual user overrides of AlphaOS recommendations (Roadmap 2.8) — a SEPARATE "
+        "decision layer; AlphaOS's original call is preserved. Safety-gated; never "
+        "auto-executes; manual approval still required."
+    )
+    uos = j.user_override_summary()
+    if uos["by_action"]:
+        oc1, oc2 = st.columns(2)
+        with oc1:
+            st.caption("by action")
+            st.dataframe(uos["by_action"], width="stretch")
+        with oc2:
+            st.caption("by attribution")
+            st.dataframe(uos["by_attribution"], width="stretch")
+        with st.expander("Override detail (AlphaOS recommendation vs user decision)"):
+            st.dataframe(
+                [
+                    {k: x.get(k) for k in (
+                        "symbol", "alphaos_final_decision", "user_override_action", "user_final_decision",
+                        "override_aggressiveness", "execution_allowed", "blocked_reason",
+                        "user_reason_code", "outcome_status", "attribution_result",
+                        "nightdesk_research_candidate",
+                    )}
+                    for x in j.recent_user_overrides(100)
+                ],
+                width="stretch",
+            )
+    else:
+        st.info("No user overrides yet.")
+
     st.markdown("#### Labels summary")
     ls = j.label_summary()
     c1, c2 = st.columns(2)

@@ -187,6 +187,7 @@ SCHEMA: list[tuple[str, str]] = [
             polarity_alignment TEXT,
             narrative_driver_type TEXT,
             arming_classification TEXT,
+            armed_watch INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -847,6 +848,10 @@ SCHEMA: list[tuple[str, str]] = [
             raw_json TEXT,
             label_frozen_at_utc TEXT,
             post_trade_review_label TEXT,
+            missing_conditions_json TEXT,
+            upgrade_blockers_json TEXT,
+            proposal_readiness TEXT,
+            what_would_upgrade TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -980,6 +985,13 @@ SCHEMA: list[tuple[str, str]] = [
             top_themes_json TEXT,
             source_coverage_json TEXT,
             label_confidence REAL,
+            arming_classification TEXT,
+            armed_watch INTEGER,
+            armed_watch_reason TEXT,
+            proposal_readiness TEXT,
+            labeller_reason TEXT,
+            labeller_missing_conditions_json TEXT,
+            labeller_upgrade_blockers_json TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1026,6 +1038,55 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Roadmap 2.8 (Part C): USER DECISION OVERRIDES — a SEPARATE decision layer.
+        # A user override NEVER rewrites AlphaOS's original recommendation; both the
+        # AlphaOS recommendation and the user's final decision are stored side by
+        # side for audit + attribution. Overrides are safety-gated and never bypass
+        # manual approval, the gates, or the real-money guard.
+        "user_decision_overrides",
+        """
+        CREATE TABLE IF NOT EXISTS user_decision_overrides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            override_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT,
+            proposal_id TEXT,
+            symbol TEXT NOT NULL,
+            alphaos_eval_decision TEXT,
+            alphaos_label_decision TEXT,
+            alphaos_final_decision TEXT,
+            alphaos_direction TEXT,
+            alphaos_confidence REAL,
+            alphaos_reasoning_summary TEXT,
+            armed_watch INTEGER,
+            arming_classification TEXT,
+            user_override_action TEXT,
+            user_final_decision TEXT,
+            user_direction TEXT,
+            user_size_override REAL,
+            user_reason_code TEXT,
+            user_reason_text TEXT,
+            override_aggressiveness TEXT,
+            execution_allowed INTEGER,
+            blocked_reason TEXT,
+            execution_result TEXT,
+            linked_order_id TEXT,
+            linked_trade_id TEXT,
+            outcome_r REAL,
+            outcome_pnl REAL,
+            outcome_status TEXT,
+            alphaos_would_have_traded INTEGER,
+            user_did_trade INTEGER,
+            attribution_result TEXT,
+            nightdesk_research_candidate INTEGER,
+            nightdesk_research_reason TEXT,
+            resolved_at_utc TEXT,
+            resolved_at_sgt TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1063,6 +1124,9 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_decadj_scan_batch ON decision_adjustments(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_polarity_candidate ON last30days_polarity(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_polarity_scan_batch ON last30days_polarity(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_overrides_candidate ON user_decision_overrides(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_overrides_symbol ON user_decision_overrides(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_overrides_status ON user_decision_overrides(outcome_status)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

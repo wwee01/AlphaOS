@@ -177,6 +177,10 @@ def build_label_user_prompt(packet: dict, official_labels: list[str]) -> str:
         "risk_tags": ["list of short risk tags"],
         "missing_context": ["list of missing data/context"],
         "suggested_new_tags": ["optional unofficial tag suggestions"],
+        "missing_conditions": ["what is missing for a proposal (e.g. clear_entry_trigger)"],
+        "upgrade_blockers": ["what currently blocks an upgrade (e.g. mixed_evidence)"],
+        "proposal_readiness": "one of: not_ready | developing | near_action | ready",
+        "what_would_upgrade": "string: what concrete change would make this proposable",
     }
     return (
         "Classify this shortlisted candidate. Return JSON ONLY matching the "

@@ -58,6 +58,11 @@ class PlaybookClassification:
     model: str
     is_mock: bool
     raw: dict = field(default_factory=dict)
+    # Roadmap 2.8 (Part B) — ADVISORY reasoning (never changes the decision).
+    missing_conditions: list = field(default_factory=list)
+    upgrade_blockers: list = field(default_factory=list)
+    proposal_readiness: str = "unclear"
+    what_would_upgrade: str = ""
 
     def to_row(self, packet_id: Optional[str], scan_batch_id: Optional[str], frozen_at_utc: str) -> dict:
         return {
@@ -87,6 +92,10 @@ class PlaybookClassification:
             "raw_json": self.raw or {},
             "label_frozen_at_utc": frozen_at_utc,
             "post_trade_review_label": None,  # reserved; never rewritten in v1
+            "missing_conditions_json": self.missing_conditions,
+            "upgrade_blockers_json": self.upgrade_blockers,
+            "proposal_readiness": self.proposal_readiness,
+            "what_would_upgrade": self.what_would_upgrade,
         }
 
 
@@ -149,6 +158,13 @@ class PlaybookClassifier:
             "risk_tags": ["no_news_context"],
             "missing_context": list(getattr(packet, "missing_data_flags", []) or []) + ["news", "last30days"],
             "suggested_new_tags": [],
+            # Part B advisory reasoning (deterministic in mock).
+            "proposal_readiness": ("ready" if decision == Decision.PROPOSE.value
+                                   else "near_action" if momentum >= thr * 0.7 else "developing"),
+            "missing_conditions": ([] if decision == Decision.PROPOSE.value else ["clear_entry_trigger"]),
+            "upgrade_blockers": ([] if decision == Decision.PROPOSE.value else ["momentum_below_threshold"]),
+            "what_would_upgrade": ("" if decision == Decision.PROPOSE.value
+                                   else "a clean entry trigger with sustained relative volume"),
         }
         clean, status = coerce_and_validate(obj, self.settings)
         return self._build(packet, clean, status, LabelSource.MOCK.value, "mock", True,
@@ -226,4 +242,8 @@ class PlaybookClassifier:
             model=model,
             is_mock=is_mock,
             raw=raw,
+            missing_conditions=clean.get("missing_conditions", []),
+            upgrade_blockers=clean.get("upgrade_blockers", []),
+            proposal_readiness=clean.get("proposal_readiness", "unclear"),
+            what_would_upgrade=clean.get("what_would_upgrade", ""),
         )
