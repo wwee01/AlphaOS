@@ -83,6 +83,40 @@ def test_override_blocked_by_risk_gate(monkeypatch):
     o.close()
 
 
+def test_watch_to_trade_can_be_created_from_armed_watch(monkeypatch):
+    """Armed Watch -> user chooses Trade Anyway: AlphaOS stayed watch (armed but no
+    upgrade); the override is created, AlphaOS's watch is preserved, the user's
+    propose is recorded separately, and the armed_watch flag carries onto the row."""
+    o = _orch()
+    cid = _a_watch_candidate(o)
+    o.journal.conn.execute(
+        "UPDATE decision_adjustments SET armed_watch = 1, arming_classification = 'normal_driver' "
+        "WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute("UPDATE candidates SET armed_watch = 1 WHERE candidate_id = ?", (cid,))
+    o.journal.conn.commit()
+    ov = o.create_user_override(cid, UserOverrideAction.WATCH_TO_TRADE.value,
+                                reason_code="testing_hypothesis", note="armed watch hypothesis")["override"]
+    assert ov["armed_watch"] == 1
+    assert ov["alphaos_final_decision"] != Decision.PROPOSE.value     # AlphaOS still said watch
+    assert ov["user_final_decision"] == Decision.PROPOSE.value        # user's call, stored apart
+    assert ov["user_reason_code"] == "testing_hypothesis"
+    o.close()
+
+
+def test_override_blocked_by_liquidity_maps_reason(monkeypatch):
+    from alphaos.constants import ReasonCode
+    o = _orch()
+    cid = _a_watch_candidate(o)
+    monkeypatch.setattr(o.risk, "assess",
+                        lambda **kw: SimpleNamespace(approved=False, sizing=None,
+                                                     primary_reason="low_liquidity",
+                                                     block_reasons=[{"code": ReasonCode.LOW_LIQUIDITY.value}]))
+    ov = o.create_user_override(cid, UserOverrideAction.WATCH_TO_TRADE.value)["override"]
+    assert ov["execution_allowed"] == 0
+    assert ov["blocked_reason"] == OverrideBlockedReason.LOW_LIQUIDITY.value
+    o.close()
+
+
 def test_override_blocked_by_spread_maps_reason(monkeypatch):
     from alphaos.constants import ReasonCode
     o = _orch()

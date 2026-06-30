@@ -75,6 +75,18 @@ def cmd_calibration_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_attribution_report(orch: Orchestrator) -> int:
+    """User-override attribution learning report (heuristic; never a significance
+    claim). PURE READ — no execution, no ledger writes."""
+    from alphaos.reports.attribution import render_markdown
+
+    rep = orch.attribution_report()
+    print(render_markdown(rep))
+    print()
+    _print({"attribution_report": rep})
+    return 0
+
+
 def cmd_flatten(orch: Orchestrator) -> int:
     res = orch.flatten_paper_account()
     _print({"flatten": res})
@@ -214,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     ov.add_argument("--size", type=float, default=None, help="size override, if applicable")
     ov.add_argument("--yes", action="store_true", help="confirm + record the override (otherwise preview only)")
     sub.add_parser("overrides", help="list user overrides + attribution summary")
+    sub.add_parser("attribution_report",
+                   help="user-override attribution learning report (AlphaOS vs user; heuristic)")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
@@ -262,6 +276,8 @@ def main(argv=None) -> int:
             return cmd_override(orch, args)
         if args.command == "overrides":
             return cmd_overrides(orch)
+        if args.command == "attribution_report":
+            return cmd_attribution_report(orch)
         if args.command == "dashboard":
             return cmd_dashboard(orch)
         if args.command == "kill":
