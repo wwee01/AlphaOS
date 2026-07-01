@@ -98,7 +98,33 @@ class MockOfficialNewsProvider(OfficialNewsProvider):
         ]
 
 
-class AlpacaNewsProvider(OfficialNewsProvider):  # pragma: no cover - live, disabled by default
+def _news_items(resp) -> list:
+    """Extract the raw article list from an alpaca-py ``NewsSet`` (or compatible).
+
+    alpaca-py (>=0.40) returns a ``NewsSet`` whose articles live at
+    ``resp["news"]`` / ``resp.data["news"]`` — NOT ``resp.news`` — so read
+    defensively across the shapes we might see and NEVER raise. (A plain
+    ``getattr(resp, "news", [])`` silently returns ``[]`` on a NewsSet, which
+    made every live catalyst look like ``none_found``.)"""
+    if resp is None:
+        return []
+    if isinstance(resp, list):                       # already a bare list
+        return resp
+    data = getattr(resp, "data", None)               # NewsSet.data -> {"news": [...]}
+    if isinstance(data, dict) and data.get("news"):
+        return data["news"] or []
+    if isinstance(resp, dict):                        # raw dict response
+        return resp.get("news") or []
+    try:                                              # NewsSet.__getitem__("news")
+        items = resp["news"]
+        if items:
+            return items
+    except (TypeError, KeyError):
+        pass
+    return getattr(resp, "news", []) or []            # legacy attribute, last resort
+
+
+class AlpacaNewsProvider(OfficialNewsProvider):
     """Lazy Alpaca official-news provider (alpaca-py NewsClient). Used ONLY when
     NEWS_ENRICHMENT_PROVIDER=alpaca. Never breaks if the SDK/creds are missing —
     it raises, and the enricher fails safe."""
@@ -108,7 +134,7 @@ class AlpacaNewsProvider(OfficialNewsProvider):  # pragma: no cover - live, disa
     def __init__(self, settings):
         self.settings = settings
 
-    def get_news_for_symbol(self, symbol: str, lookback_hours: float) -> list[NewsArticle]:
+    def get_news_for_symbol(self, symbol: str, lookback_hours: float) -> list[NewsArticle]:  # pragma: no cover - live network
         from alpaca.data.historical.news import NewsClient
         from alpaca.data.requests import NewsRequest
 
@@ -116,14 +142,21 @@ class AlpacaNewsProvider(OfficialNewsProvider):  # pragma: no cover - live, disa
         start = timeutils.now_utc() - timedelta(hours=float(lookback_hours))
         resp = client.get_news(NewsRequest(symbols=symbol, start=start,
                                            limit=int(self.settings.news_max_articles_per_symbol)))
+        return self._parse_response(resp, symbol)
+
+    @staticmethod
+    def _parse_response(resp, symbol: str) -> list[NewsArticle]:
+        """Normalize an alpaca-py NewsSet (network-free; unit-tested)."""
         out: list[NewsArticle] = []
-        for a in getattr(resp, "news", []) or []:
+        for a in _news_items(resp):
+            created = getattr(a, "created_at", "") or ""
+            published = created.isoformat() if hasattr(created, "isoformat") else str(created)
             out.append(NewsArticle(
                 source=getattr(a, "source", "alpaca") or "alpaca",
                 title=getattr(a, "headline", "") or "",
-                summary=(getattr(a, "summary", "") or "")[:280],
+                summary=((getattr(a, "summary", "") or getattr(a, "content", "")) or "")[:280],
                 external_id=str(getattr(a, "id", "") or getattr(a, "url", "")),
-                published_at_utc=str(getattr(a, "created_at", "") or ""),
+                published_at_utc=published,
                 symbols=list(getattr(a, "symbols", []) or [symbol]),
                 category=CatalystType.COMPANY_NEWS.value,
             ))
