@@ -887,6 +887,14 @@ class Orchestrator:
 
         return build_calibration_report(self.journal, self.settings)
 
+    def attribution_report(self, limit: int = 1000) -> dict:
+        """User-override attribution: AlphaOS recommendation vs the user's final
+        decision, who outperformed, win rate/expectancy. PURE READ — heuristic /
+        descriptive only, never a significance claim on a small sample."""
+        from alphaos.reports.attribution import build_attribution_report
+
+        return build_attribution_report(self.journal, self.settings, limit=limit)
+
     def flatten_paper_account(self) -> dict:
         """Paper-ONLY: cancel all open Alpaca paper orders + close all open Alpaca
         paper positions. Refuses unless the paper-only guardrails hold; the broker
