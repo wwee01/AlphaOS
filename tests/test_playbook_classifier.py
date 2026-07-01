@@ -25,6 +25,15 @@ def _pkt(momentum=0.7, structure="trend", direction="long"):
     )
 
 
+def test_label_output_token_budget_is_large_enough_for_the_json():
+    # Regression: the live labeller returns a ~16-field JSON object (~250
+    # completion tokens). A 220 cap truncated it (finish_reason=length) so every
+    # live label failed to parse and failed safe to reject — no proposals ever.
+    # Keep a comfortable floor so the default can't silently regress to a
+    # truncating value.
+    assert _s().label_max_output_tokens >= 512
+
+
 # ----------------------------------------------------------------- mock engine
 def test_mock_is_deterministic():
     c = PlaybookClassifier(_s())
