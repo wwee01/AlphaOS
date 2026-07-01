@@ -53,6 +53,7 @@ class DailyRecon:
             "same_day_exits": same_day,
             "net_pnl": round(net_pnl, 2),
             "open_positions": j.count_open_positions(),
+            "labeller": j.labeller_source_summary(limit=50),
         }
 
     def _today_metrics(self) -> dict:
@@ -91,6 +92,23 @@ class DailyRecon:
         self.journal.log_system_event(Severity.INFO, "report", f"Daily report {report_date} generated.")
         return {"report_id": report_id, "report_date": report_date, "counts": counts, "content_md": content}
 
+    def _labeller_line(self, lf: dict) -> str:
+        """One Activity line for AI-labeller health; tags WARNING/CRITICAL when the
+        fail-safe rate is high (a failing labeller silently rejects everything)."""
+        from alphaos.ai.labeller_health import evaluate_failsafe_health
+
+        s = self.settings
+        health = evaluate_failsafe_health(
+            lf or {}, s.labeller_failsafe_warn_rate, s.labeller_failsafe_critical_rate,
+            s.labeller_failsafe_min_sample)
+        pct = round((lf.get("fail_safe_rate") or 0) * 100)
+        tag = "" if health["level"] == "ok" else f" — **{health['level'].upper()}**"
+        return (
+            f"- AI labeller: **{lf.get('total', 0)}** labels, "
+            f"**{lf.get('fail_safe', 0)}** fail-safe, **{lf.get('openai', 0)}** openai, "
+            f"**{lf.get('mock', 0)}** mock, fail-safe rate **{pct}%**{tag}\n"
+        )
+
     def _render_markdown(self, report_date: str, c: dict, m: dict) -> str:
         market_mode = self.settings.market_data_mode
         exec_label = self.settings.execution_provider
@@ -115,7 +133,9 @@ class DailyRecon:
             f"- Rejections/blocks: **{c['rejections']}** / **{c['blocks']}**\n"
             f"- Fills: **{c['fills']}**\n"
             f"- Open positions: **{c['open_positions']}**\n"
-            f"- Same-day exits: **{c['same_day_exits']}**\n\n"
+            f"- Same-day exits: **{c['same_day_exits']}**\n"
+            + self._labeller_line(c.get("labeller", {}))
+            + "\n"
             "## P&L (paper) — after modelled costs\n"
             f"- Trades closed: **{m['trades']}**\n"
             f"- Gross P&L: **{m['gross_pnl']}** · Costs: **{m['total_costs']}** · "

@@ -406,6 +406,22 @@ class LabelSource(StrEnum):
     FAIL_SAFE = "fail_safe"   # malformed/missing AI output -> safe default
 
 
+class FailsafeReason(StrEnum):
+    """Why a label fell back to the conservative fail-safe (Other/Unclassified +
+    REJECT). Stored in ``candidate_labels.validation_status`` when
+    ``label_source='fail_safe'`` — for VISIBILITY only; never changes behaviour.
+    A failing labeller looks like a conservative reject, so surfacing the reason
+    (and rate) is what turns a silent block into an obvious alarm."""
+
+    LIVE_EXCEPTION = "live_exception"     # unexpected error in the live call
+    PARSE_ERROR = "parse_error"           # response had no parseable JSON object
+    TRUNCATED_OUTPUT = "truncated_output" # finish_reason=length (token budget too small)
+    TIMEOUT = "timeout"                   # network/API timeout
+    MALFORMED_JSON = "malformed_json"     # parsed, but core fields missing
+    UNAVAILABLE = "unavailable"           # provider disabled / returned nothing
+    UNKNOWN = "unknown"
+
+
 # Placeholder context sentinels (Roadmap 2.3): last30days/sentiment are NOT
 # implemented yet. These are clean, explicit "unavailable" markers so the schema
 # and packets are ready for later enrichment without faking any data now.

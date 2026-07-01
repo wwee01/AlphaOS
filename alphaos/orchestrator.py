@@ -1635,6 +1635,31 @@ class Orchestrator:
             "kill_switch": "ENGAGED" if self.kill_switch.is_engaged() else "off",
             "broker_connected": self.orders.broker_connected,
             "open_positions": self.journal.count_open_positions(),
+            "labeller_failsafe": self._labeller_failsafe_health(),
+        }
+
+    def _labeller_failsafe_health(self) -> dict:
+        """VISIBILITY into the labeller fail-safe rate over recent labels. A failing
+        labeller silently rejects (looks conservative), so a spike here is the
+        alarm. PURE READ; advisory only — never changes any decision/gate/approval."""
+        from alphaos.ai.labeller_health import evaluate_failsafe_health
+
+        s = self.settings
+        summary = self.journal.labeller_source_summary(limit=50)
+        health = evaluate_failsafe_health(
+            summary, s.labeller_failsafe_warn_rate, s.labeller_failsafe_critical_rate,
+            s.labeller_failsafe_min_sample)
+        return {
+            "level": health["level"],
+            "message": health["message"],
+            "total": summary["total"],
+            "openai": summary["openai"],
+            "mock": summary["mock"],
+            "fail_safe": summary["fail_safe"],
+            "fail_safe_rate": summary["fail_safe_rate"],
+            "by_source": summary["by_source"],
+            "by_failsafe_reason": summary["by_failsafe_reason"],
+            "top_reason": health.get("top_reason"),
         }
 
     def close(self) -> None:

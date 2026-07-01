@@ -22,6 +22,7 @@ from alphaos.ai import prompt_templates as pt
 from alphaos.ai.label_validation import LABEL_OUTPUT_KEYS, coerce_and_validate
 from alphaos.constants import (
     Decision,
+    FailsafeReason,
     LABEL_OTHER,
     LABEL_VERSION_V1,
     LabelSource,
@@ -32,6 +33,18 @@ from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
 HTTP_TIMEOUT = 30
+
+
+def _classify_exception(exc) -> str:
+    """Map a live-call exception to a fail-safe reason for VISIBILITY (never
+    changes the fail-safe behaviour). Best-effort; unknown errors stay
+    ``live_exception``."""
+    blob = f"{type(exc).__name__} {exc}".lower()
+    if "timeout" in blob or "timed out" in blob:
+        return FailsafeReason.TIMEOUT.value
+    if "json" in blob or "parse" in blob:
+        return FailsafeReason.PARSE_ERROR.value
+    return FailsafeReason.LIVE_EXCEPTION.value
 
 
 @dataclass
@@ -114,13 +127,14 @@ class PlaybookClassifier:
         try:  # pragma: no cover - live path
             return self._live_classify(packet)
         except Exception as exc:  # pragma: no cover - network/SDK/parse
+            reason = _classify_exception(exc)
             if self.journal is not None:
                 self.journal.log_system_event(
                     Severity.WARNING, "labeller",
                     f"label classify failed for {getattr(packet, 'symbol', '?')}; failing safe to reject.",
-                    {"error": str(exc)},
+                    {"error": str(exc), "failsafe_reason": reason},
                 )
-            return self._fail_safe(packet, "live_exception")
+            return self._fail_safe(packet, reason)
 
     # ------------------------------------------------------------------ mock
     def _mock_classify(self, packet) -> PlaybookClassification:
@@ -188,11 +202,21 @@ class PlaybookClassifier:
             ],
             timeout=HTTP_TIMEOUT,
         )
-        obj = structured_json.parse_json_object(resp.choices[0].message.content)
+        choice = resp.choices[0]
+        # A truncated response (token budget too small) yields incomplete JSON that
+        # fails to parse. Name that reason explicitly so a fail-safe SPIKE is
+        # diagnosable (this was the exact bug that silently blocked all proposals),
+        # rather than lumped under a vague "live_exception".
+        if getattr(choice, "finish_reason", None) == "length":
+            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value)
+        try:
+            obj = structured_json.parse_json_object(choice.message.content)
+        except Exception:
+            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value)
         # Missing keys are tolerated by coerce_and_validate (degrade safely), but a
         # total absence of the core fields should fail safe.
         if "primary_label" not in obj and "decision" not in obj:
-            return self._fail_safe(packet, "malformed_output")
+            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value)
         clean, status = coerce_and_validate(obj, self.settings)
         return self._build(packet, clean, status, LabelSource.OPENAI.value, self.model, False, raw=obj)
 

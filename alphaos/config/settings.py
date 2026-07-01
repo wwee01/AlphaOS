@@ -189,6 +189,9 @@ class Settings:
     label_max_output_tokens: int
     label_propose_threshold: float
     label_min_confidence_to_propose: float
+    labeller_failsafe_warn_rate: float
+    labeller_failsafe_critical_rate: float
+    labeller_failsafe_min_sample: int
     interest_near_extreme_pct: float
     interest_min_score: float
 
@@ -668,6 +671,11 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 220),
         label_propose_threshold=_get_float(src, "LABEL_PROPOSE_THRESHOLD", 0.40),
         label_min_confidence_to_propose=_get_float(src, "LABEL_MIN_CONFIDENCE_TO_PROPOSE", 0.50),
+        # Labeller fail-safe VISIBILITY thresholds (warn/critical on high fail-safe
+        # rate). Advisory only — never change the fail-safe behaviour itself.
+        labeller_failsafe_warn_rate=_get_float(src, "LABELLER_FAILSAFE_WARN_RATE", 0.25),
+        labeller_failsafe_critical_rate=_get_float(src, "LABELLER_FAILSAFE_CRITICAL_RATE", 0.50),
+        labeller_failsafe_min_sample=_get_int(src, "LABELLER_FAILSAFE_MIN_SAMPLE", 5),
         interest_near_extreme_pct=_get_float(src, "INTEREST_NEAR_EXTREME_PCT", 0.005),
         interest_min_score=_get_float(src, "INTEREST_MIN_SCORE", 0.5),
         news_enrichment_enabled=_get_bool(src, "NEWS_ENRICHMENT_ENABLED", True),

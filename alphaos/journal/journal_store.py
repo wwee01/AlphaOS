@@ -21,7 +21,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from alphaos.constants import Severity
+from alphaos.constants import FailsafeReason, LabelSource, Severity
 from alphaos.journal.schema import INDEXES, SCHEMA, SCHEMA_VERSION
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
@@ -525,6 +525,36 @@ class JournalStore:
             "blocked": self.count_rows("user_decision_overrides", "blocked_reason IS NOT NULL"),
             "pending": self.count_rows("user_decision_overrides", "outcome_status = 'pending'"),
             "nightdesk": self.count_rows("user_decision_overrides", "nightdesk_research_candidate = 1"),
+        }
+
+    def labeller_source_summary(self, limit: int = 100) -> dict:
+        """Breakdown of the most recent labels by source (openai / mock / fail_safe)
+        + the fail-safe rate + fail-safe reasons. PURE READ, for VISIBILITY only.
+        A failing labeller looks like a conservative reject (label_source=fail_safe
+        floors the decision), so a spike here is the alarm — it never changes any
+        decision, gate, or approval. Reasons come from ``validation_status`` on the
+        fail-safe rows (live_exception / truncated_output / parse_error / ...)."""
+        rows = self.query(
+            "SELECT label_source, validation_status FROM candidate_labels ORDER BY id DESC LIMIT ?",
+            (limit,))
+        by_source: dict[str, int] = {}
+        by_failsafe_reason: dict[str, int] = {}
+        for r in rows:
+            src = r.get("label_source") or "unknown"
+            by_source[src] = by_source.get(src, 0) + 1
+            if src == LabelSource.FAIL_SAFE.value:
+                reason = r.get("validation_status") or FailsafeReason.UNKNOWN.value
+                by_failsafe_reason[reason] = by_failsafe_reason.get(reason, 0) + 1
+        total = len(rows)
+        fail_safe = by_source.get(LabelSource.FAIL_SAFE.value, 0)
+        return {
+            "total": total,
+            "openai": by_source.get(LabelSource.OPENAI.value, 0),
+            "mock": by_source.get(LabelSource.MOCK.value, 0),
+            "fail_safe": fail_safe,
+            "by_source": by_source,
+            "fail_safe_rate": round(fail_safe / total, 3) if total else 0.0,
+            "by_failsafe_reason": by_failsafe_reason,
         }
 
     def recent_system_events(self, limit: int = 200) -> list[dict]:
