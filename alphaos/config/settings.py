@@ -665,7 +665,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         interest_scan_top_n=_get_int(src, "INTEREST_SCAN_TOP_N", 15),
         max_candidates_to_ai=_get_int(src, "MAX_CANDIDATES_TO_AI", 15),
         label_model=_get(src, "LABEL_MODEL", "") or _get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
-        label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 220),
+        # The labeller emits a ~16-field JSON object (labels + free-text reason /
+        # thesis / invalidation / risk + advisory readiness). That needs ~250
+        # completion tokens; the old 220 default truncated it (finish_reason=
+        # length) so JSON parsing raised and EVERY candidate failed safe to
+        # reject — the live pipeline could never propose. 800 leaves headroom and
+        # costs nothing extra (billed on actual tokens; the model stops ~260).
+        label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 800),
         label_propose_threshold=_get_float(src, "LABEL_PROPOSE_THRESHOLD", 0.40),
         label_min_confidence_to_propose=_get_float(src, "LABEL_MIN_CONFIDENCE_TO_PROPOSE", 0.50),
         interest_near_extreme_pct=_get_float(src, "INTEREST_NEAR_EXTREME_PCT", 0.005),
