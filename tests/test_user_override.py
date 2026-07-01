@@ -25,12 +25,24 @@ def _orch(**over):
 
 
 def _a_watch_candidate(o):
-    """Run a scan and return a candidate_id whose AlphaOS decision is watch."""
+    """Run a scan and return a candidate_id whose AlphaOS decision is WATCH, with a
+    decision_adjustments row + a usable eval. The mock scan's RNG is seeded by
+    market_date(), so which candidates land where varies by day; normalize the
+    chosen candidate to WATCH here so these tests are deterministic across dates."""
     o.run_scan_once()
-    c = o.journal.one("SELECT candidate_id FROM candidates WHERE status = 'watch' LIMIT 1")
-    if not c:
-        c = o.journal.one("SELECT candidate_id FROM candidates WHERE label_decision IS NOT NULL LIMIT 1")
-    return c["candidate_id"]
+    row = o.journal.one(
+        "SELECT da.candidate_id AS candidate_id FROM decision_adjustments da "
+        "JOIN openai_evaluations ev ON ev.candidate_id = da.candidate_id "
+        "WHERE ev.entry IS NOT NULL ORDER BY da.id LIMIT 1")
+    if not row:
+        row = o.journal.one("SELECT candidate_id FROM candidates WHERE label_decision IS NOT NULL LIMIT 1")
+    cid = row["candidate_id"]
+    o.journal.conn.execute(
+        "UPDATE decision_adjustments SET final_decision = 'watch' WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute(
+        "UPDATE candidates SET status = 'watch', label_decision = 'watch' WHERE candidate_id = ?", (cid,))
+    o.journal.conn.commit()
+    return cid
 
 
 def test_watch_to_trade_creates_pending_proposal_and_preserves_alphaos(monkeypatch):
