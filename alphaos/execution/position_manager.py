@@ -5,8 +5,10 @@ positions, and closes them — recording exits, outcomes, the same-day
 classification, and a simulated exit order so the lifecycle stays complete.
 
 Costs are recorded as a field but modelled as 0.0 in v1 (a documented gap);
-net_pnl therefore equals gross_pnl for now. MFE/MAE are exit-time approximations
-until intra-trade path tracking is added.
+net_pnl therefore equals gross_pnl for now. MFE/MAE are tracked intra-trade (one
+``monitoring_snapshots`` row per open position per monitor pass, in R terms) and
+folded into a running extremum; the final value at close is written onto
+``trade_outcomes.mfe``/``.mae`` — see ``_fold_excursion``.
 """
 
 from __future__ import annotations
@@ -158,12 +160,29 @@ class PositionManager:
                     pass
         return exits
 
-    def _record_monitoring_snapshot(self, pos, price, decision, freshness_status,
-                                    broker_managed: bool = False) -> None:
-        """Write one monitoring_snapshots row per open position per pass (audit
-        only; never influences the exit decision or mark-to-market). For
-        broker-managed positions the watchdog takes no exit action, so the row is
-        labelled ``broker_managed``."""
+    def _fold_excursion(self, position_id: str, unrealized_r: Optional[float]) -> tuple:
+        """Fold one more price observation (``unrealized_r``, R terms) into the
+        running MFE (max favorable) / MAE (max adverse) excursion for a position,
+        using every ``monitoring_snapshots`` row recorded so far. Used both for
+        the live per-pass snapshot AND at close (the exit tick counts as one more
+        observation), so the closing MFE/MAE is never less complete than the
+        snapshot history already collected."""
+        prior = self.journal.one(
+            "SELECT MAX(mfe) AS max_mfe, MIN(mae) AS min_mae FROM monitoring_snapshots "
+            "WHERE position_id = ?",
+            (position_id,),
+        ) or {}
+        mfe_candidates = [v for v in (unrealized_r, prior.get("max_mfe")) if v is not None]
+        mae_candidates = [v for v in (unrealized_r, prior.get("min_mae")) if v is not None]
+        mfe = max(mfe_candidates) if mfe_candidates else None
+        mae = min(mae_candidates) if mae_candidates else None
+        return mfe, mae
+
+    @staticmethod
+    def _unrealized_r(pos: dict, price: float) -> tuple:
+        """(unrealized_pnl, unrealized_r) at ``price`` for an open position. R is
+        pnl_per_share / risk_per_share (risk_per_share = |entry - stop|); None
+        when there's no usable stop to normalize against."""
         qty = float(pos.get("qty") or 0)
         entry = float(pos.get("avg_entry_price") or 0)
         is_short = pos.get("direction") == TradeDirection.SHORT.value
@@ -173,16 +192,16 @@ class PositionManager:
             round(unrealized_pnl / (risk_per_share * qty), 4)
             if (risk_per_share and qty) else None
         )
-        # Fold the current unrealized_r into the running MFE/MAE for this position.
-        prior = self.journal.one(
-            "SELECT MAX(mfe) AS max_mfe, MIN(mae) AS min_mae FROM monitoring_snapshots "
-            "WHERE position_id = ?",
-            (pos["position_id"],),
-        ) or {}
-        candidates_mfe = [v for v in (unrealized_r, prior.get("max_mfe")) if v is not None]
-        candidates_mae = [v for v in (unrealized_r, prior.get("min_mae")) if v is not None]
-        mfe = max(candidates_mfe) if candidates_mfe else None
-        mae = min(candidates_mae) if candidates_mae else None
+        return unrealized_pnl, unrealized_r
+
+    def _record_monitoring_snapshot(self, pos, price, decision, freshness_status,
+                                    broker_managed: bool = False) -> None:
+        """Write one monitoring_snapshots row per open position per pass (audit
+        only; never influences the exit decision or mark-to-market). For
+        broker-managed positions the watchdog takes no exit action, so the row is
+        labelled ``broker_managed``."""
+        unrealized_pnl, unrealized_r = self._unrealized_r(pos, price)
+        mfe, mae = self._fold_excursion(pos["position_id"], unrealized_r)
 
         st = timeutils.stamp()
         self.journal.insert(
@@ -323,8 +342,10 @@ class PositionManager:
             },
         )
 
-        mfe = max(0.0, return_pct) if return_pct is not None else None
-        mae = min(0.0, return_pct) if return_pct is not None else None
+        # The exit tick is one more price observation: fold it into whatever
+        # MFE/MAE the monitor already tracked across this position's life (in R
+        # terms), rather than approximating from the single final return_pct.
+        mfe, mae = self._fold_excursion(position_id, realized_r)
         self.journal.insert(
             "trade_outcomes",
             {
@@ -346,6 +367,7 @@ class PositionManager:
                 "classification": classification.value,
                 "mfe": mfe,
                 "mae": mae,
+                "mfe_mae_source": "live_tracked",
                 "win": 1 if net_pnl > 0 else 0,
                 # --- Trade Packet v1 traceability ---
                 "trade_id": pos.get("trade_id"),

@@ -87,6 +87,37 @@ def cmd_attribution_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_backfill_mfe_mae(orch: Orchestrator) -> int:
+    """Backfill MFE/MAE on closed trades recorded before intra-trade excursion
+    tracking existed. Idempotent; write-only to trade_outcomes.mfe/.mae/
+    .mfe_mae_source; no exit/order/execution behavior change."""
+    res = orch.backfill_mfe_mae()
+    _print({"backfill_mfe_mae": res})
+    return 0
+
+
+def cmd_outcomes_update(orch: Orchestrator) -> int:
+    """Counterfactual outcome tracker: seed + resolve candidate_outcomes rows
+    (candidates/proposals/rejects/armed-watch/user-overrides) with 1/3/5-day
+    forward returns + bracket replay. PURE MEASUREMENT — no execution/approval
+    change; idempotent."""
+    res = orch.outcomes_update()
+    _print({"outcomes_update": res})
+    return 0
+
+
+def cmd_outcomes_report(orch: Orchestrator) -> int:
+    """Measurement-visibility summary over candidate_outcomes. No statistical
+    claims — always surfaces a small-sample caveat."""
+    from alphaos.reports.outcomes_summary import render_markdown
+
+    rep = orch.outcomes_report()
+    print(render_markdown(rep))
+    print()
+    _print({"outcomes_report": rep})
+    return 0
+
+
 def cmd_flatten(orch: Orchestrator) -> int:
     res = orch.flatten_paper_account()
     _print({"flatten": res})
@@ -228,6 +259,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("overrides", help="list user overrides + attribution summary")
     sub.add_parser("attribution_report",
                    help="user-override attribution learning report (AlphaOS vs user; heuristic)")
+    sub.add_parser("backfill_mfe_mae",
+                   help="backfill MFE/MAE on closed trades from before excursion tracking existed (idempotent)")
+    sub.add_parser("outcomes_update",
+                   help="counterfactual outcome tracker: seed + resolve candidate_outcomes "
+                        "(1/3/5-day forward returns + bracket replay; measurement only)")
+    sub.add_parser("outcomes_report",
+                   help="measurement-visibility summary over candidate_outcomes (no statistical claims)")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
@@ -278,6 +316,12 @@ def main(argv=None) -> int:
             return cmd_overrides(orch)
         if args.command == "attribution_report":
             return cmd_attribution_report(orch)
+        if args.command == "backfill_mfe_mae":
+            return cmd_backfill_mfe_mae(orch)
+        if args.command == "outcomes_update":
+            return cmd_outcomes_update(orch)
+        if args.command == "outcomes_report":
+            return cmd_outcomes_report(orch)
         if args.command == "dashboard":
             return cmd_dashboard(orch)
         if args.command == "kill":
