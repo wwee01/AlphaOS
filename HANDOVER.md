@@ -1,148 +1,128 @@
 # HANDOVER
 
-**Checkpoint: 2026-06-30 · `main` @ `0421ca0` (Roadmap 2.8 merged, PR #14) · tests 286 passed / 3 skipped · working tree clean · mode PAPER · market-data Alpaca/IEX LIVE · AI = LIVE (OpenAI `gpt-5.4-mini`) · last30days = LIVE (`cli`: Reddit/X/YouTube/HN/Polymarket/GitHub) · polarity = ON + ARMING · labeller override = ARMED (symmetric) · Armed-Watch + User-Override = LIVE · execution = `simulated_internal` · real-money UNREACHABLE**
+**Checkpoint: 2026-07-02 (updated post-incident) · branch `feat/measurement-foundation` @ `e00595e` (pushed, NOT merged) · tests 381 passed / 3 skipped · working tree clean (2 pre-existing untracked docs, 2 pre-existing stray WAL files, 2 new incident docs — see §7) · mode PAPER · execution `alpaca_paper` · AI = LIVE (OpenAI) · real-money UNREACHABLE · 0 open positions**
 
 > Single entry point for the next session. This project keeps no other handover docs — everything is here. Verify state before trusting any of it (commands in §8).
-> ⚠️ **Posture changed this checkpoint:** the AI is now REAL and the whole enrichment chain is ENABLED in `.env`, so **every real `interest_scan` now makes real OpenAI calls (costs money)**. Real-money trading is still unreachable and execution is still simulated; the cost is OpenAI API only.
+> ✅ **RESOLVED this checkpoint** (was flagged URGENT earlier today): the META paper position had lost both broker-side protective orders and was naked. User confirmed flatten; executed; broker + local ledger both verified clean and reconciled. Full incident record: [`docs/incidents/2026-07-02-meta-protection-mismatch.md`](docs/incidents/2026-07-02-meta-protection-mismatch.md). Root cause is known (day-TIF bracket legs expiring at session close, no scheduler to notice/resubmit) and a follow-up item is tracked at [`docs/roadmap/protection-watchdog.md`](docs/roadmap/protection-watchdog.md) — **not yet built**, so this class of failure can recur on any future live-fired position until that lands.
 
 ## Changelog (most recent first)
-- **Roadmap 2.8 — Armed Watch + labeller reasoning + User Override Mode** (`f0df6f6`, PR #14). (A) ARMED WATCH: when the override armed a real driver but the decision stayed WATCH (no proposal), it's recorded as a NEAR-ACTION watchlist item (`armed_watch`=1 + `armed_watch_reason` on `decision_adjustments`; `candidates.armed_watch`) — NOT a reject. `ScanSummary.armed_watch`, `alphaos armed_watch` CLI, dashboard section. (B) LABELLER REASONING (ADVISORY, never changes the decision): labeller emits `missing_conditions`/`upgrade_blockers`/`proposal_readiness`/`what_would_upgrade`, copied onto the armed-watch record. (C) USER OVERRIDE MODE: a SEPARATE decision layer (`user_decision_overrides` table) — `create_user_override()` stores AlphaOS's original recommendation AND the user's final decision side by side, NEVER rewriting AlphaOS. `watch_to_trade` re-runs the SAME freshness+risk gates and only on pass creates a PENDING_APPROVAL proposal (manual approval still required; never auto-executes); on failure records `execution_allowed=0` + `blocked_reason`. `propose_to_reject` rejects; `manual_exit`/`manual_hold` recorded. High-risk overrides tag the proposal warning + flag NightDesk (hook only). `resolve_user_override()` records outcome + preliminary attribution. CLI: `override` (preview without `--yes`), `overrides`. +18 tests.
-- **Roadmap 2.7 — LLM-derived last30days narrative polarity** (`063178e`, PR #12). `ai/last30days_polarity.py`: classifies live last30days clusters → bullish/bearish/neutral/unclear + confidence + direction-alignment + `narrative_driver_type` + hype risk (real `gpt-5.4-mini`, `max_completion_tokens`, defensive parse, fail-safe to `unclear`/non-arming; deterministic offline mock). The ARMING decision is recomputed DETERMINISTICALLY on the AlphaOS side (`_decide_arming`) — arms only on aligned + confidence≥min + coverage≥min + no catalyst-conflict + arming enabled. Hype/meme/squeeze → `high_risk_narrative` (arms but **manual-only**, warned), not auto-suppressed. New `last30days_polarity` table; `polarity_label`/`polarity_alignment`/`narrative_driver_type`/`arming_classification` on `candidates`; `arming_classification`/`narrative_warning` on `trade_proposals`. Polarity now supplies the last30days override driver. +23 tests.
-- **gpt-5.x compatibility fix** (`41dc2dd`). The labeller passed `max_tokens`, which `gpt-5.x` chat.completions rejects (400). Switched to `max_completion_tokens` (accepted by gpt-4o too). Required for ANY real-AI labelling.
-- **Operational enablement this checkpoint (config, not code):** real `OPENAI_API_KEY` added (model `gpt-5.4-mini`); `openai` SDK installed in `.venv` (via `uv`); **X/Twitter** authenticated free via Safari cookies (`AUTH_TOKEN`/`CT0` in `~/.config/last30days/.env`); **`yt-dlp`** installed (`~/.local/bin`) → YouTube live; full chain turned ON in `.env` (`LAST30DAYS_ENABLED/PROVIDER=cli`, `POLARITY_ENABLED`, `POLARITY_ARMING_ALLOWED`, `LABELLER_DECISION_OVERRIDE_ENABLED` = true); thresholds `MIN_CONFIDENCE=0.55`, `MIN_SOURCE_COVERAGE=medium`; `LAST30DAYS_SOURCES=reddit,hackernews,polymarket,github,x,youtube`.
-- **Roadmap 2.6 — Gated labeller decision override** (`e575ddb`/`e10f896`/`23eb53c`, PR #10). The label may move the eval's decision UP or DOWN, but only when ARMED (flag + real AI + a real direction-aligned positive driver); default downgrade-only. Full audit in `decision_adjustments` (eval/label/final + driver + `evidence_json`). +21 tests.
-- **Roadmap 2.5 — last30days research enrichment** (`8418de5`, PR #9). Separate keyless social layer via the globally-installed `last30days` skill (no vendoring); `candidate_last30days` table; per-scan budget cap → `skipped_budget_cap`. +32 tests.
-- **Roadmap 2.4 — Official News / Catalyst Enrichment** (PR #7). `candidate_catalysts`; advisory only. +20 tests.
-- **Roadmap 2.3 — Interest Scanner + AI labelling** (PR #6). `candidate_packets`/`candidate_labels`. +24 tests.
-- **Roadmap 1.5 / 2.2 / approval console / base** — calibration + broker hygiene; Alpaca paper validated; Approval Center; v1 skeleton + Trade Packet v1.
+- **Incident: META protection mismatch, detected + resolved** (2026-07-02, this checkpoint). Routine handover verification surfaced that META's broker-side stop (`canceled`) and target (`expired`) orders had both expired at the end of their first trading session (`time_in_force=day` on a multi-day-hold bracket, no scheduler to resubmit) — the position sat naked for ~19 hours while price fell through the original stop, undetected by the local ledger (stale). User confirmed flatten; executed cleanly (0 open orders, 1 position closed, verified read-only after); local ledger manually reconciled via the standard `close_position()` path (not raw SQL) since `OrderManager.reconcile()` was confirmed NOT to detect a non-bracket-leg close — itself a finding, now tracked. Full writeup + timeline: `docs/incidents/2026-07-02-meta-protection-mismatch.md`. Follow-up roadmap item opened: `docs/roadmap/protection-watchdog.md`. No code changed as part of this incident response — detection + manual resolution only.
+- **Opus audit fix pass** (`e00595e`, this checkpoint). Opus audited `feat/measurement-foundation` (verdict: APPROVE WITH REQUIRED FIXES) and found two real bugs in the just-built measurement layer. Both fixed on the same branch: **HIGH-1** — forward-return windows were anchored on `candidate_outcomes.created_at_utc` (seed time) instead of the true decision time, which would silently corrupt any backlog-catchup seeding (a candidate decided 30 days ago, seeded today, would have its next bar mislabeled a "1-day" return using a stale price). Fixed with a new additive `decision_at_utc` column sourced from each type's real source row, plus a self-healing repair path for any row missing it. **MEDIUM-1** — MFE/MAE folding could report a positive MAE for a trade that was favorable at every observed point (no anchor). Fixed: entry is now an implicit R=0 observation in both the live and backfill excursion paths (textbook MFE≥0, MAE≤0), while a genuinely stop-less position still correctly returns `(None, None)` rather than a false zero. **NIT-1** — doc comment added. MEDIUM-2 (a minor backfill edge case) deliberately left as follow-up per the audit's own scoping. +18 tests (381 total, was 363). No trading/execution/gate/scheduler behavior touched — see full audit + fix report in this session's transcript if unclear. (This fix's correctness was independently confirmed live during the incident above: the reconciled META exit correctly shows `mfe=0.0` — never favorable at any monitored point — instead of the pre-fix bug's wrong small-negative value.)
+- **Measurement foundation — PR1 + PR2** (`eede83c`, this checkpoint, on top of Fable 5's architecture/roadmap review). Fable 5 reviewed AlphaOS end-to-end (packet + response now live at repo root: `FABLE_REVIEW_PACKET.md` / `FABLE_REVIEW_RESPONSE.md`, currently **untracked** — see §7) and recommended measurement before scanner v2/universe expansion/autonomy. Two parts landed: **PR1 (MFE/MAE)** — turned out to be a bug fix, not new work: per-check excursion tracking already existed (`monitoring_snapshots`) but `close_position()` discarded it and wrote a crude `%`-based approximation instead; fixed to fold the exit tick into the real running R-based extremum, plus an idempotent backfill for old closed trades (`alphaos backfill_mfe_mae`). **PR2 (counterfactual outcome ledger)** — new `alphaos/learning/` package + `candidate_outcomes` table: every scanned candidate/proposal/reject/armed-watch/user-override becomes learnable data via 1/3/5-day forward returns and bracket replay, whether or not it became a real trade (NOT a backtest — only replays decisions AlphaOS actually recorded). CLI: `alphaos outcomes_update`, `alphaos outcomes_report`. All additive, `SCHEMA_VERSION` stays 3.
+- **Live calibration run + 3 bugfixes** (merged to `main` @ `e381096` earlier this session — PRs #16/#17/#18). Fixed a labeller output-token-budget bug (`220→800`) that had been silently truncating every real labeller call and blocking ALL live proposals; fixed the live Alpaca catalyst provider (SDK `NewsSet` parsing bug, was silently returning zero catalysts); shipped the User-Override attribution report. Live-fired: **META** long, real Alpaca-paper bracket, filled 41 @ 618.78 — see the incident entry above for how this trade ultimately closed.
+- **Labeller fail-safe visibility** (`feat/labeller-failsafe-visibility`, pushed, **still not merged** — carried over from last checkpoint, untouched this session).
+- Prior: Roadmap 2.8 (Armed Watch + labeller reasoning + User Override Mode), 2.7 (last30days polarity), 2.6 (gated labeller override), 2.5 (last30days enrichment), 2.4 (catalyst enrichment), 2.3 (interest scanner + AI labelling) — see git log for full history; unchanged this checkpoint.
 
 ---
 
 ## 1. Current project state
-AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). Operating mode (verified via `system_health()`): `ALPHAOS_MODE=paper`, **market data LIVE** (Alpaca free IEX), **AI = LIVE** (`OPENAI_API_KEY` set, model `gpt-5.4-mini`; eval + labeller + polarity all real), **catalyst = MOCK** (`NEWS_ENRICHMENT_PROVIDER=mock`; live Alpaca news still opt-in), **last30days = LIVE** (`cli`; sources reddit/x/youtube/hackernews/polymarket/github + web grounding), **polarity = ON + arming allowed**, **labeller override = ARMED (symmetric)**, **execution = `simulated_internal`**, **eval no-news baseline** (`NEWS_ENABLED=false`), **real-money trading `unreachable`** (`REAL_TRADING_ENABLED=false`, `ALLOW_REAL_ORDERS=false`). `main` @ `0421ca0`, in sync with origin. Full pipeline:
-**Market Interest Scanner → Candidate Packet → AI Category/Playbook Labeller → Official Catalyst Enrichment → last30days Narrative Enrichment → last30days Polarity → label↔eval decision combine (downgrade-only OR gated symmetric override) → [Armed Watch if armed-but-no-upgrade] → safety gates → manual approval (+ optional User Override layer) → sim execution → monitor/exit → ledger / reconciliation / learning / attribution.** A Streamlit dashboard runs ephemerally at http://localhost:8502 (dies on reboot/session-end — see §7).
+AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). Two audited, unmerged branches sit on top of `main` (`e381096`): `feat/labeller-failsafe-visibility` (older, untouched this session) and `feat/measurement-foundation` (this session's work, now Opus-audited and fix-applied). Neither is merged yet — **that's the first decision pending** (§9 recommends order). Pipeline (unchanged in shape this checkpoint): **Scanner → Candidate Packet → AI Labeller → Catalyst/last30days/Polarity enrichment → decision combine → Armed Watch → gates → manual approval (+ User Override layer) → sim/paper execution → monitor/exit → ledger → NEW: counterfactual outcome measurement.** Real-money trading remains `unreachable` throughout — this checkpoint's work is entirely measurement/audit-fix, no safety-relevant behavior changed.
 
-Config lives in three places: **AlphaOS `.env`** (chain flags, thresholds, sources, `LAST30DAYS_PYTHON`, the OpenAI key — gitignored); the **skill's** `~/.config/last30days/.env` (X cookies `AUTH_TOKEN`/`CT0`, memory dir; chmod 600); and **`~/.local/bin`** (`python3.12`, `yt-dlp`).
-
-## 2. What was just implemented (this checkpoint — Roadmap 2.8)
-- **Armed Watch (Part A)**: in `orchestrator._resolve_decision`, when `override_active` AND `final==watch` AND `adjustment==unchanged`, the candidate is flagged `armed_watch` with an `armed_watch_reason` (`polarity_armed_but_labeller_did_not_upgrade` / `..._eval_not_tradeable`), recorded on `decision_adjustments` + `candidates.armed_watch` + `ScanSummary.armed_watch`. A NEAR-ACTION watchlist item, NOT a reject.
-- **Labeller reasoning (Part B, ADVISORY)**: the labeller now emits `missing_conditions` / `upgrade_blockers` / `proposal_readiness` / `what_would_upgrade` (prompt + `coerce_and_validate` + mock + `candidate_labels` columns). Copied onto the armed-watch row. NEVER changes the decision.
-- **User Override Mode (Part C)**: new `user_decision_overrides` table + `Orchestrator.create_user_override()` / `resolve_user_override()`. Stores AlphaOS's original recommendation AND the user's final decision side by side — NEVER rewrites AlphaOS's call. `watch_to_trade`/`reject_to_trade` re-run the SAME freshness+risk gates and only on pass create a PENDING_APPROVAL proposal (tagged `user_override`; manual approval still required; never auto-executes); failures record `execution_allowed=0` + `blocked_reason`. `propose_to_reject` rejects the proposal; `manual_exit`/`manual_hold` recorded. High-risk overrides tag the proposal warning + flag NightDesk (`nightdesk_research_candidate`, hook only). `resolve_user_override()` records outcome + a preliminary attribution (user vs AlphaOS).
-- **Schema** (additive, `SCHEMA_VERSION` stays 3): `user_decision_overrides` table; armed-watch + labeller-reasoning columns on `decision_adjustments`/`candidate_labels`; `armed_watch` on `candidates`. Verified 0 data loss on a real-ledger copy.
-- **CLI**: `alphaos armed_watch` (list near-action), `alphaos override --candidate-id .. --action .. [--reason --note --yes]` (preview without `--yes`), `alphaos overrides` (list + attribution). **Dashboard**: Armed Watch / Near Action + User Override sections (read-only; not inside rejects).
+## 2. What was just implemented (this checkpoint)
+- **Measurement foundation** (`alphaos/learning/outcomes_engine.py` pure compute, `alphaos/learning/outcomes_tracker.py` seed+update orchestration, `alphaos/reports/outcomes_summary.py`, `alphaos/data/providers/alpaca_bars.py` historical daily bars, `alphaos/execution/mfe_mae_backfill.py`). New `candidate_outcomes` table (43 columns incl. `decision_at_utc`) + `trade_outcomes.mfe_mae_source`.
+- **MFE/MAE bug fix** in `alphaos/execution/position_manager.py`: `_fold_excursion()` shared by the live monitor pass and `close_position()`, now textbook 0R-anchored.
+- **Opus audit fix pass**: `decision_at_utc` anchoring (HIGH-1) + textbook excursion semantics (MEDIUM-1) — see changelog above for detail.
+- New CLI: `alphaos backfill_mfe_mae`, `alphaos outcomes_update`, `alphaos outcomes_report`.
 
 ## 3. What is working (verified this checkpoint)
-- Full suite **286 passed, 3 skipped** on `main` (~1.2s). The 3 skips are the gated live-Alpaca tests.
-- **Armed Watch (2.8)**: armed-but-no-upgrade flagged with reason + labeller reasoning; tagged on the candidate (not a reject); counted in the scan summary. Your AMD live case is the canonical example.
-- **User Override (2.8)**: verified end-to-end — `watch_to_trade` preserves AlphaOS's `watch`, records the user's `propose` separately, re-runs gates, creates a PENDING_APPROVAL proposal (0 orders / 0 approvals — manual approval still required), and flags NightDesk. Freshness/risk/spread gate failures correctly record `execution_allowed=0` + `blocked_reason`. `resolve_user_override` computes attribution.
-- **Real AI end-to-end**: live eval + labeller return valid output under `gpt-5.4-mini` (`is_mock=False`); labeller uses `max_completion_tokens` (a test enforces no `max_tokens`).
-- **last30days LIVE + X + YouTube**: `last30days_probe` and full scans pull real Reddit/X/YouTube/HN content; coverage went from 1 source (keyless-thin) to up to 5 (e.g. AMD: hackernews/jobs/reddit/x/youtube, 15 items).
-- **Polarity ARMED on real data (first time)**: live scan classified AMD `bullish/aligned, conf 0.68, coverage medium → high_risk_narrative`, and the decision-adjustment row shows `armed=1`. It did **not** upgrade only because the AI labeller independently chose `watch` (override can't invent a `propose` the labeller didn't make) — correct behaviour. Other names came back neutral/low-confidence → `non_arming`. **0 upgrades, all correctly gated.**
-- Safety on every live scan: `0 orders / 0 fills / 0 positions / 0 approvals`; eval stays no-news; labels stay official; `primary_label` never overwritten; real-money unreachable.
-- Dashboard read-only on render (incl. polarity / skipped_budget_cap / decision-adjustment rows). Schema auto-migrates additively.
+- Full suite **381 passed, 3 skipped** (~1.5s, fully hermetic). The 3 skips are the pre-existing gated live-Alpaca tests.
+- MFE/MAE: manually verified a +2R/−0.5R path folds correctly through both `monitor()` and `close_position()`; textbook 0-anchoring verified long AND short.
+- Counterfactual seeding: verified live against a real mock scan — correctly classifies proposal/blocked/candidate/reject/armed_watch/user_override, sources `decision_at_utc` from each type's true source row (not seed time), idempotent across reruns.
+- Forward-outcome resolution + bracket replay: verified end-to-end with fixture bars (target-hit, stop-hit, neither, ambiguous-same-bar all correctly distinguished; no-lookahead — decision-day bar excluded).
+- The exact audit regression scenario (backlog candidate decided 30 days ago, seeded "now") now resolves against its real historical bar instead of silently losing it.
+- Safety invariants: 0 orders/approvals/fills/positions created by any seed/update/report/backfill call, in every test and in manual runs; `real_money_trading=unreachable` confirmed throughout.
 
 ## 4. Partially implemented (and what's missing to finish)
-- **A visible polarity-driven UPGRADE has not yet fired on live data.** The arming gate now fires (AMD `armed=1`), but a watch→propose upgrade also needs the *labeller* to choose `propose` on an armed candidate at the same time. Not seen yet (live narrative for the mega-caps has been mixed/low-conviction). Mechanism proven in tests; just awaiting the right live setup, or looser thresholds.
-- **Catalyst is still MOCK** — live Alpaca news provider implemented but opt-in (`NEWS_ENRICHMENT_PROVIDER=alpaca`).
-- **Real Alpaca paper EXECUTION** — opt-in (`EXECUTION_PROVIDER=alpaca_paper`); default `simulated_internal`. No real calibration fills collected yet (Step 1 deferred).
-- **Cost-model calibration** — the 20 seeded samples are marketable-limit-biased; needs real strategy-driven paper fills.
-- **MFE/MAE** — `baseline_outcomes.hypothetical_*` present but unpopulated.
+- **Attribution report** exists (Roadmap 2.8 follow-up, merged to `main`) but has never been exercised on *real* (non-mock) override data — no live overrides have accumulated yet.
+- **Cost-model calibration**: still 1/20 real fills (the META entry). Needs the exit + many more samples — see §7's urgent item, which is now entangled with this.
+- **MEDIUM-2** (backfill treats a transient empty-bars fetch as permanently `unavailable`) — deliberately left as a fast-follow per the audit's own scoping; not yet done.
+- **Measurement data has near-zero real volume yet**: the counterfactual ledger works correctly but has only been run against mock scans and hand-built fixtures — no real scheduled cadence exists to actually accumulate it (that's PR3, not started).
 
 ## 5. Not done yet (deferred / future)
-- **Step 1 — clean forward-evidence calibration pass** (reset ledger → scan → approve one → monitor; needs `alpaca_paper` execution during RTH for representative fills). Still pending.
-- More sources: TikTok / Instagram / Threads (need a free `SCRAPECREATORS_API_KEY`); Perplexity/Bluesky (opt-in).
-- **2.8 follow-ups (hooks only so far):** NightDesk full import/export (only the `nightdesk_research_candidate` flag exists); the user-vs-AlphaOS attribution LEARNING loop (fields + `resolve_user_override` exist; no aggregation/report yet); `manual_exit` execution (recorded only — actual close is via `alphaos flatten`, paper-only).
-- Automatic relabelling from catalyst/narrative; scheduler automation; durable LAN dashboard hosting.
-- **Live / real-money trading** — intentionally unreachable; not on the roadmap.
+Per the Fable 5 review's PR-sized roadmap (`FABLE_REVIEW_RESPONSE.md`), none of these are started: **PR3 scheduler v1.5** (the next recommended step — daily scan+monitor+outcomes_update+digest), decision-lineage stamping, earnings-proximity flag, proposal TTL, TQS v0, attribution v2 (ΔR), portfolio concentration monitor, playbook registry v0, generalized anomaly monitor, NightDesk export. Also still open from before: real Alpaca paper execution beyond the one META trade, universe expansion (deliberately deferred — shadow-rank only per the review), the mock-mode-doesn't-hard-disable-last30days footgun (flagged by the audit as its own follow-up PR, not touched).
 
 ## 6. Test results
-- **286 passed, 3 skipped** (`.venv/bin/python -m pytest`). 3 skips = `tests/test_live_alpaca.py` (gated behind `RUN_LIVE_ALPACA_TESTS=true`). Default suite is fully hermetic (no network / no subprocess / no real API — mock providers + monkeypatch).
-- `test_armed_watch.py` (+7): armed-but-watch creates `armed_watch`; upgrade does not; not-armed does not; stores labeller reasoning; high-risk flagged; not a reject; reasoning advisory-only.
-- `test_user_override.py` (+11): watch_to_trade creates pending proposal + preserves AlphaOS original; blocked by freshness/risk/spread; propose_to_reject rejects; manual_exit-without-position blocked; high-risk tags warning + NightDesk; resolve→attribution; never enables real-money/auto-exec; queryable.
-- `test_last30days_polarity.py` (+23): deterministic arming, classify guards, mock classifier, integration, `max_completion_tokens` enforcement.
+- **381 passed, 3 skipped** (`.venv/bin/python -m pytest`). Skips = `tests/test_live_alpaca.py` (gated behind `RUN_LIVE_ALPACA_TESTS=true`). Fully hermetic otherwise.
+- New this checkpoint: `tests/test_mfe_mae.py` (22), `tests/test_outcomes_engine.py` (19), `tests/test_outcomes_tracker.py` (28), `tests/test_outcomes_summary.py` (8) — includes the audit's exact regression scenarios (lagged-backlog anchoring, always-favorable/always-adverse excursion, short-direction close path).
 
-## 7. Known risks / blockers (no RISKS.md — recorded here)
-- **Every real scan now costs OpenAI money.** With the key live + chain on, each `interest_scan` makes ~2×(candidates) eval/label calls + ~1 polarity call per last30days-available candidate (`gpt-5.4-mini`, compact prompts — likely cents/scan; check the OpenAI usage dashboard). $0 only in `ALPHAOS_MODE=mock` or with `LAST30DAYS_POLARITY_ENABLED=false`. Scans are manual one-shots (no daemon), so cost is bounded by how often you run them.
-- **X is authenticated via your personal Safari cookies** (`AUTH_TOKEN`/`CT0` in `~/.config/last30days/.env`). Scraping X with personal cookies carries some account risk; cookies also expire (re-paste when X stops appearing). To disable: comment those two lines.
-- **The `.env` chain is ON.** Normal scans run live last30days + polarity and CAN arm upgrades (still manual-approval-gated, sim execution). To pause: `ALPHAOS_MODE=mock` or flip the `LAST30DAYS_*`/override flags false.
-- **Ledger is forward-evidence, not clean.** Validation scans this session went to temp DBs (`data/demo-*.db`, safe to delete); `data/alphaos.db` is the real ledger. Reset per §8 before a clean calibration run.
-- **last30days needs Python ≥3.12** — system `python3` is 3.9.6; the adapter uses `LAST30DAYS_PYTHON=~/.local/bin/python3.12`. Wrong path → fail-open `unavailable`.
-- **Calibration sample biased**; **dashboard ephemeral** (relaunch §8; no LAN without auth).
-- **Cannot push to `main` from this environment** (safety classifier blocks direct pushes; no `gh`/token). Feature branches push over the SSH deploy key (`origin = git@github-alphaos:wwee01/AlphaOS.git`); **merge via the GitHub web UI**.
+## 7. Known risks / blockers
+1. **Protection watchdog does not exist yet.** The META incident (resolved — see banner + changelog) can recur on any future live-fired position: nothing currently checks that a broker-managed position's protective orders are still live, and `OrderManager.reconcile()` does not detect a position closing via any path other than a bracket-leg fill. Tracked at [`docs/roadmap/protection-watchdog.md`](docs/roadmap/protection-watchdog.md) — **not built**. Until it exists, treat any live-fired `alpaca_paper` position as requiring a manual protection check if it survives past its first session (bracket legs are `time_in_force=day`, confirmed root cause of the incident).
+2. **Two audited feature branches are unmerged**: `feat/measurement-foundation` (`e00595e`, this session, Opus-approved-with-fixes-applied) and `feat/labeller-failsafe-visibility` (older, still pending). Cannot merge from this environment (no `gh`, safety classifier blocks direct pushes to `main`) — user must merge via the GitHub web UI.
+3. **Untracked docs at repo root**: `FABLE_REVIEW_PACKET.md` / `FABLE_REVIEW_RESPONSE.md` — deliberately left uncommitted (not part of the code PRs' scope); decide whether/where they should live. (The two new incident/roadmap docs under `docs/` are also currently untracked — same open question, decide together.)
+4. **Stray WAL files**: `data/demo-chain.db-shm` / `-wal` — pre-existing, untouched, harmless; clean up at your discretion.
+5. **Chain cost**: every real `interest_scan` still costs OpenAI money; `LAST30DAYS_ENABLED`/`POLARITY_ENABLED` are back on in `.env` from earlier this session.
+6. **Operational footgun (documented, not fixed)**: `ALPHAOS_MODE=mock` does NOT disable `LAST30DAYS_ENABLED=true`, causing subprocess hangs during ad-hoc CLI testing. Always pair mock-mode testing with explicit `LAST30DAYS_ENABLED=false LAST30DAYS_POLARITY_ENABLED=false EXECUTION_PROVIDER=simulated_internal`. Opus classified this as its own follow-up PR (safety-adjacent, touches settings resolution) — deliberately not fixed this session.
+7. **Cannot push to `main` from this environment** — feature branches push fine over the SSH deploy key; merge via GitHub web UI only.
 
 ## 8. Exact commands to run next
 ```bash
 cd "/Users/ck/Documents/Claude Playground/AlphaOS"
 
-# verify
-.venv/bin/python -m pytest                 # expect: 286 passed, 3 skipped
+# confirm the account is actually clean (read-only) before doing anything else
+.venv/bin/python -c "
+from alphaos.config.settings import load_settings
+from alpaca.trading.client import TradingClient
+s = load_settings(); tc = TradingClient(s.alpaca_api_key, s.alpaca_secret_key, paper=True)
+print('open positions:', tc.get_all_positions())
+"   # expect: []
+
+# verify code state
+.venv/bin/python -m pytest                 # expect: 381 passed, 3 skipped
 git status -sb && git log --oneline | head -6
-.venv/bin/python -m alphaos status         # expect AI configured, chain on, real_money unreachable
+git branch --show-current                  # expect: feat/measurement-foundation
 
-# operate (one-shot CLI; chain is LIVE -> real OpenAI calls each run)
-.venv/bin/python -m alphaos interest_scan          # scan -> label -> catalyst -> last30days -> polarity -> propose
-.venv/bin/python -m alphaos last30days_probe AAPL  # READ-ONLY probe (set PROVIDER=cli for the live skill)
-.venv/bin/python -m alphaos armed_watch            # near-action: armed but stayed watch (2.8)
-.venv/bin/python -m alphaos proposals              # open proposals
-.venv/bin/python -m alphaos approve <proposal_id>  # re-checks gates, then sim fill (manual approval)
-# USER OVERRIDE (2.8): preview without --yes; record + create pending proposal with --yes (manual approval still required)
-.venv/bin/python -m alphaos override --candidate-id <id> --action watch_to_trade --reason strong_conviction --note "..." --yes
-.venv/bin/python -m alphaos overrides              # list overrides + attribution summary
+# operate (chain is LIVE -> real OpenAI calls each run; use ALPHAOS_MODE=mock for safe testing)
+.venv/bin/python -m alphaos status
+.venv/bin/python -m alphaos outcomes_update        # seed + resolve counterfactual outcomes
+.venv/bin/python -m alphaos outcomes_report        # measurement visibility (no statistical claims)
+.venv/bin/python -m alphaos backfill_mfe_mae       # backfill any legacy closed trades
 
-# run a scan WITHOUT cost (logic only):  ALPHAOS_MODE=mock .venv/bin/python -m alphaos interest_scan
-# run a scan into a TEMP db (keep real ledger clean):  ALPHAOS_DB_PATH=data/demo.db ... interest_scan
-
-# verify a source after re-auth:  cd <skill>; python3.12 scripts/last30days.py --diagnose
-#   skill dir = ~/.claude/plugins/cache/last30days-skill/last30days/<ver>/skills/last30days
-
-# dashboard (ephemeral; read-only). Point at a chosen ledger via ALPHAOS_DB_PATH:
-ALPHAOS_DB_PATH=data/alphaos.db .venv/bin/streamlit run alphaos/dashboard/streamlit_app.py \
-  --server.headless true --server.port 8502 --server.address 127.0.0.1 --browser.gatherUsageStats false
-
-# RESET the working ledger to clean (archive first), preserving artifacts
-TS=$(date +%Y%m%d-%H%M%S); DIR="data/archive/${TS}-handover"; mkdir -p "$DIR"
-.venv/bin/python -c "import sqlite3;c=sqlite3.connect('data/alphaos.db');c.execute('PRAGMA wal_checkpoint(TRUNCATE)');c.close()"
-mv data/alphaos.db "$DIR/ledger.db"; rm -f data/alphaos.db-wal data/alphaos.db-shm
-.venv/bin/python -c "from alphaos.journal.journal_store import JournalStore; JournalStore('data/alphaos.db').close(); print('clean ledger recreated')"
+# SAFE mock testing (avoids the last30days subprocess-hang footgun, §7.6):
+ALPHAOS_MODE=mock EXECUTION_PROVIDER=simulated_internal LAST30DAYS_ENABLED=false \
+  LAST30DAYS_POLARITY_ENABLED=false ALPHAOS_DB_PATH=data/demo.db .venv/bin/python -m alphaos interest_scan
 ```
 
 ## 9. Recommended next prompt (paste into a fresh window)
 ```
-Read HANDOVER.md in the AlphaOS repo first (single source of truth), then verify real state:
-`.venv/bin/python -m pytest` (expect 286 passed, 3 skipped), `git status -sb` (clean main @ 0421ca0),
-and `.venv/bin/python -m alphaos status` (AI configured/gpt-5.4-mini, last30days cli, polarity arming,
-override armed, execution simulated_internal, real_money unreachable). NOTE: the chain is LIVE so real
-scans cost OpenAI money — use ALPHAOS_MODE=mock or a temp ALPHAOS_DB_PATH for safe experiments.
+Read HANDOVER.md in the AlphaOS repo first (single source of truth). Note the META
+protection incident from last checkpoint is RESOLVED (position flattened, ledger
+reconciled) — no action needed there, just be aware docs/incidents/ and docs/roadmap/
+now exist and are untracked.
 
-Then do ONE of:
-(a) Tune to see a polarity-driven upgrade / armed-watch fire on live data: run interest_scan during RTH on
-    a temp DB and review last30days_polarity + decision_adjustments + `alphaos armed_watch`; if too
-    conservative, lower LAST30DAYS_POLARITY_MIN_CONFIDENCE / _MIN_SOURCE_COVERAGE (less safe — note it); OR
-(b) Step 1 — clean forward-evidence calibration pass: reset the ledger (§8), enable EXECUTION_PROVIDER=
-    alpaca_paper, interest_scan -> approve ONE safe proposal -> monitor, to collect representative fills; OR
-(c) Exercise the 2.8 User Override loop (record a watch_to_trade / propose_to_reject via `alphaos override`,
-    approve, then `resolve_user_override` after close) and/or build the attribution learning report; OR
-(d) Add TikTok/Instagram via a free SCRAPECREATORS_API_KEY in ~/.config/last30days/.env to broaden coverage.
+Verify code state: `.venv/bin/python -m pytest` (expect 381 passed, 3 skipped), confirm
+branch is `feat/measurement-foundation` @ `e00595e`, and confirm the paper account has
+0 open positions (§8 has the read-only command).
 
-Hard constraints (HANDOVER §10): real-money stays unreachable; manual approval non-bypassable; no AI/
-catalyst/last30days/polarity output bypasses the gates; polarity can ARM but never trades/overwrites labels;
-hype/meme/squeeze = high_risk_narrative = manual-only; a USER OVERRIDE never rewrites AlphaOS's original
-recommendation and never bypasses gates/approval/real-money guard; eval stays no-news; migrations additive
-only; keep tests green. Branch off main; test to green; push; merge via the web UI.
+Then help me decide, in order:
+1. Disposition of the untracked docs (FABLE_REVIEW_*.md at repo root, docs/incidents/,
+   docs/roadmap/) — commit them, and if so where/how scoped.
+2. Merge order for the two unmerged, audited branches (feat/measurement-foundation and
+   feat/labeller-failsafe-visibility) via the GitHub web UI (I'll do the actual clicks).
+3. Whether to build the protection watchdog (docs/roadmap/protection-watchdog.md) before
+   or after PR3 (scheduler v1.5, FABLE_REVIEW_RESPONSE.md §16) — the incident is a live
+   argument for prioritizing the watchdog, but that's your call.
+
+Do NOT start new feature work until we've discussed this ordering.
+
+Hard constraints (HANDOVER §10): real-money stays unreachable; manual approval
+non-bypassable; no AI/catalyst/last30days/polarity/measurement output bypasses gates;
+migrations additive only; keep tests green; the counterfactual ledger is measurement-only
+and must never be read by any gate/eval/labeller/risk/execution path.
 ```
 
 ## 10. Anything the next session must NOT change (hard invariants)
 - **Real-money trading stays unreachable.** `REAL_TRADING_ENABLED=false`, `ALLOW_REAL_ORDERS=false`; `ALPHAOS_MODE=live` rejected. Do not touch `safety.py`. `system_health()["real_money_trading"]` must remain `"unreachable"`.
-- **Manual approval is the default and non-bypassable** (`APPROVAL_MODE=manual`). No path may auto-submit or skip approval. **`high_risk_narrative` proposals are manual-only — never auto-approved**, regardless of approval mode.
-- **No AI/catalyst/last30days/polarity output bypasses gates.** Freshness, spread, liquidity, crossed-quote, risk, sizing, daily-cap, exposure, kill switch, stop/target, market-session, price-drift gates are authoritative. No execution from a label, headline, narrative, or polarity alone.
-- **AI category label is ADVISORY; the override is gated + symmetric.** Default downgrade-only (`_apply_label_floor` = `min`). When ARMED (`LABELLER_DECISION_OVERRIDE_ENABLED` + real AI + a real direction-aligned positive driver) it may move the decision UP or DOWN. It **cannot** upgrade a non-tradeable eval (null levels / unusable freshness), bypass a gate, skip approval, mint an official label, or overwrite the frozen `primary_label`. Every move is audited in `decision_adjustments` (+ `evidence_json`).
-- **Polarity (2.7) is CONTEXT that can ARM, never EXECUTE.** Arms an upgrade only when `_decide_arming` (DETERMINISTIC, AlphaOS-side — never the model's word) finds: enabled + arming_allowed + direction-aligned + `confidence ≥ MIN_CONFIDENCE` + `coverage ≥ MIN_SOURCE_COVERAGE` + no official-catalyst conflict. Hype/meme/squeeze or medium/high hype → `high_risk_narrative` (arms but manual-only + warned), NOT auto-suppressed. Fails safe to `unclear`/non-arming on any error/invalid output. Stored SEPARATELY (`last30days_polarity`); never overwrites last30days / eval / label / risk / approval records.
-- **Catalyst & last30days are CONTEXT, not execution authority.** The OpenAI momentum eval stays **no-news** — never receives catalyst / last30days / polarity context (`NEWS_ENABLED=false`, distinct from `NEWS_ENRICHMENT_*` / `LAST30DAYS_*`).
-- **User Override (2.8) is a SEPARATE decision layer; it NEVER rewrites AlphaOS's recommendation.** `create_user_override` stores AlphaOS's original eval/label/final decision AND the user's final decision side by side in `user_decision_overrides`. It NEVER bypasses the freshness/risk/spread/liquidity gates, manual approval, or the real-money guard, and NEVER auto-executes: `watch_to_trade` only ever creates a PENDING_APPROVAL proposal (the user must still `approve`). High-risk-narrative overrides stay manual-only + warned. Labeller reasoning fields (`missing_conditions`/`upgrade_blockers`/`proposal_readiness`/`what_would_upgrade`) are ADVISORY — they never change the decision.
-- **Armed Watch is a near-action watchlist item, NOT a reject.** Do not route armed-watch candidates into the rejected flow.
-- **last30days is a SEPARATE layer; no vendoring.** Calls the globally-installed skill via subprocess. Real-AI calls use `max_completion_tokens` (NOT `max_tokens`) — do not regress (gpt-5.x rejects `max_tokens`). `skipped_budget_cap` stays distinct from `none_found`.
-- **Execution = `simulated_internal`** unless deliberately enabling opt-in `alpaca_paper` (paper-only, explicit intent + paper creds).
-- **Migrations additive only.** Reconciler ADDs columns/tables; never rename/drop. `SCHEMA_VERSION` stays 3 for additive changes; bump only for destructive/transforming migrations. Never silently drop data.
-- **Audit/evidence writes never gate execution/exit paths** (best-effort, after the action): `decision_adjustments`, `candidate_last30days`, `last30days_polarity`.
+- **Manual approval is the default and non-bypassable** (`APPROVAL_MODE=manual`). No path may auto-submit or skip approval. `high_risk_narrative` proposals are manual-only regardless of approval mode.
+- **No AI/catalyst/last30days/polarity/measurement output bypasses gates.** Freshness, spread, liquidity, crossed-quote, risk, sizing, daily-cap, exposure, kill switch, stop/target, market-session, price-drift gates are authoritative.
+- **AI category label is ADVISORY; the override is gated + symmetric.** Default downgrade-only. When ARMED it may move the decision UP or DOWN, gated + audited (`decision_adjustments`).
+- **Polarity is CONTEXT that can ARM, never EXECUTE.** Deterministic AlphaOS-side arming only; fails safe to non-arming.
+- **User Override (2.8) is a SEPARATE decision layer; NEVER rewrites AlphaOS's recommendation**, never bypasses gates/approval/real-money guard, never auto-executes.
+- **NEW — the counterfactual outcome ledger (`candidate_outcomes`) is PURE MEASUREMENT.** It must never be read by any gate, eval, labeller, risk check, or execution path — write-only from `alphaos/learning/`. `decision_at_utc` must stay the anchor for all forward-window math (never revert to seed-time anchoring — that was Opus audit HIGH-1, a real bug, not a style choice).
+- **MFE/MAE stay textbook-anchored** (entry = implicit R=0; MFE≥0, MAE≤0 always) — do not revert to the old unanchored fold (Opus audit MEDIUM-1).
+- **last30days is a SEPARATE layer; no vendoring.** Real-AI calls use `max_completion_tokens` (NOT `max_tokens`).
+- **`LABEL_MAX_OUTPUT_TOKENS` must stay ≥512** (guarded by a test) — 220 silently truncated every real label and blocked all live proposals for an unknown period; do not lower it.
+- **Execution = `simulated_internal`** unless deliberately enabling opt-in `alpaca_paper` (paper-only, explicit intent).
+- **Migrations additive only.** `SCHEMA_VERSION` stays 3 for additive changes.
+- **Audit/evidence writes never gate execution/exit paths** (best-effort, after the action).
 - **Dashboard stays read-only on render**; do not expose on the network without auth.
-- Do not change OpenAI decision logic / `PROPOSE_MOMENTUM_THRESHOLD` / `MIN_REWARD_RISK` / risk/freshness thresholds / bracket-OCO-watchdog exits / Alpaca submission without explicit intent.
+- Do not change OpenAI decision logic / risk/freshness thresholds / bracket-OCO-watchdog exits / Alpaca submission without explicit intent.

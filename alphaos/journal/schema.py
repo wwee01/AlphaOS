@@ -522,6 +522,7 @@ SCHEMA: list[tuple[str, str]] = [
             classification TEXT,
             mfe REAL,
             mae REAL,
+            mfe_mae_source TEXT,
             model_confidence REAL,
             catalyst_type TEXT,
             win INTEGER,
@@ -1087,6 +1088,69 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # Measurement foundation (post-2.8, Fable 5 review PR1+PR2): the
+        # COUNTERFACTUAL LEDGER. Every scanned candidate/proposal/reject/
+        # armed-watch/user-override becomes learnable data via forward
+        # 1/3/5-day outcomes, whether or not it ever became a real trade. This
+        # is NOT a de-novo historical backtest — it only replays decisions
+        # AlphaOS actually made/recorded, using bars observed AFTER the
+        # decision. PURE MEASUREMENT: never read by any gate, eval, labeller,
+        # risk check, or execution path; write-only from this subsystem.
+        # decision_at_utc (the source row's ORIGINAL decision timestamp) is the
+        # forward-window anchor — distinct from created_at_utc (when this
+        # outcome row itself was seeded, which can lag the decision when
+        # catching up on a backlog). Anchoring on seed time instead of decision
+        # time would mislabel a multi-week-old candidate's next bar as a
+        # "1-day" return (Opus audit HIGH-1).
+        "candidate_outcomes",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            outcome_id TEXT NOT NULL UNIQUE,
+            scan_id TEXT,
+            scan_batch_id TEXT,
+            candidate_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            decision_at_utc TEXT,
+            original_decision TEXT,
+            eval_decision TEXT,
+            label_decision TEXT,
+            final_decision TEXT,
+            armed_watch INTEGER DEFAULT 0,
+            user_override INTEGER DEFAULT 0,
+            playbook_id TEXT,
+            playbook_version TEXT,
+            scanner_version TEXT,
+            entry_reference_price REAL,
+            stop_price REAL,
+            target_price REAL,
+            direction_hint TEXT,
+            forward_1d_return_pct REAL,
+            forward_3d_return_pct REAL,
+            forward_5d_return_pct REAL,
+            forward_1d_r REAL,
+            forward_3d_r REAL,
+            forward_5d_r REAL,
+            max_favorable_1d_r REAL,
+            max_adverse_1d_r REAL,
+            max_favorable_3d_r REAL,
+            max_adverse_3d_r REAL,
+            max_favorable_5d_r REAL,
+            max_adverse_5d_r REAL,
+            replay_result TEXT,
+            replay_r REAL,
+            replay_exit_reason TEXT,
+            outcome_status TEXT NOT NULL DEFAULT 'pending',
+            data_quality_status TEXT,
+            updated_at_utc TEXT,
+            updated_at_sgt TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1127,6 +1191,13 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_overrides_candidate ON user_decision_overrides(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_overrides_symbol ON user_decision_overrides(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_overrides_status ON user_decision_overrides(outcome_status)",
+    # One outcome row per (candidate, counterfactual path) — enforces idempotent
+    # seeding at the DB level (seeding also pre-checks, this is defense in depth).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_candoutcomes_candidate_type "
+    "ON candidate_outcomes(candidate_id, candidate_type)",
+    "CREATE INDEX IF NOT EXISTS idx_candoutcomes_status ON candidate_outcomes(outcome_status)",
+    "CREATE INDEX IF NOT EXISTS idx_candoutcomes_symbol ON candidate_outcomes(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_candoutcomes_scan_batch ON candidate_outcomes(scan_batch_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

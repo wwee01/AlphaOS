@@ -895,6 +895,40 @@ class Orchestrator:
 
         return build_attribution_report(self.journal, self.settings, limit=limit)
 
+    # ------------------------------------------------- measurement foundation
+    def backfill_mfe_mae(self, limit: int = 500) -> dict:
+        """Backfill MFE/MAE on closed trades recorded before intra-trade
+        excursion tracking existed. Idempotent (only rows with
+        mfe_mae_source IS NULL); never changes exit/stop/target/order behavior
+        — write-only to trade_outcomes.mfe/.mae/.mfe_mae_source."""
+        from alphaos.data.providers.alpaca_bars import make_bars_provider
+        from alphaos.execution.mfe_mae_backfill import backfill_mfe_mae
+
+        provider = make_bars_provider(self.settings, self.journal)
+        return backfill_mfe_mae(self.journal, bars_provider=provider, limit=limit)
+
+    def outcomes_update(self, limit: int = 500) -> dict:
+        """Counterfactual outcome tracker (Fable 5 review PR2): seed
+        candidate_outcomes rows for candidates/proposals/rejects/armed-watch/
+        user-overrides not yet tracked, then resolve pending rows with 1/3/5-day
+        forward returns + bracket replay from historical bars. PURE MEASUREMENT
+        — never read by any gate/eval/labeller/risk/execution path; idempotent;
+        makes no order/approval/execution changes."""
+        from alphaos.data.providers.alpaca_bars import make_bars_provider
+        from alphaos.learning.outcomes_tracker import seed_pending_outcomes, update_pending_outcomes
+
+        seeded = seed_pending_outcomes(self.journal, limit=limit)
+        provider = make_bars_provider(self.settings, self.journal)
+        updated = update_pending_outcomes(self.journal, bars_provider=provider, limit=limit)
+        return {"seeded": seeded, "updated": updated}
+
+    def outcomes_report(self, limit: int = 2000) -> dict:
+        """Measurement-visibility summary over candidate_outcomes. PURE READ —
+        no statistical claims; always surfaces a small-sample caveat."""
+        from alphaos.reports.outcomes_summary import build_outcomes_report
+
+        return build_outcomes_report(self.journal, self.settings, limit=limit)
+
     def flatten_paper_account(self) -> dict:
         """Paper-ONLY: cancel all open Alpaca paper orders + close all open Alpaca
         paper positions. Refuses unless the paper-only guardrails hold; the broker
