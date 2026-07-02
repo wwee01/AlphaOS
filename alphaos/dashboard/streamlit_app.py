@@ -246,6 +246,19 @@ def tab_system_health(orch: Orchestrator) -> None:
         }
     )
 
+    st.markdown("#### AI labeller health")
+    lf = health.get("labeller_failsafe", {})
+    lc1, lc2, lc3 = st.columns(3)
+    lc1.metric("Labels (recent)", lf.get("total", 0))
+    lc2.metric("Fail-safe", lf.get("fail_safe", 0))
+    lc3.metric("Fail-safe rate", f"{round((lf.get('fail_safe_rate') or 0) * 100)}%")
+    if lf.get("message"):
+        (st.error if lf.get("level") == "critical" else st.warning)(lf["message"])
+    else:
+        st.caption(f"Label sources (last {lf.get('total', 0)}): {lf.get('by_source', {})}")
+    if lf.get("by_failsafe_reason"):
+        st.caption(f"Fail-safe reasons: {lf['by_failsafe_reason']}")
+
     st.markdown("#### Startup safety checks")
     for c in checks:
         (st.success if c.ok else st.error)(f"{c.name}: {c.detail}")
