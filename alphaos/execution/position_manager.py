@@ -7,7 +7,8 @@ classification, and a simulated exit order so the lifecycle stays complete.
 Costs are recorded as a field but modelled as 0.0 in v1 (a documented gap);
 net_pnl therefore equals gross_pnl for now. MFE/MAE are tracked intra-trade (one
 ``monitoring_snapshots`` row per open position per monitor pass, in R terms) and
-folded into a running extremum; the final value at close is written onto
+folded into a running extremum, textbook-anchored at entry (R=0) so MFE>=0 and
+MAE<=0 always; the final value at close is written onto
 ``trade_outcomes.mfe``/``.mae`` — see ``_fold_excursion``.
 """
 
@@ -166,17 +167,26 @@ class PositionManager:
         using every ``monitoring_snapshots`` row recorded so far. Used both for
         the live per-pass snapshot AND at close (the exit tick counts as one more
         observation), so the closing MFE/MAE is never less complete than the
-        snapshot history already collected."""
+        snapshot history already collected.
+
+        Textbook excursion semantics: the entry moment itself is an implicit
+        R=0 observation, so MFE is always >= 0 and MAE is always <= 0 — a trade
+        that was only ever favorable has MAE=0 (never dipped below entry), not
+        a spuriously "adverse" positive value from the least-favorable-so-far
+        OBSERVED point (Opus audit MEDIUM-1). Returns (None, None) only when
+        R is genuinely undefined for this position (no usable stop, ever —
+        stop_price is fixed for a position's life in v1, so if this
+        observation has none, no prior one could have either)."""
         prior = self.journal.one(
             "SELECT MAX(mfe) AS max_mfe, MIN(mae) AS min_mae FROM monitoring_snapshots "
             "WHERE position_id = ?",
             (position_id,),
         ) or {}
-        mfe_candidates = [v for v in (unrealized_r, prior.get("max_mfe")) if v is not None]
-        mae_candidates = [v for v in (unrealized_r, prior.get("min_mae")) if v is not None]
-        mfe = max(mfe_candidates) if mfe_candidates else None
-        mae = min(mae_candidates) if mae_candidates else None
-        return mfe, mae
+        if unrealized_r is None and prior.get("max_mfe") is None:
+            return None, None
+        mfe_candidates = [0.0] + [v for v in (unrealized_r, prior.get("max_mfe")) if v is not None]
+        mae_candidates = [0.0] + [v for v in (unrealized_r, prior.get("min_mae")) if v is not None]
+        return max(mfe_candidates), min(mae_candidates)
 
     @staticmethod
     def _unrealized_r(pos: dict, price: float) -> tuple:

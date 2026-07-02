@@ -29,10 +29,13 @@ from alphaos.util import timeutils
 
 def excursion_from_bars(entry: Optional[float], stop: Optional[float], direction: Optional[str],
                         bars: list[dict]) -> tuple:
-    """(mfe_r, mae_r) from daily bars (each needs 'high'/'low'), purely from
-    what's OBSERVED — no implicit R=0 anchor, so this stays consistent with the
-    live-tracked semantics (monitoring_snapshots only reflects what was actually
-    checked). None/None when there's no usable stop or no usable bars."""
+    """(mfe_r, mae_r) from daily bars (each needs 'high'/'low'). Textbook
+    excursion semantics, matching the live-tracked path (_fold_excursion): the
+    entry moment itself is an implicit R=0 observation, so MFE >= 0 and
+    MAE <= 0 always — a trade only ever favorable gets MAE=0, not a
+    spuriously "adverse" positive value (Opus audit MEDIUM-1). None/None when
+    there's no usable stop, or when the bars carry no real high/low data at
+    all (a genuinely unknown excursion is never reported as "flat")."""
     if not bars or entry is None or not stop:
         return None, None
     risk_per_share = abs(float(entry) - float(stop))
@@ -51,7 +54,9 @@ def excursion_from_bars(entry: Optional[float], stop: Optional[float], direction
             favorable.append((float(high) - float(entry)) / risk_per_share)
             adverse.append((float(low) - float(entry)) / risk_per_share)
     if not favorable:
-        return None, None
+        return None, None   # no usable bar data at all -- genuinely unknown, not "flat"
+    favorable.append(0.0)
+    adverse.append(0.0)
     return round(max(favorable), 4), round(min(adverse), 4)
 
 

@@ -35,9 +35,20 @@ UNAVAILABLE_AFTER_DAYS = 15.0
 
 
 # --------------------------------------------------------------------- seed
+#
+# candidate_type is a SNAPSHOT frozen at first seed, not a live view: if a
+# 'candidate' or 'reject' later grows a proposal (e.g. via a user override),
+# the ORIGINAL row keeps its original type — a separate 'user_override' row
+# captures the new path in parallel. This is deliberate (each row is a fixed
+# counterfactual observation), not a bug.
 def _classify_candidate(journal, cand: dict) -> dict:
     """AlphaOS-side classification + level/decision sourcing for one candidate.
-    Priority: proposal(blocked) > proposal > armed_watch > reject > candidate."""
+    Priority: proposal(blocked) > proposal > armed_watch > reject > candidate.
+    ``decision_at_utc`` is the SOURCE row's own timestamp (proposal/reject/
+    decision_adjustments/candidate) — the actual moment AlphaOS decided —
+    which is what forward outcomes must anchor on, NOT when this
+    candidate_outcomes row happens to get seeded (that can lag, e.g. when
+    catching up on a backlog)."""
     candidate_id = cand["candidate_id"]
     ev = journal.evaluation_for_candidate(candidate_id) or {}
     adj = journal.one(
@@ -55,11 +66,13 @@ def _classify_candidate(journal, cand: dict) -> dict:
         entry, stop, target = proposal.get("entry"), proposal.get("stop"), proposal.get("target")
         direction = proposal.get("direction") or ev.get("direction") or cand.get("direction")
         playbook = proposal.get("playbook_name") or cand.get("playbook_name")
+        decision_at_utc = proposal.get("created_at_utc") or cand.get("created_at_utc")
     elif cand.get("armed_watch"):
         candidate_type = "armed_watch"
         entry, stop, target = ev.get("entry"), ev.get("stop"), ev.get("target")
         direction = ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
+        decision_at_utc = adj.get("created_at_utc") or cand.get("created_at_utc")
     elif reject:
         candidate_type = "reject"
         if ev.get("entry") is not None:
@@ -68,11 +81,13 @@ def _classify_candidate(journal, cand: dict) -> dict:
             entry, stop, target = reject.get("would_be_entry"), reject.get("would_be_stop"), None
         direction = reject.get("direction") or ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
+        decision_at_utc = reject.get("created_at_utc") or cand.get("created_at_utc")
     else:
         candidate_type = "candidate"
         entry, stop, target = ev.get("entry"), ev.get("stop"), ev.get("target")
         direction = ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
+        decision_at_utc = cand.get("created_at_utc")
 
     final_decision = adj.get("final_decision") or cand.get("label_decision") or cand.get("status")
     return {
@@ -85,6 +100,7 @@ def _classify_candidate(journal, cand: dict) -> dict:
         "original_decision": final_decision,
         "entry_reference_price": entry, "stop_price": stop, "target_price": target,
         "direction_hint": direction, "playbook_id": playbook,
+        "decision_at_utc": decision_at_utc,
     }
 
 
@@ -92,7 +108,9 @@ def _source_from_override(journal, ov: dict) -> dict:
     """Level/decision sourcing for a user-override counterfactual row. Unlike
     the AlphaOS-side row, ``final_decision`` here is the USER's final decision
     and ``original_decision`` is AlphaOS's original (frozen) call — the pair a
-    future ΔR comparison needs."""
+    future ΔR comparison needs. ``decision_at_utc`` is the override's OWN
+    timestamp (when the user actually made their call) — that is the decision
+    whose forward outcome this row measures, not the original candidate scan."""
     entry = stop = target = None
     if ov.get("proposal_id"):
         prop = journal.proposal_by_id(ov["proposal_id"])
@@ -110,6 +128,7 @@ def _source_from_override(journal, ov: dict) -> dict:
         "original_decision": ov.get("alphaos_final_decision"),
         "entry_reference_price": entry, "stop_price": stop, "target_price": target,
         "direction_hint": direction, "playbook_id": None,
+        "decision_at_utc": ov.get("created_at_utc"),
     }
 
 
@@ -123,6 +142,7 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
         "candidate_id": candidate_id,
         "symbol": symbol,
         "candidate_type": info["candidate_type"],
+        "decision_at_utc": info.get("decision_at_utc"),
         "original_decision": info["original_decision"],
         "eval_decision": info["eval_decision"],
         "label_decision": info["label_decision"],
@@ -188,6 +208,69 @@ def _update_row(journal, outcome_id: str, fields: dict) -> None:
     journal.conn.commit()
 
 
+def _lookup_decision_timestamp(journal, candidate_id: str, candidate_type: str) -> Optional[str]:
+    """Re-derive a row's original decision timestamp from its (already-decided)
+    candidate_type's source table — the same mapping ``_classify_candidate``/
+    ``_source_from_override`` use at seed time. Used only to REPAIR legacy rows
+    seeded before ``decision_at_utc`` existed; never re-classifies the type."""
+    if candidate_type in ("proposal", "blocked"):
+        row = journal.one(
+            "SELECT created_at_utc FROM trade_proposals WHERE candidate_id = ? "
+            "ORDER BY id DESC LIMIT 1", (candidate_id,))
+    elif candidate_type == "armed_watch":
+        row = journal.one(
+            "SELECT created_at_utc FROM decision_adjustments WHERE candidate_id = ? "
+            "ORDER BY id DESC LIMIT 1", (candidate_id,))
+    elif candidate_type == "reject":
+        row = journal.one(
+            "SELECT created_at_utc FROM rejected_candidates WHERE candidate_id = ? "
+            "ORDER BY id DESC LIMIT 1", (candidate_id,))
+    elif candidate_type == "user_override":
+        row = journal.one(
+            "SELECT created_at_utc FROM user_decision_overrides WHERE candidate_id = ? "
+            "ORDER BY id DESC LIMIT 1", (candidate_id,))
+    else:  # 'candidate' catch-all
+        row = None
+    if row and row.get("created_at_utc"):
+        return row["created_at_utc"]
+    # Last resort for every type (including 'candidate', and any type whose
+    # specific source row is gone): the candidates table itself.
+    cand = journal.candidate_by_id(candidate_id)
+    return (cand or {}).get("created_at_utc")
+
+
+def _repair_missing_decision_at_utc(journal, rows: list[dict]) -> list[dict]:
+    """Backfill decision_at_utc on legacy rows (seeded before this column
+    existed) by re-deriving it from the linked source row. Additive, idempotent
+    — only rows with decision_at_utc IS NULL are touched. When the source row
+    can no longer be found, falls back to created_at_utc (so the row can still
+    resolve) but marks data_quality_status so seed-time is never silently
+    mistaken for decision-time. Returns ``rows`` with decision_at_utc filled in
+    (in-memory) so the caller's SAME pass anchors correctly."""
+    repaired = []
+    for row in rows:
+        if row.get("decision_at_utc"):
+            repaired.append(row)
+            continue
+        ts = _lookup_decision_timestamp(journal, row["candidate_id"], row["candidate_type"])
+        if ts:
+            _update_row(journal, row["outcome_id"], {"decision_at_utc": ts})
+            row = dict(row)
+            row["decision_at_utc"] = ts
+        else:
+            # Source row is gone too — created_at_utc is the only timestamp
+            # left. Use it so the row isn't stuck forever, but flag it: this is
+            # NOT a reliable decision timestamp, unlike the normal case.
+            fallback = row.get("created_at_utc")
+            _update_row(journal, row["outcome_id"], {
+                "decision_at_utc": fallback, "data_quality_status": "decision_time_unrecoverable"})
+            row = dict(row)
+            row["decision_at_utc"] = fallback
+            row["data_quality_status"] = "decision_time_unrecoverable"
+        repaired.append(row)
+    return repaired
+
+
 def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> dict:
     """Resolve pending/partial candidate_outcomes rows with forward 1/3/5-day
     returns + bracket replay. Idempotent: only rows still pending/partial are
@@ -195,7 +278,11 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     bars are handled safely — no provider or a transient empty fetch just
     leaves the row pending (retried next call); only after
     ``UNAVAILABLE_AFTER_DAYS`` with zero bars does a row convert to
-    ``unavailable``."""
+    ``unavailable``. Forward windows anchor on ``decision_at_utc`` (the
+    original decision time), NOT ``created_at_utc`` (when this row was
+    seeded) — seeding can lag the decision by days/weeks when catching up on
+    a backlog, and anchoring on seed time would mislabel a multi-week-old
+    candidate's next bar as a "1-day" return."""
     rows = journal.query(
         "SELECT * FROM candidate_outcomes WHERE outcome_status IN ('pending','partial') "
         "ORDER BY id ASC LIMIT ?", (limit,))
@@ -204,23 +291,28 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
         counts["skipped"] = len(rows)
         return counts
 
+    rows = _repair_missing_decision_at_utc(journal, rows)
     now = timeutils.now_utc()
     for row in rows:
-        created = timeutils.parse_iso(row.get("created_at_utc"))
-        if created is None:
+        decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
+        if decision_at is None:
             counts["skipped"] += 1
             continue
-        age_days = (now - created).total_seconds() / 86400.0
-        created_date = created.date().isoformat()
-        bars = bars_provider.get_daily_bars(row["symbol"], created_date, now.date().isoformat()) or []
+        age_days = (now - decision_at).total_seconds() / 86400.0
+        decision_date = decision_at.date().isoformat()
+        bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         # Bars strictly AFTER the decision day — never let the decision's own
         # day count as "forward" (no lookahead leakage into the replay).
-        forward_bars = [b for b in bars if b.get("date") and b["date"] > created_date]
+        forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
 
         if not forward_bars:
             if age_days > UNAVAILABLE_AFTER_DAYS:
+                # Don't clobber an already-flagged unrecoverable decision_at_utc
+                # (repair may have just set it this same pass) — that provenance
+                # signal matters more than the more-obvious no-bars reason.
+                dq = row.get("data_quality_status") or "no_bars_after_window"
                 _update_row(journal, row["outcome_id"], {
-                    "outcome_status": "unavailable", "data_quality_status": "no_bars_after_window"})
+                    "outcome_status": "unavailable", "data_quality_status": dq})
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -249,7 +341,10 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
 
         resolved = f5["bars_used"] >= 5
         update["outcome_status"] = "complete" if resolved else "partial"
-        update["data_quality_status"] = "ok"
+        # Don't clobber an unrecoverable-decision_at_utc flag from repair just
+        # because the forward-return math itself succeeded — the anchor being
+        # a fallback (not the true decision time) is still worth knowing.
+        update["data_quality_status"] = row.get("data_quality_status") or "ok"
         _update_row(journal, row["outcome_id"], update)
         counts["updated"] += 1
         if resolved:

@@ -217,6 +217,68 @@ def test_seed_never_submits_order_or_approval():
     o.close()
 
 
+# --------------------------------------------------- decision_at_utc sourcing
+# (Opus audit HIGH-1: forward windows must anchor on the SOURCE row's own
+# decision timestamp, not on when the candidate_outcomes row got seeded.)
+def test_decision_at_utc_sourced_from_proposal_not_candidate():
+    o = _orch()
+    cid = _candidate(o)
+    o.journal.conn.execute(
+        "UPDATE candidates SET created_at_utc = '2020-01-01T00:00:00+00:00' WHERE candidate_id = ?", (cid,))
+    _eval(o, cid)
+    _proposal(o, cid)   # proposal's created_at_utc is "now" (real stamp), distinct from the candidate's
+    o.journal.conn.commit()
+    seed_pending_outcomes(o.journal)
+    row = o.journal.one("SELECT decision_at_utc FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    assert row["decision_at_utc"] is not None
+    assert not row["decision_at_utc"].startswith("2020-01-01")   # sourced from the proposal, not the stale candidate
+    o.close()
+
+
+def test_decision_at_utc_sourced_from_reject_row():
+    o = _orch()
+    cid = _candidate(o)
+    _eval(o, cid, decision="reject")
+    _reject(o, cid)
+    seed_pending_outcomes(o.journal)
+    row = o.journal.one("SELECT co.decision_at_utc AS ts, rc.created_at_utc AS rej_ts "
+                        "FROM candidate_outcomes co JOIN rejected_candidates rc ON rc.candidate_id = co.candidate_id "
+                        "WHERE co.candidate_id = ?", (cid,))
+    assert row["ts"] == row["rej_ts"]
+    o.close()
+
+
+def test_decision_at_utc_sourced_from_candidate_for_catchall():
+    o = _orch()
+    cid = _candidate(o)
+    _eval(o, cid, decision="watch")
+    seed_pending_outcomes(o.journal)
+    row = o.journal.one("SELECT co.decision_at_utc AS ts, c.created_at_utc AS cand_ts "
+                        "FROM candidate_outcomes co JOIN candidates c ON c.candidate_id = co.candidate_id "
+                        "WHERE co.candidate_id = ?", (cid,))
+    assert row["ts"] == row["cand_ts"]
+    o.close()
+
+
+def test_decision_at_utc_sourced_from_override_not_original_candidate():
+    """The user_override row's decision_at_utc is when the USER acted, not
+    when the original candidate was scanned — that's the decision this row's
+    forward outcome actually measures."""
+    o = _orch()
+    pid, entry = inject_pending_proposal(o, symbol="AAPL")
+    cid = o.journal.proposal_by_id(pid)["candidate_id"]
+    o.journal.conn.execute(
+        "UPDATE candidates SET created_at_utc = '2020-01-01T00:00:00+00:00' WHERE candidate_id = ?", (cid,))
+    o.journal.conn.commit()
+    o.create_user_override(cid, "watch_to_trade", reason_code="strong_conviction")
+    seed_pending_outcomes(o.journal)
+    row = o.journal.one(
+        "SELECT decision_at_utc FROM candidate_outcomes WHERE candidate_type = 'user_override'")
+    assert row["decision_at_utc"] is not None
+    assert not row["decision_at_utc"].startswith("2020-01-01")   # sourced from the override, not the old candidate
+    o.close()
+
+
 # ---------------------------------------------------------------------- update
 class _FakeBars:
     def __init__(self, bars_by_symbol):
@@ -281,9 +343,11 @@ def test_update_with_empty_bars_stays_pending_within_window():
 def test_update_marks_unavailable_after_window_with_no_bars():
     o = _orch()
     row = _seeded_row(o)
-    # Simulate a candidate seeded 30 days ago with a symbol no bars ever exist for.
+    # Simulate a candidate DECIDED 30 days ago with a symbol no bars ever exist
+    # for. Backdating decision_at_utc (the real anchor), not created_at_utc
+    # (mere seed time) — this is exactly the HIGH-1 distinction.
     o.journal.conn.execute(
-        "UPDATE candidate_outcomes SET created_at_utc = ? WHERE outcome_id = ?",
+        "UPDATE candidate_outcomes SET decision_at_utc = ? WHERE outcome_id = ?",
         ("2020-01-01T00:00:00+00:00", row["outcome_id"]))
     o.journal.conn.commit()
     res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({}))
@@ -341,4 +405,150 @@ def test_update_never_submits_order_or_approval():
     h = o.system_health()
     assert h["real_money_trading"] == "unreachable"
     assert h["manual_approval"] == "required"
+    o.close()
+
+
+# ------------------------------------------------- HIGH-1 regression (Opus audit)
+# Forward windows must anchor on decision_at_utc (when AlphaOS actually
+# decided), never on created_at_utc (when this outcome row happened to get
+# seeded) — those diverge whenever seeding lags the decision, e.g. catching up
+# on a backlog. Anchoring on seed time instead mislabels an old candidate's
+# next bar as a "1-day" return using a stale entry price.
+def test_backlog_seeding_anchors_forward_windows_on_original_decision_date():
+    o = _orch()
+    cid = _candidate(o, symbol="AAPL")
+    _eval(o, cid, symbol="AAPL", entry=100.0, stop=95.0, target=200.0)   # target far away: no replay noise
+    _proposal(o, cid, symbol="AAPL", entry=100.0, stop=95.0, target=200.0)
+    # Decision happened 30 days ago; SEEDING happens only now (a backlog
+    # catch-up run), so created_at_utc (seed time) and decision_at_utc (the
+    # proposal's real timestamp) must diverge by ~30 days.
+    o.journal.conn.execute(
+        "UPDATE trade_proposals SET created_at_utc = '2026-06-02T10:00:00+00:00' WHERE candidate_id = ?", (cid,))
+    o.journal.conn.commit()
+
+    seed_pending_outcomes(o.journal)
+    row = o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    assert row["decision_at_utc"].startswith("2026-06-02")
+    assert not row["created_at_utc"].startswith("2026-06-02")   # seeded "now", not backdated
+
+    # Only ONE bar exists, dated the day after the ORIGINAL decision (not
+    # "today"). If the code wrongly anchored on seed time, this bar would be
+    # filtered out entirely (it's far in the "past" relative to today) and the
+    # window would never resolve.
+    bars = [{"date": "2026-06-03", "open": 100, "high": 108, "low": 99, "close": 106}]
+    res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    assert res["updated"] == 1
+
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+    # A genuine 1-day move from the real decision price (100 -> 106), NOT a
+    # ~30-day move mislabeled as 1-day.
+    assert updated["forward_1d_r"] == round((106 - 100) / 5, 4)
+    assert updated["forward_1d_return_pct"] == round((106 - 100) / 100, 4)
+    o.close()
+
+
+def test_bars_fetch_start_uses_decision_date_not_seed_date():
+    o = _orch()
+    cid = _candidate(o, symbol="AAPL")
+    _eval(o, cid, symbol="AAPL")
+    _proposal(o, cid, symbol="AAPL")
+    o.journal.conn.execute(
+        "UPDATE trade_proposals SET created_at_utc = '2026-05-01T00:00:00+00:00' WHERE candidate_id = ?", (cid,))
+    o.journal.conn.commit()
+    seed_pending_outcomes(o.journal)
+
+    captured = {}
+
+    class _SpyBars:
+        def get_daily_bars(self, symbol, start, end):
+            captured["start"] = start
+            return []
+
+    update_pending_outcomes(o.journal, bars_provider=_SpyBars())
+    assert captured["start"] == "2026-05-01"   # decision date, not today's seed date
+    o.close()
+
+
+# ------------------------------------------------------------- repair (legacy rows)
+def test_repair_recovers_decision_at_utc_from_still_present_source_row():
+    o = _orch()
+    row = _seeded_row(o)
+    # Simulate a row seeded before decision_at_utc existed.
+    o.journal.conn.execute(
+        "UPDATE candidate_outcomes SET decision_at_utc = NULL WHERE outcome_id = ?", (row["outcome_id"],))
+    o.journal.conn.commit()
+
+    res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({}))   # no bars needed for this assertion
+    assert res["total"] == 1   # the row was picked up and processed
+    repaired = o.journal.one("SELECT decision_at_utc, data_quality_status FROM candidate_outcomes "
+                             "WHERE outcome_id = ?", (row["outcome_id"],))
+    assert repaired["decision_at_utc"] is not None
+    assert repaired["data_quality_status"] != "decision_time_unrecoverable"   # recovered cleanly, not a fallback
+    o.close()
+
+
+def test_repair_falls_back_safely_when_source_row_is_gone():
+    o = _orch()
+    cid = _candidate(o)
+    _eval(o, cid)
+    _proposal(o, cid)
+    seed_pending_outcomes(o.journal)
+    out_id = o.journal.one("SELECT outcome_id FROM candidate_outcomes WHERE candidate_id = ?", (cid,))["outcome_id"]
+
+    # The proposal AND the candidate are both gone (e.g. an old archived scan) —
+    # decision_at_utc cannot be recovered from anywhere.
+    o.journal.conn.execute("DELETE FROM trade_proposals WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute("DELETE FROM candidates WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute("UPDATE candidate_outcomes SET decision_at_utc = NULL WHERE outcome_id = ?", (out_id,))
+    o.journal.conn.commit()
+
+    res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({}))
+    assert res["total"] == 1
+    row = o.journal.one("SELECT decision_at_utc, data_quality_status FROM candidate_outcomes "
+                        "WHERE outcome_id = ?", (out_id,))
+    assert row["decision_at_utc"] is not None    # never left permanently None (falls back to created_at_utc)
+    assert row["data_quality_status"] == "decision_time_unrecoverable"   # but honestly flagged, not pretended
+    o.close()
+
+
+def test_repair_unrecoverable_flag_survives_a_successful_resolution_pass():
+    """A row repaired with the fallback flag must keep that flag even if the
+    SAME update pass goes on to successfully compute forward returns — losing
+    the 'this timestamp is not the real decision time' signal would be worse
+    than an unresolved row."""
+    o = _orch()
+    cid = _candidate(o, symbol="AAPL")
+    _eval(o, cid, symbol="AAPL")
+    _proposal(o, cid, symbol="AAPL")
+    seed_pending_outcomes(o.journal)
+    out_id = o.journal.one("SELECT outcome_id FROM candidate_outcomes WHERE candidate_id = ?", (cid,))["outcome_id"]
+    o.journal.conn.execute("DELETE FROM trade_proposals WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute("DELETE FROM candidates WHERE candidate_id = ?", (cid,))
+    o.journal.conn.execute("UPDATE candidate_outcomes SET decision_at_utc = NULL WHERE outcome_id = ?", (out_id,))
+    o.journal.conn.commit()
+
+    # A bar dated far in the future is always "forward" of whatever fallback
+    # timestamp repair picks, so this pass succeeds rather than skipping.
+    bars = [{"date": "2099-01-01", "open": 100, "high": 105, "low": 99, "close": 103}]
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    row = o.journal.one("SELECT data_quality_status, forward_1d_r FROM candidate_outcomes "
+                        "WHERE outcome_id = ?", (out_id,))
+    assert row["forward_1d_r"] is not None                                  # computation did succeed
+    assert row["data_quality_status"] == "decision_time_unrecoverable"      # flag preserved, not clobbered by "ok"
+    o.close()
+
+
+def test_repair_is_idempotent_second_pass_does_not_reprocess():
+    o = _orch()
+    row = _seeded_row(o)
+    o.journal.conn.execute(
+        "UPDATE candidate_outcomes SET decision_at_utc = NULL WHERE outcome_id = ?", (row["outcome_id"],))
+    o.journal.conn.commit()
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({}))
+    ts_after_first = o.journal.one("SELECT decision_at_utc FROM candidate_outcomes WHERE outcome_id = ?",
+                                   (row["outcome_id"],))["decision_at_utc"]
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({}))
+    ts_after_second = o.journal.one("SELECT decision_at_utc FROM candidate_outcomes WHERE outcome_id = ?",
+                                    (row["outcome_id"],))["decision_at_utc"]
+    assert ts_after_first == ts_after_second   # repaired once, stable thereafter
     o.close()

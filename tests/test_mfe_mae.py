@@ -35,7 +35,10 @@ def test_monitor_pass_folds_running_mfe_mae_in_r_terms():
 
     o.positions.monitor(price_overrides={"AAPL": up})
     snap1 = o.journal.one("SELECT * FROM monitoring_snapshots ORDER BY id DESC LIMIT 1")
-    assert snap1["unrealized_r"] == 2.0 and snap1["mfe"] == 2.0 and snap1["mae"] == 2.0
+    # Textbook excursion semantics: entry itself is an implicit R=0 observation,
+    # so a trade that's only ever been favorable has MAE=0 (never dipped below
+    # entry) — NOT the observed +2R reported as if it were also "adverse".
+    assert snap1["unrealized_r"] == 2.0 and snap1["mfe"] == 2.0 and snap1["mae"] == 0.0
 
     o.positions.monitor(price_overrides={"AAPL": down})
     snap2 = o.journal.one("SELECT * FROM monitoring_snapshots ORDER BY id DESC LIMIT 1")
@@ -76,7 +79,8 @@ def test_close_position_with_no_prior_monitor_pass_still_folds_exit_tick():
     exit_price = pos["avg_entry_price"] + risk   # +1R, no prior monitor() call
     o.positions.close_position(pos["position_id"], exit_price, "target", triggered_by="test")
     out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
-    assert out["mfe"] == 1.0 and out["mae"] == 1.0
+    # +1R and nothing else observed -> MAE=0 (never adverse), not +1.0.
+    assert out["mfe"] == 1.0 and out["mae"] == 0.0
     o.close()
 
 
@@ -152,7 +156,9 @@ def test_backfill_prefers_monitoring_snapshots_when_present():
     res = backfill_mfe_mae(o.journal, bars_provider=None)
     assert res == {"total": 1, "from_snapshots": 1, "from_bars": 0, "unavailable": 0}
     row = o.journal.one("SELECT * FROM trade_outcomes WHERE outcome_id = ?", (out_id,))
-    assert row["mfe"] == 1.5 and row["mfe_mae_source"] == "backfilled_from_snapshots"
+    # Only ever favorable (+1.5R, one observation) -> MAE=0, not +1.5.
+    assert row["mfe"] == 1.5 and row["mae"] == 0.0
+    assert row["mfe_mae_source"] == "backfilled_from_snapshots"
     o.close()
 
 
@@ -224,3 +230,121 @@ def test_backfill_no_rows_is_safe():
     res = backfill_mfe_mae(o.journal, bars_provider=None)
     assert res == {"total": 0, "from_snapshots": 0, "from_bars": 0, "unavailable": 0}
     o.close()
+
+
+# ------------------------------------------- MEDIUM-1: textbook 0R-anchored excursion
+# (Opus audit MEDIUM-1: entry itself is an implicit R=0 observation, so MFE is
+# always >= 0 and MAE is always <= 0 — never the least-favorable-OBSERVED point
+# reported as "adverse" when the trade in fact never dipped below entry.)
+def test_always_favorable_trade_has_mfe_positive_mae_zero():
+    o = _orch()
+    pos = _open_position(o)
+    risk = abs(pos["avg_entry_price"] - pos["stop_price"])
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 0.3 * risk})
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 0.8 * risk})
+    o.positions.close_position(pos["position_id"], pos["avg_entry_price"] + 1.2 * risk, "target")
+    out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
+    assert out["mfe"] == 1.2   # best point reached
+    assert out["mae"] == 0.0   # never adverse -> MAE=0, NOT the smallest favorable point (+0.3)
+    o.close()
+
+
+def test_always_adverse_trade_has_mfe_zero_mae_negative():
+    o = _orch()
+    pos = _open_position(o)
+    risk = abs(pos["avg_entry_price"] - pos["stop_price"])
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] - 0.2 * risk})
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] - 0.6 * risk})
+    out_row = o.positions.close_position(pos["position_id"], pos["avg_entry_price"] - 0.3 * risk, "stop")
+    assert out_row is not None
+    out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
+    assert out["mfe"] == 0.0    # never favorable -> MFE=0, NOT the least-bad point (-0.2)
+    assert out["mae"] == -0.6   # worst point reached
+
+
+def test_favorable_then_adverse_path_captures_both_correctly():
+    """The 0-anchor must be a no-op when the path genuinely visits both
+    territories — this must keep matching the original path-dependent test."""
+    o = _orch()
+    pos = _open_position(o)
+    risk = abs(pos["avg_entry_price"] - pos["stop_price"])
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 2 * risk})
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] - 0.5 * risk})
+    o.positions.close_position(pos["position_id"], pos["avg_entry_price"] + 0.1 * risk, "manual_test")
+    out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
+    assert out["mfe"] == 2.0 and out["mae"] == -0.5   # unaffected by the 0-anchor fix
+    o.close()
+
+
+def _open_short_position(o, symbol="AAPL", entry=100.0, stop=105.0, target=88.0):
+    """A short position inserted directly (bypassing approval/proposal — not
+    what this test is about) so close_position()'s short-direction fold can be
+    exercised in isolation."""
+    import datetime
+    from alphaos.util.ids import new_id
+    position_id = new_id("pos")
+    o.journal.insert("positions", {
+        "position_id": position_id, "symbol": symbol, "direction": "short", "strategy": "swing",
+        "qty": 10, "avg_entry_price": entry, "stop_price": stop, "target_price": target,
+        "max_holding_days": 5, "opened_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "opened_market_date": datetime.date.today().isoformat(), "status": "open",
+        "current_price": entry, "unrealized_pnl": 0.0, "is_short": 1,
+    })
+    return o.journal.one("SELECT * FROM positions WHERE position_id = ?", (position_id,))
+
+
+def test_short_close_position_folds_favorable_and_adverse_correctly():
+    """Short: price falling is favorable, price rising is adverse — the exact
+    inverse of long. Confirms the 0-anchor fix is direction-correct, not just
+    long-tested."""
+    o = _orch()
+    pos = _open_short_position(o, entry=100.0, stop=105.0)   # risk = 5
+    risk = abs(pos["avg_entry_price"] - pos["stop_price"])
+    # Price drops 3R in AlphaOS's favor (short profits on a fall), then closes
+    # slightly less favorably than the best point but still favorable overall.
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] - 3 * risk})
+    o.positions.close_position(pos["position_id"], pos["avg_entry_price"] - 1 * risk, "manual_test")
+    out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
+    assert out["direction"] == "short"
+    assert out["mfe"] == 3.0    # best favorable point (price -3R from entry)
+    assert out["mae"] == 0.0    # never adverse (price never rose above entry)
+    o.close()
+
+
+def test_short_close_position_adverse_excursion_correctly_signed():
+    o = _orch()
+    pos = _open_short_position(o, entry=100.0, stop=105.0)   # risk = 5
+    risk = abs(pos["avg_entry_price"] - pos["stop_price"])
+    # Price rises 2R against the short (adverse) before the position exits
+    # near breakeven.
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 2 * risk})
+    o.positions.close_position(pos["position_id"], pos["avg_entry_price"] + 0.1 * risk, "manual_test")
+    out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
+    assert out["mfe"] == 0.0     # never favorable
+    assert out["mae"] == -2.0    # worst point, correctly signed for short
+    o.close()
+
+
+def test_fold_excursion_still_returns_none_without_a_stop():
+    """The 0-anchor must NOT apply when R is genuinely undefined (no stop) —
+    that would misreport 'unknown' as 'flat'."""
+    o = _orch()
+    pos = _open_position(o)
+    o.journal.conn.execute(
+        "UPDATE positions SET stop_price = NULL WHERE position_id = ?", (pos["position_id"],))
+    o.journal.conn.commit()
+    mfe, mae = o.positions._fold_excursion(pos["position_id"], None)
+    assert mfe is None and mae is None
+    o.close()
+
+
+def test_excursion_from_bars_always_favorable_gives_mae_zero():
+    bars = [{"high": 108.0, "low": 102.0}, {"high": 112.0, "low": 105.0}]   # never below entry=100
+    mfe, mae = excursion_from_bars(entry=100.0, stop=90.0, direction="long", bars=bars)
+    assert mfe == 1.2 and mae == 0.0
+
+
+def test_excursion_from_bars_always_adverse_gives_mfe_zero():
+    bars = [{"high": 99.0, "low": 92.0}]   # never above entry=100
+    mfe, mae = excursion_from_bars(entry=100.0, stop=90.0, direction="long", bars=bars)
+    assert mfe == 0.0 and mae == -0.8

@@ -1097,6 +1097,12 @@ SCHEMA: list[tuple[str, str]] = [
         # AlphaOS actually made/recorded, using bars observed AFTER the
         # decision. PURE MEASUREMENT: never read by any gate, eval, labeller,
         # risk check, or execution path; write-only from this subsystem.
+        # decision_at_utc (the source row's ORIGINAL decision timestamp) is the
+        # forward-window anchor — distinct from created_at_utc (when this
+        # outcome row itself was seeded, which can lag the decision when
+        # catching up on a backlog). Anchoring on seed time instead of decision
+        # time would mislabel a multi-week-old candidate's next bar as a
+        # "1-day" return (Opus audit HIGH-1).
         "candidate_outcomes",
         """
         CREATE TABLE IF NOT EXISTS candidate_outcomes (
@@ -1107,6 +1113,7 @@ SCHEMA: list[tuple[str, str]] = [
             candidate_id TEXT NOT NULL,
             symbol TEXT NOT NULL,
             candidate_type TEXT NOT NULL,
+            decision_at_utc TEXT,
             original_decision TEXT,
             eval_decision TEXT,
             label_decision TEXT,
