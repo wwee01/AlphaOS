@@ -143,6 +143,17 @@ class Settings:
     allow_real_orders_raw: str
     require_manual_approval: bool
 
+    # --- broker protection watchdog / multi-day TIF policy ---
+    # A swing-hold bracket (max_holding_days >= 1, i.e. may cross a session
+    # boundary) must not use day-TIF protective legs (root cause of the
+    # 2026-07-02 META incident: day-TIF legs expired at session close, leaving
+    # the position naked overnight). GTC is the default for any max_holding_days
+    # >= 1 unless explicitly opted out via allow_day_tif_for_multiday_positions;
+    # only max_holding_days==0 (pure intraday) keeps day-TIF (Opus audit HIGH-1).
+    protective_order_time_in_force: str
+    requires_persistent_protection: bool
+    allow_day_tif_for_multiday_positions: bool
+
     # --- notifications ---
     ntfy_topic: str
 
@@ -605,6 +616,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"Real orders are unreachable; ALLOW_REAL_ORDERS must be 'false'."
         )
 
+    protective_order_time_in_force = _get(src, "PROTECTIVE_ORDER_TIME_IN_FORCE", "gtc").lower()
+    if protective_order_time_in_force not in ("gtc", "day"):
+        raise SettingsError(
+            f"PROTECTIVE_ORDER_TIME_IN_FORCE={protective_order_time_in_force!r} is not supported. "
+            f"Valid: gtc | day."
+        )
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -638,6 +656,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         execution_provider=execution_provider,
         allow_real_orders_raw=allow_real_orders_raw,
         require_manual_approval=_get_bool(src, "REQUIRE_MANUAL_APPROVAL", True),
+        protective_order_time_in_force=protective_order_time_in_force,
+        requires_persistent_protection=_get_bool(src, "REQUIRES_PERSISTENT_PROTECTION", True),
+        allow_day_tif_for_multiday_positions=_get_bool(src, "ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS", False),
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,

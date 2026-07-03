@@ -112,6 +112,19 @@ class ProtectionPath(StrEnum):
     BLOCKED_NO_VALID_EXIT_PROTECTION = "BLOCKED_NO_VALID_EXIT_PROTECTION"
 
 
+class ProtectionStatus(StrEnum):
+    """Broker protection watchdog verdict for one open, broker-managed position
+    (docs/roadmap/protection-watchdog.md). UNPROTECTED and CLOSED_MISMATCH are
+    CRITICAL and block all new entries; DEGRADED is WARNING-only and does not."""
+
+    UNKNOWN = "unknown"            # never checked yet, or not broker-managed
+    PROTECTED = "protected"        # stop + target both live at the broker
+    DEGRADED = "degraded"          # target missing only; stop still live -- WARNING, non-blocking
+    UNPROTECTED = "unprotected"    # stop missing -- CRITICAL, blocks new entries
+    CLOSED_MISMATCH = "closed_mismatch"  # local open, broker has no matching position -- CRITICAL, blocks
+    CHECK_ERROR = "check_error"    # broker lookup failed this pass; left unresolved, never a false verdict
+
+
 class ApprovalLabel(StrEnum):
     MANUAL_APPROVED = "MANUAL_APPROVED"
     AUTO_APPROVED = "AUTO_APPROVED"
@@ -320,6 +333,7 @@ class ReasonCode(StrEnum):
     PAPER_SAFETY_FAILED = "PAPER_SAFETY_FAILED"
     ALPACA_SUBMIT_FAILED = "ALPACA_SUBMIT_FAILED"
     KILL_SWITCH_ACTIVE = "KILL_SWITCH_ACTIVE"
+    PROTECTION_INTEGRITY_FAILURE = "PROTECTION_INTEGRITY_FAILURE"
     INVALID_STOP = "INVALID_STOP"
     OPENAI_REJECT = "OPENAI_REJECT"
     REWARD_RISK_TOO_LOW = "REWARD_RISK_TOO_LOW"

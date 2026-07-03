@@ -71,6 +71,7 @@ def normalize_leg(leg) -> dict:
         "filled_avg_price": _f(getattr(leg, "filled_avg_price", None)),
         "limit_price": _f(getattr(leg, "limit_price", None)),
         "stop_price": _f(getattr(leg, "stop_price", None)),
+        "time_in_force": _s(getattr(leg, "time_in_force", None)),
     }
 
 
@@ -91,6 +92,7 @@ def normalize_order(order) -> dict:
         "stop_price": _f(getattr(order, "stop_price", None)),
         "submitted_at": _s(getattr(order, "submitted_at", None)),
         "filled_at": _s(getattr(order, "filled_at", None)),
+        "time_in_force": _s(getattr(order, "time_in_force", None)),
         "legs": [normalize_leg(l) for l in legs],
     }
 

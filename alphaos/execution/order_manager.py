@@ -34,7 +34,7 @@ from alphaos.constants import (
 
 FILL_PRICE_BASIS = "latest_quote_or_bar"
 EXEC_MODE_SIM = "internal_simulation"
-from alphaos.execution import order_schema
+from alphaos.execution import order_schema, protection_watchdog
 from alphaos.execution.position_manager import PositionManager
 from alphaos.safety import KillSwitch, real_trading_guard
 from alphaos.util import timeutils
@@ -84,6 +84,14 @@ class OrderManager:
             return self._blocked(
                 proposal, ReasonCode.KILL_SWITCH_ACTIVE.value,
                 f"kill switch engaged: {self.kill_switch.reason()}", Severity.CRITICAL,
+            )
+
+        blocking = protection_watchdog.has_blocking_incident(self.journal)
+        if blocking:
+            return self._blocked(
+                proposal, ReasonCode.PROTECTION_INTEGRITY_FAILURE.value,
+                f"protection incident {blocking['check_id']} unresolved: {blocking['detail']}",
+                Severity.CRITICAL,
             )
 
         if proposal.requires_margin and not proposal.margin_approved:
@@ -254,6 +262,10 @@ class OrderManager:
         data_provider, data_feed = self._data_labels()
         src = ExecutionSource.ALPACA_PAPER.value
 
+        # Prefer the broker's own echoed TIF (the ground truth of what was actually
+        # accepted) over our outgoing intent; fall back to the intent only if the
+        # broker didn't echo one back (e.g. a minimal fake in tests).
+        time_in_force = norm.get("time_in_force") or self.alpaca._resolve_tif(proposal)
         row = order_schema.build_order_row(
             order_id=order_id, proposal=proposal, side=side, order_type="bracket",
             execution_source=src, execution_provider=ExecutionProvider.ALPACA_PAPER.value,
@@ -261,6 +273,7 @@ class OrderManager:
             fill_price_basis="alpaca_fill", protection_path=protection.value, state=state,
             qty=proposal.qty, entry_price=(filled_price if filled_price is not None else proposal.entry),
             take_profit_price=proposal.target, stop_loss_price=proposal.stop, limit_price=proposal.entry,
+            time_in_force=time_in_force,
             broker_order_id=norm.get("broker_order_id"), client_order_id=norm.get("client_order_id"),
             raw_request={"proposal_id": proposal.proposal_id},
             raw_response=norm, submitted_at=norm.get("submitted_at"), filled_at=norm.get("filled_at"),

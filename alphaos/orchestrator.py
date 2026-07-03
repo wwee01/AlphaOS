@@ -62,6 +62,7 @@ from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.order_manager import OrderManager
 from alphaos.execution.position_manager import PositionManager
+from alphaos.execution import protection_watchdog
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsService
 from alphaos.risk.risk_engine import RiskEngine
@@ -215,6 +216,12 @@ class Orchestrator:
         if self.kill_switch.is_engaged():
             self.journal.log_system_event(
                 Severity.WARNING, "scan", "Kill switch engaged: no proposals will be executed."
+            )
+
+        if protection_watchdog.has_blocking_incident(self.journal):
+            self.journal.log_system_event(
+                Severity.WARNING, "scan",
+                "Protection incident unresolved: no proposals will be auto-executed this scan."
             )
 
         # --- Roadmap 2.3: rank candidates by deterministic interest, then label
@@ -449,6 +456,10 @@ class Orchestrator:
 
         if self.kill_switch.is_engaged():
             return False, "kill switch engaged"
+
+        blocking = protection_watchdog.has_blocking_incident(self.journal)
+        if blocking:
+            return False, f"blocked: unresolved protection incident ({blocking['check_id']}) — {blocking['detail']}"
 
         # Explicit margin/short capability approval (only via this flag).
         if proposal.requires_margin:
@@ -849,8 +860,14 @@ class Orchestrator:
             },
         )
         # Reconcile real Alpaca paper orders first (broker-managed bracket OCO):
-        # opens positions on entry fills, closes them on TP/SL leg fills.
+        # opens positions on entry fills, closes them on TP/SL leg fills. The
+        # protection watchdog runs NEXT, not before -- it must see this pass's
+        # legitimate leg-fill closes already applied to positions.status, or a
+        # normal, healthy close would misfire as a false-positive closed_mismatch.
         recon = self.orders.reconcile()
+        protection = protection_watchdog.run_watchdog_pass(
+            self.journal, self.orders.alpaca, self.settings, scheduler_run_id=scheduler_run_id
+        )
         # Local watchdog handles only simulated_internal positions.
         exits = self.positions.monitor(price_overrides=price_overrides)
         all_exits = list(recon.get("exits", [])) + exits
@@ -865,12 +882,15 @@ class Orchestrator:
             Severity.INFO, "monitor",
             f"monitor_once complete: {len(all_exits)} exit(s); "
             f"reconciled {recon.get('reconciled', 0)} alpaca_paper order(s), "
-            f"opened {len(recon.get('opened', []))}.",
+            f"opened {len(recon.get('opened', []))}; "
+            f"protection: {protection.get('unprotected', 0)} unprotected, "
+            f"{protection.get('closed_mismatch', 0)} mismatched.",
         )
         return {
             "exits": all_exits,
             "reconciled": recon.get("reconciled", 0),
             "opened": recon.get("opened", []),
+            "protection": protection,
             "open_positions": self.journal.count_open_positions(),
             "scheduler_run_id": scheduler_run_id,
         }
@@ -956,6 +976,27 @@ class Orchestrator:
         from alphaos.reports.broker_recon import build_broker_ledger_report
 
         return build_broker_ledger_report(self.journal, getattr(self.orders, "alpaca", None))
+
+    # ------------------------------------------------- protection watchdog
+    def protection_status_report(self) -> dict:
+        """Read-only: current per-position protection status + open incidents."""
+        return protection_watchdog.status_report(self.journal)
+
+    def protection_resolve(self, incident_id: str, exit_price: float, note: str,
+                           resolved_by: str = "user") -> dict:
+        """Human-confirmed resolution of a local-open/broker-closed incident: calls
+        close_position() with an operator-supplied price -- never raw SQL, never
+        a guessed price."""
+        self._ensure_startup()
+        return protection_watchdog.resolve_incident(
+            self.journal, self.positions, incident_id, exit_price, note, resolved_by
+        )
+
+    def protection_ack(self, incident_id: str, note: str, resolved_by: str = "user") -> dict:
+        """Human acknowledgement of an unprotected/degraded incident WITHOUT
+        closing the position -- never calls close_position()."""
+        self._ensure_startup()
+        return protection_watchdog.acknowledge_incident(self.journal, incident_id, note, resolved_by)
 
     # ----------------------------------------------------------- demo seed
     def seed_demo(self) -> dict:
@@ -1678,7 +1719,14 @@ class Orchestrator:
             "broker_connected": self.orders.broker_connected,
             "open_positions": self.journal.count_open_positions(),
             "labeller_failsafe": self._labeller_failsafe_health(),
+            "protection_watchdog": self._protection_watchdog_health(),
         }
+
+    def _protection_watchdog_health(self) -> dict:
+        """VISIBILITY into broker protection status, mirroring
+        _labeller_failsafe_health(). PURE READ; the block itself is enforced
+        elsewhere (OrderManager.execute_proposal preflight)."""
+        return protection_watchdog.status_report(self.journal)
 
     def _labeller_failsafe_health(self) -> dict:
         """VISIBILITY into the labeller fail-safe rate over recent labels. A failing

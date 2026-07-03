@@ -19,7 +19,7 @@ from conftest import make_proposal, make_settings
 
 # --------------------------------------------------------------------- fakes
 class _FakeLeg:
-    def __init__(self, role, limit_price=None, stop_price=None):
+    def __init__(self, role, limit_price=None, stop_price=None, time_in_force="day"):
         self.id = uuid.uuid4().hex
         self.order_type = "limit" if role == "take_profit" else "stop"
         self.limit_price = limit_price
@@ -27,6 +27,7 @@ class _FakeLeg:
         self.status = "new"
         self.filled_qty = 0
         self.filled_avg_price = None
+        self.time_in_force = time_in_force
 
 
 class _FakeOrder:
@@ -44,10 +45,46 @@ class _FakeOrder:
         self.stop_price = None
         self.submitted_at = "2026-06-22T13:30:00Z"
         self.filled_at = None
+        self.time_in_force = spec.get("tif", "day")
         self.legs = [
-            _FakeLeg("take_profit", limit_price=spec["target"]),
-            _FakeLeg("stop_loss", stop_price=spec["stop"]),
+            _FakeLeg("take_profit", limit_price=spec["target"], time_in_force=self.time_in_force),
+            _FakeLeg("stop_loss", stop_price=spec["stop"], time_in_force=self.time_in_force),
         ]
+
+
+class _FakePosition:
+    """Minimal broker-side open position -- the fields order_mapping.normalize_position() reads."""
+
+    def __init__(self, symbol, qty, side="long", avg_entry_price=100.0):
+        self.symbol = symbol
+        self.qty = qty
+        self.side = side
+        self.avg_entry_price = avg_entry_price
+        self.market_value = qty * avg_entry_price
+        self.unrealized_pl = 0.0
+        self.current_price = avg_entry_price
+
+
+class _FakeStrayOrder:
+    """A minimal open broker order NOT tied to any bracket/position -- for
+    exercising the watchdog's dangling-order detection."""
+
+    def __init__(self, symbol):
+        self.id = uuid.uuid4().hex
+        self.client_order_id = uuid.uuid4().hex
+        self.symbol = symbol
+        self.side = "sell"
+        self.qty = 1
+        self.order_class = "simple"
+        self.status = "new"
+        self.filled_qty = 0
+        self.filled_avg_price = None
+        self.limit_price = None
+        self.stop_price = None
+        self.submitted_at = "2026-06-22T13:30:00Z"
+        self.filled_at = None
+        self.time_in_force = "day"
+        self.legs = []
 
 
 class FakeTradingClient:
@@ -55,6 +92,8 @@ class FakeTradingClient:
 
     def __init__(self):
         self.orders = {}
+        self._positions = {}
+        self._stray_orders = {}
 
     # ---- SDK-agnostic interface used by AlpacaClient ----
     def submit(self, spec):
@@ -66,7 +105,10 @@ class FakeTradingClient:
         return self.orders[oid]
 
     def get_all_positions(self):
-        return []
+        return list(self._positions.values())
+
+    def get_orders(self):
+        return list(self._stray_orders.values())
 
     def cancel_order_by_id(self, oid):
         self.orders[oid].status = "canceled"
@@ -92,6 +134,51 @@ class FakeTradingClient:
                 leg.filled_avg_price = price
             else:
                 leg.status = "canceled"  # OCO cancels the sibling
+
+    def expire_leg(self, symbol, role):
+        """Simulate a protective leg expiring unfilled -- the exact META incident:
+        a day-TIF leg hits end-of-session with nothing to trigger it."""
+        o = self._find(symbol)
+        want = "limit" if role == "take_profit" else "stop"
+        for leg in o.legs:
+            if leg.order_type == want:
+                leg.status = "expired"
+
+    def cancel_leg(self, symbol, role):
+        """Simulate a protective leg being cancelled (the OTHER META-incident leg)."""
+        o = self._find(symbol)
+        want = "limit" if role == "take_profit" else "stop"
+        for leg in o.legs:
+            if leg.order_type == want:
+                leg.status = "canceled"
+
+    def vanish_position(self, symbol):
+        """Simulate the position closing at the broker via a path OTHER than a
+        bracket-leg fill (manual flatten, external close) -- removes it from
+        get_all_positions() and marks both legs canceled without EVER setting a
+        leg to 'filled', so no fill-based reconcile() path can catch it."""
+        self._positions.pop(symbol, None)
+        o = self._find(symbol)
+        for leg in o.legs:
+            leg.status = "canceled"
+
+    def set_position(self, symbol, qty, side="long", avg_entry_price=100.0):
+        """Register a broker-side open position so get_all_positions()/
+        AlpacaClient.list_positions() reflects it."""
+        self._positions[symbol] = _FakePosition(symbol, qty, side, avg_entry_price)
+
+    def remove_position(self, symbol):
+        """Remove the broker-side open position WITHOUT touching order/leg state --
+        for simulating the moment right after a leg fill closes a position (the
+        broker's position is gone, but the order's legs correctly show the fill).
+        Distinct from vanish_position(), which is for a close with NO fill at all."""
+        self._positions.pop(symbol, None)
+
+    def add_stray_order(self, symbol):
+        """Register a stray open broker order for a symbol with no bracket/position."""
+        o = _FakeStrayOrder(symbol)
+        self._stray_orders[o.id] = o
+        return o
 
 
 def _paper_om(fake, **over):
