@@ -27,6 +27,7 @@ from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
 from alphaos.execution.costs import CostModel
+from alphaos import lineage
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -389,6 +390,7 @@ class PositionManager:
                 "hold_duration_minutes": (holding_days * 1440) if holding_days is not None else None,
                 # Target-profile evidence relayed from the position (tracking only).
                 **target_profile_bundle(pos),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             },
         )
 

@@ -19,6 +19,7 @@ from typing import Optional
 
 from alphaos.ai import prompt_templates as pt
 from alphaos.ai.validation import enforce_no_news_sentinels, validate_no_news_eval
+from alphaos import lineage
 from alphaos.constants import (
     CATALYST_NOT_AVAILABLE_V1,
     Decision,
@@ -58,6 +59,11 @@ class OpenAIEvaluation:
     validation_status: str = "passed"
     raw: Optional[dict] = None
     is_mock: bool = False
+    # PR4: measurement-only AI-call lineage. None for mock/rejection paths
+    # (no real prompt was sent); populated by _live_eval for the real API call.
+    model_provider: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    system_prompt_hash: Optional[str] = None
 
     def to_row(self) -> dict:
         return {
@@ -91,6 +97,9 @@ class OpenAIEvaluation:
             "same_day_exit_allowed": None,
             "counter_thesis": None,
             "reasons_to_reject": None,
+            "model_provider": self.model_provider,
+            "prompt_hash": self.prompt_hash,
+            "system_prompt_hash": self.system_prompt_hash,
         }
 
 
@@ -237,6 +246,12 @@ class OpenAIClient:
 
         client = OpenAI(api_key=self.settings.openai_api_key)
         user_prompt = pt.build_no_news_user_prompt(candidate, snapshot, freshness_status)
+        # PR4: measurement-only AI-call lineage (model provider + content hashes of
+        # the actual prompt sent, never the raw prompt body) -- stamped onto
+        # whichever OpenAIEvaluation this call ends up returning below.
+        ai_lineage = lineage.ai_call_lineage(
+            provider="openai", prompt=user_prompt, system_prompt=pt.NO_NEWS_SYSTEM_PROMPT,
+        )
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
@@ -262,10 +277,18 @@ class OpenAIClient:
                 [ReasonCode.INVENTED_CATALYST.value], freshness_status=freshness_status,
                 validation_status=failure,
             )
-            return rej
+            return self._with_ai_lineage(rej, ai_lineage)
 
         obj = enforce_no_news_sentinels(obj)
-        return self._from_json(candidate, obj, freshness_status)
+        evaluation = self._from_json(candidate, obj, freshness_status)
+        return self._with_ai_lineage(evaluation, ai_lineage)
+
+    @staticmethod
+    def _with_ai_lineage(evaluation: OpenAIEvaluation, ai_lineage: dict) -> OpenAIEvaluation:
+        evaluation.model_provider = ai_lineage.get("model_provider")
+        evaluation.prompt_hash = ai_lineage.get("prompt_hash")
+        evaluation.system_prompt_hash = ai_lineage.get("system_prompt_hash")
+        return evaluation
 
     def _from_json(self, candidate, obj, freshness_status) -> OpenAIEvaluation:  # pragma: no cover
         try:
