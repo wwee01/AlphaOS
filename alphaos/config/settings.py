@@ -144,10 +144,12 @@ class Settings:
     require_manual_approval: bool
 
     # --- broker protection watchdog / multi-day TIF policy ---
-    # A multi-day-hold bracket must not use day-TIF protective legs (root cause of
-    # the 2026-07-02 META incident: day-TIF legs expired at session close, leaving
-    # the position naked overnight). GTC is the default for max_holding_days > 1
-    # unless explicitly opted back out of via allow_day_tif_for_multiday_positions.
+    # A swing-hold bracket (max_holding_days >= 1, i.e. may cross a session
+    # boundary) must not use day-TIF protective legs (root cause of the
+    # 2026-07-02 META incident: day-TIF legs expired at session close, leaving
+    # the position naked overnight). GTC is the default for any max_holding_days
+    # >= 1 unless explicitly opted out via allow_day_tif_for_multiday_positions;
+    # only max_holding_days==0 (pure intraday) keeps day-TIF (Opus audit HIGH-1).
     protective_order_time_in_force: str
     requires_persistent_protection: bool
     allow_day_tif_for_multiday_positions: bool

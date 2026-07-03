@@ -66,16 +66,20 @@ class AlpacaClient:
         return {"bracket": True, "oco": True, "short": True, "fractional": False}
 
     def _resolve_tif(self, proposal) -> str:
-        """Multi-day holds (max_holding_days > 1) must not use day-TIF protective
-        legs -- that's the exact root cause of the 2026-07-02 META incident (a
-        5-day-hold bracket's stop/target legs both expired at session close,
-        leaving the position naked overnight, undetected). GTC is used unless the
-        settings flag explicitly opts back into the old (dangerous) day-TIF
-        behavior. max_holding_days==0 is the intentionally-intraday daytrade
-        experiment (day-TIF is correct there); ==1 is a same-day-exit-eligible
-        swing still meant to typically close same-session -- day-TIF is
-        defensible there too. Only >1 is unambiguously a multi-day hold."""
-        if (getattr(proposal, "max_holding_days", 0) or 0) > 1 \
+        """Any swing hold (max_holding_days >= 1, i.e. may cross a session
+        boundary) must not use day-TIF protective legs -- that's the exact root
+        cause of the 2026-07-02 META incident (a 5-day-hold bracket's stop/
+        target legs both expired at session close, leaving the position naked
+        overnight, undetected). GTC is used unless the settings flag explicitly
+        opts back into the old (dangerous) day-TIF behavior. Only
+        max_holding_days==0 (the intentionally-intraday daytrade experiment,
+        which is designed to always close same-session) keeps day-TIF by
+        default -- max_holding_days==1 is still a SWING that can cross a
+        session boundary (same-day exit is the common case, not a guarantee),
+        so it gets the same persistent protection as any other swing hold
+        (Opus audit HIGH-1: the original >1 boundary left 1-day swings exposed
+        to this exact failure mode)."""
+        if (getattr(proposal, "max_holding_days", 0) or 0) > 0 \
                 and not self.settings.allow_day_tif_for_multiday_positions:
             return self.settings.protective_order_time_in_force
         return "day"

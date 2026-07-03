@@ -115,9 +115,13 @@ def check_position(journal, alpaca_client, position: dict,
     )
     tif_appropriate = None
     if observed_tif is not None:
-        is_multiday = (position.get("max_holding_days") or 0) > 1
+        # Matches AlpacaClient._resolve_tif()'s policy exactly: any swing hold
+        # (max_holding_days >= 1, i.e. may cross a session boundary) needs
+        # persistent protection -- only max_holding_days==0 (pure intraday) is
+        # day-TIF by default (Opus audit HIGH-1).
+        is_swing_or_longer = (position.get("max_holding_days") or 0) > 0
         tif_appropriate = not (
-            is_multiday and observed_tif == "day" and not settings.allow_day_tif_for_multiday_positions
+            is_swing_or_longer and observed_tif == "day" and not settings.allow_day_tif_for_multiday_positions
         )
 
     if not stop_live:

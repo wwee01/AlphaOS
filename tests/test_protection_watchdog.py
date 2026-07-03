@@ -143,6 +143,49 @@ def test_both_legs_missing_is_unprotected_not_escalated():
 
 
 # --------------------------------------------------------------- TIF policy
+def test_resolve_tif_boundary_only_pure_intraday_stays_day():
+    """Opus audit HIGH-1: max_holding_days==0 (pure intraday, the daytrade
+    experiment) is the ONLY case that keeps day-TIF by default. Any swing
+    hold (>=1, may cross a session boundary) gets persistent (gtc) protection
+    -- the original >1 boundary left 1-day swings exposed to the exact META
+    failure mode (day-TIF legs expiring at session close while the position
+    is still open overnight)."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+
+    for max_holding_days, expected_tif in ((0, "day"), (1, "gtc"), (2, "gtc"), (5, "gtc")):
+        prop = make_proposal(symbol="AAPL")
+        prop.max_holding_days = max_holding_days
+        assert om.alpaca._resolve_tif(prop) == expected_tif, f"max_holding_days={max_holding_days}"
+
+
+def test_resolve_tif_opt_out_flag_allows_day_tif_for_any_holding_period():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS="true")
+
+    for max_holding_days in (0, 1, 2, 5):
+        prop = make_proposal(symbol="AAPL")
+        prop.max_holding_days = max_holding_days
+        assert om.alpaca._resolve_tif(prop) == "day", f"max_holding_days={max_holding_days}"
+
+
+def test_one_day_swing_position_uses_gtc_and_is_appropriate():
+    """The exact regression this fix closes: a 1-day swing (still eligible to
+    cross a session boundary, unlike the 0-day daytrade experiment) must get
+    persistent protection, not day-TIF."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    pos, _ = _open_protected_position(fake, om, journal, "AAPL", 100.0, 97.0, 106.0, 10, max_holding_days=1)
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    check = journal.one(
+        "SELECT * FROM protection_checks WHERE position_id = ? ORDER BY id DESC LIMIT 1", (pos["position_id"],)
+    )
+    assert check["time_in_force"] == "gtc"
+    assert check["tif_appropriate"] == 1
+
+
 def test_multiday_position_uses_gtc_and_is_appropriate():
     fake = FakeTradingClient()
     s, journal, om = _paper_om(fake)
@@ -159,9 +202,9 @@ def test_multiday_position_uses_gtc_and_is_appropriate():
 
 def test_legacy_day_tif_on_multiday_position_flagged_inappropriate():
     """Simulates a row submitted before the TIF fix existed (or with the
-    explicit opt-out flag): day-TIF on a >1-day hold is a policy violation,
-    even though the legs are still currently live (a forward-looking risk
-    flag, not itself a live protection gap)."""
+    explicit opt-out flag): day-TIF on a >=1-day swing hold is a policy
+    violation, even though the legs are still currently live (a
+    forward-looking risk flag, not itself a live protection gap)."""
     fake = FakeTradingClient()
     s, journal, om = _paper_om(fake)
     pos, _ = _open_protected_position(fake, om, journal, "META", 618.78, 594.99, 666.45, 41, max_holding_days=5)
