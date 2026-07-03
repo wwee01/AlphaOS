@@ -15,6 +15,7 @@ import tempfile
 import pytest
 
 from alphaos.broker.alpaca_client import AlpacaClient
+from alphaos.config.settings import SettingsError
 from alphaos.constants import ReasonCode
 from alphaos.execution import protection_watchdog as pw
 from alphaos.execution.order_manager import OrderManager
@@ -543,3 +544,397 @@ def test_status_report_reflects_blocking_state():
     assert unhealthy["blocking"] is True
     assert unhealthy["open_incident_count"] == 1
     assert "BLOCKED" in unhealthy["summary_label"]
+
+
+# =============================================================================
+# PR2.6 — Protection Watchdog Hardening
+# =============================================================================
+def _force_check_error(om, message="flaky broker lookup"):
+    """Make every per-order broker lookup fail (simulates a persistent
+    per-order API error, distinct from a whole-pass list_positions() outage)."""
+    om.alpaca.get_order = lambda boid: (_ for _ in ()).throw(RuntimeError(message))
+
+
+# --------------------------------------------------------- check_error escalation
+def test_single_check_error_surfaces_clearly_but_does_not_block():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="3")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result["check_error"] == 1
+    assert result["unverifiable"] == 0
+    assert pw.has_blocking_incident(journal) is None  # below threshold -- not blocking
+    events = journal.query(
+        "SELECT * FROM system_events WHERE category = 'protection_watchdog' AND severity = 'warning'"
+    )
+    assert any("broker order lookup failed" in e["message"] for e in events)  # surfaced clearly, just not critical
+
+
+def test_repeated_check_error_escalates_to_blocking_unverifiable():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="3")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+
+    r1 = pw.run_watchdog_pass(journal, om.alpaca, s)
+    r2 = pw.run_watchdog_pass(journal, om.alpaca, s)
+    r3 = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert r1["check_error"] == 1 and r1["unverifiable"] == 0
+    assert r2["check_error"] == 1 and r2["unverifiable"] == 0
+    assert r3["check_error"] == 0 and r3["unverifiable"] == 1  # 3rd consecutive failure crosses the threshold
+    blocking = pw.has_blocking_incident(journal)
+    assert blocking is not None
+    assert blocking["protection_status"] == "unverifiable"
+    assert blocking["severity"] == "critical"
+    critical_events = journal.query(
+        "SELECT * FROM system_events WHERE category = 'protection_watchdog' AND severity = 'critical'"
+    )
+    assert len(critical_events) == 1  # exactly one CRITICAL alert, fired at the escalation transition
+
+
+def test_new_entries_blocked_once_protection_unverifiable_beyond_threshold():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="2")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    pw.run_watchdog_pass(journal, om.alpaca, s)  # 2nd consecutive failure -> escalates
+
+    new_prop = make_proposal(symbol="AAPL", entry=100.0, stop=97.0, target=106.0, qty=10)
+    _seed_proposal(journal, new_prop)
+    res = om.execute_proposal(new_prop)
+
+    assert res.blocked is True
+    assert res.block_reason == ReasonCode.PROTECTION_INTEGRITY_FAILURE.value
+    assert not any(o.symbol == "AAPL" for o in fake.orders.values())  # never reached the broker
+
+
+def test_check_error_streak_survives_the_escalation_status_change():
+    """Once escalated, a CONTINUING broker failure must not reset the streak
+    back to 1 just because the stored status changed from check_error to
+    unverifiable -- it must keep counting and stay escalated."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="2")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    pw.run_watchdog_pass(journal, om.alpaca, s)  # escalates
+    r3 = pw.run_watchdog_pass(journal, om.alpaca, s)  # still failing
+
+    assert r3["unverifiable"] == 1
+    assert r3["check_error"] == 0
+    assert pw.has_blocking_incident(journal) is not None
+
+
+def test_check_error_recovery_auto_resolves_without_escalating():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="3")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+    pw.run_watchdog_pass(journal, om.alpaca, s)  # 1 failure, below threshold
+
+    del om.alpaca.get_order  # broker lookup recovers -- instance override removed, falls back to the real method
+
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result["protected"] == 1
+    assert result["unverifiable"] == 0
+    assert pw.has_blocking_incident(journal) is None
+
+
+def test_unverifiable_incident_can_be_acknowledged():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="2")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+    incident_id = result["new_incidents"][0]
+
+    ack = pw.acknowledge_incident(journal, incident_id, note="confirmed protected manually at the broker")
+
+    assert ack["ok"] is True
+    assert pw.has_blocking_incident(journal) is None
+
+
+def test_stale_ack_on_unverifiable_does_not_durably_unblock():
+    """The ack lifts the block immediately, but if the broker lookup is STILL
+    failing, the next watchdog pass must re-escalate and re-block -- an ack is
+    a point-in-time human decision, not a permanent override of an ongoing,
+    unresolved problem."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="2")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)  # escalates
+    incident_id = result["new_incidents"][0]
+
+    ack = pw.acknowledge_incident(journal, incident_id, note="accepting risk for now")
+    assert ack["ok"] is True
+    assert pw.has_blocking_incident(journal) is None  # ack clears the block immediately
+
+    # Broker lookup is STILL failing -- the underlying problem was never fixed.
+    result2 = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result2["unverifiable"] == 1
+    assert len(result2["new_incidents"]) == 1  # a FRESH incident, not a reopened stale one
+    assert pw.has_blocking_incident(journal) is not None  # re-blocked
+
+
+def test_incident_supersession_leaves_at_most_one_open_incident():
+    """A position moving from unverifiable -> unprotected (the broker lookup
+    recovers and reveals a genuinely missing stop) must supersede the older
+    unverifiable incident, not leave it open alongside the new one -- and
+    resolving only the newer incident must not be blocked by a stale
+    reference to the superseded older one."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="2")
+    pos, _ = _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    r_escalate = pw.run_watchdog_pass(journal, om.alpaca, s)  # escalates to unverifiable
+    unverifiable_incident_id = r_escalate["new_incidents"][0]
+
+    # Broker lookup recovers, and reveals the stop really is missing.
+    del om.alpaca.get_order
+    fake.expire_leg("NVDA", "stop_loss")
+    r_reveal = pw.run_watchdog_pass(journal, om.alpaca, s)
+    unprotected_incident_id = r_reveal["new_incidents"][0]
+
+    assert unprotected_incident_id != unverifiable_incident_id
+
+    rows = journal.query(
+        "SELECT check_id, protection_status, resolved_at_utc, resolved_by FROM protection_checks "
+        "WHERE position_id = ? ORDER BY id", (pos["position_id"],),
+    )
+    open_incident_rows = [
+        r for r in rows if r["resolved_at_utc"] is None
+        and r["protection_status"] in ("unprotected", "closed_mismatch", "unverifiable")
+    ]
+    assert len(open_incident_rows) == 1  # at most one open incident, ever
+    assert open_incident_rows[0]["check_id"] == unprotected_incident_id
+
+    # The older unverifiable incident is SUPERSEDED (resolved), not deleted --
+    # it stays in the audit trail with an honest resolution reason.
+    old = journal.one("SELECT * FROM protection_checks WHERE check_id = ?", (unverifiable_incident_id,))
+    assert old["resolved_at_utc"] is not None
+    assert old["resolved_by"] == "watchdog_superseded"
+
+    # Resolving the NEWER incident must not be blocked by any stale reference
+    # to the old, already-superseded one.
+    ack = pw.acknowledge_incident(journal, unprotected_incident_id, note="manually confirmed protection restored")
+    assert ack["ok"] is True
+    assert pw.has_blocking_incident(journal) is None
+
+
+# ------------------------------------------------------------- qty mismatch
+def test_qty_mismatch_reported_in_summary_and_logged():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    pos, _ = _open_protected_position(fake, om, journal, "AAPL", 100.0, 97.0, 106.0, 10, max_holding_days=5)
+    fake.set_position("AAPL", qty=7, avg_entry_price=100.0)  # broker now shows fewer shares than local
+
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result["qty_mismatches"] == 1
+    check = journal.one(
+        "SELECT * FROM protection_checks WHERE position_id = ? ORDER BY id DESC LIMIT 1", (pos["position_id"],)
+    )
+    assert check["qty_match"] == 0
+    assert check["local_qty"] == 10 and check["broker_qty"] == 7
+    events = journal.query("SELECT * FROM system_events WHERE message LIKE '%quantity mismatch%'")
+    assert len(events) == 1
+
+    report = pw.status_report(journal)
+    assert report["qty_mismatches"] == 1
+    assert report["blocking"] is False  # visible, not blocking -- protection legs are still live
+
+
+def test_qty_mismatch_does_not_spam_every_pass():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    _open_protected_position(fake, om, journal, "AAPL", 100.0, 97.0, 106.0, 10, max_holding_days=5)
+    fake.set_position("AAPL", qty=7, avg_entry_price=100.0)
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    events = journal.query("SELECT * FROM system_events WHERE message LIKE '%quantity mismatch%'")
+    assert len(events) == 1  # one alert on the transition, not one per pass
+
+
+def test_short_position_qty_sign_handled_correctly():
+    """Alpaca reports a NEGATIVE qty for short positions; the local ledger
+    always stores a positive magnitude -- comparing signed values directly
+    would falsely report a mismatch on every healthy short position."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    prop = make_proposal(symbol="TSLA", direction="short", entry=200.0, stop=210.0, target=180.0, qty=5)
+    prop.max_holding_days = 5
+    _seed_proposal(journal, prop)
+    om.execute_proposal(prop)
+    fake.fill_entry("TSLA", price=200.0)
+    om.reconcile()
+    fake.set_position("TSLA", qty=-5, side="short", avg_entry_price=200.0)  # Alpaca convention
+
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result["qty_mismatches"] == 0
+    check = journal.one("SELECT * FROM protection_checks WHERE symbol = 'TSLA' ORDER BY id DESC LIMIT 1")
+    assert check["qty_match"] == 1
+
+
+def test_short_position_genuine_qty_mismatch_still_detected():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    prop = make_proposal(symbol="TSLA", direction="short", entry=200.0, stop=210.0, target=180.0, qty=5)
+    prop.max_holding_days = 5
+    _seed_proposal(journal, prop)
+    om.execute_proposal(prop)
+    fake.fill_entry("TSLA", price=200.0)
+    om.reconcile()
+    fake.set_position("TSLA", qty=-3, side="short", avg_entry_price=200.0)  # broker shows fewer shares (magnitude 3 vs 5)
+
+    result = pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert result["qty_mismatches"] == 1
+
+
+# --------------------------------------------------------------- TIF hardening
+def test_contradictory_tif_config_rejected_at_settings_load():
+    with pytest.raises(SettingsError, match="PROTECTIVE_ORDER_TIME_IN_FORCE"):
+        make_settings(
+            ALPHAOS_MODE="paper", EXECUTION_PROVIDER="alpaca_paper",
+            ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s", ALPACA_PAPER="true",
+            ALPACA_BASE_URL="https://paper-api.alpaca.markets",
+            PROTECTIVE_ORDER_TIME_IN_FORCE="day", ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS="false",
+        )
+
+
+def test_tif_day_with_explicit_opt_out_still_allowed():
+    s = make_settings(
+        ALPHAOS_MODE="paper", EXECUTION_PROVIDER="alpaca_paper",
+        ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s", ALPACA_PAPER="true",
+        ALPACA_BASE_URL="https://paper-api.alpaca.markets",
+        PROTECTIVE_ORDER_TIME_IN_FORCE="day", ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS="true",
+    )
+    assert s.protective_order_time_in_force == "day"
+    assert s.allow_day_tif_for_multiday_positions is True
+
+
+def test_max_holding_days_none_defaults_to_persistent_tif():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    prop = make_proposal(symbol="AAPL")
+    prop.max_holding_days = None
+
+    assert om.alpaca._resolve_tif(prop) == "gtc"
+
+
+def test_max_holding_days_none_even_with_opt_out_flag_stays_persistent():
+    """The opt-out flag is an INFORMED choice about identified swing holds --
+    an unknown holding period is a defensive/anomalous case, not an informed
+    swing decision, so it must stay safe regardless of the flag."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS="true")
+    prop = make_proposal(symbol="AAPL")
+    prop.max_holding_days = None
+
+    assert om.alpaca._resolve_tif(prop) == "gtc"
+
+
+def test_max_holding_days_none_flagged_inappropriate_if_observed_day():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    pos, prop = _open_protected_position(fake, om, journal, "AAPL", 100.0, 97.0, 106.0, 10, max_holding_days=5)
+    # Simulate an order whose recorded holding period is unknown (defensive
+    # path) but whose broker legs are day-TIF -- should be flagged, not
+    # silently treated as fine just because max_holding_days is missing.
+    journal.conn.execute(
+        "UPDATE positions SET max_holding_days = NULL WHERE position_id = ?", (pos["position_id"],)
+    )
+    journal.conn.commit()
+    order = fake._find("AAPL")
+    order.time_in_force = "day"
+    for leg in order.legs:
+        leg.time_in_force = "day"
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    check = journal.one(
+        "SELECT * FROM protection_checks WHERE position_id = ? ORDER BY id DESC LIMIT 1", (pos["position_id"],)
+    )
+    assert check["tif_appropriate"] == 0
+
+
+# ------------------------------------------------------------------ safety
+def test_no_orders_submitted_during_check_error_escalation():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="1")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    orders_before = len(fake.orders)
+    _force_check_error(om)
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)  # escalates immediately (threshold=1)
+
+    assert len(fake.orders) == orders_before  # the watchdog itself submitted nothing
+
+
+def test_no_auto_close_during_check_error_escalation(monkeypatch):
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="1")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    _force_check_error(om)
+    calls = []
+    monkeypatch.setattr(om.positions, "close_position", lambda *a, **kw: calls.append((a, kw)))
+
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+
+    assert calls == []
+
+
+def test_real_money_stays_unreachable_during_unverifiable_block():
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, REAL_TRADING_ENABLED="true")
+    # An open, escalated 'unverifiable' incident (injected directly -- opening a
+    # real position isn't possible under REAL_TRADING_ENABLED=true in the first
+    # place, which is itself part of the invariant being tested).
+    journal.insert("protection_checks", {
+        "check_id": new_id("pcheck"), "position_id": "pos_fake", "symbol": "NVDA",
+        "protection_status": "unverifiable", "severity": "critical",
+        "detail": "test-injected unverifiable incident",
+    })
+    prop = make_proposal(symbol="AAPL")
+    _seed_proposal(journal, prop)
+
+    res = om.execute_proposal(prop)
+
+    # real_trading_guard fires FIRST, unconditionally -- before the protection
+    # check is even evaluated, regardless of any watchdog state.
+    assert res.blocked is True
+    assert res.block_reason == ReasonCode.REAL_TRADING_BLOCKED.value
+
+
+def test_manual_approval_boundary_unchanged_when_unverifiable(orchestrator):
+    """Mirrors test_approve_proposal_blocked_by_open_protection_incident but
+    for the new unverifiable incident type -- confirms the same early-check
+    wiring covers it without any change to the freshness/risk re-check logic."""
+    orchestrator.journal.insert("protection_checks", {
+        "check_id": new_id("pcheck"), "position_id": "pos_fake", "symbol": "META",
+        "protection_status": "unverifiable", "severity": "critical",
+        "detail": "test-injected unverifiable incident",
+    })
+    proposal_id, _ = inject_pending_proposal(orchestrator, symbol="AAPL")
+
+    ok, msg = orchestrator.approve_proposal(proposal_id, approver="test")
+
+    assert ok is False
+    assert "protection incident" in msg

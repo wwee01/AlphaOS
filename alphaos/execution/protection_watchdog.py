@@ -33,7 +33,15 @@ from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 _LIVE_LEG_STATES = {OrderState.ACCEPTED.value, OrderState.SUBMITTED.value, OrderState.PARTIALLY_FILLED.value}
-_INCIDENT_STATUSES = (ProtectionStatus.UNPROTECTED.value, ProtectionStatus.CLOSED_MISMATCH.value)
+# Statuses that open a blocking incident (has_blocking_incident() keys off this).
+_INCIDENT_STATUSES = (
+    ProtectionStatus.UNPROTECTED.value, ProtectionStatus.CLOSED_MISMATCH.value, ProtectionStatus.UNVERIFIABLE.value,
+)
+# Statuses that get one-time (not every-pass) WARNING logging on transition into
+# them, but never block on their own -- CHECK_ERROR only escalates to the
+# blocking UNVERIFIABLE after enough consecutive failures (see
+# _apply_check_error_escalation).
+_WARN_ONCE_STATUSES = (ProtectionStatus.DEGRADED.value, ProtectionStatus.CHECK_ERROR.value)
 
 
 @dataclass
@@ -87,8 +95,12 @@ def check_position(journal, alpaca_client, position: dict,
 
     broker_qty = broker_pos.get("qty")
     local_qty = position.get("qty")
+    # Compare MAGNITUDES: Alpaca returns a negative qty for short positions,
+    # while the local ledger always stores a positive magnitude (PR2.6 fix --
+    # comparing signed values directly would false-positive a mismatch on
+    # every short position).
     qty_match = (
-        abs(float(local_qty) - float(broker_qty)) < 1e-6
+        abs(abs(float(local_qty)) - abs(float(broker_qty))) < 1e-6
         if (local_qty is not None and broker_qty is not None) else None
     )
 
@@ -115,13 +127,17 @@ def check_position(journal, alpaca_client, position: dict,
     )
     tif_appropriate = None
     if observed_tif is not None:
-        # Matches AlpacaClient._resolve_tif()'s policy exactly: any swing hold
-        # (max_holding_days >= 1, i.e. may cross a session boundary) needs
-        # persistent protection -- only max_holding_days==0 (pure intraday) is
-        # day-TIF by default (Opus audit HIGH-1).
-        is_swing_or_longer = (position.get("max_holding_days") or 0) > 0
+        # Matches AlpacaClient._resolve_tif()'s policy exactly (kept in lockstep
+        # -- Opus audit HIGH-1 was originally this exact boundary duplicated and
+        # drifting): any swing hold (max_holding_days >= 1) needs persistent
+        # protection; only an EXPLICIT max_holding_days==0 is day-TIF by
+        # default. PR2.6: max_holding_days MISSING/None is treated the same as
+        # a swing (requires persistent) -- unknown must never default to the
+        # weaker day-TIF expectation.
+        mhd = position.get("max_holding_days")
+        requires_persistent = mhd != 0
         tif_appropriate = not (
-            is_swing_or_longer and observed_tif == "day" and not settings.allow_day_tif_for_multiday_positions
+            requires_persistent and observed_tif == "day" and not settings.allow_day_tif_for_multiday_positions
         )
 
     if not stop_live:
@@ -145,32 +161,102 @@ def check_position(journal, alpaca_client, position: dict,
     )
 
 
+def _mark_resolved(journal, check_id: str, resolved_by: str, note: str, exit_id: Optional[str] = None) -> None:
+    st = timeutils.stamp()
+    journal.conn.execute(
+        "UPDATE protection_checks SET resolved_at_utc = ?, resolved_by = ?, resolution_note = ?, "
+        "resolution_exit_id = ? WHERE check_id = ?",
+        (st.utc, resolved_by, note, exit_id, check_id),
+    )
+    journal.conn.commit()
+
+
+def _consecutive_check_errors(journal, position_id: str) -> int:
+    """How many of the most recent protection_checks rows for this position are
+    consecutively CHECK_ERROR or UNVERIFIABLE (both represent an unresolved
+    verification failure) -- stops counting at the first row that successfully
+    verified protection state. Does not include the current pass's row (not
+    inserted yet when this is called)."""
+    rows = journal.query(
+        "SELECT protection_status FROM protection_checks WHERE position_id = ? ORDER BY id DESC LIMIT 1000",
+        (position_id,),
+    )
+    streak = 0
+    for row in rows:
+        if row["protection_status"] in (ProtectionStatus.CHECK_ERROR.value, ProtectionStatus.UNVERIFIABLE.value):
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def _apply_check_error_escalation(journal, position: dict, result: ProtectionCheckResult, settings) -> None:
+    """PR2.6 hardening: a single broker lookup failure alone is WARNING-only
+    (check_error) and does not block -- but 'I can't verify this' must not be
+    silently treated as safe forever. After
+    settings.protection_check_error_escalation_threshold CONSECUTIVE failures
+    for the SAME position (across any mix of check_error/unverifiable passes),
+    escalate to CRITICAL/unverifiable, which blocks new entries exactly like
+    unprotected does. Mutates ``result`` in place; a no-op unless this pass's
+    raw verdict is check_error."""
+    if result.protection_status != ProtectionStatus.CHECK_ERROR.value:
+        return
+    streak = _consecutive_check_errors(journal, position["position_id"]) + 1  # +1 for this pass
+    threshold = settings.protection_check_error_escalation_threshold
+    if streak >= threshold:
+        result.protection_status = ProtectionStatus.UNVERIFIABLE.value
+        result.severity = Severity.CRITICAL.value
+        result.detail = (
+            f"{result.symbol}: protection has been unverifiable for {streak} consecutive "
+            f"watchdog passes (broker lookup keeps failing) -- treating as UNPROTECTED "
+            f"until verification succeeds again. Last error: {result.detail}"
+        )
+
+
 def _record_check(journal, position: dict, result: ProtectionCheckResult, scheduler_run_id: Optional[str]) -> None:
     """Insert this pass's audit row, update positions.protection_status, and
-    open/auto-resolve incidents as needed. A 'new' incident (CRITICAL log +
-    counted) is only raised on a transition INTO unprotected/closed_mismatch --
-    if an unresolved incident already exists for this position, the audit row
-    is still written but no duplicate alert fires. A DEGRADED transition gets
-    the same one-time (not every pass) WARNING treatment -- 'loud, never
-    silent' per Part B, without spamming an alert on every subsequent pass
-    while it stays degraded."""
+    open/supersede/auto-resolve incidents as needed.
+
+    At most ONE open incident row is ever live per position at a time: a
+    transition INTO an incident type (unprotected/closed_mismatch/
+    unverifiable) opens a fresh one, superseding (resolving) any prior
+    still-open incident for the same position first. This matters because a
+    position can now move BETWEEN incident types (e.g. unverifiable ->
+    unprotected once the broker lookup finally succeeds and reveals a
+    genuinely missing stop) -- without superseding, that would leave two
+    simultaneously-open incident rows, and a human resolving only the newer
+    one would leave has_blocking_incident() still keyed on the stale older
+    row. Repeating the SAME incident type across passes does not re-alert
+    (Part A wants every pass audited, not every pass alerted).
+
+    DEGRADED and CHECK_ERROR (below the escalation threshold) get one-time
+    WARNING logging on transition into that state, never block, and need no
+    resolution tracking -- they clear implicitly once a later pass reports
+    something else. A quantity mismatch is logged once per transition into
+    mismatch, independent of protection_status."""
     prior = journal.one(
-        "SELECT protection_status FROM protection_checks WHERE position_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT protection_status, qty_match FROM protection_checks WHERE position_id = ? "
+        "ORDER BY id DESC LIMIT 1",
         (position["position_id"],),
     )
     is_incident_type = result.protection_status in _INCIDENT_STATUSES
     existing_open = None
     if is_incident_type:
         existing_open = journal.one(
-            "SELECT check_id FROM protection_checks WHERE position_id = ? "
-            "AND protection_status IN (?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC LIMIT 1",
+            "SELECT check_id, protection_status FROM protection_checks WHERE position_id = ? "
+            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC LIMIT 1",
             (position["position_id"], *_INCIDENT_STATUSES),
         )
-    is_new_incident = is_incident_type and existing_open is None
-    is_new_degraded = (
-        result.protection_status == ProtectionStatus.DEGRADED.value
-        and (prior is None or prior.get("protection_status") != ProtectionStatus.DEGRADED.value)
+    same_ongoing_incident = (
+        is_incident_type and existing_open is not None
+        and existing_open["protection_status"] == result.protection_status
     )
+    is_new_warn = (
+        result.protection_status in _WARN_ONCE_STATUSES
+        and (prior is None or prior.get("protection_status") != result.protection_status)
+    )
+    prior_qty_mismatch = prior is not None and prior.get("qty_match") == 0
+    is_new_qty_mismatch = result.qty_match is False and not prior_qty_mismatch
 
     check_id = new_id("pcheck")
     journal.insert("protection_checks", {
@@ -193,15 +279,27 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
         "scheduler_run_id": scheduler_run_id,
     })
 
-    if is_new_incident:
+    if is_incident_type and not same_ongoing_incident:
+        if existing_open is not None:
+            _mark_resolved(
+                journal, existing_open["check_id"], resolved_by="watchdog_superseded",
+                note=f"superseded by a new '{result.protection_status}' check this pass",
+            )
         result.incident_id = check_id
         journal.log_system_event(
             result.severity, "protection_watchdog", result.detail,
             {"check_id": check_id, "position_id": result.position_id, "symbol": result.symbol},
         )
-    elif is_new_degraded:
+    elif is_new_warn:
         journal.log_system_event(
             result.severity, "protection_watchdog", result.detail,
+            {"check_id": check_id, "position_id": result.position_id, "symbol": result.symbol},
+        )
+
+    if is_new_qty_mismatch:
+        journal.log_system_event(
+            Severity.WARNING, "protection_watchdog",
+            f"{result.symbol}: quantity mismatch -- local={position.get('qty')}, broker={result.broker_qty}.",
             {"check_id": check_id, "position_id": result.position_id, "symbol": result.symbol},
         )
 
@@ -211,24 +309,24 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
     )
     journal.conn.commit()
 
-    # Self-healing: PROTECTED or DEGRADED both mean the blocking condition (a
-    # missing STOP) is gone -- auto-resolve any still-open incident. Deliberately
-    # an allowlist (not "not unprotected/closed_mismatch") so a transient
+    # Self-healing: PROTECTED or DEGRADED both mean the blocking condition is
+    # gone -- auto-resolve any still-open incident. Deliberately an allowlist
+    # (not "not unprotected/closed_mismatch/unverifiable") so a transient
     # check_error can never accidentally auto-clear a real incident.
     if result.protection_status in (ProtectionStatus.PROTECTED.value, ProtectionStatus.DEGRADED.value):
-        st = timeutils.stamp()
-        journal.conn.execute(
-            "UPDATE protection_checks SET resolved_at_utc = ?, resolved_by = ?, resolution_note = ? "
-            "WHERE position_id = ? AND protection_status IN (?, ?) AND resolved_at_utc IS NULL",
-            (st.utc, "watchdog_reconfirmed", "protection confirmed restored on a later watchdog pass",
-             result.position_id, *_INCIDENT_STATUSES),
+        row = journal.one(
+            "SELECT check_id FROM protection_checks WHERE position_id = ? "
+            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC LIMIT 1",
+            (position["position_id"], *_INCIDENT_STATUSES),
         )
-        journal.conn.commit()
+        if row:
+            _mark_resolved(journal, row["check_id"], resolved_by="watchdog_reconfirmed",
+                          note="protection confirmed restored on a later watchdog pass")
 
 
 def _open_incident_count(journal) -> int:
     row = journal.one(
-        "SELECT COUNT(*) AS n FROM protection_checks WHERE protection_status IN (?, ?) "
+        "SELECT COUNT(*) AS n FROM protection_checks WHERE protection_status IN (?, ?, ?) "
         "AND resolved_at_utc IS NULL",
         _INCIDENT_STATUSES,
     )
@@ -241,7 +339,8 @@ def run_watchdog_pass(journal, alpaca_client, settings, scheduler_run_id: Option
     OrderManager.reconcile()'s own guard -- same condition, since alpaca_client
     is only ever constructed when broker_connected."""
     counts = {"checked": 0, "protected": 0, "degraded": 0, "unprotected": 0,
-             "closed_mismatch": 0, "check_error": 0, "new_incidents": [], "dangling_orders": []}
+             "closed_mismatch": 0, "check_error": 0, "unverifiable": 0,
+             "qty_mismatches": 0, "new_incidents": [], "dangling_orders": []}
     if not (settings.real_paper_execution and alpaca_client is not None):
         counts["open_incident_count"] = _open_incident_count(journal)
         return counts
@@ -264,9 +363,12 @@ def run_watchdog_pass(journal, alpaca_client, settings, scheduler_run_id: Option
 
     for pos in open_positions:
         result = check_position(journal, alpaca_client, pos, broker_by_symbol, settings)
+        _apply_check_error_escalation(journal, pos, result, settings)
         _record_check(journal, pos, result, scheduler_run_id)
         counts["checked"] += 1
         counts[result.protection_status] += 1
+        if result.qty_match is False:
+            counts["qty_mismatches"] += 1
         if result.incident_id:
             counts["new_incidents"].append(result.incident_id)
 
@@ -296,7 +398,7 @@ def has_blocking_incident(journal) -> Optional[dict]:
     KillSwitch.is_engaged()'s role, but DB-backed since it needs structured
     detail (which position, why), not just a boolean."""
     return journal.one(
-        "SELECT * FROM protection_checks WHERE protection_status IN (?, ?) AND resolved_at_utc IS NULL "
+        "SELECT * FROM protection_checks WHERE protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL "
         "ORDER BY id DESC LIMIT 1",
         _INCIDENT_STATUSES,
     )
@@ -344,19 +446,22 @@ def resolve_incident(journal, position_manager, incident_id: str, exit_price: fl
 
 
 def acknowledge_incident(journal, incident_id: str, note: str, resolved_by: str = "user") -> dict:
-    """ONLY for an unprotected/degraded incident. Marks it resolved WITHOUT
-    touching the position -- for when a human has manually restored protection
-    directly at the broker, or explicitly chooses to accept the risk and unblock
-    other trades. Never calls close_position(). This is the explicit
-    'require user decision' path; the watchdog also self-heals these
-    automatically once it reconfirms protection on a later pass (see
-    _record_check) -- this is for when a human wants to unblock sooner."""
+    """ONLY for an unprotected/degraded/unverifiable incident. Marks it resolved
+    WITHOUT touching the position -- for when a human has manually restored
+    protection directly at the broker, confirmed the broker lookup issue is
+    resolved, or explicitly chooses to accept the risk and unblock other
+    trades. Never calls close_position(). This is the explicit 'require user
+    decision' path; the watchdog also self-heals these automatically once it
+    reconfirms protection on a later pass (see _record_check) -- this is for
+    when a human wants to unblock sooner."""
     row = journal.one("SELECT * FROM protection_checks WHERE check_id = ?", (incident_id,))
     if not row:
         return {"ok": False, "message": f"incident {incident_id} not found"}
     if row.get("resolved_at_utc"):
         return {"ok": False, "message": f"incident {incident_id} already resolved"}
-    if row["protection_status"] not in (ProtectionStatus.UNPROTECTED.value, ProtectionStatus.DEGRADED.value):
+    if row["protection_status"] not in (
+        ProtectionStatus.UNPROTECTED.value, ProtectionStatus.DEGRADED.value, ProtectionStatus.UNVERIFIABLE.value,
+    ):
         return {"ok": False, "message": (
             f"incident {incident_id} is '{row['protection_status']}' -- use protection_resolve for a "
             f"local-open/broker-closed mismatch (it requires closing the position with a confirmed price)."
@@ -379,7 +484,7 @@ def status_report(journal) -> dict:
     """Read-only summary for BOTH system_health()'s dashboard/CLI surface and
     the protection_status CLI command."""
     open_incidents = journal.query(
-        "SELECT * FROM protection_checks WHERE protection_status IN (?, ?) AND resolved_at_utc IS NULL "
+        "SELECT * FROM protection_checks WHERE protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL "
         "ORDER BY id DESC",
         _INCIDENT_STATUSES,
     )
@@ -391,19 +496,28 @@ def status_report(journal) -> dict:
         "JOIN positions p ON p.position_id = pc.position_id "
         "WHERE p.status = 'open'"
     )
-    counts = {"protected": 0, "degraded": 0, "unprotected": 0, "closed_mismatch": 0, "check_error": 0}
+    counts = {"protected": 0, "degraded": 0, "unprotected": 0, "closed_mismatch": 0,
+             "check_error": 0, "unverifiable": 0}
+    qty_mismatches = 0
     for row in latest:
         s = row.get("protection_status")
         if s in counts:
             counts[s] += 1
+        if row.get("qty_match") == 0:
+            qty_mismatches += 1
 
     blocking = len(open_incidents) > 0
     checked = sum(counts.values())
     if blocking:
         summary_label = f"BLOCKED -- {len(open_incidents)} open incident(s)"
         blocking_detail = open_incidents[0]["detail"]
-    elif counts["degraded"] > 0:
-        summary_label = f"{counts['degraded']} degraded (not blocking)"
+    elif counts["degraded"] > 0 or qty_mismatches > 0:
+        parts = []
+        if counts["degraded"] > 0:
+            parts.append(f"{counts['degraded']} degraded")
+        if qty_mismatches > 0:
+            parts.append(f"{qty_mismatches} qty mismatch(es)")
+        summary_label = " + ".join(parts) + " (not blocking)"
         blocking_detail = None
     elif checked > 0:
         summary_label = "all protected"
@@ -414,6 +528,7 @@ def status_report(journal) -> dict:
 
     return {
         "checked": checked,
+        "qty_mismatches": qty_mismatches,
         **counts,
         "open_incidents": open_incidents,
         "open_incident_count": len(open_incidents),
