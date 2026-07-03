@@ -30,20 +30,26 @@ def test_monitor_pass_folds_running_mfe_mae_in_r_terms():
     o = _orch()
     pos = _open_position(o)
     risk = abs(pos["avg_entry_price"] - pos["stop_price"])
-    up = pos["avg_entry_price"] + 2 * risk       # +2R favorable
+    # inject_pending_proposal sizes stop=3%/target=6% of entry, which makes
+    # target ALWAYS exactly entry + 2*risk (algebraically, not a coincidence) —
+    # so a "+2R favorable" probe can land exactly ON the target depending on
+    # the mock price's rounding (mock prices are seeded per calendar trading
+    # day, so this is not always reproducible — it bit a real run once). Use
+    # 1.5R instead: comfortably short of the 2R target regardless of entry.
+    up = pos["avg_entry_price"] + 1.5 * risk     # +1.5R favorable, short of target
     down = pos["avg_entry_price"] - 0.5 * risk   # -0.5R adverse
 
     o.positions.monitor(price_overrides={"AAPL": up})
     snap1 = o.journal.one("SELECT * FROM monitoring_snapshots ORDER BY id DESC LIMIT 1")
     # Textbook excursion semantics: entry itself is an implicit R=0 observation,
     # so a trade that's only ever been favorable has MAE=0 (never dipped below
-    # entry) — NOT the observed +2R reported as if it were also "adverse".
-    assert snap1["unrealized_r"] == 2.0 and snap1["mfe"] == 2.0 and snap1["mae"] == 0.0
+    # entry) — NOT the observed +1.5R reported as if it were also "adverse".
+    assert snap1["unrealized_r"] == 1.5 and snap1["mfe"] == 1.5 and snap1["mae"] == 0.0
 
     o.positions.monitor(price_overrides={"AAPL": down})
     snap2 = o.journal.one("SELECT * FROM monitoring_snapshots ORDER BY id DESC LIMIT 1")
     # mfe stays at the prior high-water mark; mae drops to the new low
-    assert snap2["unrealized_r"] == -0.5 and snap2["mfe"] == 2.0 and snap2["mae"] == -0.5
+    assert snap2["unrealized_r"] == -0.5 and snap2["mfe"] == 1.5 and snap2["mae"] == -0.5
     o.close()
 
 
@@ -51,7 +57,7 @@ def test_close_position_folds_exit_tick_into_running_excursion():
     o = _orch()
     pos = _open_position(o)
     risk = abs(pos["avg_entry_price"] - pos["stop_price"])
-    up = pos["avg_entry_price"] + 2 * risk
+    up = pos["avg_entry_price"] + 1.5 * risk  # clearly short of the (always-exact) 2R target
     down = pos["avg_entry_price"] - 0.5 * risk
     exit_price = pos["avg_entry_price"] + 0.1 * risk   # exits near breakeven
 
@@ -62,8 +68,8 @@ def test_close_position_folds_exit_tick_into_running_excursion():
     out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
     # The final return alone (+0.1R) would have wrongly clamped mfe/mae under the
     # old %-based approximation (mfe=0.1%, mae=0.0). The fix preserves the full
-    # observed path: +2R favorable, -0.5R adverse — in R terms, not %.
-    assert out["mfe"] == 2.0
+    # observed path: +1.5R favorable, -0.5R adverse — in R terms, not %.
+    assert out["mfe"] == 1.5
     assert out["mae"] == -0.5
     assert out["mfe_mae_source"] == "live_tracked"
     assert out["realized_r"] == 0.1
@@ -268,11 +274,15 @@ def test_favorable_then_adverse_path_captures_both_correctly():
     o = _orch()
     pos = _open_position(o)
     risk = abs(pos["avg_entry_price"] - pos["stop_price"])
-    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 2 * risk})
+    # 1.5R, not 2R: inject_pending_proposal's target is always exactly entry +
+    # 2*risk, so a "+2R" probe can land exactly on it depending on the mock
+    # price's rounding — see the comment in
+    # test_monitor_pass_folds_running_mfe_mae_in_r_terms above.
+    o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] + 1.5 * risk})
     o.positions.monitor(price_overrides={"AAPL": pos["avg_entry_price"] - 0.5 * risk})
     o.positions.close_position(pos["position_id"], pos["avg_entry_price"] + 0.1 * risk, "manual_test")
     out = o.journal.one("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT 1")
-    assert out["mfe"] == 2.0 and out["mae"] == -0.5   # unaffected by the 0-anchor fix
+    assert out["mfe"] == 1.5 and out["mae"] == -0.5   # unaffected by the 0-anchor fix
     o.close()
 
 
