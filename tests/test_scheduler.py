@@ -11,15 +11,22 @@ scheduler exactly as it is via the manual CLI path.
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 
+import pytest
+
+from alphaos.constants import ReasonCode
+from alphaos.execution import protection_watchdog as pw
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
 from alphaos.scheduler import JobRunner
 from alphaos.scheduler.jobs import run_monitor_job, run_outcomes_job, run_scan_job
-from conftest import inject_pending_proposal, make_settings
+from alphaos.util.ids import new_id
+from conftest import inject_pending_proposal, make_proposal, make_settings
 from test_alpaca_paper_execution import FakeTradingClient, _paper_om, _seed_proposal
+from test_protection_watchdog import _force_check_error, _open_protected_position
 
 
 # --------------------------------------------------------------- scan safety
@@ -36,14 +43,25 @@ def test_scan_job_does_not_submit_orders():
 
 
 def test_scan_job_respects_manual_approval_boundary(orchestrator):
+    # Inject the pending proposal BEFORE the scan runs, so the assertion is
+    # meaningful: if the scan (or anything it triggers) auto-advanced a
+    # proposal past manual approval, this pre-existing row would flip. (An
+    # earlier version injected the proposal AFTER the scan, which made the
+    # assertion tautological -- it would pass even if the scan auto-approved.)
+    proposal_id, _ = inject_pending_proposal(orchestrator, symbol="AAPL")
+    assert orchestrator.journal.proposal_by_id(proposal_id)["status"] == "pending_approval"
+
     runner = JobRunner(orchestrator)
     run_scan_job(orchestrator, runner)
-    proposal_id, _ = inject_pending_proposal(orchestrator, symbol="AAPL")
 
-    row = orchestrator.journal.proposal_by_id(proposal_id)
-
-    assert row["status"] == "pending_approval"
-    assert row["status"] not in ("approved", "filled")
+    # The pre-existing proposal is untouched by the scan...
+    assert orchestrator.journal.proposal_by_id(proposal_id)["status"] == "pending_approval"
+    # ...and NOTHING anywhere reached approved/filled without an explicit
+    # human approve_proposal() call (which this test never makes).
+    advanced = orchestrator.journal.query(
+        "SELECT proposal_id FROM trade_proposals WHERE status IN ('approved', 'filled')"
+    )
+    assert advanced == []
 
 
 # ------------------------------------------------------------- monitor order
@@ -334,3 +352,110 @@ def test_no_live_trading_path_enabled_by_scheduler(orchestrator):
         "SELECT * FROM trade_proposals WHERE status IN ('approved', 'filled')"
     )
     assert approved_or_filled == []  # no proposal reached approved/filled without an explicit approve_proposal() call
+
+
+# ------------------------------------------- check_error escalation via scheduler
+def test_check_error_escalation_accrues_across_scheduled_monitor_passes():
+    """The consecutive broker-lookup-failure streak must accumulate to a
+    blocking `unverifiable` incident when the watchdog is driven through the
+    SCHEDULER's monitor job (run_monitor_job -> run_monitor_once -> watchdog),
+    not only via a direct pw.run_watchdog_pass() call. This exercises the real
+    reconcile-before-watchdog path per scheduled pass and proves the wrapper
+    does not reset or short-circuit the escalation streak. (Specifically
+    requested audit item; previously covered only via the direct watchdog
+    path in test_protection_watchdog.py.)"""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake, PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="3")
+    _open_protected_position(fake, om, journal, "NVDA", 120.0, 110.0, 140.0, 3, max_holding_days=5)
+    orch = Orchestrator(settings=s, journal=journal)
+    orch.orders = om
+    runner = JobRunner(orch)
+    _force_check_error(om)  # every broker per-order lookup now fails
+
+    # Three consecutive SCHEDULED monitor passes (via the job wrapper).
+    r1 = run_monitor_job(orch, runner)
+    r2 = run_monitor_job(orch, runner)
+    r3 = run_monitor_job(orch, runner)
+
+    assert r1["status"] == "completed" and r1["protection_blocking"] is False  # below threshold
+    assert r2["protection_blocking"] is False
+    assert r3["protection_blocking"] is True  # 3rd consecutive failure crosses the threshold via the scheduler path
+
+    blocking = pw.has_blocking_incident(journal)
+    assert blocking is not None
+    assert blocking["protection_status"] == "unverifiable"
+    assert blocking["severity"] == "critical"
+
+    # And a new entry is now blocked at the execution gate (same proof style as
+    # test_protection_watchdog.py's direct-path escalation test).
+    new_prop = make_proposal(symbol="AAPL", entry=100.0, stop=97.0, target=106.0, qty=10)
+    _seed_proposal(journal, new_prop)
+    res = om.execute_proposal(new_prop)
+    assert res.blocked is True
+    assert res.block_reason == ReasonCode.PROTECTION_INTEGRITY_FAILURE.value
+    assert not any(o.symbol == "AAPL" for o in fake.orders.values())  # never reached the broker
+
+
+# ------------------------------------------------- failure-logging crash-proofness
+def test_failure_logging_crash_does_not_lose_the_failure_record(orchestrator, monkeypatch):
+    """If the best-effort audit log itself raises (e.g. the DB is momentarily
+    locked by a concurrent writer) WHILE recording a job failure, run_job must
+    still (a) not re-raise and (b) leave the durable job_runs failure record
+    intact. Guards _log_failure_best_effort (job_runner.py)."""
+    def boom_job(*args, **kwargs):
+        raise RuntimeError("job blew up")
+
+    def boom_log(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(orchestrator, "run_monitor_once", boom_job)
+    monkeypatch.setattr(orchestrator.journal, "log_system_event", boom_log)
+    runner = JobRunner(orchestrator)
+
+    result = runner.run_job("monitor")  # must not raise despite BOTH the job AND the logger raising
+
+    assert result["status"] == "failed"
+    row = orchestrator.journal.one(
+        "SELECT * FROM job_runs WHERE job_type = 'monitor' ORDER BY id DESC LIMIT 1"
+    )
+    assert row["status"] == "failed"  # durable failure record survived the logging crash
+    assert row["error"] is not None
+    assert row["finished_at_utc"] is not None
+
+
+# ------------------------------------------------- cross-process lock race backstop
+def test_partial_unique_index_blocks_two_active_locks_for_one_key(journal):
+    """DB-level backstop for the check-then-insert race: two active
+    (started/completed) job_runs rows for the same lock_key are impossible."""
+    row = {
+        "job_type": "scan", "lock_key": "scan:race-key",
+        "started_at_utc": "2026-07-04T00:00:00+00:00",
+        "started_at_sgt": "2026-07-04T08:00:00+08:00", "status": "started",
+    }
+    journal.insert("job_runs", {"job_run_id": new_id("jobrun"), **row})
+    with pytest.raises(sqlite3.IntegrityError):
+        journal.insert("job_runs", {"job_run_id": new_id("jobrun"), **row})
+
+
+def test_acquire_converts_a_lost_race_to_false_not_an_exception(orchestrator, monkeypatch):
+    """When two processes both pass acquire()'s SELECT before either INSERT
+    commits, the loser's INSERT hits the partial unique index. acquire() must
+    convert that sqlite3.IntegrityError into a clean False (== 'already
+    locked'), never let it propagate."""
+    runner = JobRunner(orchestrator)
+    assert runner.acquire("monitor", "monitor:race-key") is True  # first caller wins, inserts 'started'
+
+    # Simulate the TOCTOU: force the pre-INSERT SELECT to miss the existing row
+    # so the second acquire proceeds to INSERT and hits the unique index.
+    monkeypatch.setattr(orchestrator.journal, "one", lambda *args, **kwargs: None)
+    assert runner.acquire("monitor", "monitor:race-key") is False  # IntegrityError -> False, no raise
+
+
+# ------------------------------------------------------------- CLI invalid job
+def test_cli_invalid_job_type_is_rejected_by_argparse():
+    """scheduler_run_job restricts job_type via argparse choices, so an unknown
+    job name fails at parse time (SystemExit) rather than reaching JobRunner."""
+    from alphaos.__main__ import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["scheduler_run_job", "definitely_not_a_real_job"])
