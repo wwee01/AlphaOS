@@ -246,6 +246,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     PARTIAL = "partial"
+    SKIPPED = "skipped"
 
 
 class SchedulerRunType(StrEnum):
@@ -266,6 +267,7 @@ class TriggerSource(StrEnum):
     FUTURE_SCHEDULER = "future_scheduler"
     TEST = "test"
     CLI = "cli"
+    SCHEDULER = "scheduler"
 
 
 class BaselineType(StrEnum):

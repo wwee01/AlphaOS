@@ -17,6 +17,7 @@ import sys
 from alphaos.config.settings import SettingsError, load_settings
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
+from alphaos.scheduler import JobRunner
 
 
 def _print(obj) -> None:
@@ -153,6 +154,26 @@ def cmd_protection_ack(orch: Orchestrator, incident_id: str, note: str) -> int:
     return 0 if res.get("ok") else 1
 
 
+def cmd_scheduler_status(orch: Orchestrator) -> int:
+    """READ-ONLY: scheduler job history, lock state, protection/kill-switch/cost-cap summary."""
+    _print({"scheduler_status": JobRunner(orch).status_report()})
+    return 0
+
+
+def cmd_scheduler_run_once(orch: Orchestrator) -> int:
+    """Run every scheduled job that is currently due (respects cadence windows,
+    kill switch, cost cap)."""
+    _print({"scheduler_run_once": JobRunner(orch).run_due_jobs()})
+    return 0
+
+
+def cmd_scheduler_run_job(orch: Orchestrator, job_type: str) -> int:
+    """Force-run one scheduler job now, bypassing cadence timing (still respects
+    kill switch / protection / cost cap / locking)."""
+    _print({"scheduler_run_job": JobRunner(orch).run_job(job_type)})
+    return 0
+
+
 def cmd_status(orch: Orchestrator) -> int:
     checks = orch.startup()
     _print(
@@ -279,6 +300,15 @@ def build_parser() -> argparse.ArgumentParser:
                              "position (lifts the new-entry block)")
     pa.add_argument("incident_id")
     pa.add_argument("--note", default="")
+    sub.add_parser("scheduler_status",
+                   help="READ-ONLY: scheduler job history, lock state, protection/kill-switch/cost-cap summary")
+    sub.add_parser("scheduler_run_once",
+                   help="run every scheduled job that is currently due (respects cadence windows, kill switch, "
+                        "cost cap)")
+    srj = sub.add_parser("scheduler_run_job",
+                         help="force-run one scheduler job now, bypassing cadence timing (still respects kill "
+                              "switch / protection / cost cap / locking)")
+    srj.add_argument("job_type", choices=["scan", "monitor", "outcomes_update", "daily_digest"])
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
     l30 = sub.add_parser("last30days_probe",
                          help="READ-ONLY: print last30days narrative context for one symbol (no ledger writes)")
@@ -347,6 +377,12 @@ def main(argv=None) -> int:
             return cmd_protection_resolve(orch, args.incident_id, args.exit_price, args.note)
         if args.command == "protection_ack":
             return cmd_protection_ack(orch, args.incident_id, args.note)
+        if args.command == "scheduler_status":
+            return cmd_scheduler_status(orch)
+        if args.command == "scheduler_run_once":
+            return cmd_scheduler_run_once(orch)
+        if args.command == "scheduler_run_job":
+            return cmd_scheduler_run_job(orch, args.job_type)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
         if args.command == "last30days_probe":

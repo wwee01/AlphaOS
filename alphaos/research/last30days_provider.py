@@ -197,6 +197,17 @@ def make_last30days_provider(settings, force: bool = False) -> Optional[Last30Da
     ``force=True`` ignores the ``last30days_enabled`` master switch (used by the
     manual ``last30days_probe`` CLI, which is an explicit operator action) but
     still respects the configured provider type.
+
+    In mock mode (``settings.is_mock``), the live ``CliLast30DaysProvider`` is
+    never constructed even if LAST30DAYS_PROVIDER=cli -- it is transparently
+    substituted with ``MockLast30DaysProvider``, mirroring the mock
+    short-circuit already used by the OpenAI evaluator/classifier/polarity
+    clients (``settings.is_mock or not settings.has_openai_key``). Without
+    this, ALPHAOS_MODE=mock did not disable a real subprocess shell-out
+    (HANDOVER.md footgun #4) -- a scheduled or ad-hoc mock-mode scan could
+    still hang/spend on the live provider process. ``force=True`` still
+    bypasses this (an explicit manual probe may hit the real provider even
+    from mock-mode settings).
     """
     if not force and not settings.last30days_enabled:
         return None
@@ -204,5 +215,7 @@ def make_last30days_provider(settings, force: bool = False) -> Optional[Last30Da
     if provider in ("disabled", "none", ""):
         return None
     if provider == Last30DaysProvider.CLI.value:
+        if settings.is_mock and not force:
+            return MockLast30DaysProvider()
         return CliLast30DaysProvider(settings)
     return MockLast30DaysProvider()

@@ -34,7 +34,9 @@ def test_factory_mock_when_enabled():
 
 
 def test_factory_cli_when_configured():
-    s = make_settings(LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli")
+    # Non-mock settings: proves real CLI selection outside mock mode (the
+    # mock-mode guard below is what changes behavior specifically in mock mode).
+    s = make_settings(ALPHAOS_MODE="paper", LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli")
     assert isinstance(make_last30days_provider(s), CliLast30DaysProvider)
 
 
@@ -42,6 +44,22 @@ def test_factory_force_ignores_master_switch():
     s = make_settings(LAST30DAYS_ENABLED="false", LAST30DAYS_PROVIDER="mock")
     assert make_last30days_provider(s) is None                       # scan path: disabled
     assert isinstance(make_last30days_provider(s, force=True), MockLast30DaysProvider)  # probe path
+
+
+def test_factory_falls_back_to_mock_when_mock_mode_even_if_cli_configured():
+    """HANDOVER.md footgun #4: ALPHAOS_MODE=mock must not construct the live,
+    subprocess-shelling CliLast30DaysProvider even if LAST30DAYS_PROVIDER=cli
+    is left on in .env -- it should transparently degrade to the mock provider."""
+    s = make_settings(ALPHAOS_MODE="mock", LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli")
+    assert isinstance(make_last30days_provider(s), MockLast30DaysProvider)
+
+
+def test_factory_force_still_allows_live_cli_from_mock_mode_settings():
+    """An explicit manual probe (force=True) may still reach the real provider
+    even from mock-mode settings -- this is a deliberate operator action, not
+    an unattended/scheduled path."""
+    s = make_settings(ALPHAOS_MODE="mock", LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli")
+    assert isinstance(make_last30days_provider(s, force=True), CliLast30DaysProvider)
 
 
 def test_mock_is_deterministic():

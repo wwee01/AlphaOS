@@ -83,6 +83,63 @@ def _get_int(env: dict, key: str, default: int) -> int:
         return default
 
 
+def _parse_hhmm(value: str, key: str) -> tuple[int, int]:
+    """Parse a strict 24-hour "HH:MM" string; raise SettingsError on malformed input."""
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise SettingsError(
+            f"{key}={value!r} is not a valid HH:MM time. Expected 24-hour format, e.g. '18:00'."
+        )
+    hh_raw, mm_raw = parts
+    if not (hh_raw.isdigit() and mm_raw.isdigit() and len(hh_raw) == 2 and len(mm_raw) == 2):
+        raise SettingsError(
+            f"{key}={value!r} is not a valid HH:MM time. Expected 24-hour format, e.g. '18:00'."
+        )
+    hh, mm = int(hh_raw), int(mm_raw)
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        raise SettingsError(
+            f"{key}={value!r} is not a valid HH:MM time. Hour must be 00-23 and minute 00-59."
+        )
+    return hh, mm
+
+
+def _parse_scan_windows(value: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Parse "HH:MM-HH:MM,HH:MM-HH:MM,..." into (start,end) pairs, end after start.
+
+    Raises SettingsError on any malformed window instead of silently ignoring it —
+    a bad scan window would otherwise silently starve the scan job for that slot.
+    """
+    windows: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    for raw_window in value.split(","):
+        window = raw_window.strip()
+        if not window:
+            raise SettingsError(
+                f"SCHEDULER_SCAN_WINDOWS={value!r} contains an empty window. Expected a "
+                f"comma-separated list of 'HH:MM-HH:MM' ranges, e.g. "
+                f"'09:35-09:50,12:00-12:15,15:45-16:00'."
+            )
+        bounds = window.split("-")
+        if len(bounds) != 2:
+            raise SettingsError(
+                f"SCHEDULER_SCAN_WINDOWS={value!r} has a malformed window {window!r}. "
+                f"Expected 'HH:MM-HH:MM', e.g. '09:35-09:50'."
+            )
+        start_raw, end_raw = bounds
+        start = _parse_hhmm(start_raw.strip(), "SCHEDULER_SCAN_WINDOWS")
+        end = _parse_hhmm(end_raw.strip(), "SCHEDULER_SCAN_WINDOWS")
+        if end <= start:
+            raise SettingsError(
+                f"SCHEDULER_SCAN_WINDOWS={value!r} has window {window!r} where the end "
+                f"time is not after the start time."
+            )
+        windows.append((start, end))
+    if not windows:
+        raise SettingsError(
+            f"SCHEDULER_SCAN_WINDOWS={value!r} must contain at least one 'HH:MM-HH:MM' window."
+        )
+    return windows
+
+
 def load_dotenv(path: str = ".env") -> dict:
     """Minimal `.env` parser. Does NOT override variables already in the env.
 
@@ -158,6 +215,14 @@ class Settings:
     # blocks new entries -- protection state that can't be confirmed must not
     # be silently treated as safe forever.
     protection_check_error_escalation_threshold: int
+
+    # --- scheduler v1.5 (cadence layer; scan/monitor/outcomes/digest jobs) ---
+    scheduler_ai_cost_cap_calls_per_30d: int
+    scheduler_scan_windows: str
+    scheduler_monitor_interval_minutes: int
+    scheduler_outcomes_interval_minutes: int
+    scheduler_digest_time: str
+    scheduler_stale_job_minutes: int
 
     # --- notifications ---
     ntfy_topic: str
@@ -661,6 +726,55 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"position."
         )
 
+    # --- scheduler v1.5: AI cost cap, scan windows, monitor/outcomes cadence,
+    # digest time, stale-job threshold (all cadence-layer, none change scan/
+    # AI-labeller/risk/strategy behavior) --------------------------------------
+    scheduler_ai_cost_cap_calls_per_30d = _get_int(
+        src, "SCHEDULER_AI_COST_CAP_CALLS_PER_30D", 2000)
+    if not (50 <= scheduler_ai_cost_cap_calls_per_30d <= 100000):
+        raise SettingsError(
+            f"SCHEDULER_AI_COST_CAP_CALLS_PER_30D={scheduler_ai_cost_cap_calls_per_30d!r} "
+            f"must be between 50 and 100000. Too low trips on ordinary daily scan volume "
+            f"and silently starves the scan job every day; too high (or unbounded) defeats "
+            f"the purpose of a runaway-cost safety net."
+        )
+
+    scheduler_scan_windows = _get(
+        src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
+    _parse_scan_windows(scheduler_scan_windows)
+
+    scheduler_monitor_interval_minutes = _get_int(
+        src, "SCHEDULER_MONITOR_INTERVAL_MINUTES", 15)
+    if not (1 <= scheduler_monitor_interval_minutes <= 240):
+        raise SettingsError(
+            f"SCHEDULER_MONITOR_INTERVAL_MINUTES={scheduler_monitor_interval_minutes!r} "
+            f"must be between 1 and 240. Too low (e.g. <1) risks hammering the broker API "
+            f"every scheduler tick; too high (>240) delays reaction to a real protection "
+            f"incident or exit condition, defeating the purpose of a monitor cadence."
+        )
+
+    scheduler_outcomes_interval_minutes = _get_int(
+        src, "SCHEDULER_OUTCOMES_INTERVAL_MINUTES", 60)
+    if not (5 <= scheduler_outcomes_interval_minutes <= 1440):
+        raise SettingsError(
+            f"SCHEDULER_OUTCOMES_INTERVAL_MINUTES={scheduler_outcomes_interval_minutes!r} "
+            f"must be between 5 and 1440. Too low wastes cycles for no benefit "
+            f"(forward-return windows are measured in days, not minutes); too high "
+            f"(>1440, i.e. more than a day) risks a large unmeasured backlog before it's "
+            f"flagged."
+        )
+
+    scheduler_digest_time = _get(src, "SCHEDULER_DIGEST_TIME", "18:00")
+    _parse_hhmm(scheduler_digest_time, "SCHEDULER_DIGEST_TIME")
+
+    scheduler_stale_job_minutes = _get_int(src, "SCHEDULER_STALE_JOB_MINUTES", 30)
+    if not (5 <= scheduler_stale_job_minutes <= 1440):
+        raise SettingsError(
+            f"SCHEDULER_STALE_JOB_MINUTES={scheduler_stale_job_minutes!r} must be between "
+            f"5 and 1440. Too low false-flags a job that's just running a bit long as "
+            f"'stale'; too high delays operator awareness of a genuinely crashed/stuck job."
+        )
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -698,6 +812,12 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         requires_persistent_protection=_get_bool(src, "REQUIRES_PERSISTENT_PROTECTION", True),
         allow_day_tif_for_multiday_positions=allow_day_tif_for_multiday_positions,
         protection_check_error_escalation_threshold=protection_check_error_escalation_threshold,
+        scheduler_ai_cost_cap_calls_per_30d=scheduler_ai_cost_cap_calls_per_30d,
+        scheduler_scan_windows=scheduler_scan_windows,
+        scheduler_monitor_interval_minutes=scheduler_monitor_interval_minutes,
+        scheduler_outcomes_interval_minutes=scheduler_outcomes_interval_minutes,
+        scheduler_digest_time=scheduler_digest_time,
+        scheduler_stale_job_minutes=scheduler_stale_job_minutes,
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,
