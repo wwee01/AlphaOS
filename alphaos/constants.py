@@ -114,15 +114,17 @@ class ProtectionPath(StrEnum):
 
 class ProtectionStatus(StrEnum):
     """Broker protection watchdog verdict for one open, broker-managed position
-    (docs/roadmap/protection-watchdog.md). UNPROTECTED and CLOSED_MISMATCH are
-    CRITICAL and block all new entries; DEGRADED is WARNING-only and does not."""
+    (docs/roadmap/protection-watchdog.md). UNPROTECTED, CLOSED_MISMATCH, and
+    UNVERIFIABLE are CRITICAL and block all new entries; DEGRADED and a single
+    CHECK_ERROR are WARNING-only and do not."""
 
     UNKNOWN = "unknown"            # never checked yet, or not broker-managed
     PROTECTED = "protected"        # stop + target both live at the broker
     DEGRADED = "degraded"          # target missing only; stop still live -- WARNING, non-blocking
     UNPROTECTED = "unprotected"    # stop missing -- CRITICAL, blocks new entries
     CLOSED_MISMATCH = "closed_mismatch"  # local open, broker has no matching position -- CRITICAL, blocks
-    CHECK_ERROR = "check_error"    # broker lookup failed this pass; left unresolved, never a false verdict
+    CHECK_ERROR = "check_error"    # broker lookup failed this pass; below the escalation threshold -- WARNING, non-blocking
+    UNVERIFIABLE = "unverifiable"  # broker lookup has failed N consecutive passes (PR2.6) -- CRITICAL, blocks
 
 
 class ApprovalLabel(StrEnum):

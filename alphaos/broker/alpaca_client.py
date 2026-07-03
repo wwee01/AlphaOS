@@ -78,11 +78,19 @@ class AlpacaClient:
         session boundary (same-day exit is the common case, not a guarantee),
         so it gets the same persistent protection as any other swing hold
         (Opus audit HIGH-1: the original >1 boundary left 1-day swings exposed
-        to this exact failure mode)."""
-        if (getattr(proposal, "max_holding_days", 0) or 0) > 0 \
-                and not self.settings.allow_day_tif_for_multiday_positions:
-            return self.settings.protective_order_time_in_force
-        return "day"
+        to this exact failure mode).
+
+        PR2.6 hardening: max_holding_days MISSING/None (a defensive path that
+        shouldn't happen in practice, but must fail safe if it does) is treated
+        as "unknown, not confirmed intraday" and gets the SAME persistent
+        protection as a real swing -- day-TIF is only ever used for an
+        EXPLICIT 0, never as a default for the unknown case."""
+        mhd = getattr(proposal, "max_holding_days", None)
+        if mhd == 0:
+            return "day"
+        if mhd is not None and mhd > 0 and self.settings.allow_day_tif_for_multiday_positions:
+            return "day"
+        return self.settings.protective_order_time_in_force
 
     # ---------------------------------------------------------- client build
     def _trading_client(self):

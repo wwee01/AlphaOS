@@ -153,6 +153,11 @@ class Settings:
     protective_order_time_in_force: str
     requires_persistent_protection: bool
     allow_day_tif_for_multiday_positions: bool
+    # PR2.6 hardening: consecutive per-position broker-lookup failures
+    # (check_error) before the watchdog escalates to CRITICAL/unverifiable and
+    # blocks new entries -- protection state that can't be confirmed must not
+    # be silently treated as safe forever.
+    protection_check_error_escalation_threshold: int
 
     # --- notifications ---
     ntfy_topic: str
@@ -622,6 +627,39 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"PROTECTIVE_ORDER_TIME_IN_FORCE={protective_order_time_in_force!r} is not supported. "
             f"Valid: gtc | day."
         )
+    allow_day_tif_for_multiday_positions = _get_bool(src, "ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS", False)
+    # PR2.6 hardening: reject the contradictory combination that would silently
+    # make EVERY swing hold (max_holding_days >= 1) submit day-TIF protective
+    # legs -- exactly the failure mode PROTECTIVE_ORDER_TIME_IN_FORCE/
+    # ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS exist to prevent (root cause of the
+    # 2026-07-02 META incident). A silent override here would be exactly the
+    # anti-pattern this whole policy exists to close off; fail fast instead.
+    if protective_order_time_in_force == "day" and not allow_day_tif_for_multiday_positions:
+        raise SettingsError(
+            "PROTECTIVE_ORDER_TIME_IN_FORCE=day contradicts "
+            "ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS=false (the default): this combination "
+            "would silently make every swing hold (max_holding_days>=1) submit day-TIF "
+            "protective legs, which expire at session close and can leave a position "
+            "naked overnight undetected -- the exact 2026-07-02 META incident. "
+            "Either set PROTECTIVE_ORDER_TIME_IN_FORCE=gtc (recommended, the default), "
+            "or explicitly set ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS=true to acknowledge "
+            "you intend day-TIF protection for swing holds too."
+        )
+
+    protection_check_error_escalation_threshold = _get_int(
+        src, "PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD", 3)
+    # A value that's too low escalates on noise; a value that's too high (or
+    # unbounded) silently defeats the whole point of escalation -- an
+    # unverifiable position would sit in fail-open check_error indefinitely.
+    # 1-10 keeps escalation both meaningful and reachable in practice.
+    if not (1 <= protection_check_error_escalation_threshold <= 10):
+        raise SettingsError(
+            f"PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD="
+            f"{protection_check_error_escalation_threshold!r} must be between 1 and 10. "
+            f"1 escalates on the first broker-lookup failure; too high a value silently "
+            f"disables escalation and reintroduces fail-open behavior for an unverifiable "
+            f"position."
+        )
 
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
@@ -658,7 +696,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         require_manual_approval=_get_bool(src, "REQUIRE_MANUAL_APPROVAL", True),
         protective_order_time_in_force=protective_order_time_in_force,
         requires_persistent_protection=_get_bool(src, "REQUIRES_PERSISTENT_PROTECTION", True),
-        allow_day_tif_for_multiday_positions=_get_bool(src, "ALLOW_DAY_TIF_FOR_MULTIDAY_POSITIONS", False),
+        allow_day_tif_for_multiday_positions=allow_day_tif_for_multiday_positions,
+        protection_check_error_escalation_threshold=protection_check_error_escalation_threshold,
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,
