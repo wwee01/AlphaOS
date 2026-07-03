@@ -795,6 +795,41 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # Scheduler v1.5 (PR3): one row per scheduler-invoked job execution
+        # (scan/monitor/outcomes_update/daily_digest) -- the outer cadence-layer
+        # record written by the scheduler itself when it starts/finishes a job.
+        # Distinct from the existing scheduler_runs table above: scheduler_runs is
+        # an internal per-pass audit row written by run_scan_once/run_monitor_once
+        # themselves (candidates found, orders touched, etc.), whereas job_runs
+        # tracks the scheduler's own invocation lifecycle (which job, when it was
+        # triggered, whether it completed/failed/was skipped, and top-level safety
+        # signals like kill-switch/protection-blocking/cost-cap state at run time).
+        "job_runs",
+        """
+        CREATE TABLE IF NOT EXISTS job_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_run_id TEXT NOT NULL UNIQUE,
+            job_type TEXT NOT NULL,
+            trigger_source TEXT,
+            lock_key TEXT,
+            started_at_utc TEXT NOT NULL,
+            started_at_sgt TEXT NOT NULL,
+            finished_at_utc TEXT,
+            finished_at_sgt TEXT,
+            duration_ms INTEGER,
+            status TEXT NOT NULL,
+            error TEXT,
+            kill_switch_engaged INTEGER,
+            protection_blocking INTEGER,
+            cost_cap_exceeded INTEGER,
+            scheduler_run_id TEXT,
+            result_summary_json TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         # Cost-model calibration (Roadmap 1.5): one row per approved/submitted
         # order capturing the EXPECTED/approval-time market context + modeled
         # cost assumptions. Actuals (fill price, delay, status sequence) are
@@ -1241,6 +1276,17 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_candoutcomes_scan_batch ON candidate_outcomes(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_protchecks_position ON protection_checks(position_id)",
     "CREATE INDEX IF NOT EXISTS idx_protchecks_open ON protection_checks(protection_status, resolved_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_jobruns_type ON job_runs(job_type)",
+    "CREATE INDEX IF NOT EXISTS idx_jobruns_status ON job_runs(status)",
+    "CREATE INDEX IF NOT EXISTS idx_jobruns_lock_key ON job_runs(lock_key)",
+    # At most one active (started/completed) job_runs row per lock_key --
+    # enforces JobRunner.acquire()'s idempotency guarantee at the DB level
+    # (acquire() also pre-checks via SELECT, this is defense in depth against
+    # a check-then-insert race between two concurrent scheduler invocations).
+    # A 'failed' row is deliberately excluded so a failed window can still be
+    # retried under the same lock_key.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobruns_lock_key_active ON job_runs(lock_key) "
+    "WHERE status IN ('started', 'completed')",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

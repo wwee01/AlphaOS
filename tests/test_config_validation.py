@@ -62,3 +62,14 @@ def test_mock_mode_market_data_is_labelled_mock(journal):
     snap = client.get_snapshot("AAPL")
     assert snap["is_mock"] is True
     assert snap["provider"] == "alpaca_mock"
+
+
+def test_scheduler_cost_cap_bounds_validation():
+    with pytest.raises(SettingsError):
+        make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=49)
+    with pytest.raises(SettingsError):
+        make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=100001)
+    s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
+    assert s.scheduler_ai_cost_cap_calls_per_30d == 50
+    s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=100000)
+    assert s.scheduler_ai_cost_cap_calls_per_30d == 100000

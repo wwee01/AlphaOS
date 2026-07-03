@@ -51,3 +51,18 @@ def test_migration_idempotent_on_reopen(tmp_path):
         assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     finally:
         j.close()
+
+
+def test_job_runs_table_exists_and_schema_version_unchanged(tmp_path):
+    """Scheduler v1.5 (PR3) added the job_runs table additively -- SCHEMA_VERSION
+    must not have moved for a purely additive migration."""
+    j = JournalStore(str(tmp_path / "job_runs.db"))
+    try:
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert "job_runs" in tables
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()

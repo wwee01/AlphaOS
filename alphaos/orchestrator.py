@@ -165,11 +165,11 @@ class Orchestrator:
             self.startup()
 
     # ------------------------------------------------------------- scan_once
-    def run_scan_once(self) -> ScanSummary:
+    def run_scan_once(self, trigger_source: str = TriggerSource.MANUAL_CLI.value) -> ScanSummary:
         self._ensure_startup()
 
         # --- Mint a scan batch + a scheduler run (records exist even though v1
-        #     has no real scheduler; trigger is manual CLI). ------------------
+        #     has no real scheduler; trigger defaults to manual CLI). ---------
         scan_batch_id = new_id("scan")
         scheduler_run_id = new_id("schr")
         st = timeutils.stamp()
@@ -199,7 +199,7 @@ class Orchestrator:
             {
                 "scheduler_run_id": scheduler_run_id,
                 "run_type": SchedulerRunType.SCAN.value,
-                "trigger_source": TriggerSource.MANUAL_CLI.value,
+                "trigger_source": trigger_source,
                 "started_at_utc": st.utc,
                 "started_at_sgt": st.local_sgt,
                 "status": RunStatus.STARTED.value,
@@ -840,7 +840,10 @@ class Orchestrator:
         return review
 
     # ------------------------------------------------------------- monitor
-    def run_monitor_once(self, price_overrides: Optional[dict] = None) -> dict:
+    def run_monitor_once(
+        self, price_overrides: Optional[dict] = None,
+        trigger_source: str = TriggerSource.MANUAL_CLI.value,
+    ) -> dict:
         self._ensure_startup()
         # Record a scheduler run for this monitor pass (records exist even though
         # v1 has no real scheduler). Keep the monitor behavior itself unchanged.
@@ -852,7 +855,7 @@ class Orchestrator:
             {
                 "scheduler_run_id": scheduler_run_id,
                 "run_type": SchedulerRunType.MONITOR.value,
-                "trigger_source": TriggerSource.MANUAL_CLI.value,
+                "trigger_source": trigger_source,
                 "started_at_utc": st.utc,
                 "started_at_sgt": st.local_sgt,
                 "status": RunStatus.STARTED.value,
