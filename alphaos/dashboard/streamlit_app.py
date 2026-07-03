@@ -259,6 +259,25 @@ def tab_system_health(orch: Orchestrator) -> None:
     if lf.get("by_failsafe_reason"):
         st.caption(f"Fail-safe reasons: {lf['by_failsafe_reason']}")
 
+    st.markdown("#### Protection watchdog")
+    pw = health.get("protection_watchdog", {})
+    pc1, pc2, pc3 = st.columns(3)
+    pc1.metric("Broker-managed positions", pw.get("checked", 0))
+    pc2.metric("Unprotected/mismatched", pw.get("unprotected", 0) + pw.get("closed_mismatch", 0))
+    pc3.metric("Open incidents", pw.get("open_incident_count", 0))
+    if pw.get("blocking"):
+        st.error(f"NEW ENTRIES BLOCKED: {pw.get('blocking_detail')}")
+    elif pw.get("degraded", 0) > 0:
+        st.warning(f"{pw['degraded']} position(s) degraded (target leg missing, stop still live) — not blocking.")
+    else:
+        st.success(pw.get("summary_label", "all protected"))
+    if pw.get("open_incidents"):
+        st.dataframe(
+            [{k: i.get(k) for k in ("check_id", "symbol", "protection_status", "detail", "created_at_utc")}
+             for i in pw["open_incidents"]],
+            width="stretch",
+        )
+
     st.markdown("#### Startup safety checks")
     for c in checks:
         (st.success if c.ok else st.error)(f"{c.name}: {c.detail}")

@@ -65,6 +65,21 @@ class AlpacaClient:
     def capabilities(self) -> dict:
         return {"bracket": True, "oco": True, "short": True, "fractional": False}
 
+    def _resolve_tif(self, proposal) -> str:
+        """Multi-day holds (max_holding_days > 1) must not use day-TIF protective
+        legs -- that's the exact root cause of the 2026-07-02 META incident (a
+        5-day-hold bracket's stop/target legs both expired at session close,
+        leaving the position naked overnight, undetected). GTC is used unless the
+        settings flag explicitly opts back into the old (dangerous) day-TIF
+        behavior. max_holding_days==0 is the intentionally-intraday daytrade
+        experiment (day-TIF is correct there); ==1 is a same-day-exit-eligible
+        swing still meant to typically close same-session -- day-TIF is
+        defensible there too. Only >1 is unambiguously a multi-day hold."""
+        if (getattr(proposal, "max_holding_days", 0) or 0) > 1 \
+                and not self.settings.allow_day_tif_for_multiday_positions:
+            return self.settings.protective_order_time_in_force
+        return "day"
+
     # ---------------------------------------------------------- client build
     def _trading_client(self):
         if self._client is not None:
@@ -95,7 +110,7 @@ class AlpacaClient:
             "entry": round(float(proposal.entry), 2),
             "target": round(float(proposal.target), 2),
             "stop": round(float(proposal.stop), 2),
-            "tif": "day",
+            "tif": self._resolve_tif(proposal),
             "client_order_id": proposal.proposal_id,
         }
         order = self._submit(client, spec)
@@ -117,8 +132,10 @@ class AlpacaClient:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce  # pragma: no cover
 
         side = OrderSide.SELL if spec["side"] == "sell" else OrderSide.BUY  # pragma: no cover
+        tif_map = {"day": TimeInForce.DAY, "gtc": TimeInForce.GTC}  # pragma: no cover
         request = LimitOrderRequest(  # pragma: no cover
-            symbol=spec["symbol"], qty=spec["qty"], side=side, time_in_force=TimeInForce.DAY,
+            symbol=spec["symbol"], qty=spec["qty"], side=side,
+            time_in_force=tif_map.get(spec["tif"], TimeInForce.DAY),
             limit_price=spec["entry"], order_class=OrderClass.BRACKET,
             take_profit=TakeProfitRequest(limit_price=spec["target"]),
             stop_loss=StopLossRequest(stop_price=spec["stop"]),

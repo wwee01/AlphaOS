@@ -462,6 +462,7 @@ SCHEMA: list[tuple[str, str]] = [
             candidate_id TEXT,
             proposal_id TEXT,
             eval_id TEXT,
+            protection_status TEXT DEFAULT 'unknown',
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -748,6 +749,46 @@ SCHEMA: list[tuple[str, str]] = [
             data_freshness_status TEXT,
             action_taken TEXT,
             notes TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # Broker protection watchdog (docs/roadmap/protection-watchdog.md): one row
+        # per open, broker-managed (alpaca_paper) position per monitor pass. Verifies
+        # the position still exists at the broker and that its stop/target legs are
+        # still live -- neither OrderManager.reconcile() (bracket-leg-fill only) nor
+        # the local PositionManager watchdog (never touches broker-managed positions)
+        # check this. Serves as BOTH the append-only audit log (every pass writes a
+        # row) AND the "what's currently blocking new entries" query (rows with
+        # protection_status IN ('unprotected','closed_mismatch') AND resolved_at_utc
+        # IS NULL are open incidents) -- one table is sufficient for both jobs.
+        "protection_checks",
+        """
+        CREATE TABLE IF NOT EXISTS protection_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_id TEXT NOT NULL UNIQUE,
+            position_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            trade_id TEXT,
+            protection_status TEXT NOT NULL,
+            broker_position_exists INTEGER,
+            local_qty REAL,
+            broker_qty REAL,
+            qty_match INTEGER,
+            stop_live INTEGER,
+            target_live INTEGER,
+            time_in_force TEXT,
+            tif_appropriate INTEGER,
+            dangling_orders_json TEXT,
+            severity TEXT NOT NULL,
+            detail TEXT,
+            scheduler_run_id TEXT,
+            resolved_at_utc TEXT,
+            resolved_by TEXT,
+            resolution_note TEXT,
+            resolution_exit_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1198,6 +1239,8 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_candoutcomes_status ON candidate_outcomes(outcome_status)",
     "CREATE INDEX IF NOT EXISTS idx_candoutcomes_symbol ON candidate_outcomes(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_candoutcomes_scan_batch ON candidate_outcomes(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_protchecks_position ON protection_checks(position_id)",
+    "CREATE INDEX IF NOT EXISTS idx_protchecks_open ON protection_checks(protection_status, resolved_at_utc)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

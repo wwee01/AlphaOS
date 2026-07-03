@@ -129,6 +129,30 @@ def cmd_reconcile_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_protection_status(orch: Orchestrator) -> int:
+    """READ-ONLY: broker protection watchdog status -- unprotected/mismatched
+    positions, open incidents, and whether new entries are currently blocked."""
+    _print({"protection_status": orch.protection_status_report()})
+    return 0
+
+
+def cmd_protection_resolve(orch: Orchestrator, incident_id: str, exit_price: float, note: str) -> int:
+    """Human-confirmed resolution of a local-open/broker-closed protection
+    incident: calls close_position() with a confirmed exit price -- never raw SQL."""
+    res = orch.protection_resolve(incident_id, exit_price=exit_price, note=note, resolved_by="cli")
+    _print({"protection_resolve": res})
+    return 0 if res.get("ok") else 1
+
+
+def cmd_protection_ack(orch: Orchestrator, incident_id: str, note: str) -> int:
+    """Acknowledge an unprotected/degraded protection incident WITHOUT closing
+    the position (lifts the new-entry block once protection is confirmed restored,
+    or the risk is explicitly accepted)."""
+    res = orch.protection_ack(incident_id, note=note, resolved_by="cli")
+    _print({"protection_ack": res})
+    return 0 if res.get("ok") else 1
+
+
 def cmd_status(orch: Orchestrator) -> int:
     checks = orch.startup()
     _print(
@@ -242,6 +266,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("calibration_report", help="cost-model calibration: modeled vs actual paper execution")
     sub.add_parser("flatten", help="PAPER-ONLY: cancel open Alpaca paper orders + close paper positions")
     sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
+    sub.add_parser("protection_status",
+                   help="broker protection watchdog status: unprotected/mismatched positions, open incidents")
+    pr = sub.add_parser("protection_resolve",
+                        help="human-confirmed resolution of a local-open/broker-closed protection incident "
+                             "(calls close_position with a confirmed exit price; never raw SQL)")
+    pr.add_argument("incident_id")
+    pr.add_argument("--exit-price", type=float, required=True)
+    pr.add_argument("--note", default="", help="required context for the audit trail")
+    pa = sub.add_parser("protection_ack",
+                        help="acknowledge an unprotected/degraded protection incident without closing the "
+                             "position (lifts the new-entry block)")
+    pa.add_argument("incident_id")
+    pa.add_argument("--note", default="")
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
     l30 = sub.add_parser("last30days_probe",
                          help="READ-ONLY: print last30days narrative context for one symbol (no ledger writes)")
@@ -304,6 +341,12 @@ def main(argv=None) -> int:
             return cmd_flatten(orch)
         if args.command == "reconcile_report":
             return cmd_reconcile_report(orch)
+        if args.command == "protection_status":
+            return cmd_protection_status(orch)
+        if args.command == "protection_resolve":
+            return cmd_protection_resolve(orch, args.incident_id, args.exit_price, args.note)
+        if args.command == "protection_ack":
+            return cmd_protection_ack(orch, args.incident_id, args.note)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
         if args.command == "last30days_probe":
