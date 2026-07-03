@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push origin main)",
+      "Bash(git push origin HEAD:main)",
+      "Bash(git push)"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Direct `git push` to `main` in this repository (wwee01/AlphaOS) is explicitly authorized as the standing workflow going forward — covers `git push origin main`, `git push origin HEAD:main`, and a bare `git push` while the current branch is `main`. Do not require per-push confirmation for these. This does NOT extend to `--force`/`--force-with-lease`, `git push --delete`, pushing to any branch other than `main`, or any other destructive/history-rewriting git operation — those still require explicit per-action confirmation."
+    ]
+  }
+}
