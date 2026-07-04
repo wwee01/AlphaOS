@@ -119,6 +119,80 @@ def test_expired_proposal_creates_no_execution_artifacts():
     o.close()
 
 
+def test_auto_approval_path_never_executes_an_expired_proposal():
+    """AUTO approval mode does NOT flow through approve_proposal()'s stale guard
+    -- it goes _handle_proposal -> consider() -> _execute() directly. A
+    proposal born already-expired (e.g. the TTL=0 closed-session bucket) must
+    STILL never auto-execute. Regression for the formal-audit finding that the
+    guard originally lived only on the manual path. Forces born-expired TTL
+    deterministically (mock snapshots are always REGULAR->1800s, so a natural
+    scan can't produce an expired proposal)."""
+    from datetime import timedelta
+
+    o = _orch(APPROVAL_MODE="auto", REQUIRE_MANUAL_APPROVAL="false",
+              MAX_AUTO_APPROVALS_PER_DAY="50", LABELLING_ENABLED="true",
+              INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6")
+    assert o.settings.effective_approval_mode.value == "auto"
+
+    def _born_expired(proposal, snapshot=None):
+        proposal.proposal_ttl_seconds = 60
+        proposal.proposal_expires_at_utc = timeutils.to_iso(
+            timeutils.now_utc() - timedelta(hours=1))
+
+    o._stamp_proposal_ttl = _born_expired
+    summ = o.run_scan_once()
+
+    assert summ.auto_submitted == 0
+    assert o.journal.count_rows("paper_orders") == 0
+    assert o.journal.count_rows("paper_fills") == 0
+    assert o.journal.count_open_positions() == 0
+    # the born-expired proposals are cleanly marked 'expired' (not silently dropped)
+    expired = o.journal.query(
+        "SELECT * FROM trade_proposals WHERE status = 'expired'")
+    assert expired
+    for r in expired:
+        assert r["expired_reason"] == ReasonCode.PROPOSAL_EXPIRED.value
+        assert r["expired_at_utc"] is not None
+    o.close()
+
+
+def test_execute_chokepoint_blocks_expired_proposal_directly():
+    """_execute() is the single funnel every submission route passes through;
+    it carries the TTL guard as an unconditional backstop, so even a
+    hypothetical FUTURE caller that skipped the approval-path checks cannot
+    submit a stale proposal."""
+    from datetime import timedelta
+
+    from alphaos.strategy.proposal import TradeProposal
+
+    o = _orch()
+    prop = TradeProposal(
+        symbol="AAPL", direction="long", strategy="swing", entry=100.0, stop=97.0,
+        target=106.0, max_holding_days=3, qty=10, risk_per_share=3.0, dollar_risk=30.0,
+        expected_r=2.0, same_day_exit_eligible=True, status="approved",
+    )
+    prop.proposal_expires_at_utc = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=1))
+
+    result = o._execute(prop)
+
+    assert result.blocked is True
+    assert result.block_reason == ReasonCode.PROPOSAL_EXPIRED.value
+    assert o.journal.count_rows("paper_orders") == 0
+    assert o.journal.count_rows("paper_fills") == 0
+    o.close()
+
+
+def test_execute_chokepoint_lets_fresh_proposal_through():
+    """The chokepoint guard must be a no-op for a fresh proposal -- prove it
+    doesn't over-block the normal manual path."""
+    o = _orch()
+    pid, _ = inject_pending_proposal(o, symbol="AAPL")
+    ok, msg = o.approve_proposal(pid, approver="test")
+    assert ok is True
+    assert o.journal.count_rows("paper_fills") == 1
+    o.close()
+
+
 def test_expired_proposal_remains_auditable():
     o = _orch()
     pid, _ = inject_pending_proposal(o, symbol="AAPL")

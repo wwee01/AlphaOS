@@ -61,7 +61,7 @@ from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
 from alphaos.util import timeutils
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.data.market_data import MarketDataClient
-from alphaos.execution.order_manager import OrderManager
+from alphaos.execution.order_manager import OrderManager, OrderResult
 from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
 from alphaos import lineage
@@ -462,6 +462,16 @@ class Orchestrator:
         if (arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
                 and self.settings.last30days_high_risk_narrative_manual_only):
             summary.pending_manual += 1
+            return True
+
+        # PR6: the AUTO-approval path does NOT flow through approve_proposal()'s
+        # stale guard, so re-check TTL here before considering auto-submission.
+        # A proposal born already-expired (e.g. the TTL=0 closed-session bucket)
+        # must never auto-execute; mark it expired cleanly and stop. The
+        # _execute() chokepoint below is a further backstop, but handling it here
+        # yields a clean 'expired' status (not a generic 'blocked') for audit.
+        if proposal_ttl.is_expired(proposal.proposal_expires_at_utc):
+            self._mark_proposal_expired(proposal.proposal_id, ReasonCode.PROPOSAL_EXPIRED.value)
             return True
 
         outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True)
@@ -1187,6 +1197,24 @@ class Orchestrator:
 
     # --------------------------------------------------------------- helpers
     def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None):
+        # PR6 chokepoint: NO proposal may be submitted once its TTL has lapsed.
+        # approve_proposal() already guards the manual path, but _execute is the
+        # single funnel EVERY execution route passes through (manual, auto, and
+        # any future one), so the stale guard lives here too as an unconditional
+        # backstop -- a stale proposal can never reach broker submission
+        # regardless of which caller invoked _execute. A fresh proposal (the
+        # only kind the manual path reaches here with) no-ops past this check.
+        if proposal_ttl.is_expired(proposal.proposal_expires_at_utc):
+            self.journal.log_system_event(
+                Severity.WARNING, "approval",
+                f"Execution blocked for {proposal.symbol}: proposal expired (TTL exceeded).",
+                {"proposal_id": proposal.proposal_id, "reason_code": ReasonCode.PROPOSAL_EXPIRED.value},
+            )
+            return OrderResult(
+                blocked=True, block_reason=ReasonCode.PROPOSAL_EXPIRED.value,
+                detail="proposal TTL exceeded before submission",
+                state=OrderState.REJECTED.value,
+            )
         self._set_proposal_status(proposal.proposal_id, "approved")
         return self.orders.execute_proposal(proposal, fill_price=fill_price)
 
