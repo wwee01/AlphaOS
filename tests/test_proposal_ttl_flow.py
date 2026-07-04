@@ -247,6 +247,46 @@ def test_legacy_null_expiry_proposal_treated_as_expired():
     o.close()
 
 
+def test_old_db_gets_ttl_columns_added_nullable(tmp_path):
+    """A ledger written before PR6 (no TTL columns on trade_proposals) must open
+    cleanly: the 6 new columns are ALTER-added as nullable, an existing pre-PR6
+    proposal row survives with NULL TTL fields, and SCHEMA_VERSION doesn't move
+    (purely additive). Complements the behavioral fail-safe test above with the
+    schema-migration half of legacy-row safety."""
+    import sqlite3
+
+    from alphaos.journal.schema import SCHEMA_VERSION
+
+    db = str(tmp_path / "pre_pr6.db")
+    raw = sqlite3.connect(db)
+    # Minimal pre-PR6 trade_proposals table (no proposal_ttl_* / superseded_* cols).
+    raw.execute(
+        "CREATE TABLE trade_proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "proposal_id TEXT, candidate_id TEXT, symbol TEXT, status TEXT)"
+    )
+    raw.execute(
+        "INSERT INTO trade_proposals (proposal_id, candidate_id, symbol, status) "
+        "VALUES ('old_prop', 'old_cand', 'AAPL', 'pending_approval')"
+    )
+    raw.execute("PRAGMA user_version = 0")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        cols = {r["name"] for r in j.conn.execute("PRAGMA table_info(trade_proposals)")}
+        for c in ("proposal_ttl_seconds", "proposal_expires_at_utc", "expired_reason",
+                  "expired_at_utc", "superseded_by_proposal_id", "superseded_at_utc"):
+            assert c in cols, f"missing additive column {c}"
+        old = j.one("SELECT * FROM trade_proposals WHERE proposal_id = 'old_prop'")
+        assert old["symbol"] == "AAPL"
+        assert old["proposal_expires_at_utc"] is None   # legacy row: NULL TTL
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()
+
+
 # ---------------------------------------------------------------- supersession
 def test_supersession_blocks_approval_of_old_proposal():
     o = _orch()
