@@ -63,6 +63,7 @@ from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.order_manager import OrderManager
 from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
+from alphaos import lineage
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsService
 from alphaos.risk.risk_engine import RiskEngine
@@ -290,7 +291,10 @@ class Orchestrator:
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
             )
-            self.journal.insert("openai_evaluations", evaluation.to_row())
+            self.journal.insert("openai_evaluations", {
+                **evaluation.to_row(),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            })
             self._record_baselines(cand, evaluation)
 
             decision = evaluation.decision
@@ -376,7 +380,10 @@ class Orchestrator:
             rc_id = self._record_risk_check(proposal, evaluation, risk)
             proposal.risk_check_id = rc_id
             proposal.status = "blocked"
-            self.journal.insert("trade_proposals", proposal.to_row())
+            self.journal.insert("trade_proposals", {
+                **proposal.to_row(),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            })
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
             summary.risk_blocked += 1
             return False
@@ -390,7 +397,10 @@ class Orchestrator:
         rc_id = self._record_risk_check(proposal, evaluation, risk)
         proposal.risk_check_id = rc_id
         proposal.status = "pending_approval"
-        self.journal.insert("trade_proposals", proposal.to_row())
+        self.journal.insert("trade_proposals", {
+            **proposal.to_row(),
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+        })
         # Roadmap 2.7: surface the polarity arming classification + high-risk
         # narrative warning on the proposal (advisory; never changes levels/sizing).
         arming_cls = cand.get("_arming_classification")
@@ -680,6 +690,7 @@ class Orchestrator:
         nd, nd_reason = self._nightdesk_flag(action, arming_cls, a_final)
         rec["nightdesk_research_candidate"] = 1 if nd else 0
         rec["nightdesk_research_reason"] = nd_reason
+        rec["lineage_id"] = lineage.get_or_create_lineage_id(self.journal, self.settings)
 
         self.journal.insert("user_decision_overrides", rec)
         self.journal.log_system_event(
@@ -744,7 +755,10 @@ class Orchestrator:
         proposal.status = "pending_approval"
         rc_id = self._record_risk_check(proposal, evaluation, risk)
         proposal.risk_check_id = rc_id
-        self.journal.insert("trade_proposals", proposal.to_row())
+        self.journal.insert("trade_proposals", {
+            **proposal.to_row(),
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+        })
         warning = (HIGH_RISK_NARRATIVE_WARNING
                    if rec.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value else None)
         self.journal.conn.execute(
@@ -833,7 +847,10 @@ class Orchestrator:
         if not cand or not ev:
             raise ValueError("candidate or evaluation not found")
         review = self.claude.review(cand, ev, triggered_by=triggered_by)
-        self.journal.insert("claude_reviews", review.to_row())
+        self.journal.insert("claude_reviews", {
+            **review.to_row(),
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+        })
         self.journal.log_system_event(
             Severity.INFO, "claude", f"Claude review stored for {cand['symbol']} (verdict={review.verdict})."
         )
@@ -952,6 +969,14 @@ class Orchestrator:
 
         return build_outcomes_report(self.journal, self.settings, limit=limit)
 
+    def decision_lineage_report(self, decision_id: str) -> dict:
+        """READ-ONLY: full lineage reconstruction for one decision (accepts a
+        candidate_id, proposal_id, rejection_id, adjustment_id, override_id,
+        outcome_id, eval_id, review_id, or polarity_id)."""
+        from alphaos.reports.decision_lineage import build_decision_lineage_report
+
+        return build_decision_lineage_report(self.journal, decision_id)
+
     def flatten_paper_account(self) -> dict:
         """Paper-ONLY: cancel all open Alpaca paper orders + close all open Alpaca
         paper positions. Refuses unless the paper-only guardrails hold; the broker
@@ -1037,7 +1062,10 @@ class Orchestrator:
             eval_id="demo", is_demo=True, status="pending_approval",
         )
         self._tag_target_profile(proposal, from_config=True)
-        self.journal.insert("trade_proposals", proposal.to_row())
+        self.journal.insert("trade_proposals", {
+            **proposal.to_row(),
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+        })
         self.journal.log_system_event(
             Severity.WARNING, "demo",
             "DEMO_SEED proposal created (bypasses news pipeline; clearly labelled).",
@@ -1181,7 +1209,10 @@ class Orchestrator:
                 eval_decision=None, label_decision=classification.label_decision,
             )
             polarity = self.polarity.classify(ev)
-            self.journal.insert("last30days_polarity", polarity.to_row(scan_batch_id, packet.packet_id))
+            self.journal.insert("last30days_polarity", {
+                **polarity.to_row(scan_batch_id, packet.packet_id),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            })
         self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30, polarity)
         # Stash the advisory context so _resolve_decision can (a) decide whether a
         # real driver justifies a symmetric override and (b) record the driver.
@@ -1509,6 +1540,21 @@ class Orchestrator:
             "labeller_reason": getattr(classification, "reason_for_label", None),
             "labeller_missing_conditions_json": getattr(classification, "missing_conditions", None),
             "labeller_upgrade_blockers_json": getattr(classification, "upgrade_blockers", None),
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            "ai_lineage_json": lineage.combine_ai_lineage(
+                label={"model": getattr(classification, "model", None),
+                       "is_mock": getattr(classification, "is_mock", None),
+                       "model_provider": getattr(classification, "model_provider", None),
+                       "prompt_hash": getattr(classification, "prompt_hash", None),
+                       "system_prompt_hash": getattr(classification, "system_prompt_hash", None)}
+                if classification else None,
+                last30days={"model": getattr(last30, "model", None),
+                            "is_mock": getattr(last30, "is_mock", None),
+                            "model_provider": getattr(last30, "model_provider", None),
+                            "prompt_hash": getattr(last30, "prompt_hash", None),
+                            "system_prompt_hash": getattr(last30, "system_prompt_hash", None)}
+                if last30 else None,
+            ),
         })
         self.journal.conn.execute(
             "UPDATE candidates SET decision_adjustment = ?, decision_adjustment_reason = ?, armed_watch = ? "
@@ -1599,6 +1645,7 @@ class Orchestrator:
                 "direction": evaluation.direction,
                 "would_be_entry": evaluation.entry,
                 "would_be_stop": evaluation.stop,
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             },
         )
         self._set_candidate_status(cand["candidate_id"], "rejected")

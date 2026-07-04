@@ -188,6 +188,7 @@ SCHEMA: list[tuple[str, str]] = [
             narrative_driver_type TEXT,
             arming_classification TEXT,
             armed_watch INTEGER,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -227,6 +228,10 @@ SCHEMA: list[tuple[str, str]] = [
             expected_hold_days INTEGER,
             same_day_exit_allowed INTEGER,
             reasons_to_reject TEXT,
+            lineage_id TEXT,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -253,6 +258,10 @@ SCHEMA: list[tuple[str, str]] = [
             disagreement_with_openai TEXT,
             user_requested INTEGER,
             final_user_action_after_review TEXT,
+            lineage_id TEXT,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -299,6 +308,7 @@ SCHEMA: list[tuple[str, str]] = [
             proposal_reason TEXT,
             arming_classification TEXT,
             narrative_warning TEXT,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -542,6 +552,7 @@ SCHEMA: list[tuple[str, str]] = [
             outcome_classification TEXT,
             hold_duration_minutes REAL,
             lessons_learned TEXT,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -562,6 +573,7 @@ SCHEMA: list[tuple[str, str]] = [
             would_be_entry REAL,
             would_be_stop REAL,
             scan_batch_id TEXT,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1069,6 +1081,8 @@ SCHEMA: list[tuple[str, str]] = [
             labeller_reason TEXT,
             labeller_missing_conditions_json TEXT,
             labeller_upgrade_blockers_json TEXT,
+            lineage_id TEXT,
+            ai_lineage_json TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1110,6 +1124,10 @@ SCHEMA: list[tuple[str, str]] = [
             evidence_json TEXT,
             raw_response_json TEXT,
             parse_status TEXT,
+            lineage_id TEXT,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1159,6 +1177,7 @@ SCHEMA: list[tuple[str, str]] = [
             nightdesk_research_reason TEXT,
             resolved_at_utc TEXT,
             resolved_at_sgt TEXT,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1222,6 +1241,53 @@ SCHEMA: list[tuple[str, str]] = [
             data_quality_status TEXT,
             updated_at_utc TEXT,
             updated_at_sgt TEXT,
+            lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR4: decision lineage stamping (measurement/audit-only, like
+        # protection_checks/candidate_outcomes/job_runs before it -- never read
+        # by any gate/eval/labeller/risk/execution path). One row per DISTINCT
+        # environment/config snapshot (repo commit+branch+dirty flag, app/schema
+        # version, categorized config hashes, scanner/strategy/universe version
+        # constants, market data provider), keyed by a deterministic content
+        # hash (lineage_id) so many decisions made under the same snapshot share
+        # one row instead of duplicating ~15 columns per decision -- the same
+        # "shared batch/run row referenced by lineage_id/scan_batch_id/
+        # scheduler_run_id" pattern already used by scan_batches/scheduler_runs/
+        # job_runs. Decision rows (candidates, trade_proposals,
+        # rejected_candidates, decision_adjustments, user_decision_overrides,
+        # candidate_outcomes, trade_outcomes, openai_evaluations,
+        # claude_reviews, last30days_polarity) carry their own lineage_id
+        # column pointing back to the row here that was in effect when they
+        # were created. Row-level lineage that genuinely varies per decision
+        # (model/prompt hash actually used, human override reason, freshness
+        # evidence) is stamped directly on the decision row instead, not here.
+        "lineage_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS lineage_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lineage_id TEXT NOT NULL UNIQUE,
+            git_commit_sha TEXT,
+            git_branch TEXT,
+            git_dirty INTEGER,
+            app_version TEXT,
+            schema_version INTEGER,
+            config_hash TEXT,
+            scanner_config_hash TEXT,
+            risk_config_hash TEXT,
+            protection_config_hash TEXT,
+            scheduler_config_hash TEXT,
+            scanner_version TEXT,
+            scanner_rule_version TEXT,
+            universe_version_hash TEXT,
+            playbook_version TEXT,
+            strategy_version TEXT,
+            feature_engine_version TEXT,
+            market_data_provider TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1287,6 +1353,19 @@ INDEXES: list[str] = [
     # retried under the same lock_key.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobruns_lock_key_active ON job_runs(lock_key) "
     "WHERE status IN ('started', 'completed')",
+    # PR4 decision lineage: forward lookups (decision row -> lineage_snapshots
+    # row) go through each table's own lineage_id value directly (no index
+    # needed for a single-row fetch by unique lineage_id on the small
+    # lineage_snapshots table itself -- UNIQUE already indexes it). These
+    # indexes are for the reverse direction: "every decision made under this
+    # lineage/config snapshot", used by CLI reporting and tests.
+    "CREATE INDEX IF NOT EXISTS idx_candidates_lineage ON candidates(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_proposals_lineage ON trade_proposals(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_rejected_lineage ON rejected_candidates(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_decisionadj_lineage ON decision_adjustments(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_useroverrides_lineage ON user_decision_overrides(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_candoutcomes_lineage ON candidate_outcomes(lineage_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tradeoutcomes_lineage ON trade_outcomes(lineage_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

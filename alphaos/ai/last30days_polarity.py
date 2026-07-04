@@ -37,6 +37,7 @@ from alphaos.constants import (
     SourceCoverageQuality,
     TradeDirection,
 )
+from alphaos import lineage
 from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
@@ -107,6 +108,11 @@ class PolarityResult:
     evidence_items: list
     raw_json: Optional[dict]
     parse_status: str
+    # PR4: measurement-only AI-call lineage. None for mock/skipped/error paths
+    # (no real prompt was sent); populated by _live_classify for the real call.
+    model_provider: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    system_prompt_hash: Optional[str] = None
 
     @property
     def is_high_risk(self) -> bool:
@@ -138,6 +144,9 @@ class PolarityResult:
             "evidence_json": self.evidence_items,
             "raw_response_json": self.raw_json,
             "parse_status": self.parse_status,
+            "model_provider": self.model_provider,
+            "prompt_hash": self.prompt_hash,
+            "system_prompt_hash": self.system_prompt_hash,
         }
 
 
@@ -176,8 +185,8 @@ class Last30DaysPolarityClassifier:
         if not ev.has_evidence:
             return self._skipped(ev, PolarityParseStatus.SKIPPED.value)
         try:
-            parsed, raw, status = (self._mock_classify(ev) if self.use_mock
-                                   else self._live_classify(ev))
+            parsed, raw, status, ai_lineage = (self._mock_classify(ev) if self.use_mock
+                                               else self._live_classify(ev))
         except Exception as exc:  # fail-safe: never crash the scan
             if self.journal is not None:
                 self.journal.log_system_event(
@@ -185,7 +194,7 @@ class Last30DaysPolarityClassifier:
                     f"polarity classify failed for {ev.symbol}; failing safe.", {"error": str(exc)},
                 )
             return self._error(ev, PolarityParseStatus.MODEL_ERROR.value)
-        return self._build(ev, parsed, raw, status)
+        return self._build(ev, parsed, raw, status, ai_lineage)
 
     # --------------------------------------------------- deterministic arming
     @staticmethod
@@ -233,13 +242,15 @@ class Last30DaysPolarityClassifier:
         return alignment, True, cls
 
     # --------------------------------------------------------------- builders
-    def _build(self, ev: PolarityEvidence, parsed: dict, raw, status: str) -> PolarityResult:
+    def _build(self, ev: PolarityEvidence, parsed: dict, raw, status: str,
+               ai_lineage: Optional[dict] = None) -> PolarityResult:
         alignment, should_arm, cls = self._decide_arming(parsed, ev.direction)
         high_risk = cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
         conflict = bool(parsed["official_catalyst_conflict"])
         attention = bool(high_risk or conflict
                          or parsed["hype_or_manipulation_risk"] in (HypeRisk.MEDIUM.value, HypeRisk.HIGH.value))
         warning = HIGH_RISK_NARRATIVE_WARNING if high_risk else ""
+        ai_lineage = ai_lineage or {}
         return PolarityResult(
             candidate_id=ev.candidate_id, symbol=ev.symbol, provider=ev.provider, model=self.model,
             prompt_template_version=POLARITY_PROMPT_VERSION,
@@ -252,6 +263,9 @@ class Last30DaysPolarityClassifier:
             should_arm_override=should_arm, arming_classification=cls, warning_message=warning,
             reasoning_summary=parsed["reasoning_summary"], evidence_items=parsed["evidence_items_used"],
             raw_json=raw, parse_status=status,
+            model_provider=ai_lineage.get("model_provider"),
+            prompt_hash=ai_lineage.get("prompt_hash"),
+            system_prompt_hash=ai_lineage.get("system_prompt_hash"),
         )
 
     def _empty_parsed(self) -> dict:
@@ -293,6 +307,11 @@ class Last30DaysPolarityClassifier:
 
         client = OpenAI(api_key=self.s.openai_api_key)
         user_prompt = self._build_user_prompt(ev)
+        # PR4: measurement-only AI-call lineage (model provider + content hashes
+        # of the actual prompt sent, never the raw prompt body).
+        ai_lineage = lineage.ai_call_lineage(
+            provider="openai", prompt=user_prompt, system_prompt=POLARITY_SYSTEM_PROMPT,
+        )
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
@@ -306,7 +325,7 @@ class Last30DaysPolarityClassifier:
         )
         content = resp.choices[0].message.content
         obj = structured_json.parse_json_object(content)   # raises on invalid JSON
-        return self._coerce(obj), obj, PolarityParseStatus.PARSED.value
+        return self._coerce(obj), obj, PolarityParseStatus.PARSED.value, ai_lineage
 
     @staticmethod
     def _build_user_prompt(ev: PolarityEvidence) -> str:
@@ -384,4 +403,4 @@ class Last30DaysPolarityClassifier:
             "evidence_items_used": [{"title": t[:80], "source": "mock", "relevance": "medium"}
                                     for t in ev.cluster_titles[:3]],
         }
-        return self._coerce(obj), {"mock": True, **obj}, PolarityParseStatus.PARSED.value
+        return self._coerce(obj), {"mock": True, **obj}, PolarityParseStatus.PARSED.value, None

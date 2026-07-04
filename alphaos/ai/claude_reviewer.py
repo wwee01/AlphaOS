@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from alphaos.ai import prompt_templates as pt
+from alphaos import lineage
 from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
@@ -41,6 +42,10 @@ class ClaudeReview:
     raw: Optional[dict] = None
     is_mock: bool = False
     triggered_by: str = "user"
+    # PR4: measurement-only AI-call lineage.
+    model_provider: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    system_prompt_hash: Optional[str] = None
 
     def to_row(self) -> dict:
         return {
@@ -62,6 +67,9 @@ class ClaudeReview:
             "user_requested": 1,
             "disagreement_with_openai": (None if self.agrees_with_openai else "disagrees"),
             "final_user_action_after_review": None,
+            "model_provider": self.model_provider,
+            "prompt_hash": self.prompt_hash,
+            "system_prompt_hash": self.system_prompt_hash,
         }
 
 
@@ -89,11 +97,17 @@ class ClaudeReviewer:
         import anthropic  # lazy import; optional dependency
 
         client = anthropic.Anthropic(api_key=self.settings.anthropic_api_key)
+        user_prompt = pt.build_claude_user_prompt(candidate, openai_eval)
+        # PR4: measurement-only AI-call lineage (model provider + content hashes
+        # of the actual prompt sent, never the raw prompt body).
+        ai_lineage = lineage.ai_call_lineage(
+            provider="anthropic", prompt=user_prompt, system_prompt=pt.CLAUDE_SYSTEM_PROMPT,
+        )
         msg = client.messages.create(
             model=self.model,
             max_tokens=600,
             system=pt.CLAUDE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": pt.build_claude_user_prompt(candidate, openai_eval)}],
+            messages=[{"role": "user", "content": user_prompt}],
         )
         text = "".join(block.text for block in msg.content if getattr(block, "type", "") == "text")
         obj = structured_json.parse_json_object(text)
@@ -110,4 +124,7 @@ class ClaudeReviewer:
             raw=obj,
             is_mock=False,
             triggered_by=triggered_by,
+            model_provider=ai_lineage.get("model_provider"),
+            prompt_hash=ai_lineage.get("prompt_hash"),
+            system_prompt_hash=ai_lineage.get("system_prompt_hash"),
         )

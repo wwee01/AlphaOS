@@ -27,6 +27,7 @@ from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
 from alphaos.execution.costs import CostModel
+from alphaos import lineage
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -389,6 +390,14 @@ class PositionManager:
                 "hold_duration_minutes": (holding_days * 1440) if holding_days is not None else None,
                 # Target-profile evidence relayed from the position (tracking only).
                 **target_profile_bundle(pos),
+                # PR4: anchor on the ENTRY decision's lineage (the proposal that
+                # produced this trade), NOT a fresh snapshot of whatever config
+                # is live at close time -- same anchor-on-source principle as
+                # candidate_outcomes/decision_at_utc. A trade entered under config
+                # A and closed after an operator edits config B must still trace
+                # its entry to A. Falls back to a fresh snapshot only for a
+                # legacy/manual position with no linkable entry-proposal lineage.
+                "lineage_id": self._entry_proposal_lineage_id(pos),
             },
         )
 
@@ -415,6 +424,26 @@ class PositionManager:
             "net_pnl": net_pnl,
             "realized_r": realized_r,
         }
+
+    def _entry_proposal_lineage_id(self, pos: dict) -> Optional[str]:
+        """PR4: the lineage of the ENTRY decision (the proposal that produced
+        this position), so a trade_outcomes row is anchored on the config that
+        actually decided the trade -- not a fresh snapshot of whatever config
+        happens to be live when the position closes. Measurement-only; never
+        raises (a lineage read failing must not block a real position close).
+        Falls back to a fresh snapshot for a legacy/manual position that has no
+        linkable entry proposal."""
+        try:
+            proposal_id = pos.get("proposal_id")
+            if proposal_id:
+                prop = self.journal.one(
+                    "SELECT lineage_id FROM trade_proposals WHERE proposal_id = ?", (proposal_id,)
+                )
+                if prop and prop.get("lineage_id"):
+                    return prop["lineage_id"]
+            return lineage.get_or_create_lineage_id(self.journal, self.settings)
+        except Exception:
+            return None
 
     def _record_exit_order(self, pos: dict, exit_price: float, exit_reason: str,
                            execution_source: Optional[str] = None,

@@ -20,6 +20,7 @@ from typing import Optional
 
 from alphaos.ai import prompt_templates as pt
 from alphaos.ai.label_validation import LABEL_OUTPUT_KEYS, coerce_and_validate
+from alphaos import lineage
 from alphaos.constants import (
     Decision,
     FailsafeReason,
@@ -76,6 +77,11 @@ class PlaybookClassification:
     upgrade_blockers: list = field(default_factory=list)
     proposal_readiness: str = "unclear"
     what_would_upgrade: str = ""
+    # PR4: measurement-only AI-call lineage. None for mock/fail-safe paths (no
+    # real prompt was sent); populated by _live_classify for the real API call.
+    model_provider: Optional[str] = None
+    prompt_hash: Optional[str] = None
+    system_prompt_hash: Optional[str] = None
 
     def to_row(self, packet_id: Optional[str], scan_batch_id: Optional[str], frozen_at_utc: str) -> dict:
         return {
@@ -190,6 +196,14 @@ class PlaybookClassifier:
 
         client = OpenAI(api_key=self.settings.openai_api_key)
         user_prompt = pt.build_label_user_prompt(packet.to_prompt_dict(), sorted(OFFICIAL_LABELS))
+        # PR4: measurement-only AI-call lineage (model provider + content hashes
+        # of the exact prompt sent, never the raw prompt body). Stamped onto
+        # whichever PlaybookClassification this call returns below, including the
+        # fail-safe paths -- so even a labeller failure records which prompt was
+        # attempted, matching the openai/polarity/claude reviewer paths.
+        ai_lineage = lineage.ai_call_lineage(
+            provider="openai", prompt=user_prompt, system_prompt=pt.LABEL_SYSTEM_PROMPT,
+        )
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
@@ -208,20 +222,21 @@ class PlaybookClassifier:
         # diagnosable (this was the exact bug that silently blocked all proposals),
         # rather than lumped under a vague "live_exception".
         if getattr(choice, "finish_reason", None) == "length":
-            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value)
+            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value, ai_lineage=ai_lineage)
         try:
             obj = structured_json.parse_json_object(choice.message.content)
         except Exception:
-            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value)
+            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value, ai_lineage=ai_lineage)
         # Missing keys are tolerated by coerce_and_validate (degrade safely), but a
         # total absence of the core fields should fail safe.
         if "primary_label" not in obj and "decision" not in obj:
-            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value)
+            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value, ai_lineage=ai_lineage)
         clean, status = coerce_and_validate(obj, self.settings)
-        return self._build(packet, clean, status, LabelSource.OPENAI.value, self.model, False, raw=obj)
+        return self._build(packet, clean, status, LabelSource.OPENAI.value, self.model, False,
+                           raw=obj, ai_lineage=ai_lineage)
 
     # ------------------------------------------------------------- fail-safe
-    def _fail_safe(self, packet, reason: str) -> PlaybookClassification:
+    def _fail_safe(self, packet, reason: str, ai_lineage: Optional[dict] = None) -> PlaybookClassification:
         clean = {
             "primary_label": LABEL_OTHER,
             "secondary_labels": [],
@@ -238,11 +253,13 @@ class PlaybookClassifier:
             "suggested_new_tags": [],
         }
         return self._build(packet, clean, reason, LabelSource.FAIL_SAFE.value,
-                           self.model if not self.use_mock else "mock", self.use_mock, raw={"fail_safe": reason})
+                           self.model if not self.use_mock else "mock", self.use_mock,
+                           raw={"fail_safe": reason}, ai_lineage=ai_lineage)
 
     # --------------------------------------------------------------- builder
     def _build(self, packet, clean: dict, status: str, source: str, model: str,
-               is_mock: bool, raw: dict) -> PlaybookClassification:
+               is_mock: bool, raw: dict, ai_lineage: Optional[dict] = None) -> PlaybookClassification:
+        ai_lineage = ai_lineage or {}
         return PlaybookClassification(
             label_id=new_id("lbl"),
             candidate_id=getattr(packet, "candidate_id", ""),
@@ -270,4 +287,7 @@ class PlaybookClassifier:
             upgrade_blockers=clean.get("upgrade_blockers", []),
             proposal_readiness=clean.get("proposal_readiness", "unclear"),
             what_would_upgrade=clean.get("what_would_upgrade", ""),
+            model_provider=ai_lineage.get("model_provider"),
+            prompt_hash=ai_lineage.get("prompt_hash"),
+            system_prompt_hash=ai_lineage.get("system_prompt_hash"),
         )

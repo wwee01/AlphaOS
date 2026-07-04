@@ -26,6 +26,7 @@ from alphaos.constants import (
 )
 from alphaos.data.freshness_guard import FreshnessGuard, quote_crossed_or_invalid
 from alphaos.data.market_data import MarketDataClient
+from alphaos import lineage
 from alphaos.scanner.interest_scanner import InterestScanner
 from alphaos.util.ids import new_id
 
@@ -189,6 +190,8 @@ class CandidateScanner:
             "interest_score": signals.interest_score,
             "shortlist_reason": signals.shortlist_reason,
             "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
+            # PR4: measurement-only lineage stamp (never influences the candidate decision above).
+            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         }
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).
@@ -243,5 +246,6 @@ class CandidateScanner:
                 "reason_detail": detail,
                 "would_be_entry": snapshot.get("last_price") if snapshot else None,
                 "scan_batch_id": getattr(self, "_scan_batch_id", None),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             },
         )

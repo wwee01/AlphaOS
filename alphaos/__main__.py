@@ -119,6 +119,15 @@ def cmd_outcomes_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_decision_lineage(orch: Orchestrator, decision_id: str) -> int:
+    """READ-ONLY: which code/config/model/prompt/data/scheduler context
+    produced this decision. Accepts a candidate_id, proposal_id,
+    rejection_id, adjustment_id, override_id, outcome_id, eval_id, review_id,
+    or polarity_id."""
+    _print({"decision_lineage": orch.decision_lineage_report(decision_id)})
+    return 0
+
+
 def cmd_flatten(orch: Orchestrator) -> int:
     res = orch.flatten_paper_account()
     _print({"flatten": res})
@@ -333,6 +342,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "(1/3/5-day forward returns + bracket replay; measurement only)")
     sub.add_parser("outcomes_report",
                    help="measurement-visibility summary over candidate_outcomes (no statistical claims)")
+    dl = sub.add_parser("decision_lineage",
+                        help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
+                             "one decision (accepts a candidate_id, proposal_id, rejection_id, "
+                             "adjustment_id, override_id, outcome_id, eval_id, review_id, or polarity_id)")
+    dl.add_argument("decision_id")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
@@ -401,6 +415,8 @@ def main(argv=None) -> int:
             return cmd_outcomes_update(orch)
         if args.command == "outcomes_report":
             return cmd_outcomes_report(orch)
+        if args.command == "decision_lineage":
+            return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":
             return cmd_dashboard(orch)
         if args.command == "kill":

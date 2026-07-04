@@ -67,12 +67,14 @@ def _classify_candidate(journal, cand: dict) -> dict:
         direction = proposal.get("direction") or ev.get("direction") or cand.get("direction")
         playbook = proposal.get("playbook_name") or cand.get("playbook_name")
         decision_at_utc = proposal.get("created_at_utc") or cand.get("created_at_utc")
+        lineage_id = proposal.get("lineage_id") or cand.get("lineage_id")
     elif cand.get("armed_watch"):
         candidate_type = "armed_watch"
         entry, stop, target = ev.get("entry"), ev.get("stop"), ev.get("target")
         direction = ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
         decision_at_utc = adj.get("created_at_utc") or cand.get("created_at_utc")
+        lineage_id = adj.get("lineage_id") or cand.get("lineage_id")
     elif reject:
         candidate_type = "reject"
         if ev.get("entry") is not None:
@@ -82,12 +84,14 @@ def _classify_candidate(journal, cand: dict) -> dict:
         direction = reject.get("direction") or ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
         decision_at_utc = reject.get("created_at_utc") or cand.get("created_at_utc")
+        lineage_id = reject.get("lineage_id") or cand.get("lineage_id")
     else:
         candidate_type = "candidate"
         entry, stop, target = ev.get("entry"), ev.get("stop"), ev.get("target")
         direction = ev.get("direction") or cand.get("direction")
         playbook = cand.get("playbook_name")
         decision_at_utc = cand.get("created_at_utc")
+        lineage_id = cand.get("lineage_id")
 
     final_decision = adj.get("final_decision") or cand.get("label_decision") or cand.get("status")
     return {
@@ -101,6 +105,12 @@ def _classify_candidate(journal, cand: dict) -> dict:
         "entry_reference_price": entry, "stop_price": stop, "target_price": target,
         "direction_hint": direction, "playbook_id": playbook,
         "decision_at_utc": decision_at_utc,
+        # PR4: preserve the SOURCE decision's lineage_id (same anchor-on-source,
+        # not anchor-on-seed-time, principle as decision_at_utc above) rather
+        # than computing a fresh "current" snapshot -- an outcome row measures
+        # the original decision, so it must carry that decision's own lineage,
+        # not whatever code/config happens to be running when this row is seeded.
+        "lineage_id": lineage_id,
     }
 
 
@@ -129,6 +139,10 @@ def _source_from_override(journal, ov: dict) -> dict:
         "entry_reference_price": entry, "stop_price": stop, "target_price": target,
         "direction_hint": direction, "playbook_id": None,
         "decision_at_utc": ov.get("created_at_utc"),
+        # PR4: the override row's own lineage (the environment/config in
+        # effect when the USER made this override) -- not the original
+        # AlphaOS decision's lineage, since this row measures the override.
+        "lineage_id": ov.get("lineage_id"),
     }
 
 
@@ -155,6 +169,7 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
         "target_price": info.get("target_price"),
         "direction_hint": info.get("direction_hint"),
         "outcome_status": "pending",
+        "lineage_id": info.get("lineage_id"),
     })
 
 
