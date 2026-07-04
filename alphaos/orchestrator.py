@@ -949,6 +949,17 @@ class Orchestrator:
             # lazily flipped to 'expired' the moment an approval is attempted.
             expires_at = row.get("proposal_expires_at_utc")
             remaining = proposal_ttl.seconds_remaining(expires_at)
+            # PR7: TQS v0 -- DISPLAY ONLY. This is a shadow measurement signal
+            # (see alphaos/tqs/ module docstring): it must never be read by
+            # approval/risk/execution logic, only shown to a human operator
+            # alongside everything else here. A missing tqs_row (shadow
+            # disabled, or scoring hasn't run for this proposal) shows as None
+            # -- never a fabricated score.
+            tqs_row = self.journal.one(
+                "SELECT tqs_score, tqs_bucket, data_confidence FROM tqs_scores "
+                "WHERE proposal_id = ? AND source_type = 'proposal' ORDER BY id DESC LIMIT 1",
+                (row.get("proposal_id"),),
+            ) or {}
             views.append(
                 {
                     "proposal_id": row.get("proposal_id"),
@@ -974,6 +985,9 @@ class Orchestrator:
                     "proposal_expires_at_utc": expires_at,
                     "proposal_seconds_remaining": remaining,
                     "proposal_is_stale": proposal_ttl.is_expired(expires_at),
+                    "tqs_score": tqs_row.get("tqs_score"),
+                    "tqs_bucket": tqs_row.get("tqs_bucket"),
+                    "tqs_data_confidence": tqs_row.get("data_confidence"),
                 }
             )
         return views

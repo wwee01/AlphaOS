@@ -18,6 +18,7 @@ from alphaos.constants import ProposalStatus
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 from alphaos.scheduler import cost_guard
+from alphaos.tqs import TQS_VERSION
 from alphaos.util import timeutils
 
 
@@ -228,6 +229,31 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "cost_cap_skipped_jobs_today": cost_cap_skipped_today,
     }
 
+    # PR7: TQS v0 shadow scoring visibility. PURE READ, reporting only -- this
+    # section (and every field in it) is for an operator to eyeball coverage
+    # and score distribution; no decision path may read it. See
+    # alphaos/tqs/ module docstring for the enforced boundary.
+    tqs_rows_today = journal.query(
+        "SELECT tqs_bucket, data_confidence, is_mock FROM tqs_scores WHERE created_at_utc >= ?",
+        (since_sgt,),
+    )
+    tqs_bucket_histogram: dict = {}
+    for r in tqs_rows_today:
+        tqs_bucket_histogram[r["tqs_bucket"]] = tqs_bucket_histogram.get(r["tqs_bucket"], 0) + 1
+    confidences = [r["data_confidence"] for r in tqs_rows_today if r["data_confidence"] is not None]
+    tqs_shadow = {
+        "enabled": bool(settings.tqs_shadow_enabled),
+        "tqs_version": TQS_VERSION,
+        "scored_count_today": len(tqs_rows_today),
+        "bucket_histogram_today": tqs_bucket_histogram,
+        "mean_data_confidence_today": round(sum(confidences) / len(confidences), 2) if confidences else None,
+        "unscorable_count_today": tqs_bucket_histogram.get("unscorable", 0),
+        "mock_share_today": (
+            round(sum(1 for r in tqs_rows_today if r["is_mock"]) / len(tqs_rows_today), 2)
+            if tqs_rows_today else None
+        ),
+    }
+
     return {
         "date_sgt": timeutils.stamp().local_sgt[:10],
         "kill_switch_engaged": kill_switch.is_engaged(),
@@ -246,4 +272,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "cost_usage": cost_usage,
         "earnings_proximity": earnings_proximity,
         "proposal_lifecycle": proposal_lifecycle,
+        "tqs_shadow": tqs_shadow,
     }
