@@ -188,6 +188,12 @@ SCHEMA: list[tuple[str, str]] = [
             narrative_driver_type TEXT,
             arming_classification TEXT,
             armed_watch INTEGER,
+            earnings_date TEXT,
+            days_until_earnings INTEGER,
+            earnings_within_hold_window INTEGER,
+            earnings_within_warning_window INTEGER,
+            earnings_timing TEXT,
+            earnings_data_status TEXT,
             lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
@@ -308,6 +314,12 @@ SCHEMA: list[tuple[str, str]] = [
             proposal_reason TEXT,
             arming_classification TEXT,
             narrative_warning TEXT,
+            earnings_date TEXT,
+            days_until_earnings INTEGER,
+            earnings_within_hold_window INTEGER,
+            earnings_within_warning_window INTEGER,
+            earnings_timing TEXT,
+            earnings_data_status TEXT,
             lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
@@ -573,6 +585,12 @@ SCHEMA: list[tuple[str, str]] = [
             would_be_entry REAL,
             would_be_stop REAL,
             scan_batch_id TEXT,
+            earnings_date TEXT,
+            days_until_earnings INTEGER,
+            earnings_within_hold_window INTEGER,
+            earnings_within_warning_window INTEGER,
+            earnings_timing TEXT,
+            earnings_data_status TEXT,
             lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
@@ -1081,6 +1099,12 @@ SCHEMA: list[tuple[str, str]] = [
             labeller_reason TEXT,
             labeller_missing_conditions_json TEXT,
             labeller_upgrade_blockers_json TEXT,
+            earnings_date TEXT,
+            days_until_earnings INTEGER,
+            earnings_within_hold_window INTEGER,
+            earnings_within_warning_window INTEGER,
+            earnings_timing TEXT,
+            earnings_data_status TEXT,
             lineage_id TEXT,
             ai_lineage_json TEXT,
             created_at_utc TEXT NOT NULL,
@@ -1281,6 +1305,7 @@ SCHEMA: list[tuple[str, str]] = [
             risk_config_hash TEXT,
             protection_config_hash TEXT,
             scheduler_config_hash TEXT,
+            earnings_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1288,6 +1313,46 @@ SCHEMA: list[tuple[str, str]] = [
             strategy_version TEXT,
             feature_engine_version TEXT,
             market_data_provider TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR5: earnings-proximity enrichment per shortlisted candidate, mirroring
+        # candidate_catalysts/candidate_last30days -- one row per candidate per
+        # scan (INCLUDING those skipped by the per-scan budget cap, so a gap in
+        # coverage is visible, not silently absent). Advisory/context ONLY: never
+        # hard-blocks a trade by default, never bypasses a gate or manual
+        # approval, never fed into the AI eval/labeller prompt (unlike
+        # last30days). Summary fields are also denormalized onto candidates/
+        # trade_proposals/rejected_candidates/decision_adjustments (same pattern
+        # as catalyst_status/last30days_status) so callers don't need to join
+        # here just to see the flag.
+        "candidate_earnings",
+        """
+        CREATE TABLE IF NOT EXISTS candidate_earnings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            earnings_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            packet_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            earnings_date TEXT,
+            earnings_timing TEXT,
+            days_until_earnings INTEGER,
+            hold_days_used INTEGER,
+            earnings_within_hold_window INTEGER,
+            earnings_within_warning_window INTEGER,
+            earnings_data_status TEXT,
+            confidence REAL,
+            source TEXT,
+            provider TEXT,
+            enrichment_status TEXT,
+            enrichment_error TEXT,
+            risk_tags_json TEXT,
+            fetched_at_utc TEXT,
+            lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1366,6 +1431,10 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_useroverrides_lineage ON user_decision_overrides(lineage_id)",
     "CREATE INDEX IF NOT EXISTS idx_candoutcomes_lineage ON candidate_outcomes(lineage_id)",
     "CREATE INDEX IF NOT EXISTS idx_tradeoutcomes_lineage ON trade_outcomes(lineage_id)",
+    # PR5: earnings proximity.
+    "CREATE INDEX IF NOT EXISTS idx_earnings_candidate ON candidate_earnings(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_earnings_scan_batch ON candidate_earnings(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_earnings_lineage ON candidate_earnings(lineage_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

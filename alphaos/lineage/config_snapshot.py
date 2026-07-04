@@ -55,6 +55,13 @@ SCHEDULER_CONFIG_FIELDS = (
     "scheduler_stale_job_minutes", "scheduler_ai_cost_cap_calls_per_30d",
 )
 
+EARNINGS_CONFIG_FIELDS = (
+    "earnings_proximity_enabled", "earnings_proximity_provider",
+    "earnings_proximity_warning_days", "earnings_proximity_default_hold_days",
+    "earnings_proximity_max_symbols_per_scan", "earnings_proximity_timeout_seconds",
+    "earnings_proximity_fail_open_as_unavailable",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -70,9 +77,10 @@ def _subset_hash(full: dict, fields: tuple) -> str:
 
 def build_config_hashes(settings) -> dict[str, str]:
     """{"config_hash", "scanner_config_hash", "risk_config_hash",
-    "protection_config_hash", "scheduler_config_hash"}. Each hash changes iff
-    a relevant field's VALUE changes -- adding/renaming a field it doesn't
-    list does not perturb a category hash that doesn't reference it."""
+    "protection_config_hash", "scheduler_config_hash", "earnings_config_hash"}.
+    Each hash changes iff a relevant field's VALUE changes -- adding/renaming a
+    field it doesn't list does not perturb a category hash that doesn't
+    reference it."""
     full = settings_dict(settings)
     return {
         "config_hash": stable_hash(full),
@@ -80,4 +88,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "risk_config_hash": _subset_hash(full, RISK_CONFIG_FIELDS),
         "protection_config_hash": _subset_hash(full, PROTECTION_CONFIG_FIELDS),
         "scheduler_config_hash": _subset_hash(full, SCHEDULER_CONFIG_FIELDS),
+        "earnings_config_hash": _subset_hash(full, EARNINGS_CONFIG_FIELDS),
     }

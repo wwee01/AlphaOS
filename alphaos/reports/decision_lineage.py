@@ -59,6 +59,11 @@ def build_decision_lineage_report(journal, decision_id: str) -> dict:
     evaluations = _rows(journal, "openai_evaluations", candidate_id)
     claude_reviews = _rows(journal, "claude_reviews", candidate_id)
     polarity = _rows(journal, "last30days_polarity", candidate_id)
+    # PR5: earnings-proximity has its own lineage_id (unlike candidate_catalysts/
+    # candidate_last30days, which carry no lineage_id of their own and are
+    # deliberately not included here -- see last30days_polarity for the same
+    # own-lineage-id pattern this follows).
+    earnings = _rows(journal, "candidate_earnings", candidate_id)
     decision_adjustments = _rows(journal, "decision_adjustments", candidate_id)
     proposals = _rows(journal, "trade_proposals", candidate_id)
     rejects = _rows(journal, "rejected_candidates", candidate_id)
@@ -72,7 +77,7 @@ def build_decision_lineage_report(journal, decision_id: str) -> dict:
     # (e.g. a user override made under a later code/config state).
     all_rows = (
         ([candidate] if candidate else []) + evaluations + claude_reviews + polarity
-        + decision_adjustments + proposals + rejects + overrides
+        + earnings + decision_adjustments + proposals + rejects + overrides
         + candidate_outcomes + trade_outcomes
     )
     lineage_ids = sorted({r.get("lineage_id") for r in all_rows if r.get("lineage_id")})
@@ -111,6 +116,7 @@ def build_decision_lineage_report(journal, decision_id: str) -> dict:
         "openai_evaluations": evaluations,
         "claude_reviews": claude_reviews,
         "last30days_polarity": polarity,
+        "candidate_earnings": earnings,
         "decision_adjustments": decision_adjustments,
         "trade_proposals": proposals,
         "rejected_candidates": rejects,

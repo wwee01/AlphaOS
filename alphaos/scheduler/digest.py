@@ -124,6 +124,54 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "system_events": system_events_today,
     }
 
+    # PR5: earnings-proximity awareness -- surface EVERY candidate (not just
+    # those that became proposals) whose hold window contains an earnings event,
+    # candidates in the warning-but-not-hold window, the actionable proposal
+    # subset, and provider health (unavailable data / outright failures) so an
+    # operator sees both the signal AND whether the signal itself is healthy.
+    # The candidate-level hold bucket is queried separately from the proposal
+    # bucket so a rejected/watch candidate that is INSIDE the hold window (the
+    # most severe signal) is never dropped just because it never became a
+    # proposal. Advisory only: nothing here blocks or alters any trade.
+    earnings_candidates_hold_window_today = journal.query(
+        "SELECT * FROM candidate_earnings WHERE earnings_within_hold_window = 1 "
+        "AND created_at_utc >= ? ORDER BY id DESC",
+        (since_sgt,),
+    )
+    earnings_proposals_near_hold_window_today = journal.query(
+        "SELECT * FROM trade_proposals WHERE earnings_within_hold_window = 1 "
+        "AND created_at_utc >= ? ORDER BY id DESC",
+        (since_sgt,),
+    )
+    earnings_candidates_warning_today = journal.query(
+        "SELECT * FROM candidate_earnings WHERE earnings_within_warning_window = 1 "
+        "AND earnings_within_hold_window = 0 AND created_at_utc >= ? ORDER BY id DESC",
+        (since_sgt,),
+    )
+    # Provider HEALTH: genuinely-unavailable/unknown/stale/disabled data the
+    # provider was ASKED for -- excludes budget-cap skips (enrichment_status
+    # 'skipped'), which are a deliberate cost-control choice, not a data-health
+    # problem, and would otherwise inflate this bucket and mask a real outage.
+    earnings_data_unavailable_today = journal.query(
+        "SELECT * FROM candidate_earnings WHERE earnings_data_status != 'ok' "
+        "AND enrichment_status != 'skipped' AND created_at_utc >= ? ORDER BY id DESC",
+        (since_sgt,),
+    )
+    earnings_provider_failures_today = journal.query(
+        "SELECT * FROM candidate_earnings WHERE enrichment_status = 'error' "
+        "AND created_at_utc >= ? ORDER BY id DESC",
+        (since_sgt,),
+    )
+    earnings_proximity = {
+        "enabled": bool(settings.earnings_proximity_enabled),
+        "provider": settings.earnings_proximity_provider,
+        "candidates_near_earnings_hold_window_today": earnings_candidates_hold_window_today,
+        "proposals_near_earnings_hold_window_today": earnings_proposals_near_hold_window_today,
+        "candidates_earnings_warning_today": earnings_candidates_warning_today,
+        "earnings_data_unavailable_today": earnings_data_unavailable_today,
+        "earnings_provider_failures_today": earnings_provider_failures_today,
+    }
+
     calls_used = cost_guard.calls_in_last_30_days(journal)
     cost_cap_skipped_today = journal.query(
         "SELECT * FROM job_runs WHERE cost_cap_exceeded = 1 AND started_at_utc >= ? ORDER BY id DESC",
@@ -152,4 +200,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "outcomes_update_status": outcomes_update_status,
         "errors_and_failures": errors_and_failures,
         "cost_usage": cost_usage,
+        "earnings_proximity": earnings_proximity,
     }

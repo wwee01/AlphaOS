@@ -319,6 +319,22 @@ class Settings:
     last30days_polarity_arming_allowed: bool
     last30days_high_risk_narrative_manual_only: bool
 
+    # --- earnings proximity (Roadmap PR5) ---
+    # Event-risk AWARENESS, not execution authority: flags whether a candidate's
+    # intended holding window contains an earnings event. Advisory only in this
+    # PR -- it never hard-blocks a trade, never bypasses a gate/approval, and is
+    # never fed into the AI eval/labeller prompt (unlike last30days). Enabled by
+    # default with a mock/static provider (zero-cost, deterministic) since this
+    # is informational, not a paid live API call; a real provider can replace
+    # the mock behind the same factory later without touching call sites.
+    earnings_proximity_enabled: bool
+    earnings_proximity_provider: str          # mock | static | disabled
+    earnings_proximity_warning_days: int      # "near-term" warning window (calendar days)
+    earnings_proximity_default_hold_days: int  # fallback when max_holding_days isn't known yet
+    earnings_proximity_max_symbols_per_scan: int
+    earnings_proximity_timeout_seconds: float  # reserved for a future live provider; mock ignores it
+    earnings_proximity_fail_open_as_unavailable: bool
+
     # --- gated labeller decision override (Roadmap 2.6) ---
     # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
     # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
@@ -789,6 +805,27 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     if min_reward_risk < 0:
         raise SettingsError(f"MIN_REWARD_RISK={min_reward_risk!r} must be >= 0.")
 
+    # --- earnings proximity (PR5): warning window + conservative hold-days
+    # fallback. Not a safety gate (advisory only), but a nonsensical value
+    # (0 hold days, a multi-year warning window) would silently make the flag
+    # meaningless, so bound it to a sane range.
+    earnings_proximity_warning_days = _get_int(src, "EARNINGS_PROXIMITY_WARNING_DAYS", 7)
+    if not (0 <= earnings_proximity_warning_days <= 90):
+        raise SettingsError(
+            f"EARNINGS_PROXIMITY_WARNING_DAYS={earnings_proximity_warning_days!r} must be "
+            f"between 0 and 90. 0 disables the warning window (hold-window flagging still "
+            f"works); >90 days stops being a meaningful 'near-term' warning for a 1-5 day "
+            f"swing strategy."
+        )
+    earnings_proximity_default_hold_days = _get_int(src, "EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS", 3)
+    if not (1 <= earnings_proximity_default_hold_days <= 30):
+        raise SettingsError(
+            f"EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS={earnings_proximity_default_hold_days!r} "
+            f"must be between 1 and 30. This is the fallback hold period used only when a "
+            f"real max_holding_days isn't known yet; 0 or unbounded both make the "
+            f"hold-window flag meaningless."
+        )
+
     return Settings(
         openai_api_key=_get(src, "OPENAI_API_KEY"),
         openai_primary_model=_get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
@@ -893,6 +930,14 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         last30days_polarity_min_source_coverage=_get(src, "LAST30DAYS_POLARITY_MIN_SOURCE_COVERAGE", "medium").lower(),
         last30days_polarity_arming_allowed=_get_bool(src, "LAST30DAYS_POLARITY_ARMING_ALLOWED", False),
         last30days_high_risk_narrative_manual_only=_get_bool(src, "LAST30DAYS_HIGH_RISK_NARRATIVE_MANUAL_ONLY", True),
+        earnings_proximity_enabled=_get_bool(src, "EARNINGS_PROXIMITY_ENABLED", True),
+        earnings_proximity_provider=_get(src, "EARNINGS_PROXIMITY_PROVIDER", "mock").lower(),
+        earnings_proximity_warning_days=earnings_proximity_warning_days,
+        earnings_proximity_default_hold_days=earnings_proximity_default_hold_days,
+        earnings_proximity_max_symbols_per_scan=_get_int(src, "EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN", 10),
+        earnings_proximity_timeout_seconds=_get_float(src, "EARNINGS_PROXIMITY_TIMEOUT_SECONDS", 10.0),
+        earnings_proximity_fail_open_as_unavailable=_get_bool(
+            src, "EARNINGS_PROXIMITY_FAIL_OPEN_AS_UNAVAILABLE", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),
