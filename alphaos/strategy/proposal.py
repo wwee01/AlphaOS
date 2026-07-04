@@ -49,6 +49,13 @@ class TradeProposal:
     expected_hold_days: Optional[int] = None
     scan_batch_id: Optional[str] = None
     proposal_reason: Optional[str] = None
+    # --- proposal TTL / stale-approval guard (Roadmap PR6) ---
+    proposal_ttl_seconds: Optional[int] = None
+    proposal_expires_at_utc: Optional[str] = None
+    expired_reason: Optional[str] = None
+    expired_at_utc: Optional[str] = None
+    superseded_by_proposal_id: Optional[str] = None
+    superseded_at_utc: Optional[str] = None
     proposal_id: str = field(default_factory=lambda: new_id("prop"))
     # Every proposal is born with a stable trade_id — the central correlation key
     # that survives proposal -> order -> position -> exit -> outcome.
@@ -90,6 +97,12 @@ class TradeProposal:
             expected_hold_days=row.get("expected_hold_days"),
             scan_batch_id=row.get("scan_batch_id"),
             proposal_reason=row.get("proposal_reason"),
+            proposal_ttl_seconds=row.get("proposal_ttl_seconds"),
+            proposal_expires_at_utc=row.get("proposal_expires_at_utc"),
+            expired_reason=row.get("expired_reason"),
+            expired_at_utc=row.get("expired_at_utc"),
+            superseded_by_proposal_id=row.get("superseded_by_proposal_id"),
+            superseded_at_utc=row.get("superseded_at_utc"),
             proposal_id=row["proposal_id"],
             trade_id=row.get("trade_id") or new_id("trade"),
         )
@@ -130,4 +143,10 @@ class TradeProposal:
             "expected_hold_days": self.expected_hold_days,
             "scan_batch_id": self.scan_batch_id,
             "proposal_reason": self.proposal_reason,
+            "proposal_ttl_seconds": self.proposal_ttl_seconds,
+            "proposal_expires_at_utc": self.proposal_expires_at_utc,
+            "expired_reason": self.expired_reason,
+            "expired_at_utc": self.expired_at_utc,
+            "superseded_by_proposal_id": self.superseded_by_proposal_id,
+            "superseded_at_utc": self.superseded_at_utc,
         }

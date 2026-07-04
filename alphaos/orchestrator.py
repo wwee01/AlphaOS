@@ -45,6 +45,7 @@ from alphaos.constants import (
     NewsStatus,
     OrderState,
     PLAYBOOK_V1,
+    ProposalStatus,
     ReasonCode,
     RunStatus,
     ScanType,
@@ -64,6 +65,7 @@ from alphaos.execution.order_manager import OrderManager
 from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
 from alphaos import lineage
+from alphaos import proposals as proposal_ttl
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsService
 from alphaos.risk.risk_engine import RiskEngine
@@ -402,6 +404,7 @@ class Orchestrator:
             proposal.playbook_name = PLAYBOOK_V1
             proposal.setup_classification = "momentum_continuation"
             proposal.expected_hold_days = evaluation.max_holding_days
+            self._stamp_proposal_ttl(proposal, snapshot)
             # Persist the risk check (does NOT change whether the trade proceeds).
             rc_id = self._record_risk_check(proposal, evaluation, risk)
             proposal.risk_check_id = rc_id
@@ -421,6 +424,7 @@ class Orchestrator:
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "momentum_continuation"
         proposal.expected_hold_days = evaluation.max_holding_days
+        self._stamp_proposal_ttl(proposal, snapshot)
         rc_id = self._record_risk_check(proposal, evaluation, risk)
         proposal.risk_check_id = rc_id
         proposal.status = "pending_approval"
@@ -429,6 +433,11 @@ class Orchestrator:
             **self._earnings_fields_for(cand.get("_earnings"), proposal.max_holding_days),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         })
+        # PR6: a fresh approvable proposal for this symbol supersedes any OTHER
+        # still-open (pending_approval/proposed) proposal for the same symbol --
+        # never deletes it, just marks it so approving the stale one is blocked
+        # by the same status guard approve_proposal() already enforces.
+        self._supersede_open_proposals(cand["symbol"], proposal.proposal_id)
         # Roadmap 2.7: surface the polarity arming classification + high-risk
         # narrative warning on the proposal (advisory; never changes levels/sizing).
         arming_cls = cand.get("_arming_classification")
@@ -467,6 +476,50 @@ class Orchestrator:
             summary.pending_manual += 1
         return True
 
+    def _stamp_proposal_ttl(self, proposal, snapshot: Optional[dict] = None) -> None:
+        """PR6: freeze the TTL + expiry instant onto the proposal at CREATION
+        time, from the market session active right now. Never recomputed
+        later against the session active at approval time -- once set, a
+        proposal's expiry is fixed (anchor-on-source, like PR4 lineage
+        snapshots and PR5's earnings recompute).
+
+        Session is read from ``snapshot["market_session"]`` when given --
+        EXACTLY the same source FreshnessGuard.assess() prefers -- rather than
+        calling the real wall-clock timeutils.market_session() directly: the
+        mock data provider fixes every snapshot's session to REGULAR
+        specifically so tests are deterministic regardless of the real
+        weekday/time, and TTL must respect that same fiction, not bypass it."""
+        session = (snapshot or {}).get("market_session")
+        expiry = proposal_ttl.compute_expiry(
+            self.settings, timeutils.to_iso(timeutils.now_utc()), session=session)
+        proposal.proposal_ttl_seconds = expiry["proposal_ttl_seconds"]
+        proposal.proposal_expires_at_utc = expiry["proposal_expires_at_utc"]
+
+    def _supersede_open_proposals(self, symbol: str, new_proposal_id: str) -> None:
+        """PR6: mark any OTHER still-open (pending_approval/proposed) proposal
+        for ``symbol`` as superseded by the fresh one just created. NEVER
+        deletes a row -- the old proposal stays fully auditable. Approving a
+        superseded proposal is blocked by the same status guard
+        ``approve_proposal`` already enforces (superseded is not in the
+        approvable-status tuple), so no separate check is needed there.
+
+        Deliberately only called from the risk-APPROVED branch of
+        _handle_proposal: a later scan that risk-BLOCKS a fresh evaluation
+        does not invalidate an existing, still-good open proposal for the
+        same symbol -- that would remove user optionality for reasons
+        unrelated to the old proposal's own validity."""
+        now = timeutils.to_iso(timeutils.now_utc())
+        self.journal.conn.execute(
+            "UPDATE trade_proposals SET status = ?, superseded_by_proposal_id = ?, "
+            "superseded_at_utc = ? WHERE symbol = ? AND status IN (?, ?) AND proposal_id != ?",
+            (
+                ProposalStatus.SUPERSEDED.value, new_proposal_id, now,
+                symbol, ProposalStatus.PENDING_APPROVAL.value, ProposalStatus.PROPOSED.value,
+                new_proposal_id,
+            ),
+        )
+        self.journal.conn.commit()
+
     # --------------------------------------------------- manual approval API
     def approve_proposal(
         self, proposal_id: str, approver: str = "user", approve_margin: bool = False
@@ -477,9 +530,24 @@ class Orchestrator:
         row = self.journal.proposal_by_id(proposal_id)
         if not row:
             return False, "proposal not found"
-        if row["status"] not in ("pending_approval", "proposed"):
+        if row["status"] not in ProposalStatus.approvable():
             return False, f"proposal not approvable (status={row['status']})"
         proposal = TradeProposal.from_row(row)
+
+        # PR6: stale-approval guard. Checked BEFORE broker submission (and
+        # before every other gate below) so an expired proposal always gets a
+        # clear, specific PROPOSAL_EXPIRED reason regardless of what else might
+        # also be true (kill switch, protection, risk...). A missing/unparseable
+        # expiry (e.g. a proposal row from before this PR existed) is treated
+        # as expired -- fail safe, never "still fresh". Discovering expiry here
+        # PERSISTS it (status='expired', audit fields set) so the row's history
+        # remains fully reconstructable; it is never deleted or silently mutated.
+        if proposal_ttl.is_expired(proposal.proposal_expires_at_utc):
+            self._mark_proposal_expired(proposal_id, ReasonCode.PROPOSAL_EXPIRED.value)
+            return False, (
+                "proposal expired (TTL exceeded) — request a fresh scan/evaluation; "
+                f"expired at {proposal.proposal_expires_at_utc}"
+            )
 
         # Idempotency (belt-and-suspenders on top of the status guard): if a live
         # entry order already exists for this proposal, never create a duplicate.
@@ -781,12 +849,14 @@ class Orchestrator:
         proposal.expected_hold_days = evaluation.max_holding_days
         proposal.proposal_reason = f"user_override:{rec['user_override_action']}"
         proposal.status = "pending_approval"
+        self._stamp_proposal_ttl(proposal, snap)
         rc_id = self._record_risk_check(proposal, evaluation, risk)
         proposal.risk_check_id = rc_id
         self.journal.insert("trade_proposals", {
             **proposal.to_row(),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         })
+        self._supersede_open_proposals(symbol, proposal.proposal_id)
         warning = (HIGH_RISK_NARRATIVE_WARNING
                    if rec.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value else None)
         self.journal.conn.execute(
@@ -1090,10 +1160,12 @@ class Orchestrator:
             eval_id="demo", is_demo=True, status="pending_approval",
         )
         self._tag_target_profile(proposal, from_config=True)
+        self._stamp_proposal_ttl(proposal, snap)
         self.journal.insert("trade_proposals", {
             **proposal.to_row(),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         })
+        self._supersede_open_proposals(symbol, proposal.proposal_id)
         self.journal.log_system_event(
             Severity.WARNING, "demo",
             "DEMO_SEED proposal created (bypasses news pipeline; clearly labelled).",
@@ -1144,6 +1216,19 @@ class Orchestrator:
     def _set_proposal_status(self, proposal_id: str, status: str) -> None:
         self.journal.conn.execute(
             "UPDATE trade_proposals SET status = ? WHERE proposal_id = ?", (status, proposal_id)
+        )
+        self.journal.conn.commit()
+
+    def _mark_proposal_expired(self, proposal_id: str, reason: str) -> None:
+        """PR6: persist the expired transition discovered at approval time.
+        Never deletes the row -- entry/stop/target/qty and every prior status
+        transition remain exactly as recorded; only the terminal status +
+        expiry audit fields are set."""
+        now = timeutils.to_iso(timeutils.now_utc())
+        self.journal.conn.execute(
+            "UPDATE trade_proposals SET status = ?, expired_reason = ?, expired_at_utc = ? "
+            "WHERE proposal_id = ?",
+            (ProposalStatus.EXPIRED.value, reason, now, proposal_id),
         )
         self.journal.conn.commit()
 

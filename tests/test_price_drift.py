@@ -23,7 +23,8 @@ def test_approval_blocked_on_material_drift():
     s = make_settings(MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL="50")
     orch = Orchestrator(settings=s, journal=JournalStore(":memory:"))
     symbol = "AAPL"
-    price = float(orch.market.get_snapshot(symbol)["last_price"])
+    snap = orch.market.get_snapshot(symbol)
+    price = float(snap["last_price"])
     # Proposal entry deliberately 2% (200 bps) away from the current mock price.
     skewed_entry = round(price * 1.02, 2)
     cand_id = new_id("cand")
@@ -38,6 +39,7 @@ def test_approval_blocked_on_material_drift():
         dollar_risk=skewed_entry * 0.03 * 10, expected_r=2.0, same_day_exit_eligible=True,
         candidate_id=cand_id, status="pending_approval",
     )
+    orch._stamp_proposal_ttl(prop, snap)  # PR6: fresh by construction, not expired-by-omission
     orch.journal.insert("trade_proposals", prop.to_row())
 
     ok, msg = orch.approve_proposal(prop.proposal_id, approver="tester")

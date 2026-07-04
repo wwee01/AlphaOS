@@ -335,6 +335,21 @@ class Settings:
     earnings_proximity_timeout_seconds: float  # reserved for a future live provider; mock ignores it
     earnings_proximity_fail_open_as_unavailable: bool
 
+    # --- proposal TTL / stale-approval guard (Roadmap PR6) ---
+    # Safety guard, not a toggle-able feature: a proposal is only approvable
+    # while fresh. There is deliberately NO master enable/disable switch here
+    # (unlike earnings' provider toggle) -- unlike an advisory flag, this PR's
+    # whole purpose is an unconditional guarantee ("no stale proposal can be
+    # approved"), so it stays active. Extended-hours (premarket+afterhours)
+    # share ONE conservative bucket, mirroring FreshnessGuard's own precedent
+    # of using a single lenient threshold pair for both. A proposal born while
+    # the market is CLOSED gets the shortest TTL of all (fails safe) -- belt
+    # and suspenders on top of the freshness guard's existing hard block on
+    # CLOSED-session approval.
+    proposal_ttl_rth_seconds: int
+    proposal_ttl_extended_hours_seconds: int
+    proposal_ttl_closed_session_seconds: int
+
     # --- gated labeller decision override (Roadmap 2.6) ---
     # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
     # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
@@ -826,6 +841,33 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"hold-window flag meaningless."
         )
 
+    # --- proposal TTL (PR6): this IS a safety gate, so bound it tightly. Too
+    # long defeats the point (a stale proposal stays approvable); too short
+    # (or negative) would make every proposal instantly unapprovable.
+    proposal_ttl_rth_seconds = _get_int(src, "PROPOSAL_TTL_RTH_SECONDS", 1800)
+    if not (60 <= proposal_ttl_rth_seconds <= 7200):
+        raise SettingsError(
+            f"PROPOSAL_TTL_RTH_SECONDS={proposal_ttl_rth_seconds!r} must be between 60 and "
+            f"7200 (1-120 minutes). Too short and every regular-hours proposal expires before "
+            f"a human can react; too long defeats the point of a staleness guard."
+        )
+    proposal_ttl_extended_hours_seconds = _get_int(src, "PROPOSAL_TTL_EXTENDED_HOURS_SECONDS", 300)
+    if not (0 <= proposal_ttl_extended_hours_seconds <= 3600):
+        raise SettingsError(
+            f"PROPOSAL_TTL_EXTENDED_HOURS_SECONDS={proposal_ttl_extended_hours_seconds!r} must "
+            f"be between 0 and 3600 (up to 60 minutes). Premarket/afterhours liquidity is "
+            f"thinner, so this should stay conservative -- 0 means such proposals are never "
+            f"approvable (immediate expiry), which is a valid conservative choice."
+        )
+    proposal_ttl_closed_session_seconds = _get_int(src, "PROPOSAL_TTL_CLOSED_SESSION_SECONDS", 0)
+    if not (0 <= proposal_ttl_closed_session_seconds <= 3600):
+        raise SettingsError(
+            f"PROPOSAL_TTL_CLOSED_SESSION_SECONDS={proposal_ttl_closed_session_seconds!r} must "
+            f"be between 0 and 3600. This is the fail-safe bucket for a proposal born while the "
+            f"market is closed (an edge case already blocked separately by the freshness guard's "
+            f"CLOSED_SESSION check) -- default 0 means immediate expiry."
+        )
+
     return Settings(
         openai_api_key=_get(src, "OPENAI_API_KEY"),
         openai_primary_model=_get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
@@ -938,6 +980,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         earnings_proximity_timeout_seconds=_get_float(src, "EARNINGS_PROXIMITY_TIMEOUT_SECONDS", 10.0),
         earnings_proximity_fail_open_as_unavailable=_get_bool(
             src, "EARNINGS_PROXIMITY_FAIL_OPEN_AS_UNAVAILABLE", True),
+        proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
+        proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
+        proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

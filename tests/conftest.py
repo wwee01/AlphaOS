@@ -97,5 +97,6 @@ def inject_pending_proposal(orch, symbol="AAPL"):
     })
     prop = make_proposal(symbol=symbol, entry=entry, stop=stop, target=target, candidate_id=cand_id)
     prop.eval_id = eval_id
+    orch._stamp_proposal_ttl(prop, snap)  # PR6: fresh by construction, not expired-by-omission
     orch.journal.insert("trade_proposals", prop.to_row())
     return prop.proposal_id, entry
