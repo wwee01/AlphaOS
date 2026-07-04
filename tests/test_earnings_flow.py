@@ -217,10 +217,102 @@ def test_daily_digest_surfaces_earnings_proximity_section():
     digest = build_daily_digest(o.journal, o.settings, o.kill_switch)
     assert "earnings_proximity" in digest
     ep = digest["earnings_proximity"]
-    for key in ("enabled", "provider", "proposals_near_earnings_hold_window_today",
+    for key in ("enabled", "provider", "candidates_near_earnings_hold_window_today",
+                "proposals_near_earnings_hold_window_today",
                 "candidates_earnings_warning_today", "earnings_data_unavailable_today",
                 "earnings_provider_failures_today"):
         assert key in ep
+    o.close()
+
+
+def test_digest_surfaces_in_hold_candidate_that_never_became_a_proposal():
+    """A candidate INSIDE the hold window that gets REJECTED (never a proposal)
+    must still appear in the digest's candidate-level hold bucket -- the most
+    severe event-risk signal must not be dropped just because the candidate
+    didn't become a trade. Force every earnings result to 2 days out so every
+    enriched candidate is inside the default 3-day hold window, then reject them
+    all via the kill switch path is not needed -- we assert directly on the
+    candidate_earnings-backed digest bucket."""
+    from alphaos.earnings.earnings_provider import EarningsProximityResult
+    from alphaos.scheduler.digest import build_daily_digest
+
+    o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12",
+              EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN="10")
+
+    def _always_in_hold(symbol):
+        from datetime import timedelta
+        from alphaos.util import timeutils
+        earnings_date = (timeutils.market_date() + timedelta(days=2)).isoformat()
+        return EarningsProximityResult(
+            symbol=symbol, earnings_date=earnings_date, status=EarningsDataStatus.OK.value,
+            source="stub",
+        )
+
+    monkeypatch_target = o.earnings_enricher._provider
+    orig = monkeypatch_target.get_earnings_for_symbol
+    monkeypatch_target.get_earnings_for_symbol = _always_in_hold
+    try:
+        o.run_scan_once()
+    finally:
+        monkeypatch_target.get_earnings_for_symbol = orig
+
+    # candidate_earnings hold-window rows exist for EVERY enriched candidate,
+    # regardless of whether it became a proposal or was rejected.
+    in_hold = o.journal.query(
+        "SELECT candidate_id FROM candidate_earnings WHERE earnings_within_hold_window = 1")
+    assert len(in_hold) == 10
+    digest = build_daily_digest(o.journal, o.settings, o.kill_switch)
+    surfaced_ids = {r["candidate_id"]
+                    for r in digest["earnings_proximity"]["candidates_near_earnings_hold_window_today"]}
+    # every in-hold candidate is surfaced, including any that were rejected
+    assert surfaced_ids == {r["candidate_id"] for r in in_hold}
+    o.close()
+
+
+def test_digest_provider_failures_bucket_surfaces_injected_failure():
+    """When the provider raises, the enricher fails safe (enrichment_status
+    'error') AND the digest's provider-failures bucket surfaces it -- a health
+    signal must not be silently swallowed by the fail-safe."""
+    from alphaos.scheduler.digest import build_daily_digest
+
+    o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12",
+              EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN="10")
+
+    def _boom(symbol):
+        raise RuntimeError("provider outage")
+
+    o.earnings_enricher._provider.get_earnings_for_symbol = _boom
+    o.run_scan_once()  # must NOT raise -- fail-safe
+    failures = o.journal.query(
+        "SELECT * FROM candidate_earnings WHERE enrichment_status = 'error'")
+    assert len(failures) == 10
+    digest = build_daily_digest(o.journal, o.settings, o.kill_switch)
+    surfaced = digest["earnings_proximity"]["earnings_provider_failures_today"]
+    assert len(surfaced) == 10
+    # and they are NOT falsely "safe": data status is unavailable, flags are 0
+    for r in surfaced:
+        assert r["earnings_data_status"] == EarningsDataStatus.UNAVAILABLE.value
+        assert r["earnings_within_hold_window"] == 0
+    o.close()
+
+
+def test_digest_unavailable_bucket_excludes_budget_skips():
+    """Budget-cap skips (a deliberate cost choice, not a data-health problem)
+    must NOT inflate the provider-health 'unavailable' bucket, or a real outage
+    would be masked by routine cost-control noise."""
+    from alphaos.scheduler.digest import build_daily_digest
+
+    # 12 shortlisted, only 8 within the earnings budget -> 4 budget-skipped.
+    o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12",
+              EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN="8")
+    o.run_scan_once()
+    skipped = o.journal.query(
+        "SELECT * FROM candidate_earnings WHERE enrichment_status = 'skipped'")
+    assert len(skipped) == 4  # they exist and are queryable...
+    digest = build_daily_digest(o.journal, o.settings, o.kill_switch)
+    unavailable = digest["earnings_proximity"]["earnings_data_unavailable_today"]
+    # ...but none of them appear in the provider-health bucket
+    assert all(r["enrichment_status"] != "skipped" for r in unavailable)
     o.close()
 
 
@@ -397,3 +489,48 @@ def test_scheduler_triggered_scan_also_produces_candidate_earnings():
     assert job_run is not None
     assert job_run["status"] == "completed"
     o.close()
+
+
+# --------------------------------------------------- additive migration (PR5)
+def test_old_db_gets_earnings_columns_and_table_added_nullable(tmp_path):
+    """A ledger written before PR5 (no earnings columns on candidates, no
+    candidate_earnings table) must open cleanly: the 6 summary columns are
+    ALTER-added as nullable, the new table is created, an existing pre-PR5 row
+    survives with NULL earnings fields, and SCHEMA_VERSION does not move (purely
+    additive)."""
+    import sqlite3
+
+    from alphaos.journal.schema import SCHEMA_VERSION
+
+    db = str(tmp_path / "pre_pr5.db")
+    raw = sqlite3.connect(db)
+    # Minimal pre-PR5 candidates table (no earnings_* columns).
+    raw.execute(
+        "CREATE TABLE candidates (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "candidate_id TEXT, symbol TEXT, status TEXT)"
+    )
+    raw.execute(
+        "INSERT INTO candidates (candidate_id, symbol, status) VALUES ('old_cand', 'AAPL', 'detected')"
+    )
+    raw.execute("PRAGMA user_version = 0")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        cols = {r["name"] for r in j.conn.execute("PRAGMA table_info(candidates)")}
+        for c in ("earnings_date", "days_until_earnings", "earnings_within_hold_window",
+                  "earnings_within_warning_window", "earnings_timing", "earnings_data_status"):
+            assert c in cols, f"missing additive column {c}"
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert "candidate_earnings" in tables
+        # the pre-PR5 row still reads, with NULL earnings fields
+        old = j.one("SELECT * FROM candidates WHERE candidate_id = 'old_cand'")
+        assert old["symbol"] == "AAPL"
+        assert old["earnings_data_status"] is None
+        # additive-only: version constant unchanged
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()

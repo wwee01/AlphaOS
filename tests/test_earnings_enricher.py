@@ -65,6 +65,36 @@ def test_flags_within_hold_window():
     assert "earnings_within_hold_window" in flags["risk_tags"]
 
 
+def test_flags_same_day_earnings_flagged():
+    """Earnings TODAY (days_until == 0) is the most acute in-window case -- it
+    must land inside both the hold and warning windows (the boundary is
+    inclusive: 0 <= 0 <= hold_days)."""
+    today = date(2026, 1, 1)
+    earnings_date = today.isoformat()
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["days_until_earnings"] == 0
+    assert flags["earnings_within_hold_window"] == 1
+    assert flags["earnings_within_warning_window"] == 1
+    assert "earnings_within_hold_window" in flags["risk_tags"]
+
+
+def test_flags_exact_hold_boundary_inclusive():
+    """days_until == hold_days is INSIDE the hold window (inclusive upper
+    bound) -- guards the <= vs < boundary explicitly."""
+    today = date(2026, 1, 1)
+    earnings_date = (today + timedelta(days=3)).isoformat()
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["earnings_within_hold_window"] == 1
+    # one day past the hold boundary is OUT of the hold window (but still in warning)
+    earnings_date = (today + timedelta(days=4)).isoformat()
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["earnings_within_hold_window"] == 0
+    assert flags["earnings_within_warning_window"] == 1
+
+
 def test_flags_within_warning_but_outside_hold():
     today = date(2026, 1, 1)
     earnings_date = (today + timedelta(days=6)).isoformat()
