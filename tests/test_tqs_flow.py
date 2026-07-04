@@ -61,14 +61,22 @@ def test_every_candidate_regardless_of_decision_gets_a_candidate_level_score():
 
 
 def test_proposal_gets_a_separate_row_from_its_candidate():
-    o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12")
-    o.run_scan_once()
-    prop = o.journal.one("SELECT candidate_id, proposal_id FROM trade_proposals LIMIT 1")
-    if not prop:
-        o.close()
-        return
+    """Deterministic by construction (inject_pending_proposal), not dependent
+    on whether the mock scan's date-seeded RNG happens to produce a proposal
+    this run."""
+    from conftest import inject_pending_proposal
+    from alphaos.tqs import score_candidate, score_proposal
+
+    o = _orch()
+    pid, _ = inject_pending_proposal(o, symbol="AAPL")
+    cand_row = o.journal.one("SELECT * FROM candidates ORDER BY id DESC LIMIT 1")
+    candidate_id = cand_row["candidate_id"]
+
+    assert score_candidate(o.journal, o.settings, cand_row) is not None
+    assert score_proposal(o.journal, o.settings, candidate_id, pid) is not None
+
     rows = o.journal.query(
-        "SELECT source_type FROM tqs_scores WHERE candidate_id = ?", (prop["candidate_id"],)
+        "SELECT source_type FROM tqs_scores WHERE candidate_id = ?", (candidate_id,)
     )
     assert {r["source_type"] for r in rows} == {"candidate", "proposal"}
     o.close()
@@ -138,7 +146,8 @@ def test_tqs_toggle_does_not_change_decision_artifacts():
     assert adjustments_on == adjustments_off
     assert risk_checks_on == risk_checks_off
     # sanity: the A/B test itself actually produced decision rows to compare
-    assert proposals_off or rejected_off or adjustments_off
+    # (an all-empty comparison would pass vacuously regardless of a real leak)
+    assert proposals_off or rejected_off or adjustments_off or risk_checks_off
 
 
 def test_tqs_toggle_does_not_change_candidate_labels_or_status():
@@ -292,7 +301,6 @@ def test_component_error_is_logged_as_system_event():
     from unittest.mock import MagicMock
 
     o = _orch(INTEREST_SCAN_TOP_N="3", MAX_CANDIDATES_TO_AI="3")
-    real_build = tqs_pkg.batch.build_candidate_inputs if hasattr(tqs_pkg, "batch") else None
     import alphaos.tqs.batch as batch_mod
 
     original = batch_mod.build_candidate_inputs
