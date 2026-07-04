@@ -909,6 +909,12 @@ class Orchestrator:
         for row in self.journal.open_proposals():
             direction = row.get("direction") or TradeDirection.LONG.value
             fresh = self.journal.latest_freshness_for_symbol(row["symbol"]) or {}
+            # PR6: TTL/expiry visibility -- computed fresh on every render (never
+            # persisted here; this is a PURE READ), so an operator sees staleness
+            # BEFORE clicking Approve, even though the DB status itself is only
+            # lazily flipped to 'expired' the moment an approval is attempted.
+            expires_at = row.get("proposal_expires_at_utc")
+            remaining = proposal_ttl.seconds_remaining(expires_at)
             views.append(
                 {
                     "proposal_id": row.get("proposal_id"),
@@ -930,6 +936,10 @@ class Orchestrator:
                     "generated_at_utc": row.get("created_at_utc"),
                     "generated_at_sgt": row.get("created_at_sgt"),
                     "last_known_freshness": fresh.get("freshness_status") or "n/a (re-checked at approval)",
+                    "proposal_ttl_seconds": row.get("proposal_ttl_seconds"),
+                    "proposal_expires_at_utc": expires_at,
+                    "proposal_seconds_remaining": remaining,
+                    "proposal_is_stale": proposal_ttl.is_expired(expires_at),
                 }
             )
         return views

@@ -67,6 +67,17 @@ def render_sidebar(orch: Orchestrator) -> None:
         st.sidebar.info(f"Demo: {d['message']}")
 
 
+def _format_seconds_remaining(seconds) -> str:
+    """PR6: human-readable TTL countdown for the Approval Center. None (missing/
+    unparseable expiry) reads as 'unknown' -- never as a blank/"fine" value."""
+    if seconds is None:
+        return "unknown"
+    if seconds <= 0:
+        return f"expired {int(abs(seconds))}s ago"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m {secs}s"
+
+
 def tab_approval_center(orch: Orchestrator) -> None:
     """The actionable approval queue. Listing is read-only; ledger writes happen
     only when the user clicks Approve/Reject (each is an explicit action)."""
@@ -88,6 +99,8 @@ def tab_approval_center(orch: Orchestrator) -> None:
                 "side": v["side"], "entry": v["entry"], "stop": v["stop"], "target": v["target"],
                 "qty": v["qty"], "R:R": v["reward_risk"], "risk_$": v["risk_amount"],
                 "last_freshness": v["last_known_freshness"], "generated_sgt": v["generated_at_sgt"],
+                "expires_in": _format_seconds_remaining(v["proposal_seconds_remaining"]),
+                "stale": v["proposal_is_stale"],
             }
             for v in views
         ],
@@ -96,9 +109,15 @@ def tab_approval_center(orch: Orchestrator) -> None:
     st.divider()
     for v in views:
         pid = v["proposal_id"]
+        stale_flag = " ⚠️ STALE (TTL exceeded)" if v["proposal_is_stale"] else ""
         with st.expander(
-            f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · {pid}"
+            f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · {pid}{stale_flag}"
         ):
+            if v["proposal_is_stale"]:
+                st.warning(
+                    "This proposal's TTL has expired — approval will be rejected. "
+                    "Run a fresh scan to get a current proposal for this symbol."
+                )
             st.write(
                 {
                     "trade_id": v["trade_id"], "candidate_id": v["candidate_id"],
@@ -107,6 +126,9 @@ def tab_approval_center(orch: Orchestrator) -> None:
                     "expected_r": v["expected_r"], "requires_margin": v["requires_margin"],
                     "last_known_freshness": v["last_known_freshness"],
                     "generated_at_utc": v["generated_at_utc"],
+                    "proposal_ttl_seconds": v["proposal_ttl_seconds"],
+                    "proposal_expires_at_utc": v["proposal_expires_at_utc"],
+                    "expires_in": _format_seconds_remaining(v["proposal_seconds_remaining"]),
                 }
             )
             approve_margin = False
@@ -162,7 +184,16 @@ def tab_candidates(orch: Orchestrator) -> None:
                 (c["candidate_id"],),
             )
             if prop and prop["status"] in ("pending_approval", "proposed"):
-                st.markdown(f"**Proposal** `{prop['proposal_id']}` — qty {prop['qty']} · status {prop['status']}")
+                from alphaos.proposals import is_expired as _proposal_is_expired
+                from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
+
+                expires_in = _format_seconds_remaining(
+                    _proposal_seconds_remaining(prop.get("proposal_expires_at_utc")))
+                st.markdown(f"**Proposal** `{prop['proposal_id']}` — qty {prop['qty']} · status {prop['status']} "
+                           f"· expires in {expires_in}")
+                if _proposal_is_expired(prop.get("proposal_expires_at_utc")):
+                    st.warning("This proposal's TTL has expired — approval will be rejected. "
+                              "Run a fresh scan to get a current proposal for this symbol.")
                 approve_margin = False
                 if prop.get("requires_margin"):
                     approve_margin = st.checkbox(
