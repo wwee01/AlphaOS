@@ -1543,9 +1543,17 @@ class Orchestrator:
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             "ai_lineage_json": lineage.combine_ai_lineage(
                 label={"model": getattr(classification, "model", None),
-                       "is_mock": getattr(classification, "is_mock", None)} if classification else None,
+                       "is_mock": getattr(classification, "is_mock", None),
+                       "model_provider": getattr(classification, "model_provider", None),
+                       "prompt_hash": getattr(classification, "prompt_hash", None),
+                       "system_prompt_hash": getattr(classification, "system_prompt_hash", None)}
+                if classification else None,
                 last30days={"model": getattr(last30, "model", None),
-                            "is_mock": getattr(last30, "is_mock", None)} if last30 else None,
+                            "is_mock": getattr(last30, "is_mock", None),
+                            "model_provider": getattr(last30, "model_provider", None),
+                            "prompt_hash": getattr(last30, "prompt_hash", None),
+                            "system_prompt_hash": getattr(last30, "system_prompt_hash", None)}
+                if last30 else None,
             ),
         })
         self.journal.conn.execute(

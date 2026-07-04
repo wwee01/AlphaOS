@@ -34,6 +34,15 @@ SECRET_SETTINGS_FIELDS = frozenset({
     "alpaca_secret_key",
     "ntfy_topic",
     "last30days_cmd",
+    # Private local filesystem paths -- not credentials, but they leak the
+    # deployment's directory layout into the config-hash PREIMAGE (the digest
+    # itself never stores them, but keep them out of the preimage entirely as
+    # defense-in-depth in case the preimage is ever logged) and are deployment
+    # environment, not decision-relevant config, so excluding them also keeps
+    # the config hash stable across machines.
+    "db_path",
+    "last30days_repo_path",
+    "last30days_python",
 })
 
 
