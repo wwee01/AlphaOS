@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, time as _time, timedelta, timezone as _tz
 
+from alphaos.constants import ProposalStatus
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 from alphaos.scheduler import cost_guard
@@ -182,17 +183,18 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     # proposal_expires_at_utc (pre-PR6/legacy rows) counts as stale, matching
     # is_expired()'s own fail-safe rule.
     now_iso = timeutils.to_iso(timeutils.now_utc())
+    open_statuses = ProposalStatus.approvable()
     active_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN ('pending_approval', 'proposed') "
+        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
         "AND proposal_expires_at_utc IS NOT NULL AND proposal_expires_at_utc > ? "
         "AND created_at_utc >= ? ORDER BY id DESC",
-        (now_iso, since_sgt),
+        (*open_statuses, now_iso, since_sgt),
     )
     stale_unmarked_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN ('pending_approval', 'proposed') "
+        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
         "AND (proposal_expires_at_utc IS NULL OR proposal_expires_at_utc <= ?) "
         "AND created_at_utc >= ? ORDER BY id DESC",
-        (now_iso, since_sgt),
+        (*open_statuses, now_iso, since_sgt),
     )
     expired_proposals_today = journal.query(
         "SELECT * FROM trade_proposals WHERE status = 'expired' AND created_at_utc >= ? "

@@ -19,6 +19,7 @@ import streamlit as st
 
 from alphaos.ai.claude_reviewer import ClaudeUnavailable
 from alphaos.config.settings import load_settings
+from alphaos.constants import ProposalStatus
 from alphaos.orchestrator import Orchestrator
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
@@ -183,7 +184,7 @@ def tab_candidates(orch: Orchestrator) -> None:
                 "SELECT * FROM trade_proposals WHERE candidate_id = ? ORDER BY id DESC LIMIT 1",
                 (c["candidate_id"],),
             )
-            if prop and prop["status"] in ("pending_approval", "proposed"):
+            if prop and prop["status"] in ProposalStatus.approvable():
                 from alphaos.proposals import is_expired as _proposal_is_expired
                 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 

@@ -756,7 +756,8 @@ class Orchestrator:
             rec["user_final_decision"] = Decision.REJECT.value
             prop = self.journal.one(
                 "SELECT * FROM trade_proposals WHERE candidate_id = ? "
-                "AND status IN ('pending_approval','proposed') ORDER BY id DESC LIMIT 1", (candidate_id,))
+                "AND status IN (?, ?) ORDER BY id DESC LIMIT 1",
+                (candidate_id, *ProposalStatus.approvable()))
             if not prop:
                 rec["blocked_reason"] = OverrideBlockedReason.NO_PROPOSAL.value
                 msg = "no open proposal to reject"

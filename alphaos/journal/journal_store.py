@@ -21,7 +21,7 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from alphaos.constants import FailsafeReason, LabelSource, Severity
+from alphaos.constants import FailsafeReason, LabelSource, ProposalStatus, Severity
 from alphaos.journal.schema import INDEXES, SCHEMA, SCHEMA_VERSION
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
@@ -353,9 +353,9 @@ class JournalStore:
         approved (filled), rejected, or blocked. Read-only — newest first.
         """
         return self.query(
-            "SELECT * FROM trade_proposals WHERE status IN ('pending_approval', 'proposed') "
+            "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
             "ORDER BY id DESC LIMIT ?",
-            (limit,),
+            (*ProposalStatus.approvable(), limit),
         )
 
     def latest_freshness_for_symbol(self, symbol: str) -> Optional[dict]:
