@@ -67,6 +67,17 @@ PROPOSAL_TTL_CONFIG_FIELDS = (
     "proposal_ttl_closed_session_seconds",
 )
 
+# PR7: TQS v0's actual scoring parameters (weights, normalization, buckets)
+# are CODE CONSTANTS keyed by TQS_VERSION, not settings -- so there is
+# nothing to hash here for the formula itself (TQS_VERSION already travels on
+# every tqs_scores row directly). The one real setting is the on/off switch;
+# a category hash still earns its keep by making "was shadow scoring even
+# enabled for this snapshot" a traceable config fact, consistent with every
+# other PR's category.
+TQS_CONFIG_FIELDS = (
+    "tqs_shadow_enabled",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -83,9 +94,9 @@ def _subset_hash(full: dict, fields: tuple) -> str:
 def build_config_hashes(settings) -> dict[str, str]:
     """{"config_hash", "scanner_config_hash", "risk_config_hash",
     "protection_config_hash", "scheduler_config_hash", "earnings_config_hash",
-    "proposal_ttl_config_hash"}. Each hash changes iff a relevant field's VALUE
-    changes -- adding/renaming a field it doesn't list does not perturb a
-    category hash that doesn't reference it."""
+    "proposal_ttl_config_hash", "tqs_config_hash"}. Each hash changes iff a
+    relevant field's VALUE changes -- adding/renaming a field it doesn't list
+    does not perturb a category hash that doesn't reference it."""
     full = settings_dict(settings)
     return {
         "config_hash": stable_hash(full),
@@ -95,4 +106,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "scheduler_config_hash": _subset_hash(full, SCHEDULER_CONFIG_FIELDS),
         "earnings_config_hash": _subset_hash(full, EARNINGS_CONFIG_FIELDS),
         "proposal_ttl_config_hash": _subset_hash(full, PROPOSAL_TTL_CONFIG_FIELDS),
+        "tqs_config_hash": _subset_hash(full, TQS_CONFIG_FIELDS),
     }

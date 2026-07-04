@@ -31,6 +31,8 @@ from alphaos.constants import (
     UserOverrideAction,
     BASELINE_MOMENTUM_NO_NEWS_V1,
     BaselineType,
+    BEARISH_CATALYST_TYPES,
+    BULLISH_CATALYST_TYPES,
     CATALYST_NOT_AVAILABLE_V1,
     CatalystStatus,
     CatalystType,
@@ -66,6 +68,7 @@ from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
 from alphaos import lineage
 from alphaos import proposals as proposal_ttl
+from alphaos import tqs
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsService
 from alphaos.risk.risk_engine import RiskEngine
@@ -103,6 +106,8 @@ class ScanSummary:
     last30days_skipped_budget_cap: int = 0
     earnings_enriched: int = 0
     earnings_skipped_budget_cap: int = 0
+    tqs_scored_candidates: int = 0
+    tqs_scored_proposals: int = 0
     polarity_classified: int = 0
     high_risk_narrative: int = 0
     decision_upgraded: int = 0
@@ -379,6 +384,20 @@ class Orchestrator:
             f"{summary.rejected} rejected, {summary.risk_blocked} risk-blocked, "
             f"{summary.auto_submitted} auto-submitted, {summary.pending_manual} pending.",
         )
+
+        # PR7: TQS v0 shadow scoring. MUST run last, strictly AFTER every
+        # decision above has already been committed -- this is what makes "TQS
+        # cannot influence this scan's decisions" true by construction, not
+        # merely by discipline. Measurement-only: nothing downstream reads
+        # tqs_scores. score_scan_batch() never raises regardless, but the
+        # tqs_shadow_enabled check still lives here (not inside
+        # score_scan_batch) so a disabled shadow costs zero queries, not just
+        # zero writes.
+        if self.settings.tqs_shadow_enabled:
+            tqs_result = tqs.score_scan_batch(self.journal, self.settings, scan_batch_id)
+            summary.tqs_scored_candidates = tqs_result["scored_candidates"]
+            summary.tqs_scored_proposals = tqs_result["scored_proposals"]
+
         return summary
 
     def _handle_proposal(self, cand, evaluation, summary: ScanSummary, scan_batch_id=None) -> bool:
@@ -875,6 +894,10 @@ class Orchestrator:
             (rec.get("arming_classification"), warning, proposal.proposal_id),
         )
         self.journal.conn.commit()
+        # PR7: TQS v0 shadow scoring, strictly AFTER this proposal is committed
+        # (same ordering guarantee as the main scan path). Measurement-only.
+        if self.settings.tqs_shadow_enabled:
+            tqs.score_proposal(self.journal, self.settings, cand["candidate_id"], proposal.proposal_id)
         rec["proposal_id"] = proposal.proposal_id
         rec["linked_trade_id"] = proposal.trade_id
         rec["execution_allowed"] = 1
@@ -926,6 +949,17 @@ class Orchestrator:
             # lazily flipped to 'expired' the moment an approval is attempted.
             expires_at = row.get("proposal_expires_at_utc")
             remaining = proposal_ttl.seconds_remaining(expires_at)
+            # PR7: TQS v0 -- DISPLAY ONLY. This is a shadow measurement signal
+            # (see alphaos/tqs/ module docstring): it must never be read by
+            # approval/risk/execution logic, only shown to a human operator
+            # alongside everything else here. A missing tqs_row (shadow
+            # disabled, or scoring hasn't run for this proposal) shows as None
+            # -- never a fabricated score.
+            tqs_row = self.journal.one(
+                "SELECT tqs_score, tqs_bucket, data_confidence FROM tqs_scores "
+                "WHERE proposal_id = ? AND source_type = 'proposal' ORDER BY id DESC LIMIT 1",
+                (row.get("proposal_id"),),
+            ) or {}
             views.append(
                 {
                     "proposal_id": row.get("proposal_id"),
@@ -951,6 +985,9 @@ class Orchestrator:
                     "proposal_expires_at_utc": expires_at,
                     "proposal_seconds_remaining": remaining,
                     "proposal_is_stale": proposal_ttl.is_expired(expires_at),
+                    "tqs_score": tqs_row.get("tqs_score"),
+                    "tqs_bucket": tqs_row.get("tqs_bucket"),
+                    "tqs_data_confidence": tqs_row.get("data_confidence"),
                 }
             )
         return views
@@ -1491,13 +1528,11 @@ class Orchestrator:
         )
 
     # Catalyst types that clearly OPPOSE a direction — never a positive upgrade
-    # driver for it (an analyst downgrade / legal-regulatory hit can't upgrade a
-    # long; an upgrade / launch / partnership can't upgrade a short).
-    _BEARISH_CATALYSTS = frozenset({CatalystType.ANALYST_DOWNGRADE.value,
-                                    CatalystType.LEGAL_REGULATORY.value})
-    _BULLISH_CATALYSTS = frozenset({CatalystType.ANALYST_UPGRADE.value,
-                                    CatalystType.PRODUCT_LAUNCH.value,
-                                    CatalystType.PARTNERSHIP.value})
+    # driver for it. Shared with alphaos/tqs/scoring.py (PR7); see
+    # BEARISH_CATALYST_TYPES/BULLISH_CATALYST_TYPES in constants.py for why
+    # the definition lives there rather than here.
+    _BEARISH_CATALYSTS = BEARISH_CATALYST_TYPES
+    _BULLISH_CATALYSTS = BULLISH_CATALYST_TYPES
 
     @staticmethod
     def _real_decision_driver(catalyst, last30, direction, polarity=None) -> tuple:

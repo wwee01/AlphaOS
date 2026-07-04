@@ -350,6 +350,21 @@ class Settings:
     proposal_ttl_extended_hours_seconds: int
     proposal_ttl_closed_session_seconds: int
 
+    # --- TQS v0 shadow scoring (Roadmap PR7) ---
+    # Measurement-only: computes an attention-worthiness ranking signal for
+    # every scored candidate/proposal and journals it to a SEPARATE tqs_scores
+    # table for later comparison against candidate_outcomes/trade_outcomes.
+    # No decision path may read this table (see alphaos/tqs/ module
+    # docstring). Weights, normalization rules, and bucket thresholds are
+    # CODE CONSTANTS (alphaos/tqs/scoring.py's TQS_VERSION), not settings --
+    # unlike earnings' provider toggle, there is nothing here an operator
+    # should be able to tune, since env-tunable weights would destroy
+    # comparability across the shadow record this PR exists to build. The
+    # only setting is the master on/off switch (pure computation, zero cost,
+    # so default True; off only disables the shadow write entirely, it can
+    # never disable a gate since TQS never gates anything).
+    tqs_shadow_enabled: bool
+
     # --- gated labeller decision override (Roadmap 2.6) ---
     # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
     # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
@@ -983,6 +998,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,
+        tqs_shadow_enabled=_get_bool(src, "TQS_SHADOW_ENABLED", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

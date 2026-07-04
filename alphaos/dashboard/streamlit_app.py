@@ -102,6 +102,9 @@ def tab_approval_center(orch: Orchestrator) -> None:
                 "last_freshness": v["last_known_freshness"], "generated_sgt": v["generated_at_sgt"],
                 "expires_in": _format_seconds_remaining(v["proposal_seconds_remaining"]),
                 "stale": v["proposal_is_stale"],
+                # PR7 TQS v0: DISPLAY ONLY -- a shadow measurement signal, never
+                # read by approval/risk/execution logic (see alphaos/tqs/).
+                "tqs": v["tqs_score"], "tqs_bucket": v["tqs_bucket"],
             }
             for v in views
         ],
@@ -130,6 +133,9 @@ def tab_approval_center(orch: Orchestrator) -> None:
                     "proposal_ttl_seconds": v["proposal_ttl_seconds"],
                     "proposal_expires_at_utc": v["proposal_expires_at_utc"],
                     "expires_in": _format_seconds_remaining(v["proposal_seconds_remaining"]),
+                    # PR7 TQS v0 -- shadow measurement signal, display only.
+                    "tqs_score": v["tqs_score"], "tqs_bucket": v["tqs_bucket"],
+                    "tqs_data_confidence": v["tqs_data_confidence"],
                 }
             )
             approve_margin = False
@@ -170,6 +176,19 @@ def tab_candidates(orch: Orchestrator) -> None:
                     f"entry {ev.get('entry')} / stop {ev.get('stop')} / target {ev.get('target')}"
                 )
                 st.caption(ev.get("reasoning_summary") or "")
+            # PR7 TQS v0 -- shadow measurement signal, display only (never read
+            # by any decision above). Absent when scoring is disabled/hasn't
+            # run yet for this candidate.
+            tqs_row = orch.journal.one(
+                "SELECT tqs_score, tqs_bucket, data_confidence FROM tqs_scores "
+                "WHERE candidate_id = ? AND source_type = 'candidate' ORDER BY id DESC LIMIT 1",
+                (c["candidate_id"],),
+            )
+            if tqs_row:
+                st.caption(
+                    f"TQS (shadow): {tqs_row['tqs_score']} · {tqs_row['tqs_bucket']} "
+                    f"· confidence {tqs_row['data_confidence']}"
+                )
             review = orch.journal.claude_review_for_candidate(c["candidate_id"])
             if review:
                 st.markdown(f"**Claude (2nd opinion):** `{review['verdict']}` — {review.get('reasoning')}")
