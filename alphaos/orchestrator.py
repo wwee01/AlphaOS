@@ -75,6 +75,7 @@ from alphaos.ai.playbook_classifier import PlaybookClassifier
 from alphaos.ai.last30days_polarity import Last30DaysPolarityClassifier, PolarityEvidence
 from alphaos.news.catalyst_enricher import CatalystEnricher
 from alphaos.research.last30days_enricher import Last30DaysEnricher
+from alphaos.earnings.earnings_enricher import EarningsProximityEnricher, recompute_with_hold_days
 from alphaos.strategy.proposal import TradeProposal
 from alphaos.strategy.swing_strategy import SwingStrategy
 from alphaos.strategy.daytrade_experiment import DaytradeExperiment
@@ -98,6 +99,8 @@ class ScanSummary:
     catalyst_enriched: int = 0
     last30days_enriched: int = 0
     last30days_skipped_budget_cap: int = 0
+    earnings_enriched: int = 0
+    earnings_skipped_budget_cap: int = 0
     polarity_classified: int = 0
     high_risk_narrative: int = 0
     decision_upgraded: int = 0
@@ -125,6 +128,7 @@ class Orchestrator:
         self.labeller = PlaybookClassifier(self.settings, self.journal)  # Roadmap 2.3: AI category labelling
         self.enricher = CatalystEnricher(self.settings, self.journal)    # Roadmap 2.4: official catalyst context
         self.l30_enricher = Last30DaysEnricher(self.settings, self.journal)  # Roadmap 2.5: last30days narrative context
+        self.earnings_enricher = EarningsProximityEnricher(self.settings, self.journal)  # PR5: earnings-proximity context
         self.polarity = Last30DaysPolarityClassifier(self.settings, self.journal)  # Roadmap 2.7: narrative polarity
         self.claude = ClaudeReviewer(self.settings, self.journal)
         self.risk = RiskEngine(self.settings)
@@ -259,6 +263,19 @@ class Orchestrator:
             if l30_enabled and (c.get("interest_rank") or 10 ** 9) <= l30_cap
         }
 
+        # Earnings-proximity enrichment is a SEPARATE per-scan budget (PR5),
+        # mirroring last30days exactly: top-N shortlisted candidates BY INTEREST
+        # RANK are enriched; eligible candidates outside the cap are explicitly
+        # journaled as 'skipped_budget_cap' (never silently dropped). Advisory
+        # only -- never fed to the labeller/AI eval, never gates a decision.
+        earnings_enabled = labelling and self.settings.earnings_proximity_enabled
+        earnings_cap = (min(cap, self.settings.earnings_proximity_max_symbols_per_scan)
+                        if earnings_enabled else 0)
+        earnings_set = {
+            c["candidate_id"] for c in scan.candidates
+            if earnings_enabled and (c.get("interest_rank") or 10 ** 9) <= earnings_cap
+        }
+
         for cand in scan.candidates:
             snapshot = cand.get("_snapshot", {})
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
@@ -275,8 +292,13 @@ class Orchestrator:
                 if l30_enabled:
                     l30_mode = ("enrich" if cand["candidate_id"] in l30_set
                                 else "skipped_budget_cap")
+                earnings_mode = None
+                if earnings_enabled:
+                    earnings_mode = ("enrich" if cand["candidate_id"] in earnings_set
+                                     else "skipped_budget_cap")
                 classification = self._label_candidate(
-                    cand, snapshot, scan_batch_id, enrich=do_enrich, l30_mode=l30_mode)
+                    cand, snapshot, scan_batch_id, enrich=do_enrich, l30_mode=l30_mode,
+                    earnings_mode=earnings_mode)
                 summary.labelled += 1
                 if do_enrich:
                     enrich_budget -= 1
@@ -285,6 +307,10 @@ class Orchestrator:
                     summary.last30days_enriched += 1
                 elif l30_mode == "skipped_budget_cap":
                     summary.last30days_skipped_budget_cap += 1
+                if earnings_mode == "enrich":
+                    summary.earnings_enriched += 1
+                elif earnings_mode == "skipped_budget_cap":
+                    summary.earnings_skipped_budget_cap += 1
                 if cand.get("_polarity") is not None:
                     summary.polarity_classified += 1
 
@@ -382,6 +408,7 @@ class Orchestrator:
             proposal.status = "blocked"
             self.journal.insert("trade_proposals", {
                 **proposal.to_row(),
+                **self._earnings_fields_for(cand.get("_earnings"), proposal.max_holding_days),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             })
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
@@ -399,6 +426,7 @@ class Orchestrator:
         proposal.status = "pending_approval"
         self.journal.insert("trade_proposals", {
             **proposal.to_row(),
+            **self._earnings_fields_for(cand.get("_earnings"), proposal.max_holding_days),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         })
         # Roadmap 2.7: surface the polarity arming classification + high-risk
@@ -1137,14 +1165,38 @@ class Orchestrator:
             )
         self.journal.conn.commit()
 
+    def _earnings_fields_for(self, earnings_ctx, hold_days=None) -> dict:
+        """Denormalized earnings-proximity summary (PR5) for candidates/
+        trade_proposals/rejected_candidates/decision_adjustments. With
+        ``hold_days`` given, cheaply RE-DERIVE the hold-window flag against the
+        REAL holding period (never re-fetches from the provider -- see
+        alphaos/earnings/earnings_enricher.py); with ``hold_days=None``, use the
+        already-computed default-hold-days view as-is (candidates table, where
+        the real hold length isn't known yet). ``None`` earnings_ctx (disabled/
+        not yet enriched) yields an all-None dict -- never a false "safe"."""
+        empty = {
+            "earnings_date": None, "days_until_earnings": None,
+            "earnings_within_hold_window": None, "earnings_within_warning_window": None,
+            "earnings_timing": None, "earnings_data_status": None,
+        }
+        if earnings_ctx is None:
+            return empty
+        ctx = earnings_ctx
+        if hold_days is not None:
+            ctx = recompute_with_hold_days(
+                earnings_ctx, hold_days, self.settings.earnings_proximity_warning_days)
+        return ctx.summary_fields()
+
     def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id, enrich: bool = True,
-                         l30_mode: Optional[str] = None):
+                         l30_mode: Optional[str] = None, earnings_mode: Optional[str] = None):
         """Build the compact packet, (optionally) enrich it with catalyst +
-        last30days context, journal it, AI-classify it, and freeze the label +
-        catalyst + last30days view onto the candidate. Returns the
-        PlaybookClassification (advisory). ``l30_mode`` is one of: 'enrich'
-        (within the per-scan cap), 'skipped_budget_cap' (eligible but outside it),
-        or None (last30days disabled)."""
+        last30days + earnings-proximity context, journal it, AI-classify it, and
+        freeze the label + catalyst + last30days + earnings view onto the
+        candidate. Returns the PlaybookClassification (advisory). ``l30_mode``/
+        ``earnings_mode`` are each one of: 'enrich' (within the per-scan cap),
+        'skipped_budget_cap' (eligible but outside it), or None (disabled).
+        Earnings context is NEVER applied to the packet -- it must not reach the
+        AI eval/labeller prompt."""
         signals = cand.get("_interest")
         if signals is None:  # defensive: recompute if the scanner didn't attach it
             from alphaos.scanner.interest_scanner import InterestScanner
@@ -1171,6 +1223,14 @@ class Orchestrator:
         elif l30_mode == "skipped_budget_cap":
             last30 = self.l30_enricher.skipped_budget_cap(
                 packet, rank=cand.get("interest_rank"), interest_score=signals.interest_score)
+        # PR5: earnings-proximity context, AFTER last30days. Advisory ONLY — never
+        # applied to the packet, so it can never reach the AI eval/labeller prompt,
+        # never forces a decision, bypasses a gate, or executes.
+        earnings = None
+        if earnings_mode == "enrich":
+            earnings = self.earnings_enricher.enrich(packet)
+        elif earnings_mode == "skipped_budget_cap":
+            earnings = self.earnings_enricher.skipped_budget_cap(packet)
         self.journal.insert("candidate_packets", packet.to_row(scan_batch_id))
         classification = self.labeller.classify(packet)
         if catalyst is not None:
@@ -1189,6 +1249,11 @@ class Orchestrator:
                 "candidate_last30days",
                 last30.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
             )
+        if earnings is not None:
+            self.journal.insert("candidate_earnings", {
+                **earnings.to_row(cand["candidate_id"], packet.packet_id, scan_batch_id),
+                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            })
         # Roadmap 2.7: LLM narrative polarity over the live last30days clusters.
         # Only when enrichment found a real narrative (status 'available'); SEPARATE
         # evidence; fail-safe. It can ARM an override upgrade (gated, deterministic)
@@ -1213,17 +1278,19 @@ class Orchestrator:
                 **polarity.to_row(scan_batch_id, packet.packet_id),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             })
-        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30, polarity)
+        self._freeze_label(cand, packet, classification, scan_batch_id, catalyst, last30,
+                           polarity, earnings)
         # Stash the advisory context so _resolve_decision can (a) decide whether a
         # real driver justifies a symmetric override and (b) record the driver.
         cand["_catalyst"] = catalyst
         cand["_last30"] = last30
         cand["_polarity"] = polarity
+        cand["_earnings"] = earnings
         cand["_packet_id"] = packet.packet_id
         return classification
 
     def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None,
-                      last30=None, polarity=None) -> None:
+                      last30=None, polarity=None, earnings=None) -> None:
         """Persist the label (append-only history) + freeze the current view onto
         the candidate, including the advisory catalyst (2.4) + last30days (2.5) +
         polarity (2.7) views. History is never rewritten; none of catalyst /
@@ -1244,13 +1311,18 @@ class Orchestrator:
         pol_align = polarity.direction_alignment if polarity else None
         pol_driver = polarity.narrative_driver_type if polarity else None
         pol_arming = polarity.arming_classification if polarity else None
+        # PR5: earnings-proximity summary, computed with the DEFAULT hold-days
+        # view (the real hold length isn't known yet at label-freeze time).
+        earn = self._earnings_fields_for(earnings)
         self.journal.conn.execute(
             "UPDATE candidates SET primary_label = ?, secondary_labels_json = ?, "
             "candidate_tags_json = ?, risk_tags_json = ?, label_confidence = ?, "
             "label_decision = ?, label_version = ?, label_source = ?, label_frozen_at_utc = ?, "
             "catalyst_status = ?, catalyst_type = ?, catalyst_suggested_label = ?, label_review_required = ?, "
             "last30days_status = ?, sentiment_label = ?, "
-            "polarity_label = ?, polarity_alignment = ?, narrative_driver_type = ?, arming_classification = ? "
+            "polarity_label = ?, polarity_alignment = ?, narrative_driver_type = ?, arming_classification = ?, "
+            "earnings_date = ?, days_until_earnings = ?, earnings_within_hold_window = ?, "
+            "earnings_within_warning_window = ?, earnings_timing = ?, earnings_data_status = ? "
             "WHERE candidate_id = ?",
             (
                 classification.primary_label,
@@ -1265,6 +1337,8 @@ class Orchestrator:
                 cs, ct, csl, lrr,
                 l30s, sentl,
                 pol_label, pol_align, pol_driver, pol_arming,
+                earn["earnings_date"], earn["days_until_earnings"], earn["earnings_within_hold_window"],
+                earn["earnings_within_warning_window"], earn["earnings_timing"], earn["earnings_data_status"],
                 cand["candidate_id"],
             ),
         )
@@ -1432,9 +1506,10 @@ class Orchestrator:
                                   else ArmedWatchReason.EVAL_NOT_TRADEABLE.value)
             summary.armed_watch += 1
 
+        earnings = cand.get("_earnings")
         self._record_decision_adjustment(
             cand, evaluation, classification, base, final, adjustment,
-            override_active, driver_str, driver_detail, catalyst, last30, scan_batch_id,
+            override_active, driver_str, driver_detail, catalyst, last30, earnings, scan_batch_id,
             armed_watch=armed_watch, armed_watch_reason=armed_watch_reason, arming_cls=arming_cls,
         )
         return final
@@ -1490,7 +1565,7 @@ class Orchestrator:
 
     def _record_decision_adjustment(self, cand, evaluation, classification, base, final,
                                     adjustment, override_active, driver_str, driver_detail,
-                                    catalyst, last30, scan_batch_id, armed_watch=False,
+                                    catalyst, last30, earnings, scan_batch_id, armed_watch=False,
                                     armed_watch_reason=None, arming_cls=None) -> None:
         """Append-only audit + a denormalized tag on the candidate. Stores enough
         source-level evidence (catalyst + last30days, columns AND a full
@@ -1540,6 +1615,10 @@ class Orchestrator:
             "labeller_reason": getattr(classification, "reason_for_label", None),
             "labeller_missing_conditions_json": getattr(classification, "missing_conditions", None),
             "labeller_upgrade_blockers_json": getattr(classification, "upgrade_blockers", None),
+            # --- PR5: earnings-proximity, recomputed against the REAL max_holding_days ---
+            **self._earnings_fields_for(
+                earnings, getattr(evaluation, "max_holding_days", None)
+                or self.settings.earnings_proximity_default_hold_days),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             "ai_lineage_json": lineage.combine_ai_lineage(
                 label={"model": getattr(classification, "model", None),
@@ -1645,6 +1724,11 @@ class Orchestrator:
                 "direction": evaluation.direction,
                 "would_be_entry": evaluation.entry,
                 "would_be_stop": evaluation.stop,
+                # PR5: earnings-proximity, recomputed against the REAL max_holding_days.
+                **self._earnings_fields_for(
+                    cand.get("_earnings"),
+                    getattr(evaluation, "max_holding_days", None)
+                    or self.settings.earnings_proximity_default_hold_days),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             },
         )

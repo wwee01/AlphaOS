@@ -483,6 +483,25 @@ class EnrichmentSource(StrEnum):
     NONE = "none"
 
 
+class EarningsDataStatus(StrEnum):
+    """PR5: status of the earnings-proximity fetch for one candidate. Never
+    "safe" by omission -- UNAVAILABLE/UNKNOWN/STALE/PROVIDER_DISABLED are all
+    distinct from OK so a caller can never mistake missing data for a
+    confirmed no-earnings-nearby result."""
+
+    OK = "ok"
+    UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
+    STALE = "stale"
+    PROVIDER_DISABLED = "provider_disabled"
+
+
+class EarningsTiming(StrEnum):
+    BEFORE_OPEN = "before_open"
+    AFTER_CLOSE = "after_close"
+    UNKNOWN = "unknown"
+
+
 # Maps a catalyst type to the OFFICIAL label it would imply, used ONLY to compute
 # an advisory ``catalyst_suggested_label`` + ``label_review_required`` flag. It
 # never overwrites the frozen primary_label (no auto-relabelling in v1).
