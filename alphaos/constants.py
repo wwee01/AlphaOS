@@ -348,6 +348,9 @@ class ReasonCode(StrEnum):
     LABEL_UNCLASSIFIED = "LABEL_UNCLASSIFIED"
     LABEL_MALFORMED = "LABEL_MALFORMED"
     LABEL_LOW_CONFIDENCE = "LABEL_LOW_CONFIDENCE"
+    # --- Roadmap PR6: proposal TTL / stale-approval guard ---
+    PROPOSAL_EXPIRED = "PROPOSAL_EXPIRED"
+    PROPOSAL_SUPERSEDED = "PROPOSAL_SUPERSEDED"
 
 
 # --- Labels & sentinels ------------------------------------------------------
@@ -500,6 +503,30 @@ class EarningsTiming(StrEnum):
     BEFORE_OPEN = "before_open"
     AFTER_CLOSE = "after_close"
     UNKNOWN = "unknown"
+
+
+class ProposalStatus(StrEnum):
+    """Full lifecycle of a ``trade_proposals`` row (PR6 formalizes this as an
+    enum; every value below was already in use as a raw string except EXPIRED
+    and SUPERSEDED, which PR6 adds). A row is only ever ADDITIVELY updated —
+    never deleted — so every status a proposal ever passed through remains
+    reconstructable from system_events/approvals history."""
+
+    PROPOSED = "proposed"
+    PENDING_APPROVAL = "pending_approval"
+    BLOCKED = "blocked"
+    APPROVED = "approved"
+    SUBMITTED = "submitted"
+    FILLED = "filled"
+    REJECTED = "rejected"
+    # --- Roadmap PR6 ---
+    EXPIRED = "expired"        # TTL exceeded before an approval attempt succeeded
+    SUPERSEDED = "superseded"  # a fresher proposal for the same symbol replaced it
+
+    @classmethod
+    def approvable(cls) -> tuple:
+        """Statuses a proposal must be in to be eligible for approve_proposal()."""
+        return (cls.PENDING_APPROVAL.value, cls.PROPOSED.value)
 
 
 # Maps a catalyst type to the OFFICIAL label it would imply, used ONLY to compute

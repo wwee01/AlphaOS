@@ -14,7 +14,9 @@ from __future__ import annotations
 
 from datetime import datetime, time as _time, timedelta, timezone as _tz
 
+from alphaos.constants import ProposalStatus
 from alphaos.execution.protection_watchdog import status_report
+from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 from alphaos.scheduler import cost_guard
 from alphaos.util import timeutils
 
@@ -172,6 +174,48 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "earnings_provider_failures_today": earnings_provider_failures_today,
     }
 
+    # PR6: proposal TTL / stale-approval guard visibility. "Active" and "stale
+    # (unmarked)" are both computed against a Python "now" (never SQLite's
+    # datetime('now') -- see stale_before above for why) since the DB status
+    # column is only lazily flipped to 'expired' the moment someone actually
+    # attempts to approve one; the digest must not wait for that to happen to
+    # show an operator a proposal is effectively no longer approvable. NULL
+    # proposal_expires_at_utc (pre-PR6/legacy rows) counts as stale, matching
+    # is_expired()'s own fail-safe rule.
+    now_iso = timeutils.to_iso(timeutils.now_utc())
+    open_statuses = ProposalStatus.approvable()
+    active_proposals_today = journal.query(
+        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
+        "AND proposal_expires_at_utc IS NOT NULL AND proposal_expires_at_utc > ? "
+        "AND created_at_utc >= ? ORDER BY id DESC",
+        (*open_statuses, now_iso, since_sgt),
+    )
+    stale_unmarked_proposals_today = journal.query(
+        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
+        "AND (proposal_expires_at_utc IS NULL OR proposal_expires_at_utc <= ?) "
+        "AND created_at_utc >= ? ORDER BY id DESC",
+        (*open_statuses, now_iso, since_sgt),
+    )
+    expired_proposals_today = journal.query(
+        "SELECT * FROM trade_proposals WHERE status = 'expired' AND created_at_utc >= ? "
+        "ORDER BY id DESC",
+        (since_sgt,),
+    )
+    superseded_proposals_today = journal.query(
+        "SELECT * FROM trade_proposals WHERE status = 'superseded' AND created_at_utc >= ? "
+        "ORDER BY id DESC",
+        (since_sgt,),
+    )
+    for bucket in (active_proposals_today, stale_unmarked_proposals_today):
+        for r in bucket:
+            r["seconds_remaining"] = _proposal_seconds_remaining(r.get("proposal_expires_at_utc"))
+    proposal_lifecycle = {
+        "active_proposals_today": active_proposals_today,
+        "stale_unmarked_proposals_today": stale_unmarked_proposals_today,
+        "expired_proposals_today": expired_proposals_today,
+        "superseded_proposals_today": superseded_proposals_today,
+    }
+
     calls_used = cost_guard.calls_in_last_30_days(journal)
     cost_cap_skipped_today = journal.query(
         "SELECT * FROM job_runs WHERE cost_cap_exceeded = 1 AND started_at_utc >= ? ORDER BY id DESC",
@@ -201,4 +245,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "errors_and_failures": errors_and_failures,
         "cost_usage": cost_usage,
         "earnings_proximity": earnings_proximity,
+        "proposal_lifecycle": proposal_lifecycle,
     }

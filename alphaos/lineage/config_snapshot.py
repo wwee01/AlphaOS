@@ -62,6 +62,11 @@ EARNINGS_CONFIG_FIELDS = (
     "earnings_proximity_fail_open_as_unavailable",
 )
 
+PROPOSAL_TTL_CONFIG_FIELDS = (
+    "proposal_ttl_rth_seconds", "proposal_ttl_extended_hours_seconds",
+    "proposal_ttl_closed_session_seconds",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -77,10 +82,10 @@ def _subset_hash(full: dict, fields: tuple) -> str:
 
 def build_config_hashes(settings) -> dict[str, str]:
     """{"config_hash", "scanner_config_hash", "risk_config_hash",
-    "protection_config_hash", "scheduler_config_hash", "earnings_config_hash"}.
-    Each hash changes iff a relevant field's VALUE changes -- adding/renaming a
-    field it doesn't list does not perturb a category hash that doesn't
-    reference it."""
+    "protection_config_hash", "scheduler_config_hash", "earnings_config_hash",
+    "proposal_ttl_config_hash"}. Each hash changes iff a relevant field's VALUE
+    changes -- adding/renaming a field it doesn't list does not perturb a
+    category hash that doesn't reference it."""
     full = settings_dict(settings)
     return {
         "config_hash": stable_hash(full),
@@ -89,4 +94,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "protection_config_hash": _subset_hash(full, PROTECTION_CONFIG_FIELDS),
         "scheduler_config_hash": _subset_hash(full, SCHEDULER_CONFIG_FIELDS),
         "earnings_config_hash": _subset_hash(full, EARNINGS_CONFIG_FIELDS),
+        "proposal_ttl_config_hash": _subset_hash(full, PROPOSAL_TTL_CONFIG_FIELDS),
     }
