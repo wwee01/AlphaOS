@@ -1313,6 +1313,7 @@ SCHEMA: list[tuple[str, str]] = [
             scheduler_config_hash TEXT,
             earnings_config_hash TEXT,
             proposal_ttl_config_hash TEXT,
+            tqs_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1360,6 +1361,45 @@ SCHEMA: list[tuple[str, str]] = [
             risk_tags_json TEXT,
             fetched_at_utc TEXT,
             lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR7: TQS v0 -- shadow-only Trade Quality Score. Measurement-only: an
+        # attention-worthiness ranking signal to compare against
+        # candidate_outcomes/trade_outcomes, NOT a probability, NOT expected
+        # return, NOT a sizing/approval/gating signal. No decision path may
+        # read this table -- see alphaos/tqs/README (module docstring) for the
+        # enforced boundary. Separate table (not columns on the decision
+        # tables) so "nothing reads this" stays a one-table audit surface, and
+        # so a v0 formula that gets reshaped by calibration doesn't require
+        # touching four other tables. One row per (source_type, candidate_id[,
+        # proposal_id], tqs_version) -- see the partial unique indexes below
+        # for why a plain UNIQUE column list is not NULL-safe in SQLite.
+        "tqs_scores",
+        """
+        CREATE TABLE IF NOT EXISTS tqs_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tqs_id TEXT NOT NULL UNIQUE,
+            source_type TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            proposal_id TEXT,
+            scan_batch_id TEXT,
+            symbol TEXT NOT NULL,
+            direction TEXT,
+            tqs_version TEXT NOT NULL,
+            raw_score INTEGER,
+            data_confidence REAL NOT NULL,
+            tqs_score INTEGER,
+            tqs_bucket TEXT NOT NULL,
+            components_json TEXT,
+            missing_components_json TEXT,
+            data_quality_status TEXT NOT NULL,
+            is_mock INTEGER DEFAULT 0,
+            lineage_id TEXT,
+            computed_at_utc TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1444,6 +1484,24 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_earnings_candidate ON candidate_earnings(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_earnings_scan_batch ON candidate_earnings(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_earnings_lineage ON candidate_earnings(lineage_id)",
+    # PR7: TQS v0 shadow scoring. Idempotency at the DB level: SQLite treats
+    # every NULL as distinct from every other NULL, so a plain
+    # UNIQUE(source_type, candidate_id, proposal_id, tqs_version) would NOT
+    # stop two candidate-level rows (proposal_id IS NULL both times) for the
+    # same candidate+version from being inserted twice. Two PARTIAL unique
+    # indexes close that gap: the candidate-level one never mentions
+    # proposal_id at all, and the proposal-level one only applies where
+    # proposal_id is actually populated (never NULL there, since a
+    # source_type='proposal' row is only ever inserted with a real
+    # proposal_id) -- mirrors PR3's idx_jobruns_lock_key_active partial-index
+    # pattern for the same class of problem.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tqs_candidate_unique "
+    "ON tqs_scores(candidate_id, tqs_version) WHERE source_type = 'candidate'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_tqs_proposal_unique "
+    "ON tqs_scores(candidate_id, proposal_id, tqs_version) WHERE source_type = 'proposal'",
+    "CREATE INDEX IF NOT EXISTS idx_tqs_scan_batch ON tqs_scores(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tqs_bucket ON tqs_scores(tqs_bucket)",
+    "CREATE INDEX IF NOT EXISTS idx_tqs_lineage ON tqs_scores(lineage_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

@@ -479,6 +479,20 @@ class CatalystType(StrEnum):
     UNKNOWN = "unknown"
 
 
+# Catalyst types that clearly OPPOSE a direction -- never a positive upgrade
+# driver for it (an analyst downgrade / legal-regulatory hit can't upgrade a
+# long; an upgrade / launch / partnership can't upgrade a short). Shared
+# single source of truth: Orchestrator._real_decision_driver (Roadmap 2.7) and
+# alphaos/tqs/scoring.py (PR7) both need this same opposition list, and it
+# lives here (not on Orchestrator) specifically so alphaos/tqs -- which
+# orchestrator.py imports -- never has to import orchestrator.py back.
+BEARISH_CATALYST_TYPES = frozenset({CatalystType.ANALYST_DOWNGRADE.value,
+                                    CatalystType.LEGAL_REGULATORY.value})
+BULLISH_CATALYST_TYPES = frozenset({CatalystType.ANALYST_UPGRADE.value,
+                                    CatalystType.PRODUCT_LAUNCH.value,
+                                    CatalystType.PARTNERSHIP.value})
+
+
 class EnrichmentSource(StrEnum):
     MOCK = "mock"
     ALPACA = "alpaca"
@@ -527,6 +541,42 @@ class ProposalStatus(StrEnum):
     def approvable(cls) -> tuple:
         """Statuses a proposal must be in to be eligible for approve_proposal()."""
         return (cls.PENDING_APPROVAL.value, cls.PROPOSED.value)
+
+
+class TqsSourceType(StrEnum):
+    """PR7: what a tqs_scores row was computed for. A candidate-level row
+    exists for every scored candidate; a proposal-level row is a SEPARATE,
+    ADDITIONAL row for the subset that also became a proposal (recomputed
+    against proposal-level fields like the built proposal's own expected_r) --
+    never a mutation of the candidate-level row."""
+
+    CANDIDATE = "candidate"
+    PROPOSAL = "proposal"
+
+
+class TqsBucket(StrEnum):
+    """PR7: TQS v0 score buckets. Boundaries are v0-arbitrary (chosen for
+    digest readability, not calibrated) -- part of TQS_VERSION; changing them
+    is a version bump, not a config tweak. UNSCORABLE is distinct from WEAK:
+    weak means "scored low", unscorable means "no evidence was available to
+    score at all" -- collapsing the two would hide a data-coverage gap behind
+    what looks like a real (if poor) assessment."""
+
+    UNSCORABLE = "unscorable"
+    WEAK = "weak"
+    MIXED = "mixed"
+    WATCH = "watch"
+    GOOD = "good"
+    STRONG = "strong"
+
+
+class TqsDataQualityStatus(StrEnum):
+    """PR7: overall evidence-quality label for one tqs_scores row."""
+
+    OK = "ok"                # majority of applicable components were live/available
+    DEGRADED = "degraded"    # scored, but most components were unavailable
+    MOCK = "mock"            # the candidate/proposal itself is mock-mode/demo data
+    UNSCORABLE = "unscorable"  # zero components available; no score was fabricated
 
 
 # Maps a catalyst type to the OFFICIAL label it would imply, used ONLY to compute
