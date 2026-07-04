@@ -22,8 +22,10 @@ class _StubProvider:
     def __init__(self, result=None, exc=None):
         self._result = result
         self._exc = exc
+        self.calls = 0
 
     def get_earnings_for_symbol(self, symbol):
+        self.calls += 1
         if self._exc is not None:
             raise self._exc
         return self._result
@@ -215,14 +217,19 @@ def test_summary_fields_subset():
 def test_recompute_does_not_refetch_only_reclassifies():
     """The provider is called exactly ONCE (inside enrich()); recompute must
     reclassify using the SAME fetched earnings_date, just against a new hold
-    length -- days_until_earnings must be identical across recomputes."""
+    length -- days_until_earnings must be identical across recomputes. Proven
+    with a CALL-COUNTING stub, not just value equality (a buggy recompute that
+    silently refetched and happened to get the same date back would otherwise
+    slip past this test)."""
     res = _result(days_out=5)
     stub = _StubProvider(result=res)
     e = EarningsProximityEnricher(_settings(EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS="3"), provider=stub)
     ctx = e.enrich(_pkt())
+    assert stub.calls == 1
     assert ctx.earnings_within_hold_window == 0        # 5 days out > 3-day default hold
 
     recomputed = recompute_with_hold_days(ctx, hold_days=10, warning_days=7)
+    assert stub.calls == 1                              # recompute must NOT call the provider again
     assert recomputed.days_until_earnings == ctx.days_until_earnings
     assert recomputed.earnings_date == ctx.earnings_date
     assert recomputed.hold_days_used == 10

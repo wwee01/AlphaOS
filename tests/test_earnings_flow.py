@@ -127,16 +127,30 @@ def test_trade_proposals_get_earnings_summary_recomputed_with_real_hold_days():
 
 
 # --------------------------------------------------------- provider health
-def test_unavailable_data_status_appears_distinctly_not_as_safe():
+def test_unavailable_data_status_appears_distinctly_not_as_safe(monkeypatch):
+    """Force EVERY enriched candidate's provider result to "no data found" so
+    this doesn't depend on the mock's date-seeded ~15%-per-symbol unavailable
+    roll landing on at least one of 10 symbols (a real flake risk across a
+    handful of symbols -- see HANDOVER.md's documented mock-RNG-boundary
+    lesson)."""
+    from alphaos.earnings.earnings_provider import EarningsProximityResult
+
     o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12",
               EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN="10")
+
+    def _always_unavailable(symbol):
+        return EarningsProximityResult(
+            symbol=symbol, earnings_date=None, status=EarningsDataStatus.UNAVAILABLE.value,
+            source="stub",
+        )
+
+    monkeypatch.setattr(o.earnings_enricher._provider, "get_earnings_for_symbol", _always_unavailable)
     o.run_scan_once()
     unavailable = o.journal.query(
         "SELECT * FROM candidate_earnings WHERE earnings_data_status = ?",
         (EarningsDataStatus.UNAVAILABLE.value,),
     )
-    # the mock provider deterministically produces some "no data" symbols
-    assert unavailable
+    assert len(unavailable) == 10  # every enriched candidate, deterministically
     for r in unavailable:
         assert r["earnings_date"] is None
         assert r["earnings_within_hold_window"] == 0
@@ -341,6 +355,28 @@ def test_risk_checks_unaffected_by_earnings_toggle():
     on.close()
 
     assert [dict(r) for r in risk_on] == [dict(r) for r in risk_off]
+
+
+def test_protection_watchdog_unaffected_by_earnings_toggle():
+    """protection_watchdog is untouched by this PR; confirm its read-only status
+    report is byte-identical whether earnings-proximity is on or off."""
+    from alphaos.execution.protection_watchdog import status_report
+
+    base = {"INTEREST_SCAN_TOP_N": "12", "MAX_CANDIDATES_TO_AI": "12", "LABELLING_ENABLED": "true"}
+    off = Orchestrator(settings=make_settings(EARNINGS_PROXIMITY_ENABLED="false", **base),
+                       journal=JournalStore(":memory:"))
+    off.run_scan_once()
+    report_off = status_report(off.journal)
+    off.close()
+
+    on = Orchestrator(settings=make_settings(EARNINGS_PROXIMITY_ENABLED="true",
+                                             EARNINGS_PROXIMITY_MAX_SYMBOLS_PER_SCAN="10", **base),
+                      journal=JournalStore(":memory:"))
+    on.run_scan_once()
+    report_on = status_report(on.journal)
+    on.close()
+
+    assert report_on == report_off
 
 
 def test_scheduler_triggered_scan_also_produces_candidate_earnings():
