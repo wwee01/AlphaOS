@@ -191,21 +191,36 @@ def _resolve_one(journal, row: dict) -> Optional[str]:
     to persist this pass -- the row is simply left untouched, not rewritten)."""
     attribution_type = row["attribution_type"]
     candidate_id = row.get("candidate_id")
+    proposal_id = row.get("proposal_id")
+
+    def _proposal_levels():
+        """(entry, stop, target) for THIS row's own proposal, or all-None if
+        there is no proposal_id -- used to disambiguate which
+        candidate_outcomes row (if the candidate has more than one proposal
+        in its history) actually belongs to this attribution row, rather
+        than silently borrowing a different proposal's frozen replay
+        (PR8 audit LOW-1)."""
+        if not proposal_id:
+            return None, None, None
+        prop = journal.proposal_by_id(proposal_id)
+        return (prop or {}).get("entry"), (prop or {}).get("stop"), (prop or {}).get("target")
 
     if attribution_type == AttributionType.PROPOSE_APPROVED_EXECUTED.value:
-        trade_outcome = discovery.trade_outcome_for_proposal(journal, row.get("proposal_id"))
-        co = discovery.candidate_outcome_for_proposal(journal, candidate_id)
+        trade_outcome = discovery.trade_outcome_for_proposal(journal, proposal_id)
+        entry, stop, target = _proposal_levels()
+        co = discovery.candidate_outcome_for_proposal(journal, candidate_id, entry=entry, stop=stop, target=target)
         result = resolve_propose_approved_executed(trade_outcome, co)
         extra_ids = {"trade_outcome_id": (trade_outcome or {}).get("outcome_id"),
                     "candidate_outcome_id": (co or {}).get("outcome_id")}
     elif attribution_type == AttributionType.USER_OVERRIDE_TRADE.value:
-        trade_outcome = discovery.trade_outcome_for_proposal(journal, row.get("proposal_id"))
+        trade_outcome = discovery.trade_outcome_for_proposal(journal, proposal_id)
         co = discovery.candidate_outcome_for_override(journal, candidate_id)
         result = resolve_user_override_trade(trade_outcome, co)
         extra_ids = {"trade_outcome_id": (trade_outcome or {}).get("outcome_id"),
                     "candidate_outcome_id": (co or {}).get("outcome_id")}
     else:  # propose_user_rejected / propose_expired / propose_blocked
-        co = discovery.candidate_outcome_for_proposal(journal, candidate_id)
+        entry, stop, target = _proposal_levels()
+        co = discovery.candidate_outcome_for_proposal(journal, candidate_id, entry=entry, stop=stop, target=target)
         result = resolve_zero_vs_replay(co)
         extra_ids = {"candidate_outcome_id": (co or {}).get("outcome_id"), "trade_outcome_id": None}
 

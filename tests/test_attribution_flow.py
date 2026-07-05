@@ -51,9 +51,16 @@ def _proposal(journal, candidate_id, status, symbol="AAPL", proposal_id=None, **
 def _co(journal, candidate_id, candidate_type="proposal", outcome_status="complete",
        replay_result=None, replay_r=None, symbol="AAPL", **kw):
     outcome_id = new_id("cout")
-    row = {"outcome_id": outcome_id, "candidate_id": candidate_id, "symbol": symbol,
-          "candidate_type": candidate_type, "outcome_status": outcome_status,
-          "replay_result": replay_result, "replay_r": replay_r}
+    row = {
+        "outcome_id": outcome_id, "candidate_id": candidate_id, "symbol": symbol,
+        "candidate_type": candidate_type, "outcome_status": outcome_status,
+        "replay_result": replay_result, "replay_r": replay_r,
+        # Match _proposal()'s own defaults (100.0/97.0/106.0) so a co row
+        # built for "the" proposal on a candidate satisfies the levels-match
+        # guard in discovery.candidate_outcome_for_proposal() (PR8 audit
+        # LOW-1) unless a test explicitly overrides these to test a mismatch.
+        "entry_reference_price": 100.0, "stop_price": 97.0, "target_price": 106.0,
+    }
     row.update(kw)
     journal.insert("candidate_outcomes", row)
     return outcome_id
@@ -220,6 +227,56 @@ def test_propose_approved_executed_partial_when_trade_open():
     assert row["resolved_status"] == "pending"  # nothing to close against yet
     assert row["delta_r"] is None
     assert row["execution_delta_r"] is None
+    j.close()
+
+
+def test_propose_approved_executed_resolves_execution_gap_for_an_override_origin_proposal():
+    """PR8 audit LOW-2 regression: an override-created proposal's frozen
+    levels are seeded under candidate_type='user_override' (see
+    _source_from_override), not 'proposal'/'blocked'. Before the fix,
+    candidate_outcome_for_proposal() only checked 'proposal'/'blocked' and so
+    could never find this row -- the execution gap stayed permanently
+    unresolvable for every override-originated trade."""
+    j = JournalStore(":memory:")
+    s = make_settings()
+    cand_id = _cand(j, status="watch")
+    prop_id = _proposal(j, cand_id, status="filled")
+    _override(j, cand_id, proposal_id=prop_id)
+    _co(j, cand_id, candidate_type="user_override", replay_result="target_hit", replay_r=1.5)
+    _trade_outcome(j, prop_id, realized_r=1.1)
+    _run(j, s)
+    pae = j.one(
+        "SELECT * FROM attribution_records WHERE proposal_id = ? AND attribution_type = 'propose_approved_executed'",
+        (prop_id,),
+    )
+    assert pae["resolved_status"] == "resolved"
+    assert pae["alphaos_path_r"] == 1.5
+    assert pae["execution_delta_r"] == round(1.1 - 1.5, 4)
+    j.close()
+
+
+def test_candidate_with_two_proposals_does_not_cross_link_the_wrong_replay():
+    """PR8 audit LOW-1 regression: candidate_outcomes seeds AT MOST ONE
+    'proposal'/'blocked' row per candidate_id, frozen at first seed (see
+    outcomes_tracker._classify_candidate). If a candidate later grows a
+    SECOND proposal with DIFFERENT levels, the frozen row belongs to the
+    FIRST proposal -- looking it up by candidate_id alone would silently
+    borrow the wrong proposal's replay_r. The levels-match guard must refuse
+    to use a mismatched row (honest 'pending', never a wrong delta_r)."""
+    j = JournalStore(":memory:")
+    s = make_settings()
+    cand_id = _cand(j, status="rejected")
+    prop_a = _proposal(j, cand_id, status="rejected", entry=100.0, stop=97.0, target=106.0)
+    prop_b = _proposal(j, cand_id, status="filled", entry=200.0, stop=194.0, target=212.0)
+    # frozen row belongs to B (the "first seeded" proposal in this scenario)
+    _co(j, cand_id, candidate_type="proposal", replay_result="target_hit", replay_r=5.0,
+       entry_reference_price=200.0, stop_price=194.0, target_price=212.0)
+    discover_events(j, s)
+    resolve_pending(j, s)
+    row_a = j.one("SELECT * FROM attribution_records WHERE proposal_id = ?", (prop_a,))
+    assert row_a["alphaos_path_r"] != 5.0  # must NOT borrow B's replay
+    assert row_a["delta_r"] is None
+    assert row_a["resolved_status"] == "pending"  # honest miss, not a wrong number
     j.close()
 
 

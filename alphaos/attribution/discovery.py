@@ -83,20 +83,44 @@ def find_user_override_trade(journal, version: str, limit: int = 200) -> list[di
     )
 
 
-def candidate_outcome_for_proposal(journal, candidate_id: Optional[str]) -> Optional[dict]:
-    """The AlphaOS-side candidate_outcomes row for a candidate that became a
-    proposal. candidate_type is 'proposal' or 'blocked' depending on the
-    proposal's status AT SEED TIME (see
-    alphaos/learning/outcomes_tracker.py::_classify_candidate) -- both read
-    the SAME frozen entry/stop/target from the same proposal row, so either
-    label satisfies a replay lookup regardless of which one was frozen."""
+def candidate_outcome_for_proposal(journal, candidate_id: Optional[str], *,
+                                   entry: Optional[float] = None, stop: Optional[float] = None,
+                                   target: Optional[float] = None) -> Optional[dict]:
+    """The AlphaOS-side candidate_outcomes row whose FROZEN levels match ONE
+    specific proposal. candidate_type is 'proposal' or 'blocked' depending on
+    the proposal's status AT SEED TIME (see
+    alphaos/learning/outcomes_tracker.py::_classify_candidate) -- either
+    label satisfies a lookup. Also checks 'user_override' -- an
+    override-created proposal's frozen levels are seeded under THAT label
+    (see _source_from_override), not 'proposal'/'blocked', so excluding it
+    would silently strand every override-origin proposal without a
+    counterfactual replay (PR8 audit LOW-2).
+
+    candidate_outcomes seeds AT MOST ONE row of these types per candidate_id
+    (frozen at first seed) -- if a candidate later grows a SECOND proposal,
+    the existing row's frozen levels belong to the FIRST one. When ``entry``/
+    ``stop``/``target`` are supplied (the caller's own proposal's levels),
+    a row whose frozen levels don't match is treated as if none exists at
+    all (returns None -> the caller's resolve function reports 'pending'/
+    'candidate_outcome_not_yet_seeded') rather than silently borrowing a
+    different proposal's replay (PR8 audit LOW-1) -- an honest miss, never a
+    wrong number."""
     if not candidate_id:
         return None
-    return journal.one(
+    rows = journal.query(
         "SELECT * FROM candidate_outcomes WHERE candidate_id = ? "
-        "AND candidate_type IN ('proposal', 'blocked') ORDER BY id DESC LIMIT 1",
+        "AND candidate_type IN ('proposal', 'blocked', 'user_override') ORDER BY id DESC",
         (candidate_id,),
     )
+    if not rows:
+        return None
+    if entry is None or stop is None or target is None:
+        return rows[0]  # no levels to disambiguate against -- best-effort latest
+    for row in rows:
+        if (row.get("entry_reference_price"), row.get("stop_price"), row.get("target_price")) == \
+           (entry, stop, target):
+            return row
+    return None
 
 
 def candidate_outcome_for_override(journal, candidate_id: Optional[str]) -> Optional[dict]:
