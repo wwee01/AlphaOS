@@ -381,6 +381,31 @@ def test_components_json_serializable_and_sorted_keys_stable():
     assert j1 == j2
 
 
+def test_components_json_byte_identical_under_the_real_unsorted_serializer():
+    """PR7 audit NIT-1: the test above normalizes with sort_keys=True, which
+    would mask an ordering bug in the ACTUAL insert path -- journal_store.py's
+    insert() serializes '_json' columns with plain json.dumps(value,
+    default=str), no sort_keys. Reproduce that exact call here: byte-identical
+    output must hold WITHOUT sorting, because component dict insertion order
+    comes from iterating the fixed WEIGHTS literal, not from anything
+    incidental to one call. Also pins that order to WEIGHTS itself, so a
+    future refactor that builds components via a set/merge (losing that
+    order) fails this test rather than silently degrading determinism."""
+    import json
+
+    kwargs = dict(interest_score=0.5, expected_r=2.0, spread_pct=0.002,
+                 ai_available=True, ai_confidence=0.8, ai_validation_status="passed",
+                 label_confidence=0.7, label_source="openai")
+    r1 = compute_tqs(_inputs(**kwargs))
+    r2 = compute_tqs(_inputs(**kwargs))
+    j1 = json.dumps(r1.components, default=str)  # mirrors journal_store.insert() exactly
+    j2 = json.dumps(r2.components, default=str)
+    assert j1 == j2
+
+    expected_order = [name for name in WEIGHTS if name in r1.components]
+    assert list(r1.components.keys()) == expected_order
+
+
 # ------------------------------------------------------- component-level error
 def test_component_exception_degrades_to_missing_not_a_crash():
     """A malformed input that would raise inside a component's own logic must

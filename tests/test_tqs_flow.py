@@ -294,6 +294,38 @@ def test_labeller_failsafe_row_is_missing_with_reason_recorded():
     o.close()
 
 
+def test_eval_less_mock_mode_candidate_is_tagged_mock_not_real():
+    """PR7 audit MEDIUM-1 regression: a candidate scored with NO
+    openai_evaluations row at all (e.g. rejected before an eval ever ran)
+    must still be tagged is_mock=1 / data_quality_status='mock' when the run
+    itself is ALPHAOS_MODE=mock -- derived from settings.is_mock, not just
+    eval_row.get('is_mock') (which is unavailable when there is no eval row).
+    Before the fix this scored is_mock=0/data_quality_status='degraded' with
+    a real-looking score, which would silently pollute a future calibration
+    query that filters WHERE is_mock=0."""
+    from alphaos.tqs.inputs import build_candidate_inputs
+    from alphaos.tqs.scoring import compute_tqs
+    from alphaos.util.ids import new_id
+
+    o = _orch()
+    assert o.settings.is_mock is True  # sanity: this run really is mock mode
+    cand_id = new_id("cand")
+    o.journal.insert("candidates", {
+        "candidate_id": cand_id, "symbol": "ZZZ", "direction": "long", "strategy": "swing",
+        "status": "rejected", "interest_score": 0.8,
+    })
+    cand_row = o.journal.one("SELECT * FROM candidates WHERE candidate_id = ?", (cand_id,))
+    inputs = build_candidate_inputs(o.journal, o.settings, cand_row)
+    assert inputs.ai_available is False  # confirms this candidate truly has no eval row
+    result = compute_tqs(inputs)
+
+    assert result.is_mock is True
+    assert result.data_quality_status == TqsDataQualityStatus.MOCK.value
+    # does not look calibration-ready: a "WHERE is_mock=0" filter must exclude it
+    assert not (result.is_mock == 0 and result.tqs_score is not None)
+    o.close()
+
+
 def test_component_error_is_logged_as_system_event():
     """An exception raised inside input-building (not scoring itself, which is
     pure and can't raise on bad DB state) is caught by score_candidate's outer

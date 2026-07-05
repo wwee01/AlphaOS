@@ -65,7 +65,11 @@ def build_candidate_inputs(journal, settings, candidate_row: dict) -> TqsCompone
         symbol=candidate_row["symbol"],
         direction=candidate_row.get("direction"),
         max_spread_pct=settings.max_spread_pct,
-        is_mock=bool(eval_row.get("is_mock")),
+        # Mock-mode intent, not just the eval row: a candidate scored with no
+        # openai_evaluations row at all (e.g. rejected pre-eval) would
+        # otherwise default this to False and read as real data even though
+        # the whole run is ALPHAOS_MODE=mock -- see PR7 audit MEDIUM-1.
+        is_mock=bool(settings.is_mock) or bool(eval_row.get("is_mock")),
         expected_r=eval_row.get("expected_r"),
         interest_score=candidate_row.get("interest_score"),
         spread_pct=spread_pct,
