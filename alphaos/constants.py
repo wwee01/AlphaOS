@@ -579,6 +579,54 @@ class TqsDataQualityStatus(StrEnum):
     UNSCORABLE = "unscorable"  # zero components available; no score was fabricated
 
 
+class AttributionType(StrEnum):
+    """PR8: the 5 supported Attribution v2 event types. An attribution_records
+    row exists ONLY where two paths diverged -- user vs AlphaOS, gate vs
+    AlphaOS, operational expiry vs AlphaOS, or execution vs the frozen
+    AlphaOS plan. Pure one-path no-action decisions (reject-no-action,
+    watch-no-action, armed-watch-no-action) get NO rows -- they are already
+    measured by candidate_outcomes and analyzed via report-time joins."""
+
+    PROPOSE_USER_REJECTED = "propose_user_rejected"
+    USER_OVERRIDE_TRADE = "user_override_trade"
+    PROPOSE_APPROVED_EXECUTED = "propose_approved_executed"
+    PROPOSE_EXPIRED = "propose_expired"
+    PROPOSE_BLOCKED = "propose_blocked"
+
+
+class AttributionAgent(StrEnum):
+    """PR8: which agent's deviation this row measures. Used for aggregation
+    ONLY (never a per-event moral judgment) -- see the reporting floor rules
+    in alphaos/reports/attribution.py."""
+
+    USER = "user"
+    GATE = "gate"
+    OPERATIONAL = "operational"
+    EXECUTION = "execution"
+
+
+class AttributionResolvedStatus(StrEnum):
+    """PR8: lifecycle state of one attribution_records row. 'partial' is
+    propose_approved_executed-specific (the executed side resolved but the
+    counterfactual replay side did not, or vice versa)."""
+
+    PENDING = "pending"
+    RESOLVED = "resolved"
+    PARTIAL = "partial"
+    UNRESOLVABLE = "unresolvable"
+
+
+class AttributionDataQuality(StrEnum):
+    """PR8: overall evidence-quality label for one attribution_records row --
+    same shape as TqsDataQualityStatus, deliberately: 'mock' takes precedence
+    over ok/degraded whenever the row's own settings/eval mock signal is set."""
+
+    OK = "ok"
+    DEGRADED = "degraded"
+    MOCK = "mock"
+    UNRESOLVABLE = "unresolvable"
+
+
 # Maps a catalyst type to the OFFICIAL label it would imply, used ONLY to compute
 # an advisory ``catalyst_suggested_label`` + ``label_review_required`` flag. It
 # never overwrites the frozen primary_label (no auto-relabelling in v1).

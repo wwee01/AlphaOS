@@ -1116,7 +1116,19 @@ class Orchestrator:
         seeded = seed_pending_outcomes(self.journal, limit=limit)
         provider = make_bars_provider(self.settings, self.journal)
         updated = update_pending_outcomes(self.journal, bars_provider=provider, limit=limit)
-        return {"seeded": seeded, "updated": updated}
+        result = {"seeded": seeded, "updated": updated}
+
+        # PR8: Attribution v2. MUST run strictly AFTER the outcome ledger above
+        # -- attribution only ever READS candidate_outcomes/trade_outcomes as
+        # they already stand, never recomputes a replay itself. Same
+        # zero-cost-when-disabled posture as PR7's tqs_shadow_enabled check.
+        if self.settings.attribution_enabled:
+            from alphaos import attribution
+
+            discovered = attribution.discover_events(self.journal, self.settings, limit=limit)
+            resolved = attribution.resolve_pending(self.journal, self.settings, limit=limit)
+            result["attribution"] = {"discovered": discovered, "resolved": resolved}
+        return result
 
     def outcomes_report(self, limit: int = 2000) -> dict:
         """Measurement-visibility summary over candidate_outcomes. PURE READ —

@@ -365,6 +365,18 @@ class Settings:
     # never disable a gate since TQS never gates anything).
     tqs_shadow_enabled: bool
 
+    # --- Attribution v2 / counterfactual ΔR (Roadmap PR8) ---
+    # Measurement-only: pairs a decision-divergence event (user override, gate
+    # block, TTL expiry, or execution vs frozen plan) with the ΔR the outcome
+    # ledger (candidate_outcomes/trade_outcomes) already resolved, and journals
+    # it to a SEPARATE attribution_records table. No decision path may read
+    # this table (see alphaos/attribution/ module docstring). Formula/taxonomy
+    # are CODE CONSTANTS tied to ATTRIBUTION_VERSION, not settings -- same
+    # rationale as TQS's own single toggle. Off disables discovery/resolution
+    # entirely (zero queries, not just zero writes); it can never disable a
+    # gate since attribution never gates anything.
+    attribution_enabled: bool
+
     # --- gated labeller decision override (Roadmap 2.6) ---
     # Default OFF -> the AI label stays DOWNGRADE-ONLY (legacy safe behaviour).
     # When ON, the label may move the eval's decision UP or DOWN, but ONLY when
@@ -999,6 +1011,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,
         tqs_shadow_enabled=_get_bool(src, "TQS_SHADOW_ENABLED", True),
+        attribution_enabled=_get_bool(src, "ATTRIBUTION_ENABLED", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),

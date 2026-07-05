@@ -1314,6 +1314,7 @@ SCHEMA: list[tuple[str, str]] = [
             earnings_config_hash TEXT,
             proposal_ttl_config_hash TEXT,
             tqs_config_hash TEXT,
+            attribution_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1400,6 +1401,60 @@ SCHEMA: list[tuple[str, str]] = [
             is_mock INTEGER DEFAULT 0,
             lineage_id TEXT,
             computed_at_utc TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR8: Attribution v2 -- counterfactual DELTA_R ledger. Measurement-only:
+        # pairs a decision-DIVERGENCE event (user override, gate block, TTL
+        # expiry, or execution vs the frozen AlphaOS plan) with the R already
+        # resolved by the outcome ledger (candidate_outcomes/trade_outcomes) --
+        # this table NEVER recomputes a replay itself; one replay engine, one
+        # truth. No decision path may read this table -- see
+        # alphaos/attribution/ module docstring for the enforced boundary.
+        # A row exists ONLY where two paths diverged; pure one-path no-action
+        # decisions (reject-no-action/watch-no-action/armed-watch-no-action)
+        # get no row here and are analyzed via report-time joins on
+        # candidate_outcomes instead. Separate table (not columns on the
+        # decision tables) for the same one-table-audit-surface reason as
+        # tqs_scores. One row per (attribution_type, proposal_id OR
+        # override_id, attribution_version) -- see the partial unique indexes
+        # below for why a plain UNIQUE column list is not NULL-safe in SQLite.
+        "attribution_records",
+        """
+        CREATE TABLE IF NOT EXISTS attribution_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attribution_id TEXT NOT NULL UNIQUE,
+            attribution_type TEXT NOT NULL,
+            attribution_version TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            candidate_id TEXT,
+            proposal_id TEXT,
+            override_id TEXT,
+            position_id TEXT,
+            trade_outcome_id TEXT,
+            candidate_outcome_id TEXT,
+            symbol TEXT NOT NULL,
+            direction TEXT,
+            decision_at_utc TEXT,
+            alphaos_path_r REAL,
+            actual_path_r REAL,
+            delta_r REAL,
+            execution_delta_r REAL,
+            r_basis TEXT,
+            replay_status TEXT,
+            blocked_reason_code TEXT,
+            expired_reason TEXT,
+            resolved_status TEXT NOT NULL DEFAULT 'pending',
+            resolved_at_utc TEXT,
+            data_quality_status TEXT NOT NULL,
+            is_mock INTEGER DEFAULT 0,
+            lineage_id TEXT,
+            missing_data_json TEXT,
+            notes_json TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1502,6 +1557,21 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_tqs_scan_batch ON tqs_scores(scan_batch_id)",
     "CREATE INDEX IF NOT EXISTS idx_tqs_bucket ON tqs_scores(tqs_bucket)",
     "CREATE INDEX IF NOT EXISTS idx_tqs_lineage ON tqs_scores(lineage_id)",
+    # PR8: Attribution v2. Same SQLite NULL-uniqueness trap as tqs_scores above,
+    # same cure: two PARTIAL unique indexes. Proposal-anchored types
+    # (propose_user_rejected/propose_approved_executed/propose_expired/
+    # propose_blocked) never share a proposal_id with an override-anchored row
+    # (user_override_trade), so the two indexes never compete for the same row.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_attr_proposal_unique "
+    "ON attribution_records(attribution_type, proposal_id, attribution_version) "
+    "WHERE proposal_id IS NOT NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_attr_override_unique "
+    "ON attribution_records(attribution_type, override_id, attribution_version) "
+    "WHERE override_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_attr_resolved_status ON attribution_records(resolved_status)",
+    "CREATE INDEX IF NOT EXISTS idx_attr_type ON attribution_records(attribution_type)",
+    "CREATE INDEX IF NOT EXISTS idx_attr_candidate ON attribution_records(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_attr_lineage ON attribution_records(lineage_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
