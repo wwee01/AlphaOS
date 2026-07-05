@@ -48,7 +48,14 @@ def test_scan_job_respects_manual_approval_boundary(orchestrator):
     # proposal past manual approval, this pre-existing row would flip. (An
     # earlier version injected the proposal AFTER the scan, which made the
     # assertion tautological -- it would pass even if the scan auto-approved.)
-    proposal_id, _ = inject_pending_proposal(orchestrator, symbol="AAPL")
+    #
+    # Symbol is deliberately OUTSIDE the scanner's fixed DEFAULT_UNIVERSE (see
+    # candidate_scanner.py) so the mock scan can never independently mint its
+    # own competing proposal for it on any date. "AAPL" (which IS in the
+    # universe) intermittently collided with the mock scan's own date-seeded
+    # AAPL proposal, tripping PR6's same-symbol supersession policy and
+    # failing this test on some but not all dates.
+    proposal_id, _ = inject_pending_proposal(orchestrator, symbol="ZTEST")
     assert orchestrator.journal.proposal_by_id(proposal_id)["status"] == "pending_approval"
 
     runner = JobRunner(orchestrator)

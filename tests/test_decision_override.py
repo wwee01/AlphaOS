@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from alphaos.ai.openai_client import OpenAIEvaluation
 from alphaos.ai.playbook_classifier import PlaybookClassification
 from alphaos.constants import (
     OFFICIAL_LABELS,
@@ -18,7 +19,8 @@ from alphaos.constants import (
     Last30DaysStatus,
 )
 from alphaos.journal.journal_store import JournalStore
-from alphaos.orchestrator import Orchestrator
+from alphaos.orchestrator import Orchestrator, ScanSummary
+from alphaos.util.ids import new_id
 from conftest import make_settings
 
 R, W, P = Decision.REJECT.value, Decision.WATCH.value, Decision.PROPOSE.value
@@ -280,23 +282,69 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     o.close()
 
 
+def _watch_ready_candidate(orch, symbol="ZWATCH"):
+    """A single hand-built candidate whose eval decision is WATCH, with FIXED
+    (not mock-scanner-random) entry/stop/target -- schema-valid and guaranteed
+    to clear risk sizing regardless of the mock market data's date seed.
+    Whether it ends up upgraded is then decided ONLY by the override
+    mechanism under test, not by whether today's mock scan happens to
+    independently produce a WATCH candidate at all."""
+    cand_id = new_id("cand")
+    orch.journal.insert("candidates", {
+        "candidate_id": cand_id, "symbol": symbol, "direction": "long", "strategy": "swing",
+        "momentum_score": 0.5, "news_status": "available", "status": "watch",
+    })
+    evaluation = OpenAIEvaluation(
+        eval_id=new_id("eval"), candidate_id=cand_id, symbol=symbol, model="mock",
+        direction="long", entry=100.0, stop=97.0, target=106.0, max_holding_days=3,
+        expected_r=2.0, confidence=0.6, decision=Decision.WATCH.value,
+        reasoning_summary="test fixture", data_freshness_status="usable", is_mock=True,
+    )
+    classification = _propose_label(SimpleNamespace(candidate_id=cand_id, symbol=symbol))
+    cand = {"candidate_id": cand_id, "symbol": symbol, "_snapshot": {},
+            "_catalyst": None, "_last30": None, "_polarity": None}
+    return cand, evaluation, classification
+
+
 def test_armed_upgrade_increases_proposals_vs_downgrade_only(monkeypatch):
     """Concrete proof the upgrade path can CREATE a proposal the downgrade-only
-    path would not — the capability the user asked for."""
+    path would not — the capability the user asked for.
+
+    Directly constructs a WATCH candidate (see _watch_ready_candidate) and
+    calls the orchestrator's own decision + proposal-creation methods on it,
+    exactly as run_scan_once()'s loop would, instead of hoping a full mock
+    scan happens to (a) produce a WATCH-decision candidate that day at all,
+    and (b) have the risk engine also approve its date-seeded sizing. Both
+    were unrelated, date-seeded coin flips this test previously depended on
+    without pinning down: it broke outright on a date where every scan-
+    produced WATCH candidate was risk-blocked, and fuzzing across simulated
+    dates surfaced a second, rarer failure mode -- a date where the labelled
+    shortlist contained zero WATCH candidates at all, so there was nothing
+    for either version of the assertion to upgrade.
+    """
     base = _orch()
-    monkeypatch.setattr(base.labeller, "classify", _propose_label)
-    proposed_floor = base.run_scan_once().proposed     # downgrade-only: PROPOSE label can't lift WATCH
+    cand, evaluation, classification = _watch_ready_candidate(base)
+    summary_floor = ScanSummary(scan_id="floor-test")
+    final_floor = base._resolve_decision(cand, evaluation, classification, "floor-batch", summary_floor)
+    assert final_floor == Decision.WATCH.value     # downgrade-only: PROPOSE label can't lift WATCH
+    # final_floor == WATCH, so run_scan_once()'s loop would `continue` here --
+    # never reaching _handle_proposal. No proposal row for this candidate.
+    proposals_floor = base.journal.count_rows("trade_proposals")
     base.close()
 
     armed = _orch()
-    monkeypatch.setattr(armed.labeller, "classify", _propose_label)
+    cand2, evaluation2, classification2 = _watch_ready_candidate(armed)
     monkeypatch.setattr(armed, "_override_armed", lambda: True)
     monkeypatch.setattr(armed, "_real_decision_driver",
                         lambda c, l, d, p=None: (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
-    proposed_armed = armed.run_scan_once().proposed
+    summary_armed = ScanSummary(scan_id="armed-test")
+    final_armed = armed._resolve_decision(cand2, evaluation2, classification2, "armed-batch", summary_armed)
+    assert final_armed == Decision.PROPOSE.value   # armed: the override upgraded it
+    armed._handle_proposal(cand2, evaluation2, summary_armed, scan_batch_id="armed-batch")
+    proposals_armed = armed.journal.count_rows("trade_proposals")
     armed.close()
 
-    assert proposed_armed > proposed_floor
+    assert proposals_armed > proposals_floor
 
 
 def test_real_money_unreachable_with_override_enabled():
