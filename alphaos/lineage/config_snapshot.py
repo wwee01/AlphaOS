@@ -53,6 +53,8 @@ SCHEDULER_CONFIG_FIELDS = (
     "scheduler_scan_windows", "scheduler_monitor_interval_minutes",
     "scheduler_outcomes_interval_minutes", "scheduler_digest_time",
     "scheduler_stale_job_minutes", "scheduler_ai_cost_cap_calls_per_30d",
+    # PR9: self-halt fuse threshold + heartbeat staleness window.
+    "scheduler_max_consecutive_failures", "scheduler_heartbeat_stale_minutes",
 )
 
 EARNINGS_CONFIG_FIELDS = (

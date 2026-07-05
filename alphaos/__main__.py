@@ -183,6 +183,15 @@ def cmd_scheduler_run_job(orch: Orchestrator, job_type: str) -> int:
     return 0
 
 
+def cmd_scheduler_health(orch: Orchestrator) -> int:
+    """PR9 dead-man's-switch: exit 0 if a job_runs row completed recently
+    enough during market hours (else exit 1 + one alert). Meant to be driven
+    by its OWN separate LaunchAgent, not the scheduler's own tick."""
+    result = JobRunner(orch).heartbeat_check()
+    _print({"scheduler_health": result})
+    return 0 if result["ok"] else 1
+
+
 def cmd_status(orch: Orchestrator) -> int:
     checks = orch.startup()
     _print(
@@ -318,6 +327,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="force-run one scheduler job now, bypassing cadence timing (still respects kill "
                               "switch / protection / cost cap / locking)")
     srj.add_argument("job_type", choices=["scan", "monitor", "outcomes_update", "daily_digest"])
+    sub.add_parser("scheduler_health",
+                   help="dead-man's-switch check: exit 0 if a job completed recently enough during "
+                        "market hours, else exit 1 + one alert (run from its own separate LaunchAgent)")
     sub.add_parser("seed_demo", help="create a labelled demo trade (exec/journal/dashboard demo)")
     l30 = sub.add_parser("last30days_probe",
                          help="READ-ONLY: print last30days narrative context for one symbol (no ledger writes)")
@@ -397,6 +409,8 @@ def main(argv=None) -> int:
             return cmd_scheduler_run_once(orch)
         if args.command == "scheduler_run_job":
             return cmd_scheduler_run_job(orch, args.job_type)
+        if args.command == "scheduler_health":
+            return cmd_scheduler_health(orch)
         if args.command == "seed_demo":
             return cmd_seed_demo(orch)
         if args.command == "last30days_probe":

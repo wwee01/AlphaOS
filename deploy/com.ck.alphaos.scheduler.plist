@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- AlphaOS scheduler cadence (PR9) -- ticks `scheduler_run_once` every
+       5 minutes. Keeps launchd dumb on purpose: this LaunchAgent only
+       decides WHEN to invoke the process; JobRunner.run_due_jobs() decides
+       which jobs are actually due, respecting scan windows / kill switch /
+       cost cap / self-halt fuses / idempotency locking. Never a daemon --
+       each tick is a short-lived, idempotent process. -->
+  <key>Label</key>
+  <string>com.ck.alphaos.scheduler</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
+    <string>-m</string>
+    <string>alphaos</string>
+    <string>scheduler_run_once</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ck/Documents/Claude Playground/AlphaOS</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ck</string>
+  </dict>
+
+  <!-- Fire every 300 seconds, always -- the idempotent tick. cadence.py's
+       is_due()/is_fused() checks decide what actually runs on any given
+       tick; a tick outside every scan window or between monitor/outcomes
+       intervals is a cheap, fast no-op (all job types report not_due). -->
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/alphaos-scheduler.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/alphaos-scheduler-error.log</string>
+</dict>
+</plist>

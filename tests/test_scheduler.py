@@ -11,8 +11,10 @@ scheduler exactly as it is via the manual CLI path.
 from __future__ import annotations
 
 import os
+import pathlib
 import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -21,12 +23,34 @@ from alphaos.execution import protection_watchdog as pw
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
-from alphaos.scheduler import JobRunner
+from alphaos.scheduler import JobRunner, cadence
 from alphaos.scheduler.jobs import run_monitor_job, run_outcomes_job, run_scan_job
+from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 from conftest import inject_pending_proposal, make_proposal, make_settings
 from test_alpaca_paper_execution import FakeTradingClient, _paper_om, _seed_proposal
 from test_protection_watchdog import _force_check_error, _open_protected_position
+
+
+def _insert_job_run(journal, job_type, status, lock_key=None, finished_at_utc=None):
+    """PR9 test helper: directly construct a terminal job_runs row with a
+    known status/timestamp -- never depend on what a live run happens to
+    produce (the date-seeded-mock-data lesson applies just as much to
+    job_runs history as to price data)."""
+    st = timeutils.stamp()
+    row = {
+        "job_run_id": new_id("jobrun"),
+        "job_type": job_type,
+        "trigger_source": "scheduler",
+        "lock_key": lock_key or new_id(f"{job_type}-lock"),
+        "started_at_utc": st.utc,
+        "started_at_sgt": st.local_sgt,
+        "status": status,
+    }
+    if status != "started":
+        row["finished_at_utc"] = finished_at_utc or st.utc
+        row["finished_at_sgt"] = st.local_sgt
+    journal.insert("job_runs", row)
 
 
 # --------------------------------------------------------------- scan safety
@@ -466,3 +490,476 @@ def test_cli_invalid_job_type_is_rejected_by_argparse():
 
     with pytest.raises(SystemExit):
         build_parser().parse_args(["scheduler_run_job", "definitely_not_a_real_job"])
+
+
+def test_cli_scheduler_health_is_registered():
+    from alphaos.__main__ import build_parser
+
+    args = build_parser().parse_args(["scheduler_health"])
+    assert args.command == "scheduler_health"
+
+
+# =============================================================================
+# PR9: self-halt fuse (cadence.is_fused pure predicate)
+# =============================================================================
+def test_is_fused_pure_function_trips_after_threshold_consecutive_failures(journal):
+    for _ in range(3):
+        _insert_job_run(journal, "scan", "failed")
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is True
+    assert streak == 3
+    assert "3 consecutive failed scan runs" in reason
+
+
+def test_is_fused_pure_function_not_fused_below_threshold(journal):
+    for _ in range(2):
+        _insert_job_run(journal, "scan", "failed")
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is False
+    assert streak == 2
+
+
+def test_is_fused_streak_is_broken_by_an_older_completed_row(journal):
+    """Rows are inserted oldest-first: completed, failed, failed. The trailing
+    2 failures don't reach threshold=3 because the streak stops counting the
+    moment it hits the completed row -- older history beyond a success must
+    never count toward the fuse."""
+    _insert_job_run(journal, "scan", "completed")
+    _insert_job_run(journal, "scan", "failed")
+    _insert_job_run(journal, "scan", "failed")
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is False
+    assert streak == 2
+
+
+def test_is_fused_streak_is_broken_by_a_skipped_row():
+    """A kill-switch/cost-cap 'skipped' row is an expected state, not a
+    failure -- it must break the streak exactly like a completed row."""
+    journal = JournalStore(":memory:")
+    _insert_job_run(journal, "scan", "failed")
+    _insert_job_run(journal, "scan", "failed")
+    _insert_job_run(journal, "scan", "skipped")
+    _insert_job_run(journal, "scan", "failed")
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is False
+    assert streak == 1
+    journal.close()
+
+
+def test_is_fused_ignores_in_flight_started_rows(journal):
+    """An in-flight 'started' row (e.g. a stale/crashed process) must not be
+    read as part of the terminal failure streak."""
+    for _ in range(3):
+        _insert_job_run(journal, "scan", "failed")
+    _insert_job_run(journal, "scan", "started")  # most recent, but never terminal
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is True  # the 3 failed rows underneath still count
+    assert streak == 3
+
+
+def test_is_fused_job_types_are_independent(journal):
+    for _ in range(3):
+        _insert_job_run(journal, "scan", "failed")
+
+    scan_fused, _, _ = cadence.is_fused("scan", 3, journal)
+    monitor_fused, _, monitor_streak = cadence.is_fused("monitor", 3, journal)
+
+    assert scan_fused is True
+    assert monitor_fused is False
+    assert monitor_streak == 0
+
+
+def test_is_fused_fails_safe_toward_not_fused_on_a_db_error(journal, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated DB error while reading job_runs")
+
+    monkeypatch.setattr(journal, "query", boom)
+
+    fused, reason, streak = cadence.is_fused("scan", 3, journal)
+
+    assert fused is False
+    assert "error checking fuse state" in reason
+    assert streak == 0
+
+
+# =============================================================================
+# PR9: self-halt fuse end-to-end (JobRunner.run_due_jobs dispatch skip)
+# =============================================================================
+def test_run_due_jobs_skips_a_fused_job_type_without_a_new_job_runs_row(orchestrator):
+    # monitor has no prior COMPLETED row, so cadence._interval_due reports it
+    # due regardless of wall-clock -- exactly like a brand-new deployment.
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+    rows_before = orchestrator.journal.count_rows("job_runs", "job_type = 'monitor'")
+
+    results = JobRunner(orchestrator).run_due_jobs()
+    by_type = {r["job_type"]: r for r in results}
+
+    assert by_type["monitor"]["status"] == "fused"
+    assert "3 consecutive failed monitor runs" in by_type["monitor"]["reason"]
+    rows_after = orchestrator.journal.count_rows("job_runs", "job_type = 'monitor'")
+    assert rows_after == rows_before  # fused dispatch never claims a new lock row
+
+
+def test_run_due_jobs_logs_scheduler_fused_system_event(orchestrator):
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+
+    JobRunner(orchestrator).run_due_jobs()
+
+    row = orchestrator.journal.one(
+        "SELECT * FROM system_events WHERE category = 'scheduler_fused' ORDER BY id DESC LIMIT 1"
+    )
+    assert row is not None
+    assert row["severity"] == "error"
+    assert "monitor" in row["message"]
+
+
+def test_fuse_alert_and_log_are_deduped_across_two_consecutive_fused_ticks(orchestrator, monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+
+    runner = JobRunner(orchestrator)
+    runner.run_due_jobs()
+    runner.run_due_jobs()  # second consecutive fused tick -- must not re-alert
+
+    assert len(calls) == 1
+    fused_events = orchestrator.journal.count_rows("system_events", "category = 'scheduler_fused'")
+    assert fused_events == 1
+
+
+def test_fuse_dedupe_survives_a_null_finished_at_utc_on_the_last_completed_row(orchestrator, monkeypatch):
+    """Audit finding (LOW): a 'completed' job_runs row with a NULL
+    finished_at_utc must not silently defeat the dedupe watermark (binding
+    SQL NULL into 'created_at_utc >= ?' never matches, which would otherwise
+    make _handle_fuse re-alert on every single tick instead of once)."""
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    # A completed row with an explicit NULL finished_at_utc -- schema-legal
+    # (the column is nullable), even though no current writer produces it.
+    orchestrator.journal.insert("job_runs", {
+        "job_run_id": new_id("jobrun"), "job_type": "monitor", "trigger_source": "scheduler",
+        "lock_key": new_id("monitor-lock"), "started_at_utc": "2026-01-01T00:00:00+00:00",
+        "started_at_sgt": "2026-01-01T08:00:00+08:00", "status": "completed",
+        "finished_at_utc": None, "finished_at_sgt": None,
+    })
+
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+
+    runner = JobRunner(orchestrator)
+    runner.run_due_jobs()
+    runner.run_due_jobs()  # second consecutive fused tick -- must still dedupe
+
+    assert len(calls) == 1
+    fused_events = orchestrator.journal.count_rows("system_events", "category = 'scheduler_fused'")
+    assert fused_events == 1
+
+
+def test_fuse_clears_after_a_manual_successful_run(orchestrator, monkeypatch):
+    # Force "due" throughout -- isolates fuse-clear behavior from monitor's
+    # own interval cadence (a monitor that JUST completed is legitimately
+    # "not due" again for scheduler_monitor_interval_minutes, which is a
+    # separate concern from whether the fuse itself is cleared).
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+    runner = JobRunner(orchestrator)
+    fused_before, _, _ = cadence.is_fused("monitor", orchestrator.settings.scheduler_max_consecutive_failures, orchestrator.journal)
+    assert fused_before is True
+
+    # A human running `scheduler_run_job monitor` calls run_job() DIRECTLY,
+    # bypassing run_due_jobs' fuse check entirely -- exactly like the CLI path.
+    result = runner.run_job("monitor")
+    assert result["status"] == "completed"
+
+    fused_after, _, streak_after = cadence.is_fused(
+        "monitor", orchestrator.settings.scheduler_max_consecutive_failures, orchestrator.journal
+    )
+    assert fused_after is False
+    assert streak_after == 0
+
+    # And run_due_jobs no longer reports it fused (is_due is forced True, so
+    # this genuinely exercises the fuse re-check, not just cadence timing).
+    results = runner.run_due_jobs()
+    by_type = {r["job_type"]: r for r in results}
+    assert by_type["monitor"]["status"] != "fused"
+
+
+def test_fuse_re_alerts_on_a_genuinely_new_episode_after_clearing(orchestrator, monkeypatch):
+    """Two SEPARATE fuse episodes (cleared by a manual success in between)
+    must each alert once -- the dedupe watermark must advance, not permanently
+    suppress every future episode for the same job_type."""
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    runner = JobRunner(orchestrator)
+
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+    runner.run_due_jobs()
+    assert len(calls) == 1
+
+    runner.run_job("monitor")  # manual success clears the fuse
+
+    for _ in range(3):
+        _insert_job_run(orchestrator.journal, "monitor", "failed")
+    runner.run_due_jobs()
+
+    assert len(calls) == 2  # the second, genuinely new episode re-alerted
+
+
+# =============================================================================
+# PR9: job-failure alert (JobRunner.run_job -> alerts.send_alert)
+# =============================================================================
+def test_job_failure_sends_a_high_priority_alert(orchestrator, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated monitor failure")
+
+    monkeypatch.setattr(orchestrator, "run_monitor_once", boom)
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    runner = JobRunner(orchestrator)
+
+    result = runner.run_job("monitor")
+
+    assert result["status"] == "failed"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert kwargs.get("priority") == "high"
+    assert "monitor" in kwargs.get("title", "")
+    assert "simulated monitor failure" in kwargs.get("message", "")
+
+
+def test_job_failure_alert_crashing_never_breaks_run_job(orchestrator, monkeypatch):
+    """Suspenders: even if alerts.send_alert itself raises unexpectedly,
+    run_job must still return its failure result cleanly."""
+    def boom_job(*args, **kwargs):
+        raise RuntimeError("job blew up")
+
+    def boom_alert(*args, **kwargs):
+        raise RuntimeError("ntfy client library exploded")
+
+    monkeypatch.setattr(orchestrator, "run_monitor_once", boom_job)
+    monkeypatch.setattr(alerts, "send_alert", boom_alert)
+    runner = JobRunner(orchestrator)
+
+    result = runner.run_job("monitor")  # must not raise
+
+    assert result["status"] == "failed"
+    row = orchestrator.journal.one(
+        "SELECT * FROM job_runs WHERE job_type = 'monitor' ORDER BY id DESC LIMIT 1"
+    )
+    assert row["status"] == "failed"
+
+
+def test_a_skipped_job_never_sends_a_failure_alert(orchestrator, tmp_path, monkeypatch):
+    """Kill-switch/cost-cap skips are expected state, never a failure -- see
+    9.2.5 ('When the kill switch blocks a scan tick: NO alert')."""
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    ks_path = tmp_path / "KILL_SWITCH"
+    orchestrator.kill_switch = KillSwitch(str(ks_path))
+    orchestrator.orders.kill_switch = orchestrator.kill_switch
+    orchestrator.kill_switch.engage("test")
+    runner = JobRunner(orchestrator)
+
+    result = runner.run_job("scan")
+
+    assert result["status"] == "skipped"
+    assert calls == []
+
+
+# =============================================================================
+# PR9: kill-switch-at-job-entry regression via run_due_jobs (spec 9.2.6)
+# =============================================================================
+def test_kill_switch_blocks_scan_via_run_due_jobs_but_monitor_and_outcomes_still_run(
+    orchestrator, tmp_path, monkeypatch
+):
+    ks_path = tmp_path / "KILL_SWITCH"
+    orchestrator.kill_switch = KillSwitch(str(ks_path))
+    orchestrator.orders.kill_switch = orchestrator.kill_switch
+    orchestrator.kill_switch.engage("test")
+
+    # Force every job type "due" regardless of wall-clock/scan-window timing --
+    # isolates the kill-switch behavior itself from cadence timing.
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+
+    proposals_before = orchestrator.journal.count_rows("trade_proposals")
+    orders_before = orchestrator.journal.count_rows("paper_orders")
+
+    results = JobRunner(orchestrator).run_due_jobs()
+    by_type = {r["job_type"]: r for r in results}
+
+    assert by_type["scan"]["status"] == "skipped"
+    assert by_type["scan"]["kill_switch_engaged"] is True
+    assert orchestrator.journal.count_rows("trade_proposals") == proposals_before
+    assert orchestrator.journal.count_rows("paper_orders") == orders_before
+
+    # PR2.5 doctrine: monitor/protection must keep running even when the kill
+    # switch blocks new entries (detect+block only, never itself gated off).
+    assert by_type["monitor"]["status"] == "completed"
+    assert by_type["outcomes_update"]["status"] == "completed"
+
+
+# =============================================================================
+# PR9: dead-man heartbeat (JobRunner.heartbeat_check)
+# =============================================================================
+# Monday 2026-07-06, 10:30 ET -- REGULAR session (verified: weekday()==0).
+_MARKET_HOURS_NOW = datetime(2026, 7, 6, 14, 30, tzinfo=timezone.utc)
+# Saturday 2026-07-04, 10:30 ET -- CLOSED session (weekday()==5).
+_WEEKEND_NOW = datetime(2026, 7, 4, 14, 30, tzinfo=timezone.utc)
+
+
+def test_heartbeat_ok_when_a_completed_job_is_recent(orchestrator):
+    fresh_ts = timeutils.to_iso(_MARKET_HOURS_NOW - timedelta(minutes=10))
+    _insert_job_run(orchestrator.journal, "monitor", "completed", finished_at_utc=fresh_ts)
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_MARKET_HOURS_NOW)
+
+    assert result["ok"] is True
+    assert result["market_hours"] is True
+    assert result["last_job_type"] == "monitor"
+
+
+def test_heartbeat_stale_completed_job_is_not_ok_and_alerts(orchestrator, monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    stale_ts = timeutils.to_iso(_MARKET_HOURS_NOW - timedelta(minutes=200))
+    _insert_job_run(orchestrator.journal, "monitor", "completed", finished_at_utc=stale_ts)
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_MARKET_HOURS_NOW)
+
+    assert result["ok"] is False
+    assert result["market_hours"] is True
+    assert "200.0m ago" in result["detail"]
+    assert len(calls) == 1
+    assert calls[0][1].get("priority") == "high"
+
+
+def test_heartbeat_no_completed_row_at_all_is_not_ok(orchestrator, monkeypatch):
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: True)
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_MARKET_HOURS_NOW)
+
+    assert result["ok"] is False
+    assert "no completed job_runs row found" in result["detail"]
+
+
+def test_heartbeat_unparseable_timestamp_is_not_ok(orchestrator, monkeypatch):
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: True)
+    _insert_job_run(orchestrator.journal, "monitor", "completed", finished_at_utc="not-a-timestamp")
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_MARKET_HOURS_NOW)
+
+    assert result["ok"] is False
+    assert "unparseable timestamp" in result["detail"]
+
+
+def test_heartbeat_outside_market_hours_is_always_ok_and_never_alerts(orchestrator, monkeypatch):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("must not alert outside market hours")
+
+    monkeypatch.setattr(alerts, "send_alert", fail_if_called)
+    # No completed rows at all -- would be "not ok" during market hours, but
+    # must be unconditionally healthy on a weekend.
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_WEEKEND_NOW)
+
+    assert result["ok"] is True
+    assert result["market_hours"] is False
+
+
+def test_heartbeat_never_raises_even_if_alert_send_crashes(orchestrator, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("ntfy client exploded")
+
+    monkeypatch.setattr(alerts, "send_alert", boom)
+
+    result = JobRunner(orchestrator).heartbeat_check(now=_MARKET_HOURS_NOW)  # must not raise
+
+    assert result["ok"] is False
+
+
+# =============================================================================
+# PR9: config-hash perturbation (lineage category, PR4 pattern)
+# =============================================================================
+def test_scheduler_config_hash_changes_when_pr9_settings_change():
+    from alphaos.lineage.config_snapshot import build_config_hashes
+
+    hash_a = build_config_hashes(make_settings())["scheduler_config_hash"]
+    hash_b = build_config_hashes(make_settings(SCHEDULER_MAX_CONSECUTIVE_FAILURES="7"))["scheduler_config_hash"]
+    hash_c = build_config_hashes(make_settings(SCHEDULER_HEARTBEAT_STALE_MINUTES="30"))["scheduler_config_hash"]
+
+    assert hash_a != hash_b
+    assert hash_a != hash_c
+
+
+# =============================================================================
+# PR9: behavior-neutrality -- alerts module never touches a decision path
+# =============================================================================
+def test_alerts_module_never_imported_by_approval_or_risk_engine():
+    """Same pattern as PR7/PR8's shadow-layer isolation grep: alerting is
+    operator-visibility tooling, never a decision path. job_runner.py IS
+    allowed to import it (that's the whole point) -- only the actual
+    gate/approval logic is checked here."""
+    import alphaos.approval as approval_mod
+    import alphaos.risk.risk_engine as risk_mod
+
+    for mod, name in ((approval_mod, "approval.py"), (risk_mod, "risk_engine.py")):
+        text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+        assert "util.alerts" not in text and "import alerts" not in text, f"{name} references the alerts module"
+
+
+def test_decision_functions_never_reference_alerts_or_fuse_state():
+    """Structural complement to the grep above: the actual decision-making
+    Orchestrator methods must not mention alerting/fuse concepts at all."""
+    import inspect
+
+    from alphaos.orchestrator import Orchestrator
+
+    decision_functions = (
+        "_handle_proposal", "_resolve_decision", "_combine_decision",
+        "_real_decision_driver", "approve_proposal", "reject_proposal",
+        "_label_candidate", "_freeze_label", "run_scan_once",
+    )
+    for fn_name in decision_functions:
+        fn = getattr(Orchestrator, fn_name)
+        source = inspect.getsource(fn)
+        assert "alerts" not in source.lower(), f"Orchestrator.{fn_name} references alerts"
+        assert "is_fused" not in source, f"Orchestrator.{fn_name} references is_fused"
+
+
+def test_no_orders_approvals_fills_positions_created_by_pr9_code():
+    """Structural grep, same pattern as the scheduler package's own existing
+    real-money-scope test: the fuse/heartbeat/alert additions must not
+    introduce any new path toward broker submission. Scoped to the files PR9
+    actually added/touched (cadence.py, job_runner.py, alerts.py) -- the rest
+    of the scheduler package (jobs.py etc.) is unmodified by PR9 and already
+    covered by its own pre-existing tests; jobs.py's docstrings legitimately
+    NAME these tokens as things it never calls, which would false-positive a
+    whole-package scan."""
+    pr9_files = (
+        pathlib.Path(cadence.__file__),
+        pathlib.Path(cadence.__file__).parent / "job_runner.py",
+        pathlib.Path(alerts.__file__),
+    )
+    banned = ("execute_proposal", "approve_proposal", "close_position",
+              "submit_bracket", "submit_order", "place_order")
+    for py_file in pr9_files:
+        text = py_file.read_text(encoding="utf-8")
+        for token in banned:
+            assert token not in text, f"{py_file.name} references {token!r}"

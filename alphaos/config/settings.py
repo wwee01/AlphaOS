@@ -223,6 +223,9 @@ class Settings:
     scheduler_outcomes_interval_minutes: int
     scheduler_digest_time: str
     scheduler_stale_job_minutes: int
+    # --- scheduler v1.6 (PR9: unattended cadence -- self-halt fuse + heartbeat) ---
+    scheduler_max_consecutive_failures: int
+    scheduler_heartbeat_stale_minutes: int
 
     # --- notifications ---
     ntfy_topic: str
@@ -833,6 +836,29 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"'stale'; too high delays operator awareness of a genuinely crashed/stuck job."
         )
 
+    # --- scheduler v1.6 (PR9): self-halt fuse threshold + heartbeat staleness.
+    # A value too low fuses/pages on ordinary transient noise (a single flaky
+    # broker timeout); too high (or unbounded) lets a genuinely broken job type
+    # keep retrying forever with no operator awareness -- the exact failure
+    # mode PR9 exists to close. Mirrors
+    # PROTECTION_CHECK_ERROR_ESCALATION_THRESHOLD's validation pattern.
+    scheduler_max_consecutive_failures = _get_int(src, "SCHEDULER_MAX_CONSECUTIVE_FAILURES", 3)
+    if not (1 <= scheduler_max_consecutive_failures <= 20):
+        raise SettingsError(
+            f"SCHEDULER_MAX_CONSECUTIVE_FAILURES={scheduler_max_consecutive_failures!r} "
+            f"must be between 1 and 20. 1 fuses on the first failure; too high silently "
+            f"defeats the self-halt fuse and lets a broken job type keep retrying "
+            f"unattended indefinitely."
+        )
+
+    scheduler_heartbeat_stale_minutes = _get_int(src, "SCHEDULER_HEARTBEAT_STALE_MINUTES", 120)
+    if not (5 <= scheduler_heartbeat_stale_minutes <= 1440):
+        raise SettingsError(
+            f"SCHEDULER_HEARTBEAT_STALE_MINUTES={scheduler_heartbeat_stale_minutes!r} must "
+            f"be between 5 and 1440. Too low false-pages during normal scan-window gaps; "
+            f"too high delays the dead-man's-switch alert past the point of being useful."
+        )
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -924,6 +950,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_outcomes_interval_minutes=scheduler_outcomes_interval_minutes,
         scheduler_digest_time=scheduler_digest_time,
         scheduler_stale_job_minutes=scheduler_stale_job_minutes,
+        scheduler_max_consecutive_failures=scheduler_max_consecutive_failures,
+        scheduler_heartbeat_stale_minutes=scheduler_heartbeat_stale_minutes,
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,

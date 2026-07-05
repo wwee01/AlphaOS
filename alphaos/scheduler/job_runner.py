@@ -13,13 +13,13 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
-from alphaos.constants import Severity
+from alphaos.constants import MarketSession, Severity
 from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cadence, cost_guard, jobs
-from alphaos.util import timeutils
+from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
 _JOB_FUNCS = {
@@ -117,6 +117,7 @@ class JobRunner:
             )
             self.journal.conn.commit()
             self._log_failure_best_effort(job_type, lock_key, f"{job_type} job failed: {exc}")
+            self._alert_job_failure(job_type, str(exc))
             return {"job_type": job_type, "status": "failed", "error": str(exc), "lock_key": lock_key}
 
         duration_ms = int((time.monotonic() - started) * 1000)
@@ -154,11 +155,33 @@ class JobRunner:
         except Exception:  # noqa: BLE001 - best-effort, see docstring
             pass
 
+    def _alert_job_failure(self, job_type: str, error: str) -> None:
+        """PR9: page on a job transitioning to 'failed' (priority=high). Never
+        raises -- suspenders on top of send_alert's own belt (it never raises
+        either); alerting must never compound a job failure with a crash."""
+        try:
+            alerts.send_alert(
+                self.orch.settings,
+                title=f"AlphaOS job failed: {job_type}",
+                message=error,
+                priority="high",
+                journal=self.journal,
+            )
+        except Exception:  # noqa: BLE001 - see docstring
+            pass
+
     # ------------------------------------------------------------- cadence
     def run_due_jobs(self) -> list:
         """Run every job type that is currently due, in a fixed order (scan,
         monitor, outcomes_update, daily_digest). Job types that are not due get
-        a ``not_due`` entry WITHOUT any job_runs row being inserted."""
+        a ``not_due`` entry WITHOUT any job_runs row being inserted.
+
+        PR9: a due job type that is currently FUSED (too many consecutive
+        failures -- see ``cadence.is_fused``) is also skipped, with no
+        job_runs row inserted (same "not dispatched, nothing recorded"
+        contract as not_due) -- the fuse's own alert/log happens once per
+        fused state via ``_handle_fuse``, not per tick.
+        """
         results = []
         for job_type in (
             cadence.JobType.SCAN,
@@ -167,11 +190,79 @@ class JobRunner:
             cadence.JobType.DAILY_DIGEST,
         ):
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
-            if due:
-                results.append(self.run_job(job_type))
-            else:
+            if not due:
                 results.append({"job_type": job_type, "status": "not_due", "reason": reason})
+                continue
+
+            fused, fuse_reason, streak = cadence.is_fused(
+                job_type, self.orch.settings.scheduler_max_consecutive_failures, self.orch.journal,
+            )
+            if fused:
+                self._handle_fuse(job_type, fuse_reason, streak)
+                results.append({"job_type": job_type, "status": "fused", "reason": fuse_reason})
+                continue
+
+            results.append(self.run_job(job_type))
         return results
+
+    def _handle_fuse(self, job_type: str, reason: str, streak: int) -> None:
+        """Log + alert ONCE per fused state, not per tick (a fused job type
+        would otherwise re-check every 5-minute scheduler tick forever).
+
+        Dedupe: a fuse episode's watermark is the last 'completed' job_runs
+        row for this job_type (or the epoch if none exists yet). If a
+        ``scheduler_fused`` system_events row for this job_type already exists
+        at/after that watermark, this exact fused state has already been
+        reported -- do nothing. The watermark advances only when the job type
+        actually completes again (clearing the fuse), so the very next fused
+        episode automatically gets a fresh watermark and WILL re-alert.
+        """
+        last_completed = self.journal.one(
+            "SELECT finished_at_utc FROM job_runs WHERE job_type = ? AND status = 'completed' "
+            "ORDER BY finished_at_utc DESC LIMIT 1",
+            (job_type,),
+        )
+        # A NULL finished_at_utc must fall back to the epoch sentinel too, not
+        # bind SQL NULL below -- "created_at_utc >= NULL" is never true (SQL's
+        # three-valued logic), which would silently defeat the dedupe (every
+        # tick would think "not yet reported" and re-alert forever). No
+        # current writer leaves finished_at_utc NULL on a 'completed' row, but
+        # the column is nullable by schema -- fail toward correct dedupe, not
+        # toward a query that can never match.
+        since = (last_completed or {}).get("finished_at_utc") or "0001-01-01T00:00:00+00:00"
+        message_prefix = f"scheduler_fused:{job_type}:"
+        already_reported = self.journal.one(
+            "SELECT 1 FROM system_events WHERE category = 'scheduler_fused' AND message LIKE ? "
+            "AND created_at_utc >= ? LIMIT 1",
+            (f"{message_prefix}%", since),
+        )
+        if already_reported:
+            return
+
+        try:
+            self.journal.log_system_event(
+                Severity.ERROR,
+                "scheduler_fused",
+                f"{message_prefix}{reason}",
+                {
+                    "job_type": job_type,
+                    "consecutive_failures": streak,
+                    "threshold": self.orch.settings.scheduler_max_consecutive_failures,
+                },
+            )
+        except Exception:  # noqa: BLE001 - best-effort, mirrors _log_failure_best_effort
+            pass
+
+        try:
+            alerts.send_alert(
+                self.orch.settings,
+                title=f"AlphaOS scheduler fused: {job_type}",
+                message=reason,
+                priority="high",
+                journal=self.journal,
+            )
+        except Exception:  # noqa: BLE001 - suspenders: must never crash run_due_jobs
+            pass
 
     # ------------------------------------------------------------- status
     def status_report(self, recent_limit: int = 10) -> dict:
@@ -213,3 +304,75 @@ class JobRunner:
                 "cap": self.orch.settings.scheduler_ai_cost_cap_calls_per_30d,
             },
         }
+
+    # ---------------------------------------------------------- heartbeat
+    def heartbeat_check(self, now: Optional[datetime] = None) -> dict:
+        """Dead-man's-switch check for the ``scheduler_health`` CLI command,
+        driven by its OWN separate LaunchAgent (PR9) so its failure modes are
+        never shared with the scheduler tick itself.
+
+        Outside market hours (``MarketSession.CLOSED`` -- nights/weekends)
+        this always reports healthy WITHOUT checking staleness or alerting:
+        there is no expectation of a fresh completed job during a period the
+        scheduler isn't expected to be doing anything. During any other
+        session (premarket/regular/afterhours), monitor/outcomes jobs run on
+        their own interval around the clock regardless of scan windows, so a
+        live scheduler should always have a recently-completed job_runs row;
+        a stale/missing one pages once per invocation (the heartbeat
+        LaunchAgent's own tick interval is the natural repeat -- unlike the
+        scheduler fuse, there is no separate dedupe here by design).
+
+        Never raises.
+        """
+        session = timeutils.market_session(now)
+        if session == MarketSession.CLOSED:
+            return {
+                "ok": True,
+                "market_hours": False,
+                "detail": "market closed; heartbeat staleness not enforced",
+            }
+
+        stale_minutes = self.orch.settings.scheduler_heartbeat_stale_minutes
+        last_completed = self.journal.one(
+            "SELECT job_type, finished_at_utc FROM job_runs WHERE status = 'completed' "
+            "ORDER BY finished_at_utc DESC LIMIT 1"
+        )
+
+        age_seconds = None
+        if last_completed:
+            age_seconds = timeutils.age_seconds(last_completed["finished_at_utc"], now)
+
+        if last_completed and age_seconds is not None and age_seconds <= stale_minutes * 60:
+            return {
+                "ok": True,
+                "market_hours": True,
+                "detail": (
+                    f"last completed job ({last_completed['job_type']}) "
+                    f"{age_seconds / 60:.1f}m ago (<= {stale_minutes}m)"
+                ),
+                "last_job_type": last_completed["job_type"],
+                "age_minutes": age_seconds / 60.0,
+            }
+
+        if not last_completed:
+            detail = "no completed job_runs row found"
+        elif age_seconds is None:
+            detail = f"last completed job ({last_completed['job_type']}) has an unparseable timestamp"
+        else:
+            detail = (
+                f"last completed job ({last_completed['job_type']}) "
+                f"{age_seconds / 60:.1f}m ago (> {stale_minutes}m)"
+            )
+
+        try:
+            alerts.send_alert(
+                self.orch.settings,
+                title="AlphaOS scheduler heartbeat stale",
+                message=detail,
+                priority="high",
+                journal=self.journal,
+            )
+        except Exception:  # noqa: BLE001 - suspenders: must never crash the CLI command
+            pass
+
+        return {"ok": False, "market_hours": True, "detail": detail}

@@ -171,6 +171,55 @@ def _interval_due(job_type: str, interval_minutes: int, journal, now: Optional[d
     return (False, f"only {elapsed_minutes:.1f}m elapsed since last completed {job_type} (< {interval_minutes}m)")
 
 
+def is_fused(job_type: str, max_consecutive_failures: int, journal) -> tuple[bool, str, int]:
+    """Whether ``job_type`` is self-halted after too many consecutive failures.
+
+    Reads the most recent ``max_consecutive_failures`` TERMINAL (status !=
+    'started') ``job_runs`` rows for ``job_type``, most-recent first, and
+    counts a leading streak of 'failed' rows (a 'completed' or 'skipped' row
+    anywhere in that window breaks the streak). Fused iff the streak reaches
+    the threshold.
+
+    No separate fuse-state row exists on purpose: because a fused job type is
+    never dispatched by ``run_due_jobs`` (see job_runner.py), no new job_runs
+    row is added while fused, so the streak -- and therefore the fused
+    verdict -- stays frozen until a human forces a run via the CLI's
+    ``scheduler_run_job`` (which bypasses this check entirely). A forced
+    success adds a 'completed' row and the fuse clears on the next check; a
+    forced failure extends the streak and the fuse stays tripped.
+
+    Never raises; a DB read error fails toward "not fused" (a missed fuse trip
+    is recoverable, an incorrectly stuck fuse is not) -- same conservative
+    bias as ``is_due``.
+    """
+    try:
+        rows = journal.query(
+            "SELECT status FROM job_runs WHERE job_type = ? AND status != 'started' "
+            "ORDER BY id DESC LIMIT ?",
+            (job_type, max_consecutive_failures),
+        )
+    except Exception as exc:  # never crash the caller -- fail toward "not fused"
+        return (False, f"error checking fuse state: {exc}", 0)
+
+    streak = 0
+    for row in rows:
+        if row["status"] != "failed":
+            break
+        streak += 1
+
+    if streak >= max_consecutive_failures:
+        return (
+            True,
+            f"{streak} consecutive failed {job_type} runs (>= {max_consecutive_failures})",
+            streak,
+        )
+    return (
+        False,
+        f"{streak} consecutive failed {job_type} runs (< {max_consecutive_failures})",
+        streak,
+    )
+
+
 def _digest_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     st = timeutils.stamp(now)
     today_sgt = st.local_sgt[:10]
