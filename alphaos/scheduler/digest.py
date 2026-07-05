@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, time as _time, timedelta, timezone as _tz
 
+from alphaos.attribution import ATTRIBUTION_VERSION
 from alphaos.constants import ProposalStatus
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
@@ -254,6 +255,36 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         ),
     }
 
+    # PR8: Attribution v2 visibility. PURE READ, reporting only -- counts and
+    # mock-share only (no mean/sum delta_r here; that stays floor-gated inside
+    # alphaos/reports/attribution.py's fuller report, not the digest). See
+    # alphaos/attribution/ module docstring for the enforced boundary.
+    attribution_rows_today = journal.query(
+        "SELECT attribution_type, resolved_status, is_mock FROM attribution_records "
+        "WHERE created_at_utc >= ?",
+        (since_sgt,),
+    )
+    attribution_type_histogram: dict = {}
+    for r in attribution_rows_today:
+        attribution_type_histogram[r["attribution_type"]] = (
+            attribution_type_histogram.get(r["attribution_type"], 0) + 1
+        )
+    attribution_shadow = {
+        "enabled": bool(settings.attribution_enabled),
+        "attribution_version": ATTRIBUTION_VERSION,
+        "discovered_count_today": len(attribution_rows_today),
+        "type_histogram_today": attribution_type_histogram,
+        "pending_count_today": sum(1 for r in attribution_rows_today if r["resolved_status"] == "pending"),
+        "resolved_count_today": sum(1 for r in attribution_rows_today if r["resolved_status"] == "resolved"),
+        "unresolvable_count_today": sum(
+            1 for r in attribution_rows_today if r["resolved_status"] == "unresolvable"
+        ),
+        "mock_share_today": (
+            round(sum(1 for r in attribution_rows_today if r["is_mock"]) / len(attribution_rows_today), 2)
+            if attribution_rows_today else None
+        ),
+    }
+
     return {
         "date_sgt": timeutils.stamp().local_sgt[:10],
         "kill_switch_engaged": kill_switch.is_engaged(),
@@ -273,4 +304,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "earnings_proximity": earnings_proximity,
         "proposal_lifecycle": proposal_lifecycle,
         "tqs_shadow": tqs_shadow,
+        "attribution_shadow": attribution_shadow,
     }

@@ -16,9 +16,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.attribution import ATTRIBUTION_VERSION
 from alphaos.constants import (
     ArmingClassification,
     AttributionResult,
+    AttributionType,
     OverrideOutcomeStatus,
 )
 from alphaos.reports.metrics import compute_metrics
@@ -26,6 +28,27 @@ from alphaos.util import timeutils
 
 # Below this many *resolved* overrides, attribution is anecdotal, not statistical.
 MIN_MEANINGFUL_OVERRIDE_SAMPLE = 20
+
+# --- Attribution v2 (PR8) sample floors -- deliberately stricter than the v1
+# heuristic block above: v2 claims a DIRECTIONAL R comparison, not just a
+# win/loss count, so it demands both a minimum resolved sample AND a minimum
+# calendar span (a burst of 30 same-day events is not the same evidence as 30
+# spread across weeks).
+MIN_RESOLVED_FOR_V2_AGGREGATE = 30
+MIN_SPAN_DAYS_FOR_V2_AGGREGATE = 28
+MIN_RESOLVED_FOR_V2_SUBSLICE = 20
+
+ATTRIBUTION_V2_CAVEAT = (
+    "Attribution v2 measures whether a DEVIATION from AlphaOS's frozen path "
+    "(a user override, a gate block, a TTL expiry, or execution vs the frozen "
+    "plan) added or cost value in R -- aggregated by attribution_type and "
+    "agent ONLY, never summed into one global 'system value' (a single "
+    "candidate lifecycle can generate more than one attribution row, e.g. a "
+    "blocked proposal a user later overrode). This is NOT a per-event "
+    "verdict: no single trade proves AlphaOS or the user 'right' or 'wrong'. "
+    "Mock/demo rows are always excluded from aggregates. Below the sample "
+    "floor, only counts are shown -- no mean/sum delta_r."
+)
 
 # Outcome statuses that count as a closed/decided override (have a real result).
 _TERMINAL = frozenset({
@@ -175,6 +198,94 @@ def compute_attribution(
     }
 
 
+def _span_days(rows: list[dict], ts_key: str = "resolved_at_utc") -> Optional[float]:
+    dts = []
+    for r in rows:
+        dt = timeutils.parse_iso(r.get(ts_key))
+        if dt is not None:
+            dts.append(dt)
+    if len(dts) < 2:
+        return None
+    return (max(dts) - min(dts)).total_seconds() / 86400.0
+
+
+def _floor_gated_v2_aggregate(rows: list[dict], delta_key: str,
+                              min_resolved: int = MIN_RESOLVED_FOR_V2_AGGREGATE) -> dict:
+    """``rows`` must already be resolved, non-mock, non-demo rows for ONE
+    slice (a type+agent pair, or an execution-gap slice). Returns counts
+    always; mean/sum ``delta_key`` ONLY when both the resolved count AND the
+    calendar span between the first and last resolved event meet the floor --
+    a burst of same-day events never masquerades as weeks of evidence."""
+    n = len(rows)
+    span = _span_days(rows)
+    meets_floor = n >= min_resolved and (span or 0) >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE
+    deltas = [r[delta_key] for r in rows if r.get(delta_key) is not None]
+    if not meets_floor:
+        return {"resolved_count": n, "span_days": round(span, 1) if span is not None else None,
+                "mean_delta_r": None, "sum_delta_r": None, "status": "below_sample_floor"}
+    return {
+        "resolved_count": n, "span_days": round(span, 1) if span is not None else None,
+        "mean_delta_r": round(sum(deltas) / len(deltas), 4) if deltas else None,
+        "sum_delta_r": round(sum(deltas), 4) if deltas else None,
+        "status": "ok",
+    }
+
+
+def compute_attribution_v2(records: list[dict]) -> dict:
+    """Pure aggregation over ``attribution_records`` rows (PR8). Aggregates by
+    ``attribution_type`` AND ``agent`` ONLY -- deliberately never sums delta_r
+    across all types/agents into one global 'system value', since a single
+    candidate lifecycle can generate more than one row (e.g. a blocked
+    proposal a user later overrode), and mixing agents there would
+    misattribute one agent's value to another. Mock rows are always excluded
+    from aggregates (counted separately, never silently dropped)."""
+    live = [r for r in records if not r.get("is_mock")]
+    mock_excluded = sum(1 for r in records if r.get("is_mock"))
+
+    counts_by_type_and_status: dict = {}
+    for r in records:
+        t, s = r.get("attribution_type"), r.get("resolved_status")
+        counts_by_type_and_status.setdefault(t, {}).setdefault(s, 0)
+        counts_by_type_and_status[t][s] += 1
+
+    aggregate_by_type_and_agent: dict = {}
+    for t in AttributionType:
+        resolved_rows = [r for r in live if r.get("attribution_type") == t.value
+                         and r.get("resolved_status") == "resolved"]
+        agents = sorted({r.get("agent") for r in resolved_rows if r.get("agent")})
+        by_agent = {
+            agent: _floor_gated_v2_aggregate(
+                [r for r in resolved_rows if r.get("agent") == agent], "delta_r",
+            )
+            for agent in agents
+        }
+        if by_agent:
+            aggregate_by_type_and_agent[t.value] = by_agent
+
+    execution_rows = [
+        r for r in live
+        if r.get("attribution_type") == AttributionType.PROPOSE_APPROVED_EXECUTED.value
+        and r.get("execution_delta_r") is not None
+    ]
+    execution_gap = _floor_gated_v2_aggregate(execution_rows, "execution_delta_r") if execution_rows else {
+        "resolved_count": 0, "span_days": None, "mean_delta_r": None, "sum_delta_r": None,
+        "status": "below_sample_floor",
+    }
+
+    return {
+        "attribution_version": ATTRIBUTION_VERSION,
+        "total_records": len(records),
+        "mock_excluded_count": mock_excluded,
+        "counts_by_type_and_status": counts_by_type_and_status,
+        "aggregate_delta_r_by_type_and_agent": aggregate_by_type_and_agent,
+        "execution_gap_propose_approved_executed": execution_gap,
+        "sample_floor_resolved": MIN_RESOLVED_FOR_V2_AGGREGATE,
+        "sample_floor_span_days": MIN_SPAN_DAYS_FOR_V2_AGGREGATE,
+        "sample_floor_subslice_resolved": MIN_RESOLVED_FOR_V2_SUBSLICE,
+        "caveat": ATTRIBUTION_V2_CAVEAT,
+    }
+
+
 def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
     """Read the override layer (+ trade_outcomes baseline) and aggregate. PURE
     READ — safe to call any time; never writes, never touches gates/execution."""
@@ -193,6 +304,16 @@ def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
     rep["as_of"] = timeutils.market_date().isoformat()
     rep["mode"] = settings.mode.value
     rep["execution_provider"] = settings.execution_provider
+
+    # PR8: Attribution v2 -- counterfactual ΔR ledger, a SEPARATE nested block
+    # (never merged into the v1 heuristic fields above, which answer a
+    # coarser "who outperformed" question over a different table).
+    attribution_records = journal.query(
+        "SELECT attribution_type, agent, resolved_status, delta_r, execution_delta_r, "
+        "is_mock, resolved_at_utc FROM attribution_records ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
+    rep["v2"] = compute_attribution_v2(attribution_records)
     return rep
 
 
@@ -259,4 +380,44 @@ def render_markdown(rep: dict) -> str:
         "",
         f"> ⚠️ {rep['caveat']}",
     ]
+    if "v2" in rep:
+        v2 = rep["v2"]
+        lines += [
+            "",
+            f"# Attribution v2 (counterfactual ΔR) — version {v2['attribution_version']}",
+            f"- Total records: **{v2['total_records']}**  ·  Mock-excluded: **{v2['mock_excluded_count']}**",
+            "",
+            "## Counts by type and status",
+        ]
+        for t, statuses in v2["counts_by_type_and_status"].items():
+            lines.append(f"- {t}: " + ", ".join(f"{s}={n}" for s, n in statuses.items()))
+        if not v2["counts_by_type_and_status"]:
+            lines.append("- (none)")
+        lines += ["", "## Aggregate ΔR by type and agent (floor-gated)"]
+        for t, by_agent in v2["aggregate_delta_r_by_type_and_agent"].items():
+            for agent, agg in by_agent.items():
+                if agg["status"] == "ok":
+                    lines.append(
+                        f"- {t} / {agent}: n={agg['resolved_count']} "
+                        f"(span {agg['span_days']}d) mean ΔR={agg['mean_delta_r']} "
+                        f"sum ΔR={agg['sum_delta_r']}"
+                    )
+                else:
+                    lines.append(
+                        f"- {t} / {agent}: n={agg['resolved_count']} — below_sample_floor "
+                        f"(needs ≥{v2['sample_floor_resolved']} resolved over "
+                        f"≥{v2['sample_floor_span_days']}d)"
+                    )
+        if not v2["aggregate_delta_r_by_type_and_agent"]:
+            lines.append("- (none)")
+        eg = v2["execution_gap_propose_approved_executed"]
+        lines += ["", "## Execution gap (propose_approved_executed)"]
+        if eg["status"] == "ok":
+            lines.append(
+                f"- n={eg['resolved_count']} (span {eg['span_days']}d) "
+                f"mean execution ΔR={eg['mean_delta_r']} sum={eg['sum_delta_r']}"
+            )
+        else:
+            lines.append(f"- n={eg['resolved_count']} — below_sample_floor")
+        lines += ["", f"> ⚠️ {v2['caveat']}"]
     return "\n".join(lines)

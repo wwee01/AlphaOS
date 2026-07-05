@@ -78,6 +78,14 @@ TQS_CONFIG_FIELDS = (
     "tqs_shadow_enabled",
 )
 
+# PR8: Attribution v2's formula/taxonomy are CODE CONSTANTS keyed by
+# ATTRIBUTION_VERSION (which travels on every attribution_records row
+# directly) -- same rationale as TQS_CONFIG_FIELDS above. The one real
+# setting is the on/off switch.
+ATTRIBUTION_CONFIG_FIELDS = (
+    "attribution_enabled",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -94,9 +102,10 @@ def _subset_hash(full: dict, fields: tuple) -> str:
 def build_config_hashes(settings) -> dict[str, str]:
     """{"config_hash", "scanner_config_hash", "risk_config_hash",
     "protection_config_hash", "scheduler_config_hash", "earnings_config_hash",
-    "proposal_ttl_config_hash", "tqs_config_hash"}. Each hash changes iff a
-    relevant field's VALUE changes -- adding/renaming a field it doesn't list
-    does not perturb a category hash that doesn't reference it."""
+    "proposal_ttl_config_hash", "tqs_config_hash", "attribution_config_hash"}.
+    Each hash changes iff a relevant field's VALUE changes -- adding/renaming
+    a field it doesn't list does not perturb a category hash that doesn't
+    reference it."""
     full = settings_dict(settings)
     return {
         "config_hash": stable_hash(full),
@@ -107,4 +116,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "earnings_config_hash": _subset_hash(full, EARNINGS_CONFIG_FIELDS),
         "proposal_ttl_config_hash": _subset_hash(full, PROPOSAL_TTL_CONFIG_FIELDS),
         "tqs_config_hash": _subset_hash(full, TQS_CONFIG_FIELDS),
+        "attribution_config_hash": _subset_hash(full, ATTRIBUTION_CONFIG_FIELDS),
     }
