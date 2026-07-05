@@ -17,6 +17,11 @@ How to use it:
 - **Every new working session** reads `HANDOVER.md` first (current state), then this
   document (direction), in that order. HANDOVER answers "where are we"; this answers
   "where are we going and why."
+- **Companion documents** (same directory): `alphaos-pr-implementation-specs.md` —
+  machine-drawing detail for PR9–PR11, skeletons for PR12–PR15, the reusable
+  spec/build/audit templates (T1–T4), and the house-patterns appendix (tribal
+  knowledge, written down). `alphaos-ui-ux-design.md` — the operator-console design
+  (§13 summarizes it). Build from the specs doc; strategize from this one.
 - **Specs for each PR** are written fresh against the current code at build time — this
   plan fixes intent, scope boundaries, and acceptance gates, not implementation detail.
 - **Nothing here overrides §1 (Prime Directives) or §8 (the Never-List).** If a future
@@ -490,6 +495,43 @@ measured expectancy × measured frequency × sized risk  vs  10% MoM
 
 That line is the moonshot, operationalized. Chase the constraint it names; never the
 number itself.
+
+---
+
+## 13. UI/UX — the operator console
+
+Full design in `alphaos-ui-ux-design.md` (philosophy, information architecture, all
+screens with written wireframes, evolution path, first-build order, avoid-list, and
+a Google Stitch mockup prompt). The load-bearing decisions, so no future builder
+has to rediscover them:
+
+- **The user is the accountable supervisor of a machine that trades** — not a
+  chart-watcher. Every screen must answer in ≤5s: what is it doing, why, what does
+  it need from me, how do I stop it.
+- **Annunciator principle:** a permanent status strip (mode PAPER/LIVE · autonomy
+  level · kill switch + one-click engage · governor · heartbeat age · open R ·
+  pending approvals) on every screen. Mode confusion is the deadliest UX failure in
+  supervised autonomy.
+- **Asymmetric friction:** viewing instant · approving deliberate (confirm restating
+  max loss) · risk/autonomy increases heavy (typed confirm, Class C link) ·
+  **stopping is always the easiest action in the UI.** The real-money lock has no
+  unlock affordance, by design.
+- **Evidence-state honesty in pixels:** scores never appear without confidence;
+  aggregates never without n-vs-floor; mock/paper never styled as live
+  ("paper — upper bound" watermark). The reporting law extends to the UI.
+- **Progressive disclosure ladder** for all machine reasoning: verdict → one-line
+  why → evidence table → narrative → raw provenance. Hindsight (counterfactual ΔR
+  on rejects/blocks/expiries) is a neutral learning surface, never a FOMO alarm.
+- **Nine screens, three planes:** Operate (Tonight · Approvals · Positions),
+  Understand (Decisions · Learning · Cards), Govern (Autonomy & Risk · System &
+  Audit · Brief Archive). "Tonight" is the home: the one action, needs-you, open
+  risk, machine activity, brief, moonshot gap line.
+- **Build order:** annunciator strip + Tonight tab + position health cards +
+  approvals TTL/exit-plan upgrades + decisions funnel — all on the existing
+  Streamlit substrate (UI-PR-A, alongside PR11). Stay on Streamlit until it
+  demonstrably hurts; the IA is substrate-independent; ntfy push is the mobile app
+  until the crossing justifies more. The UI can never do what the CLI cannot —
+  same orchestrator methods, same gates, forever.
 
 ---
 
