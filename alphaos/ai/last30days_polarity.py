@@ -113,6 +113,11 @@ class PolarityResult:
     model_provider: Optional[str] = None
     prompt_hash: Optional[str] = None
     system_prompt_hash: Optional[str] = None
+    # PR9.5: real token usage for cost accounting. None for mock/skipped/error
+    # paths (no real API call was made); populated by _live_classify.
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
     @property
     def is_high_risk(self) -> bool:
@@ -147,7 +152,26 @@ class PolarityResult:
             "model_provider": self.model_provider,
             "prompt_hash": self.prompt_hash,
             "system_prompt_hash": self.system_prompt_hash,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
         }
+
+
+def _extract_usage(resp) -> Optional[dict]:
+    """PR9.5: best-effort token usage from an OpenAI ChatCompletion response,
+    for real cost accounting (cost_guard previously only counted
+    openai_evaluations, undercounting real AI spend 2-3x). Returns None if
+    unavailable -- cost accounting must never affect or break the
+    classification it's measuring."""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 def _enum(value, allowed: set, default: str) -> str:
@@ -185,8 +209,8 @@ class Last30DaysPolarityClassifier:
         if not ev.has_evidence:
             return self._skipped(ev, PolarityParseStatus.SKIPPED.value)
         try:
-            parsed, raw, status, ai_lineage = (self._mock_classify(ev) if self.use_mock
-                                               else self._live_classify(ev))
+            parsed, raw, status, ai_lineage, usage = (self._mock_classify(ev) if self.use_mock
+                                                       else self._live_classify(ev))
         except Exception as exc:  # fail-safe: never crash the scan
             if self.journal is not None:
                 self.journal.log_system_event(
@@ -194,7 +218,7 @@ class Last30DaysPolarityClassifier:
                     f"polarity classify failed for {ev.symbol}; failing safe.", {"error": str(exc)},
                 )
             return self._error(ev, PolarityParseStatus.MODEL_ERROR.value)
-        return self._build(ev, parsed, raw, status, ai_lineage)
+        return self._build(ev, parsed, raw, status, ai_lineage, usage)
 
     # --------------------------------------------------- deterministic arming
     @staticmethod
@@ -243,7 +267,7 @@ class Last30DaysPolarityClassifier:
 
     # --------------------------------------------------------------- builders
     def _build(self, ev: PolarityEvidence, parsed: dict, raw, status: str,
-               ai_lineage: Optional[dict] = None) -> PolarityResult:
+               ai_lineage: Optional[dict] = None, usage: Optional[dict] = None) -> PolarityResult:
         alignment, should_arm, cls = self._decide_arming(parsed, ev.direction)
         high_risk = cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
         conflict = bool(parsed["official_catalyst_conflict"])
@@ -251,6 +275,7 @@ class Last30DaysPolarityClassifier:
                          or parsed["hype_or_manipulation_risk"] in (HypeRisk.MEDIUM.value, HypeRisk.HIGH.value))
         warning = HIGH_RISK_NARRATIVE_WARNING if high_risk else ""
         ai_lineage = ai_lineage or {}
+        usage = usage or {}
         return PolarityResult(
             candidate_id=ev.candidate_id, symbol=ev.symbol, provider=ev.provider, model=self.model,
             prompt_template_version=POLARITY_PROMPT_VERSION,
@@ -266,6 +291,9 @@ class Last30DaysPolarityClassifier:
             model_provider=ai_lineage.get("model_provider"),
             prompt_hash=ai_lineage.get("prompt_hash"),
             system_prompt_hash=ai_lineage.get("system_prompt_hash"),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
         )
 
     def _empty_parsed(self) -> dict:
@@ -323,9 +351,10 @@ class Last30DaysPolarityClassifier:
             ],
             timeout=HTTP_TIMEOUT,
         )
+        usage = _extract_usage(resp)  # PR9.5: real cost accounting
         content = resp.choices[0].message.content
         obj = structured_json.parse_json_object(content)   # raises on invalid JSON
-        return self._coerce(obj), obj, PolarityParseStatus.PARSED.value, ai_lineage
+        return self._coerce(obj), obj, PolarityParseStatus.PARSED.value, ai_lineage, usage
 
     @staticmethod
     def _build_user_prompt(ev: PolarityEvidence) -> str:
@@ -403,4 +432,4 @@ class Last30DaysPolarityClassifier:
             "evidence_items_used": [{"title": t[:80], "source": "mock", "relevance": "medium"}
                                     for t in ev.cluster_titles[:3]],
         }
-        return self._coerce(obj), {"mock": True, **obj}, PolarityParseStatus.PARSED.value, None
+        return self._coerce(obj), {"mock": True, **obj}, PolarityParseStatus.PARSED.value, None, None

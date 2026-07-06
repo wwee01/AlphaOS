@@ -55,3 +55,28 @@ def test_config_version_recorded(journal, settings):
     assert len(rows) == 1
     assert rows[0]["real_trading_enabled_raw"] == "false"
     assert "openai_api_key" not in rows[0]["config_json"]  # secrets never stored
+
+
+def test_config_hash_is_deterministic_across_independent_journal_instances(settings):
+    """PR9.5 fix: builtin hash() on a str is PYTHONHASHSEED-randomized (a
+    security default since Python 3.3) -- the SAME config produced a
+    DIFFERENT config_hash every process restart, defeating the point of a
+    config-change fingerprint. Must now use the codebase's own deterministic
+    stable_hash convention instead (already used correctly elsewhere by
+    build_config_hashes()). Two INDEPENDENT JournalStore instances (standing
+    in for two separate process runs) must agree on the hash for identical
+    config."""
+    from alphaos.journal.journal_store import JournalStore
+
+    j1 = JournalStore(":memory:")
+    j2 = JournalStore(":memory:")
+    j1.record_config_version(settings)
+    j2.record_config_version(settings)
+    hash1 = j1.one("SELECT config_hash FROM config_versions")["config_hash"]
+    hash2 = j2.one("SELECT config_hash FROM config_versions")["config_hash"]
+
+    assert hash1 == hash2
+    assert len(hash1) == 16  # stable_hash's fixed hex-digest length
+    assert all(c in "0123456789abcdef" for c in hash1)  # hex, not the old decimal-mod format
+    j1.close()
+    j2.close()

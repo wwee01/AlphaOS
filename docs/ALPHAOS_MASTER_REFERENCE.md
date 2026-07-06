@@ -132,13 +132,22 @@ unattended system is a **silent halt**. The daily digest's delivery channel is a
 ntfy. *Fix: operator sets a topic + subscribes their phone (user-only input), then
 run the drill suite. One line of config activates every alert path already built.*
 
-**T2 · The ledger dies with one disk. (infra CRITICAL + CRO HIGH)** 🔴 No backup
-automation; Time Machine has **no destination configured**; `data/*.db` is
-(correctly) gitignored; `pmset autorestart 0` means a power cut leaves the machine
-off, silently (see T1). WAL mode means naive `cp` mid-tick can produce a torn copy —
-backups must use the SQLite `.backup` API. *Fix: PR9.5 backup LaunchAgent (05:30 SGT:
-`.backup` → `PRAGMA integrity_check` → gzip → iCloud Drive copy → 30 daily/12 monthly
-rotation → alert on failure) + `sudo pmset -a autorestart 1` + quarterly restore drill.*
+**T2 · The ledger dies with one disk.** ✅ **Backup automation shipped 2026-07-06**
+(PR9.5): `deploy/backup_ledger.sh` + `com.ck.alphaos.backup` LaunchAgent (05:30 SGT
+daily) — SQLite's own `.backup` API (WAL-safe, never `cp`) → `PRAGMA
+integrity_check` gate (never rotates in a bad backup) → gzip → copy to iCloud
+Drive (`~/Library/Mobile Documents/com~apple~CloudDocs/AlphaOS-backups/`) →
+rotate 30 daily / 12 monthly (monthly slot self-heals if the 1st is missed) →
+any failure alerts priority=high. 10 tests (integrity, restore-roundtrip,
+rotation math, corrupt-DB rejection, missing-source rejection). `pmset
+autorestart` ✅ already fixed (§2). **Residual, honestly stated**: this protects
+against logical failure (corruption, accidental deletion, a bad migration) —
+NOT physical disk failure, since the backup still lives on the same physical
+Mac mini (iCloud Drive sync gives genuine off-machine redundancy IF it's
+working, but that wasn't independently verified end-to-end for a real
+LaunchAgent — do the quarterly restore drill, and see the Week-2 punch-list
+item for a true second physical layer, e.g. Time Machine to an external
+drive).
 
 **T3 · The strategy is aimed where the signal can't win, at a frequency that can't
 learn. (trader CRITICAL + researcher CRITICAL)** 🔴 See §1. Additionally the
@@ -329,11 +338,13 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
    offset — literal 2h wait wasn't practical) → phone notification received. **PR9 is
    now complete except the passive 10-consecutive-trading-day streak** (started
    2026-07-06; does not block PR9.5/PR10).
-   **Next up** — ready to run now that NTFY is live.
 
 **Week 1 — PR9.5 "Ops & Measurement Hardening" (small, spec in the specs doc):**
-6. 🔴 Backup LaunchAgent (`.backup` → integrity_check → gzip → iCloud → 30d/12m
-   rotation → alert on failure) + one restore test.
+6. ✅ Backup LaunchAgent built + tested 2026-07-06 (`.backup` → integrity_check
+   → gzip → iCloud → 30d/12m rotation → alert on failure, 10 tests). **Still
+   open**: the operator's own quarterly restore-test drill (README has the
+   exact 3-step command) — the automation writing backups isn't the same
+   claim as a human having confirmed one restores.
 7. 🔴 **Benchmark spine** (T4): daily paper-equity snapshot + SPY total-return series
    + relative-return/rolling-beta report block. Start the irreplaceable dataset.
 8. 🔴 Cost-cap true-up: count labeller + polarity calls; capture `resp.usage` tokens.
@@ -361,13 +372,13 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
 
 ## 6. Operating manual
 
-**Daily (≤5 min):** read the 18:00 SGT digest (arrives via ntfy once T1 is fixed).
+**Daily (≤5 min):** read the 18:00 SGT digest (arrives via ntfy — live since 2026-07-06).
 Check `python -m alphaos scheduler_status` if anything looks off. Approve/reject any
 pending proposals *only* through CLI/dashboard — never raw SQL.
 
 **Weekly:** `pytest` green · `git fetch && git status` clean · glance at
-`/tmp/alphaos-scheduler-error.log` (→ `~/Library/Logs/alphaos/` after #9) · fuse
-check: any `scheduler_fused` system_events? · backup verified current (after #6).
+`~/Library/Logs/alphaos/*-error.log` · fuse check: any `scheduler_fused`
+system_events? · backup verified current (`ls -la ~/Library/Mobile\ Documents/com~apple~CloudDocs/AlphaOS-backups/daily/ | tail -3`).
 
 **Monthly:** Moonshot Gap line (after PR11): `expectancy × frequency × risk vs 10% —
 binding constraint named`. Restore-test a backup quarterly. Re-read §3 of this file;
@@ -379,8 +390,10 @@ in a *copy* of the plist or monkeypatch a job to raise once → page arrives →
 heartbeat (stop the scheduler agent for >2h in market hours → page arrives → reload).
 
 **Recovery:**
-- *Machine died/replaced:* clone repo → `uv venv` + `pip install -r
-  requirements-lock.txt` → restore newest backup to `data/alphaos.db` → copy `.env`
+- *Machine died/replaced:* clone repo → `uv venv && uv pip install --python
+  .venv/bin/python -r requirements-lock.txt && uv pip install --python
+  .venv/bin/python -e .` → restore newest backup from iCloud Drive to
+  `data/alphaos.db` (README has the exact restore commands) → copy `.env`
   from your password manager (it is NOT in git) → `deploy/install_launchagent.sh` →
   verify `scheduler_status` + a heartbeat page.
 - *Fused job:* root-cause via `job_runs.error` + logs, fix, then one manual

@@ -108,34 +108,37 @@ mock or any other provider — data is blocked instead.
 
 ---
 
-## Unattended scheduler cadence (PR9)
+## Unattended scheduler cadence (PR9) + backups (PR9.5)
 
-Two macOS LaunchAgents (never cron — `launchctl`, matching this machine's other
-projects) turn the scheduler on:
+Three macOS LaunchAgents (never cron — `launchctl`, matching this machine's other
+projects) turn the scheduler on and protect the ledger:
 
 | LaunchAgent | Runs | Interval | Purpose |
 |---|---|---|---|
 | `com.ck.alphaos.scheduler` | `python -m alphaos scheduler_run_once` | 300s | The idempotent tick. `JobRunner.run_due_jobs()` decides what's actually due (scan windows, monitor/outcomes intervals, digest time), respecting the kill switch, AI cost cap, and the self-halt fuse. |
 | `com.ck.alphaos.heartbeat` | `python -m alphaos scheduler_health` | 1800s | A SEPARATE dead-man's-switch process on purpose, so its failure modes never overlap with the scheduler tick it's watching. |
+| `com.ck.alphaos.backup` | `deploy/backup_ledger.sh` | daily 05:30 | Online (WAL-safe) backup of `data/alphaos.db`, integrity-checked, gzipped, rotated (30 daily / 12 monthly), copied to iCloud Drive. Also a separate process/agent. |
 
 ```bash
-# Install/reload both agents (or just one: `... scheduler` / `... heartbeat`)
+# Install/reload all three agents (or just one: `... scheduler` / `... heartbeat` / `... backup`)
 deploy/install_launchagent.sh
 
-# Remove (stops unattended cadence entirely; does not touch the kill switch,
-# open positions, or any data)
+# Remove the TRADING agents only (stops unattended cadence; does not touch the
+# kill switch, open positions, or any data -- and deliberately does NOT stop
+# backups, since pausing the fund is no reason to stop protecting the ledger
+# you already have). Pass `backup` explicitly if you really want that too.
 deploy/uninstall_launchagent.sh
 
-# Check status / logs
+# Check status / logs (persistent -- NOT /tmp, which macOS purges on reboot)
 launchctl list | grep com.ck.alphaos
-tail -f /tmp/alphaos-scheduler.log /tmp/alphaos-scheduler-error.log
-tail -f /tmp/alphaos-heartbeat.log /tmp/alphaos-heartbeat-error.log
+tail -f ~/Library/Logs/alphaos/*.log
 
 # Manual equivalents (no LaunchAgent needed)
 python -m alphaos scheduler_status   # job history, locks, kill-switch/cost-cap summary
 python -m alphaos scheduler_run_once # run whatever's currently due, once
 python -m alphaos scheduler_run_job scan   # force one job type now (bypasses cadence timing)
 python -m alphaos scheduler_health   # dead-man heartbeat check (exit 0/1)
+deploy/backup_ledger.sh              # run a backup right now
 ```
 
 **Self-halt fuse**: a job type that fails `SCHEDULER_MAX_CONSECUTIVE_FAILURES`
@@ -143,6 +146,29 @@ times in a row (default 3) is skipped by every subsequent tick — one alert +
 one `system_events` row per fused episode, not per tick — until a human runs
 `scheduler_run_job <job_type>` manually (success clears it; another failure
 extends the streak). Kill-switch/cost-cap skips never count as failures.
+
+**Backups live at** `~/Library/Mobile Documents/com~apple~CloudDocs/AlphaOS-backups/{daily,monthly}/`
+(iCloud Drive — genuinely off-machine, not just a second folder on the same
+disk). Any failure (missing source DB, a failed `.backup`, a failed integrity
+check) sends a high-priority alert instead of silently producing nothing.
+
+**Quarterly restore drill (do this — an untested backup is a hope, not a
+plan):**
+```bash
+# 1. Pick the newest daily backup and restore it to a scratch path (never
+#    overwrite the live data/alphaos.db with this).
+LATEST=$(ls -t ~/Library/Mobile\ Documents/com~apple~CloudDocs/AlphaOS-backups/daily/*.db.gz | head -1)
+gunzip -c "$LATEST" > /tmp/alphaos-restore-test.db
+
+# 2. Verify it's actually valid and has recent data.
+sqlite3 /tmp/alphaos-restore-test.db "PRAGMA integrity_check;"
+sqlite3 /tmp/alphaos-restore-test.db "SELECT COUNT(*) FROM job_runs;"
+
+# 3. Clean up the scratch copy.
+rm /tmp/alphaos-restore-test.db
+```
+Log the result in `docs/incidents/` (date, which backup file, integrity_check
+output, row counts) — the same discipline as the kill-switch/alert drills.
 
 ---
 

@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# PR9: stop + remove the AlphaOS LaunchAgents. Per the master build plan's
-# own doctrine ("stopping is always the easiest action"), this is the
+# PR9: stop + remove the AlphaOS trading LaunchAgents. Per the master build
+# plan's own doctrine ("stopping is always the easiest action"), this is the
 # one-command way to fully turn off unattended cadence -- it does NOT touch
 # the kill switch, any open positions, or any data; it only stops the
 # scheduler/heartbeat processes from being invoked by launchd going forward.
 #
+# PR9.5: `all` deliberately does NOT include the backup agent -- pausing the
+# fund is not a reason to also stop protecting the ledger you already have.
+# Use the explicit `backup` target if you really want to stop backups too.
+#
 # Usage:
-#   deploy/uninstall_launchagent.sh              # remove both agents
+#   deploy/uninstall_launchagent.sh              # remove scheduler + heartbeat (trading cadence only)
 #   deploy/uninstall_launchagent.sh scheduler     # just com.ck.alphaos.scheduler
 #   deploy/uninstall_launchagent.sh heartbeat     # just com.ck.alphaos.heartbeat
+#   deploy/uninstall_launchagent.sh backup        # just com.ck.alphaos.backup (explicit only, not part of `all`)
 
 set -euo pipefail
 
@@ -39,8 +44,11 @@ case "$TARGET" in
   heartbeat)
     remove_agent "com.ck.alphaos.heartbeat"
     ;;
+  backup)
+    remove_agent "com.ck.alphaos.backup"
+    ;;
   *)
-    echo "Usage: $0 [all|scheduler|heartbeat]" >&2
+    echo "Usage: $0 [all|scheduler|heartbeat|backup]" >&2
     exit 1
     ;;
 esac

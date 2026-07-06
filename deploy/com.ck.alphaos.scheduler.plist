@@ -38,9 +38,13 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- PR9.5: persistent logs, not /tmp -- macOS purges /tmp on reboot and
+       periodically, which made the scheduler's own log history disposable.
+       ~/Library/Logs/ is the standard macOS location for app logs (visible
+       in Console.app) and is included in Time Machine / most backup tools. -->
   <key>StandardOutPath</key>
-  <string>/tmp/alphaos-scheduler.log</string>
+  <string>/Users/ck/Library/Logs/alphaos/scheduler.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/alphaos-scheduler-error.log</string>
+  <string>/Users/ck/Library/Logs/alphaos/scheduler-error.log</string>
 </dict>
 </plist>

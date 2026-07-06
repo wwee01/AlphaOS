@@ -55,6 +55,8 @@ SCHEDULER_CONFIG_FIELDS = (
     "scheduler_stale_job_minutes", "scheduler_ai_cost_cap_calls_per_30d",
     # PR9: self-halt fuse threshold + heartbeat staleness window.
     "scheduler_max_consecutive_failures", "scheduler_heartbeat_stale_minutes",
+    # PR9.5: benchmark spine capture time.
+    "scheduler_benchmark_spine_time",
 )
 
 EARNINGS_CONFIG_FIELDS = (

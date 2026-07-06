@@ -1137,6 +1137,13 @@ class Orchestrator:
 
         return build_outcomes_report(self.journal, self.settings, limit=limit)
 
+    def relative_performance_report(self, limit: int = 3650) -> dict:
+        """PR9.5: paper-equity vs S&P 500 measurement. PURE READ — no
+        statistical claims; floor-gated exactly like every other report."""
+        from alphaos.reports.relative_performance import build_relative_performance_report
+
+        return build_relative_performance_report(self.journal, self.settings, limit=limit)
+
     def decision_lineage_report(self, decision_id: str) -> dict:
         """READ-ONLY: full lineage reconstruction for one decision (accepts a
         candidate_id, proposal_id, rejection_id, adjustment_id, override_id,

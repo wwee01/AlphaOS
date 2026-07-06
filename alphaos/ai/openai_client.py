@@ -64,6 +64,11 @@ class OpenAIEvaluation:
     model_provider: Optional[str] = None
     prompt_hash: Optional[str] = None
     system_prompt_hash: Optional[str] = None
+    # PR9.5: real token usage for cost accounting. None for mock/rejection
+    # paths (no real API call was made); populated by _live_eval.
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
     def to_row(self) -> dict:
         return {
@@ -100,7 +105,27 @@ class OpenAIEvaluation:
             "model_provider": self.model_provider,
             "prompt_hash": self.prompt_hash,
             "system_prompt_hash": self.system_prompt_hash,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
         }
+
+
+def _extract_usage(resp) -> Optional[dict]:
+    """PR9.5: best-effort token usage from an OpenAI ChatCompletion response,
+    for real cost accounting (cost_guard previously only counted
+    openai_evaluations that were the FULL AI spend anyway here, but labeller/
+    polarity calls elsewhere were invisible to it -- see cost_guard.py).
+    Returns None if unavailable -- never affects/blocks the eval it's
+    measuring."""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
 
 
 class OpenAIClient:
@@ -261,6 +286,7 @@ class OpenAIClient:
             ],
             timeout=HTTP_TIMEOUT,
         )
+        usage = _extract_usage(resp)  # PR9.5: before any validation/rejection branch below
         obj = structured_json.parse_json_object(resp.choices[0].message.content)
         structured_json.require_keys(obj, pt.NO_NEWS_EVAL_KEYS)
 
@@ -277,17 +303,23 @@ class OpenAIClient:
                 [ReasonCode.INVENTED_CATALYST.value], freshness_status=freshness_status,
                 validation_status=failure,
             )
-            return self._with_ai_lineage(rej, ai_lineage)
+            return self._with_ai_lineage(rej, ai_lineage, usage)
 
         obj = enforce_no_news_sentinels(obj)
         evaluation = self._from_json(candidate, obj, freshness_status)
-        return self._with_ai_lineage(evaluation, ai_lineage)
+        return self._with_ai_lineage(evaluation, ai_lineage, usage)
 
     @staticmethod
-    def _with_ai_lineage(evaluation: OpenAIEvaluation, ai_lineage: dict) -> OpenAIEvaluation:
+    def _with_ai_lineage(
+        evaluation: OpenAIEvaluation, ai_lineage: dict, usage: Optional[dict] = None,
+    ) -> OpenAIEvaluation:
         evaluation.model_provider = ai_lineage.get("model_provider")
         evaluation.prompt_hash = ai_lineage.get("prompt_hash")
         evaluation.system_prompt_hash = ai_lineage.get("system_prompt_hash")
+        if usage:
+            evaluation.prompt_tokens = usage.get("prompt_tokens")
+            evaluation.completion_tokens = usage.get("completion_tokens")
+            evaluation.total_tokens = usage.get("total_tokens")
         return evaluation
 
     def _from_json(self, candidate, obj, freshness_status) -> OpenAIEvaluation:  # pragma: no cover

@@ -66,3 +66,109 @@ def test_job_runs_table_exists_and_schema_version_unchanged(tmp_path):
         assert SCHEMA_VERSION == 3
     finally:
         j.close()
+
+
+def test_benchmark_spine_tables_exist_on_a_fresh_db_and_schema_version_unchanged(tmp_path):
+    """PR9.5's equity_snapshots/benchmark_bars are additive -- SCHEMA_VERSION
+    must not have moved (still 3)."""
+    j = JournalStore(str(tmp_path / "fresh_benchmark.db"))
+    try:
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert {"equity_snapshots", "benchmark_bars"} <= tables
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()
+
+
+def test_benchmark_spine_tables_added_to_a_pre_pr9_5_db(tmp_path):
+    """An old ledger written before PR9.5 (no equity_snapshots/benchmark_bars
+    tables at all) must gain both additively on open, exactly like every
+    other post-hoc table addition in this codebase's history."""
+    db = str(tmp_path / "pre_pr9_5.db")
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "CREATE TABLE system_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "event_id TEXT NOT NULL UNIQUE, severity TEXT NOT NULL, category TEXT NOT NULL, "
+        "message TEXT NOT NULL, detail_json TEXT, created_at_utc TEXT NOT NULL, "
+        "created_at_sgt TEXT NOT NULL, created_at_market TEXT)"
+    )
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert {"equity_snapshots", "benchmark_bars"} <= tables
+        # And they're immediately usable, not just present.
+        j.insert("equity_snapshots", {
+            "snapshot_id": "eq1", "market_date": "2026-07-06", "equity": 100000.0,
+            "equity_source": "static_config",
+        })
+        assert j.count_rows("equity_snapshots") == 1
+    finally:
+        j.close()
+
+
+def test_benchmark_spine_unique_indexes_enforce_idempotency(tmp_path):
+    """One equity snapshot per market_date; one bar per (symbol, date) --
+    both plain UNIQUE (never NULL columns, so no NULL-uniqueness trap here,
+    unlike the partial-index cases elsewhere in this codebase)."""
+    import pytest
+
+    j = JournalStore(str(tmp_path / "unique_test.db"))
+    try:
+        j.insert("equity_snapshots", {
+            "snapshot_id": "eq1", "market_date": "2026-07-06", "equity": 100000.0,
+            "equity_source": "static_config",
+        })
+        with pytest.raises(sqlite3.IntegrityError):
+            j.insert("equity_snapshots", {
+                "snapshot_id": "eq2", "market_date": "2026-07-06", "equity": 999.0,
+                "equity_source": "static_config",
+            })
+
+        j.insert("benchmark_bars", {"bar_id": "b1", "symbol": "SPY", "bar_date": "2026-07-06", "close": 500.0})
+        with pytest.raises(sqlite3.IntegrityError):
+            j.insert("benchmark_bars", {"bar_id": "b2", "symbol": "SPY", "bar_date": "2026-07-06", "close": 501.0})
+    finally:
+        j.close()
+
+
+def test_ai_token_usage_columns_added_to_a_pre_pr9_5_db(tmp_path):
+    """PR9.5 added prompt_tokens/completion_tokens/total_tokens to
+    openai_evaluations, candidate_labels, and last30days_polarity. An old
+    ledger predating those columns must gain them additively on open."""
+    db = str(tmp_path / "pre_pr9_5_tokens.db")
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "CREATE TABLE openai_evaluations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "eval_id TEXT NOT NULL UNIQUE, candidate_id TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute(
+        "CREATE TABLE candidate_labels (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "label_id TEXT NOT NULL UNIQUE, candidate_id TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute(
+        "CREATE TABLE last30days_polarity (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "polarity_id TEXT NOT NULL UNIQUE, candidate_id TEXT NOT NULL, symbol TEXT NOT NULL, "
+        "created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        for table in ("openai_evaluations", "candidate_labels", "last30days_polarity"):
+            cols = {r["name"] for r in j.conn.execute(f"PRAGMA table_info({table})")}
+            assert {"prompt_tokens", "completion_tokens", "total_tokens"} <= cols, table
+    finally:
+        j.close()

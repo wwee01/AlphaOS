@@ -963,3 +963,84 @@ def test_no_orders_approvals_fills_positions_created_by_pr9_code():
         text = py_file.read_text(encoding="utf-8")
         for token in banned:
             assert token not in text, f"{py_file.name} references {token!r}"
+
+
+# =============================================================================
+# PR9.5: benchmark spine cadence + scheduler wiring
+# =============================================================================
+def test_benchmark_spine_not_due_before_its_configured_time():
+    from datetime import datetime, timezone
+
+    s = make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="17:30")
+    j = JournalStore(":memory:")
+    # 09:00 SGT = 01:00 UTC -- before 17:30 SGT.
+    before = datetime(2026, 7, 6, 1, 0, tzinfo=timezone.utc)
+
+    due, reason = cadence.is_due(cadence.JobType.BENCHMARK_SPINE, s, j, now=before)
+
+    assert due is False
+    assert "before benchmark_spine time" in reason
+    j.close()
+
+
+def test_benchmark_spine_due_at_or_after_its_configured_time_and_not_yet_run():
+    from datetime import datetime, timezone
+
+    s = make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="17:30")
+    j = JournalStore(":memory:")
+    # 18:00 SGT = 10:00 UTC -- after 17:30 SGT, no prior run today.
+    after = datetime(2026, 7, 6, 10, 0, tzinfo=timezone.utc)
+
+    due, reason = cadence.is_due(cadence.JobType.BENCHMARK_SPINE, s, j, now=after)
+
+    assert due is True
+    j.close()
+
+
+def test_benchmark_spine_not_due_twice_same_sgt_day(orchestrator):
+    from datetime import datetime, timezone
+
+    orchestrator.settings = make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="17:30")
+    after = datetime(2026, 7, 6, 10, 0, tzinfo=timezone.utc)
+    runner = JobRunner(orchestrator)
+    runner.run_job(cadence.JobType.BENCHMARK_SPINE, lock_key=cadence.default_lock_key(
+        cadence.JobType.BENCHMARK_SPINE, orchestrator.settings, now=after))
+
+    due, reason = cadence.is_due(cadence.JobType.BENCHMARK_SPINE, orchestrator.settings,
+                                 orchestrator.journal, now=after)
+
+    assert due is False
+    assert "already completed today" in reason
+
+
+def test_run_due_jobs_includes_benchmark_spine_and_writes_a_real_row(orchestrator, monkeypatch):
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+
+    results = JobRunner(orchestrator).run_due_jobs()
+
+    by_type = {r["job_type"]: r for r in results}
+    assert cadence.JobType.BENCHMARK_SPINE in by_type
+    assert by_type[cadence.JobType.BENCHMARK_SPINE]["status"] == "completed"
+    assert orchestrator.journal.count_rows("equity_snapshots") == 1
+
+
+def test_scheduler_status_report_includes_benchmark_spine(orchestrator):
+    report = JobRunner(orchestrator).status_report()
+
+    assert "benchmark_spine" in report["recent_by_job_type"]
+
+
+def test_benchmark_spine_config_hash_changes_with_its_own_setting():
+    from alphaos.lineage.config_snapshot import build_config_hashes
+
+    hash_a = build_config_hashes(make_settings())["scheduler_config_hash"]
+    hash_b = build_config_hashes(make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="09:00"))["scheduler_config_hash"]
+
+    assert hash_a != hash_b
+
+
+def test_cli_benchmark_spine_is_a_valid_scheduler_run_job_choice():
+    from alphaos.__main__ import build_parser
+
+    args = build_parser().parse_args(["scheduler_run_job", "benchmark_spine"])
+    assert args.job_type == "benchmark_spine"
