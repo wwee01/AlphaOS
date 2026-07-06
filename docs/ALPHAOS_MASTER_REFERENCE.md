@@ -340,19 +340,34 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
    2026-07-06; does not block PR9.5/PR10).
 
 **Week 1 — PR9.5 "Ops & Measurement Hardening" (small, spec in the specs doc):**
-6. ✅ Backup LaunchAgent built + tested 2026-07-06 (`.backup` → integrity_check
-   → gzip → iCloud → 30d/12m rotation → alert on failure, 10 tests). **Still
-   open**: the operator's own quarterly restore-test drill (README has the
-   exact 3-step command) — the automation writing backups isn't the same
-   claim as a human having confirmed one restores.
-7. 🔴 **Benchmark spine** (T4): daily paper-equity snapshot + SPY total-return series
-   + relative-return/rolling-beta report block. Start the irreplaceable dataset.
-8. 🔴 Cost-cap true-up: count labeller + polarity calls; capture `resp.usage` tokens.
-9. 🔴 Logs → `~/Library/Logs/alphaos/`; commit `requirements-lock.txt` (pip freeze);
-   `config_versions` builtin-`hash()` → `stable_hash`.
+6. ✅ Backup LaunchAgent built, merged, **activated and verified 2026-07-07**
+   (`.backup` → integrity_check → gzip → iCloud → 30d/12m rotation → alert on
+   failure, 10 tests). Hit a real macOS Full Disk Access wall on first install
+   (repo lives under `~/Documents`; see specs doc §H.13) — operator granted FDA
+   to `/bin/bash`, re-verified end-to-end (real gzip files, matching
+   integrity-check-passed timestamps). **Still open**: the operator's own
+   quarterly restore-test drill (README has the exact 3-step command) — the
+   automation writing backups isn't the same claim as a human having confirmed
+   one restores.
+7. ✅ **Benchmark spine** (T4): daily paper-equity snapshot + SPY total-return
+   series + relative-return/rolling-beta report block. Merged `e075adb`. The
+   irreplaceable dataset starts accumulating 2026-07-07.
+8. ✅ Cost-cap true-up: now counts labeller + polarity calls too (was
+   undercounting real spend 2-3x); captures `resp.usage` tokens on all 3 call
+   sites. Merged `e075adb`.
+9. ✅ Logs → `~/Library/Logs/alphaos/`; `requirements-lock.txt` committed;
+   `config_versions` now `stable_hash` (SHA256, deterministic across processes
+   — re-verified with real `PYTHONHASHSEED` runs). Merged `e075adb`.
+
+PR9.5 full audit: verdict APPROVE, no HIGH findings; one MEDIUM (benchmark-bars
+pagination truncation past ~200 trading days) fixed and adversarially
+re-verified (315-business-day gap closes in one call); isolation, schema
+additivity, config-hash determinism and cost-guard sums all independently
+re-confirmed by a second audit pass. Suite 884/3/0. Full as-built deltas: specs
+doc's PR9.5 SHIPPED banner.
 
 **Then, in order:**
-10. 🔴 PR10 Setup Cards v1 (spec ready) — the join key for all learning.
+10. 🟡 PR10 Setup Cards v1 (spec ready) — the join key for all learning. **In progress.**
 11. 🔴 PR11 Daily Brief + Portfolio Health + Moonshot Gap (now measurable, thanks
     to #7) + UI-PR-A annunciator/Tonight tab alongside.
 12. 🔴 **Structural PR before PR12** (SWE #1): typed `ScanContext` replacing the

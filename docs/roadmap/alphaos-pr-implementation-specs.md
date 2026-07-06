@@ -166,6 +166,31 @@ diff that makes tonight's data clean.
 
 ## PR9.5 — OPS & MEASUREMENT HARDENING (added 2026-07-06, exit review)
 
+> ✅ **SHIPPED 2026-07-06/07** — merged `e075adb` (branch commit `841b787`,
+> `feat/pr9-5-ops-measurement-hardening`), Opus-audited (verdict APPROVE, no
+> HIGH findings), backup LaunchAgent installed AND activated, first real backup
+> verified end-to-end. Suite 884/3/0. **As-built deltas vs this spec:**
+> 1. `_backfill_benchmark_bars` pages through `_BARS_PAGE_SIZE`-sized chunks
+>    (audit MEDIUM: a bare `get_daily_bars` call truncates silently past its own
+>    200-bar default — a gap bigger than ~200 trading days would have trickled
+>    in over many days instead of closing in one run). Re-verified adversarially
+>    post-audit: a real 315-business-day gap closes in one call at the actual
+>    production page size, zero regression on the normal 1-day path.
+> 2. Backup activation hit a real macOS permission wall on first install (exit
+>    126, `getcwd` "Operation not permitted") — the repo lives under
+>    `~/Documents`, which `launchd`-spawned processes can't enter without an
+>    explicit Full Disk Access grant. Fixed by the operator granting FDA to
+>    `/bin/bash`; see house pattern §H.13 (new, written specifically because of
+>    this). Not a code bug — no fix landed in the script itself.
+> 3. Isolation (write-only, never read by any gate/eval/risk/execution path) and
+>    the config-hash/cost-guard/schema-additivity claims were each independently
+>    re-probed by a second audit pass (real multi-process `PYTHONHASHSEED` runs,
+>    pre-PR9.5-schema DB reopen, in-memory cost-guard construction) — all
+>    CONFIRMED, nothing broke.
+> **Still open:** the operator's own quarterly restore-drill (README has the
+> 3-step command) — automation writing backups isn't the same claim as a human
+> having confirmed one restores. Not blocking; tracked separately.
+
 **Goal:** the unattended system can page a human, survive a dead disk, and measure
 the only question that matters (vs S&P) — before any new intelligence layer.
 Consolidated from the exit review (docs/ALPHAOS_MASTER_REFERENCE.md §3/§5).
@@ -500,3 +525,17 @@ human instruction** → post-merge fresh full-suite run on main.
 12. **Push-to-main** is authorized as standing workflow (`.claude/settings.json`)
     for `main` only; never force-push; feature branches merge `--no-ff` with
     the `Merge branch '...' — PRn Title` message convention.
+13. **macOS TCC blocks LaunchAgents in protected folders**: a LaunchAgent whose
+    `WorkingDirectory`/script/destination lives under `~/Documents`, `~/Desktop`,
+    `~/Downloads`, or iCloud Drive (`~/Library/Mobile Documents/...`) gets silently
+    blocked — `launchd` spawns the binary (e.g. `/bin/bash`) fresh, with none of
+    an interactive Terminal session's inherited grants, so even `getcwd()` fails
+    with "Operation not permitted." No error until the first fire (PR9.5's
+    `install_launchagent.sh` preflight only checks the binary is executable, not
+    that it can actually reach the working directory). Fix: the operator grants
+    **Full Disk Access** to the exact `ProgramArguments[0]` binary (System
+    Settings → Privacy & Security → Full Disk Access → + → Cmd+Shift+G to type
+    the path, since `/bin` isn't Finder-browsable) — this is a one-time,
+    human-only action; there is no command-line grant. AlphaOS's repo living
+    inside `~/Documents` means every future LaunchAgent touching it will need
+    this same grant on its own `ProgramArguments[0]`.
