@@ -320,7 +320,7 @@ LLM-derived invalidation text, no gate threshold changes.
 
 ---
 
-## PR11 — DAILY BRIEF + PORTFOLIO HEALTH (merged)
+## PR11 — DAILY BRIEF + PORTFOLIO HEALTH (not started — stale "(merged)" label removed 2026-07-07; verified against code: no `daily_brief.py`/`position_health.py` exist yet)
 
 **Goal:** the daily human interface: what needs you, what the machine did, what
 it learned, the one action — plus per-position health with thesis validity.
