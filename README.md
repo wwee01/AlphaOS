@@ -92,7 +92,9 @@ hardcoded.
 | `OPENAI_API_KEY`, `OPENAI_PRIMARY_MODEL`, `OPENAI_REVIEW_MODEL` | OpenAI primary engine. |
 | `ANTHROPIC_API_KEY`, `CLAUDE_REVIEW_MODEL` | Optional Claude manual reviewer. |
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER`, `ALPACA_BASE_URL` | Alpaca **paper** broker + live market data. |
-| `NTFY_TOPIC` | Optional notifications. |
+| `NTFY_TOPIC` | Optional ntfy.sh push alerts (job failures, scheduler self-halt fuse, dead-man heartbeat). Blank = silent no-op. |
+| `SCHEDULER_MAX_CONSECUTIVE_FAILURES` | Consecutive failed runs (per job type) before self-halting (default `3`, range 1-20). |
+| `SCHEDULER_HEARTBEAT_STALE_MINUTES` | Dead-man heartbeat staleness window in minutes, checked during market hours only (default `120`, range 5-1440). |
 | Risk limits | `MAX_RISK_PER_TRADE_PCT`, `MAX_PAPER_TRADES_PER_DAY`, `MAX_OPEN_POSITIONS`, `MAX_DAILY_LOSS_PCT`, `PAPER_EQUITY`, `MAX_AUTO_APPROVALS_PER_DAY`, `MAX_SPREAD_PCT`, `MIN_DOLLAR_VOLUME` |
 | Freshness | `MAX_QUOTE_AGE_SECONDS_RTH`, `MAX_BAR_AGE_SECONDS_RTH`, `MAX_QUOTE_AGE_SECONDS_PREMARKET`, `MAX_BAR_AGE_SECONDS_PREMARKET`, `MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL` |
 | Storage | `ALPHAOS_DB_PATH`, `ALPHAOS_JSONL_MIRROR` |
@@ -103,6 +105,44 @@ and both Alpaca keys (used for both paper execution and live IEX market data). I
 any check fails, paper execution refuses to start and the failure is logged to
 `system_events`. Missing Alpaca creds in live mode never silently fall back to
 mock or any other provider — data is blocked instead.
+
+---
+
+## Unattended scheduler cadence (PR9)
+
+Two macOS LaunchAgents (never cron — `launchctl`, matching this machine's other
+projects) turn the scheduler on:
+
+| LaunchAgent | Runs | Interval | Purpose |
+|---|---|---|---|
+| `com.ck.alphaos.scheduler` | `python -m alphaos scheduler_run_once` | 300s | The idempotent tick. `JobRunner.run_due_jobs()` decides what's actually due (scan windows, monitor/outcomes intervals, digest time), respecting the kill switch, AI cost cap, and the self-halt fuse. |
+| `com.ck.alphaos.heartbeat` | `python -m alphaos scheduler_health` | 1800s | A SEPARATE dead-man's-switch process on purpose, so its failure modes never overlap with the scheduler tick it's watching. |
+
+```bash
+# Install/reload both agents (or just one: `... scheduler` / `... heartbeat`)
+deploy/install_launchagent.sh
+
+# Remove (stops unattended cadence entirely; does not touch the kill switch,
+# open positions, or any data)
+deploy/uninstall_launchagent.sh
+
+# Check status / logs
+launchctl list | grep com.ck.alphaos
+tail -f /tmp/alphaos-scheduler.log /tmp/alphaos-scheduler-error.log
+tail -f /tmp/alphaos-heartbeat.log /tmp/alphaos-heartbeat-error.log
+
+# Manual equivalents (no LaunchAgent needed)
+python -m alphaos scheduler_status   # job history, locks, kill-switch/cost-cap summary
+python -m alphaos scheduler_run_once # run whatever's currently due, once
+python -m alphaos scheduler_run_job scan   # force one job type now (bypasses cadence timing)
+python -m alphaos scheduler_health   # dead-man heartbeat check (exit 0/1)
+```
+
+**Self-halt fuse**: a job type that fails `SCHEDULER_MAX_CONSECUTIVE_FAILURES`
+times in a row (default 3) is skipped by every subsequent tick — one alert +
+one `system_events` row per fused episode, not per tick — until a human runs
+`scheduler_run_job <job_type>` manually (success clears it; another failure
+extends the streak). Kill-switch/cost-cap skips never count as failures.
 
 ---
 

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- AlphaOS dead-man's-switch heartbeat (PR9) -- runs `scheduler_health`
+       every 30 minutes. Deliberately a SEPARATE LaunchAgent from
+       com.ck.alphaos.scheduler so this check's failure modes are never
+       shared with the scheduler tick it is watching over. -->
+  <key>Label</key>
+  <string>com.ck.alphaos.heartbeat</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
+    <string>-m</string>
+    <string>alphaos</string>
+    <string>scheduler_health</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ck/Documents/Claude Playground/AlphaOS</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ck</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/alphaos-heartbeat.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/alphaos-heartbeat-error.log</string>
+</dict>
+</plist>
