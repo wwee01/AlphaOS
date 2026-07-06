@@ -323,8 +323,12 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
    first flagged as). Resolved, no code change needed.
 4. ✅ `sudo pmset -a autorestart 1` (operator ran it, verified `autorestart 1`)
    · ✅ `chmod 600 .env` (done). Done.
-5. 🔴 Run + log the drills in `docs/incidents/`: kill-switch engage→verify scan
-   skipped→release; forced job failure → phone pages; stale heartbeat → phone pages.
+5. ✅ All three drills PASS, operator-confirmed 2026-07-06 (`docs/incidents/2026-07-06-pr9-acceptance-drills.md`):
+   kill-switch engage→verify scan skipped (zero AI cost, monitor kept running)→release;
+   forced job failure → phone notification received; stale heartbeat (forced clock
+   offset — literal 2h wait wasn't practical) → phone notification received. **PR9 is
+   now complete except the passive 10-consecutive-trading-day streak** (started
+   2026-07-06; does not block PR9.5/PR10).
    **Next up** — ready to run now that NTFY is live.
 
 **Week 1 — PR9.5 "Ops & Measurement Hardening" (small, spec in the specs doc):**

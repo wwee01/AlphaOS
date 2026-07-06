@@ -40,9 +40,9 @@ No alert expected (kill-switch skips are documented as "expected state, no alert
 - Server-side confirmation: no `system_events` row with `category='alerts'` was
   logged afterward — `send_alert` only logs on a send FAILURE, so its absence
   confirms the POST to ntfy.sh succeeded (2xx).
-- Operator confirmation (phone received the push): **PENDING — awaiting operator.**
+- Operator confirmation (phone received the push): **CONFIRMED 2026-07-06 — notification received.**
 
-**Verdict: mechanism PASS (server-side); end-to-end delivery TBC.**
+**Verdict: PASS (end-to-end).**
 
 ## Drill 3 — dead-man heartbeat staleness → alert
 
@@ -62,10 +62,10 @@ to do synchronously here).
   "detail": "last completed job (monitor) 180.0m ago (> 120m)"}`.
 - Server-side confirmation: no `system_events` row with `category='alerts'`
   logged afterward → the POST to ntfy.sh succeeded.
-- Operator confirmation (phone received the push): **PENDING — awaiting operator.**
+- Operator confirmation (phone received the push): **CONFIRMED 2026-07-06 — notification received.**
 
-**Verdict: mechanism PASS (server-side); end-to-end delivery TBC. Full literal
-2h-outage drill still recommended at some point, lower priority.**
+**Verdict: PASS (end-to-end via forced-clock mechanism check). Full literal
+2h-outage drill still recommended at some point, lower priority, non-blocking.**
 
 ## Post-drill system state (verified clean)
 
@@ -78,7 +78,10 @@ to do synchronously here).
 
 ## Outcome
 
-If the operator confirms both pushes arrived: **all three PR9 acceptance drills
-pass**, and the 10-consecutive-unattended-trading-day streak is the only
-remaining PR9 acceptance item (clock effectively started 2026-07-06, the first
-clean-post-hotfix trading day).
+**All three PR9 acceptance drills PASS, end-to-end, operator-confirmed 2026-07-06.**
+The only remaining PR9 acceptance item is the 10-consecutive-unattended-trading-day
+streak — a passive/observational milestone, not an action item. The clock started
+today, the first clean trading day post-PR9.1 (no prompt leak, no date-flaky
+tests). Nothing about this streak blocks starting PR9.5/PR10 in parallel; it is
+simply tracked and reported when it completes (~2 calendar weeks out, accounting
+for weekends). **PR9 is otherwise code-complete, merged, activated, and drilled.**

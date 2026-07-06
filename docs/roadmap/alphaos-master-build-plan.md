@@ -180,7 +180,7 @@ audit). Each level names its rollback trigger — rollback is automatic.
 | Level | Capability | Entry criteria | Auto-rollback trigger |
 |---|---|---|---|
 | **L0** | Observe + measure (TQS, attribution, outcomes) | ✅ live today | — |
-| **L1** | Unattended cadence: scans/monitor/outcomes/digest run on schedule; all decisions still gated | PR9 shipped ✅ (2026-07-06); heartbeat + fuses unit-tested ✅; live drills + 10-day streak PENDING | ≥N consecutive job failures → self-halt |
+| **L1** | Unattended cadence: scans/monitor/outcomes/digest run on schedule; all decisions still gated | PR9 shipped ✅ (2026-07-06); heartbeat + fuses unit-tested ✅ AND live-drilled ✅ (2026-07-06, operator-confirmed — `docs/incidents/2026-07-06-pr9-acceptance-drills.md`); only the 10-day unattended streak remains (passive clock, started 2026-07-06) | ≥N consecutive job failures → self-halt |
 | **L2** | Self-directed learning: nightly hypothesis generation, auto-demotion of decayed cards | PR12–13 shipped; pre-registration enforced | hypothesis volume/cost cap breach → pause engine |
 | **L3** | Bounded auto-approval, **paper**: existing `MAX_AUTO_APPROVALS_PER_DAY`-capped path, live-eligible cards only | ≥8 weeks L1 data; attribution floors met; TTL/watchdog/kill-switch drills passed | any auto-approved trade violating a gate invariant → revert to manual |
 | **L4** | Bounded auto-approval, **live, tier-1 size** (see §6 Phase 5) | ≥3 months profitable-after-costs L3 record; crossing protocol (§6 Phase 4) complete | drawdown governor breach → demote to paper |
