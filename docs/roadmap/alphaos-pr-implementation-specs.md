@@ -230,6 +230,27 @@ math on constructed series, cost-guard counting probe, migration test for new ta
 
 ## PR10 — SETUP CARDS v1 + EXIT-FIRST INVARIANT
 
+> ✅ **SHIPPED 2026-07-07** — merged `0e5b3fa` (branch commit `6c4e6a1`,
+> `feat/pr10-setup-cards-v1`), Opus-audited (two subagent passes + a direct
+> Opus pass; verdict APPROVE, no findings, no bypass). Suite 909/3/0.
+> **As-built deltas vs this spec:**
+> 1. New dependency **pyyaml** (this project's first — `dependencies` was
+>    previously empty). Chosen over hand-rolling a YAML subset or switching
+>    cards to JSON so they stay genuinely hand-editable + comment-able;
+>    loaded via `yaml.safe_load` (no arbitrary-code-exec surface).
+> 2. `seed_demo()` was a 5th proposal-creation site not named in §10.3's
+>    stamping list — caught because the exit-first check broke 2 existing
+>    demo tests once live. Now stamped like the other four.
+> 3. `_execute()`'s completeness check uses `if not value` (falsy), not
+>    `is None` — deliberate: `TradeProposal.from_row()` hydrates a NULL
+>    `max_holding_days` to `0`, which `is None` would miss. No real proposal
+>    has a legitimate 0-day hold (swing floors at 3; daytrade is dead code).
+> 4. `tests/conftest.py`'s `make_proposal()` gained a `with_card=True`
+>    default so every pre-existing execution-path test stays green.
+> 5. by_card report slices: attribution v2 via a `LEFT JOIN candidates`
+>    (audit-verified neutral — `candidate_id` UNIQUE forbids fan-out);
+>    digest TQS via a separate additive join (main histogram byte-identical).
+
 **Goal:** the versioned join key for the whole learning loop; every candidate/
 proposal stamped with the card that produced it; exits written before entry, by law.
 

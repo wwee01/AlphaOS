@@ -367,9 +367,15 @@ re-confirmed by a second audit pass. Suite 884/3/0. Full as-built deltas: specs
 doc's PR9.5 SHIPPED banner.
 
 **Then, in order:**
-10. 🟡 PR10 Setup Cards v1 (spec ready) — the join key for all learning. **In progress.**
-11. 🔴 PR11 Daily Brief + Portfolio Health + Moonshot Gap (now measurable, thanks
-    to #7) + UI-PR-A annunciator/Tonight tab alongside.
+10. ✅ PR10 Setup Cards v1 — merged `0e5b3fa` 2026-07-07, Opus-audited APPROVE.
+    The versioned join key is live: every candidate/proposal stamped with its
+    setup card, exit-first invariant ("no entry without a written exit")
+    enforced at `_execute()`, attribution/digest gain floor-gated by_card
+    slices. v1 = one card (`catalyst_momentum_v1`), a behavior-neutral
+    transcription. Suite 909/3/0.
+11. 🔴 **PR11 Daily Brief + Portfolio Health + Moonshot Gap** (now measurable,
+    thanks to #7's benchmark spine) + UI-PR-A annunciator/Tonight tab alongside.
+    **Next up.**
 12. 🔴 **Structural PR before PR12** (SWE #1): typed `ScanContext` replacing the
     `_*` side-channel; ruff + loose mypy in CI; enum-ify status literals as touched.
 13. 🔴 **Eval harness before any prompt/model change** (ML #1): `alphaos eval` —
