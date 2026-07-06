@@ -24,6 +24,31 @@ only on explicit human instruction.
 
 ## PR9 — TURN IT ON (unattended cadence + alerting + fuses)
 
+> ✅ **SHIPPED 2026-07-06** — merged `85ae705` (branch commit `c6823b6`), Opus-audited
+> (verdict APPROVE, no BLOCKER/HIGH/MEDIUM open), LaunchAgents installed AND activated
+> the same day; first unattended ticks verified in `job_runs` (`trigger_source='scheduler'`).
+> Suite 804/3/0. **As-built deltas vs this spec** (all deliberate, none scope-expanding):
+> 1. Heartbeat "market hours" was defined as **any non-CLOSED session** (premarket/
+>    regular/afterhours count; nights/weekends exempt) — user-decided.
+> 2. `alerts.py` additionally gained **secret-value redaction + a 1000-char length cap**
+>    applied before text leaves the process (audit finding: ntfy.sh is a new public
+>    egress channel for exception text that used to stay local; redaction reuses
+>    `lineage.hashing.SECRET_SETTINGS_FIELDS`).
+> 3. Fuse dedupe is watermark-based (one `scheduler_fused` system_event per episode,
+>    keyed off the last completed row) rather than a separate fuse-state row; a NULL
+>    `finished_at_utc` edge case was audit-caught and hardened.
+> 4. `cadence.is_fused()` returns `(fused, reason, streak)`; the fuse check lives in
+>    `run_due_jobs()` only — the CLI `scheduler_run_job` deliberately bypasses it
+>    (that IS the documented human reset procedure).
+> 5. `deploy/uninstall_launchagent.sh` added (stopping must be the easiest action).
+> 6. Two non-blocking audit follow-ups spun off: README note on fused-monitor
+>    semantics; make `send_alert`'s never-raises literal (getattr on ntfy_topic).
+> **Still open from §9.5 acceptance:** the 10-consecutive-trading-day unattended streak
+> (clock started 2026-07-06; first scan window fires the next trading day), the
+> kill-switch drill, and the failure-alert drill. ⚠️ The drills REQUIRE `NTFY_TOPIC`
+> to be set in `.env` first — it was still empty at activation, meaning every alert
+> path silently no-ops. Log drill results in `docs/incidents/` as dated notes.
+
 **Goal:** 100% of trading days produce scans/fills/outcomes/TQS/attribution rows
 with zero human initiation, with visible death (alerts) and self-limiting failure.
 
@@ -111,6 +136,68 @@ alert arrive, restore). Log drill results in `docs/incidents/` as a dated note.
 
 No new job types, no cadence changes, no autonomy change (approvals untouched),
 no Telegram (ntfy only — one channel until it hurts), no daemonization.
+
+---
+
+## PR9.1 — HOTFIX: no-news prompt leak + date-flaky tests (added 2026-07-06, exit review)
+
+**Goal:** stop contaminating the no-news baseline before the first unattended scan.
+Found by the 2026-07-06 exit review (ML lens, reproduced by execution; founder
+re-verified): `cand["_snapshot"]/_interest` (scanner) and `_catalyst/_last30/
+_polarity/_earnings/_packet_id` (labeller stash) ride the candidate dict into
+`openai.evaluate()`, and `build_no_news_user_prompt` serializes the WHOLE dict —
+so the "no-news" eval sees catalyst/narrative text while being told none exists.
+
+1. Strip `_`-prefixed keys at prompt construction (`ai/prompt_templates.py`) — the
+   serialization site, so every current and future caller is covered; also removes
+   the duplicated-snapshot token bloat. Check the review-prompt template for the
+   same pattern.
+2. Live-prompt-composition regression test: build the real prompt from a candidate
+   carrying a sentinel string inside `_catalyst`; assert sentinel absent + public
+   fields present. (Mock mode never builds prompts — that's why 800+ tests missed it.)
+3. Fix the 2 date-flaky `test_decision_override.py` tests (organic-scan assertions,
+   third occurrence of the §H.1 class) via deterministic direct construction.
+
+**Non-goals:** the structural fix (typed ScanContext replacing the `_*` side-channel)
+is deliberately NOT here — it's the pre-PR12 structural PR. This is the smallest
+diff that makes tonight's data clean.
+
+---
+
+## PR9.5 — OPS & MEASUREMENT HARDENING (added 2026-07-06, exit review)
+
+**Goal:** the unattended system can page a human, survive a dead disk, and measure
+the only question that matters (vs S&P) — before any new intelligence layer.
+Consolidated from the exit review (docs/ALPHAOS_MASTER_REFERENCE.md §3/§5).
+
+1. **Backup automation**: `deploy/backup_ledger.sh` + third LaunchAgent
+   (`com.ck.alphaos.backup.plist`, StartCalendarInterval 05:30 SGT — US market
+   closed): `sqlite3 data/alphaos.db ".backup ..."` (WAL-safe online API — never
+   `cp`) → `PRAGMA integrity_check` gate → gzip → copy to iCloud Drive
+   (`~/Library/Mobile Documents/com~apple~CloudDocs/AlphaOS-backups/`) → rotate 30
+   daily/12 monthly → any failure = `send_alert` priority high. Document the
+   quarterly restore drill in README + master reference §6.
+2. **Benchmark spine** (measurement-only, additive tables): daily `equity_snapshots`
+   row (paper account equity, timestamped) + `benchmark_bars` SPY daily series (the
+   bars provider already exists) + a `relative_performance` report block: TWR equity
+   curve, SPY total-return comparison, rolling beta, per-month alpha. Floor-gated
+   like every other report. This starts the irreplaceable contemporaneous dataset —
+   it cannot be backfilled honestly later.
+3. **Cost-cap true-up**: `cost_guard` counts labeller + polarity calls too (today it
+   counts only `openai_evaluations` — undercounts 2–3×); capture `resp.usage` token
+   counts on every AI call row for real dollar accounting.
+4. **Ops hygiene**: LaunchAgent logs → `~/Library/Logs/alphaos/` (both plists; /tmp
+   is purged on reboot); commit `requirements-lock.txt` (pip freeze); fix
+   `config_versions.config_hash` builtin-`hash()` → `lineage.hashing.stable_hash`;
+   installer validates the python path before `launchctl load`.
+5. **Operator prerequisites documented, not coded** (user-only, day-1 items):
+   `NTFY_TOPIC` set + phone subscribed; `MAX_PAPER_TRADES_PER_DAY` drift resolved;
+   `sudo pmset -a autorestart 1`; `chmod 600 .env`; the three drills logged in
+   `docs/incidents/`.
+
+**Non-goals:** no new gates, no strategy changes, no universe changes, no autonomy
+change. Tests: backup script against a temp DB (integrity + rotation), benchmark
+math on constructed series, cost-guard counting probe, migration test for new tables.
 
 ---
 
@@ -225,7 +312,8 @@ it learned, the one action — plus per-position health with thesis validity.
    `days_held` vs `max_holding_days`. Pure read.
 2. **Brief builder** — new `alphaos/reports/daily_brief.py`:
    `build_daily_brief(journal, settings, kill_switch) -> dict` composing:
-   market condition (regime fields if present, else index snapshot),
+   market condition (regime fields if present, else index snapshot; consume PR9.5's
+   `relative_performance` block — the vs-S&P line is the north-star metric),
    needs-you block (pending approvals w/ TTL seconds remaining, open
    incidents, fused jobs), positions health (from #1), today's machine
    activity (scan/proposal/reject/block counts from digest), best candidate

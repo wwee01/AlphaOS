@@ -1,15 +1,17 @@
 # HANDOVER
 
-**Checkpoint: 2026-07-06 (post PR8 merge + Fable 5 legacy roadmap docs) · branch `main` @ `b659147` · tests 763 passed / 3 skipped / 0 failed · working tree clean · mode PAPER · execution `alpaca_paper` · AI = LIVE (OpenAI) · real-money UNREACHABLE · 0 open positions · kill switch OFF**
+**Checkpoint: 2026-07-06 evening (post PR9 merge+ACTIVATION + full-team exit review) · branch `main` @ `85ae705`+docs · tests 804/3/0 on the Jul-5 seed — ⚠️ 2 date-flaky tests RED on the Jul-6+ seed, fix in PR9.1 · mode PAPER · execution `alpaca_paper` · AI = LIVE (OpenAI) · real-money UNREACHABLE · 0 open positions · kill switch OFF · **SCHEDULER RUNNING UNATTENDED** (2 LaunchAgents live since 2026-07-06 ~11:30 SGT)**
 
-> Single entry point for the next session. This project keeps no other handover docs — everything is here. Verify state before trusting any of it (commands in §8).
-> 📐 **New this checkpoint — the long-horizon plan exists, read it before proposing "what's next."** `docs/roadmap/alphaos-master-build-plan.md` (strategy: Prime Directives, autonomy ladder L0–L5, 6-phase plan Month 0 → Year 2+), `docs/roadmap/alphaos-pr-implementation-specs.md` (implementation-ready specs for PR9–PR11, skeletons for PR12–PR15, reusable spec/build/audit templates, house-patterns appendix), `docs/roadmap/alphaos-ui-ux-design.md` (operator-console design + Google Stitch prompt). **PR9 ("Turn It On" — unattended scheduler cadence) is the explicitly-designated next PR, fully spec'd already** — see §5/§9.
-> ✅ **Still true — protection watchdog is built, merged, AND hardened** (PR2.5/PR2.6, both Opus-audited). Zero-diff against it through PR3–PR8 (each PR's own audit confirms).
-> ✅ **Direct push to `main` remains enabled and in active use** (`.claude/settings.json`, `353d9f5`) — PR8 and this checkpoint's docs were both pushed straight to `main`.
-> ⚠️ **Two independent AI sessions have now pushed directly to `main` concurrently at least twice** (once during the PR7 follow-up checkpoint, once implied by the HANDOVER-only commits `b411143`/`660de18` appearing between this session's PR8 work) — harmless so far (no conflicts), but `git fetch` + check before pushing if you suspect concurrent activity, same lesson as last checkpoint.
+> Single entry point for the next session — but read `docs/ALPHAOS_MASTER_REFERENCE.md` FIRST if you're new: it is now the root document (team exit review, gate inventory, punch list, operating manual, decision log). This file answers "where are we right now"; that file answers everything else.
+> 🔥 **URGENT until merged — PR9.1 hotfix** (branch, see §5): the "no-news" eval prompt LEAKS catalyst/last30days/polarity text (reproduced + founder-verified); every scan contaminates the baseline until it lands. First unattended scan fires Mon 09:35 ET / 21:35 SGT. Also fixes the 2 date-flaky tests currently making the suite red.
+> 📊 **The 2026-07-06 full-team exit review is done** (6 specialist lenses, all findings verified). Convergent CRITICALs: alerting is a silent no-op (NTFY_TOPIC empty — the dead-man switch pages nobody), zero DB backups, the megacap universe + frequency ceiling can't reach OR validate the target (it's the control group), no benchmark-vs-S&P measurement exists, and the `cand["_*"]` side-channel caused the prompt leak. Full findings + ordered punch list: master reference §3/§5. **PR order changed: PR9.1 (tonight) → operator day-1 items → PR9.5 (ops/benchmark) → PR10 → PR11 → ScanContext refactor → eval harness → PR12+.**
+> ✅ Protection watchdog, TTL chokepoint, 4-lock real-money unreachability: all re-verified by the CRO lens (243 safety tests + file:line trace, gate table in master reference §3).
+> ⚠️ Concurrent-session pushes to main: two chip sessions (README fused-monitor note; alerts.py never-raises tightening) were started and may land — `git fetch` before pushing.
 
 ## Changelog (most recent first)
-- **AlphaOS Master Build Plan + PR Implementation Specs + UI/UX Design** (`bb669fe`, `b659147`, this checkpoint) — Fable 5's legacy handoff, written because the strategic review that produced it concluded AlphaOS is data-bottlenecked, not intelligence-bottlenecked (TQS/attribution floors near-zero live data), and the prior PR9–PR14 sketch had no PR that actually turns the scheduler on. Three documents in `docs/roadmap/`:
+- **Full-team exit review + master reference + PR9.1/9.5 specs** (2026-07-06 evening, docs commit after `85ae705`): six parallel specialist reviews (quant research / SWE / ML / trader / infra / CRO), all findings empirically verified, consolidated into the new root document `docs/ALPHAOS_MASTER_REFERENCE.md` (mission physics, exit-review findings §3, gate inventory, ordered punch list §5, operating manual §6, self-learning roadmap §7, decision log §9, pivot criteria §12). Specs doc gained PR9.1 (hotfix: prompt leak + flaky tests) and PR9.5 (backups, benchmark spine, cost-cap true-up, ops hygiene); master plan bumped to v1.1 (PR9 shipped; L1 entered pending drills). Memory files updated. **Nothing in `alphaos/` changed in the docs commit; the PR9.1 hotfix is a separate branch awaiting explicit merge instruction.**
+- **PR9 — Turn It On** (merged `85ae705`, branch commit `c6823b6`, 2026-07-06; Opus-audited APPROVE; 804/3/0 post-merge): unattended scheduler cadence via `com.ck.alphaos.scheduler` (300s tick → `scheduler_run_once`) + `com.ck.alphaos.heartbeat` (1800s → new `scheduler_health` CLI, exit 0/1); per-job-type consecutive-failure self-halt fuse (`cadence.is_fused`, default 3, alert+log once per episode via last-completed watermark, cleared by one manual `scheduler_run_job` success); `alphaos/util/alerts.py` ntfy sender (never raises, no-op on unset topic, secret-redaction + 1000-char cap before any egress); job-failure alerts priority=high; 2 new settings in `SCHEDULER_CONFIG_FIELDS`; `deploy/` plists + install/uninstall scripts. **Activated same day — first unattended ticks verified in `job_runs` (`trigger_source='scheduler'`)**. Acceptance still accruing: 10-trading-day streak + kill-switch drill + failure-alert drill (blocked on NTFY_TOPIC being set). As-built deltas vs spec: recorded in the specs doc's PR9 SHIPPED banner.
+- **AlphaOS Master Build Plan + PR Implementation Specs + UI/UX Design** (`bb669fe`, `b659147`) — Fable 5's legacy handoff, written because the strategic review that produced it concluded AlphaOS is data-bottlenecked, not intelligence-bottlenecked (TQS/attribution floors near-zero live data), and the prior PR9–PR14 sketch had no PR that actually turns the scheduler on. Three documents in `docs/roadmap/`:
   - `alphaos-master-build-plan.md` — 10 Prime Directives (target sizes the roadmap never the trade; shadow-first always; auto-demote/manual-promote; pre-registration; unknown≠zero; deterministic gates own execution; agents at the edges; enumerated risk classes A/B/C; system always killable+visible); the L0–L5 **Autonomy Ladder** with entry criteria AND automatic rollback triggers per level; six phases with exit-gate numbers (not dates) from Ignition (M0–1) through the Edge Factory (Year 2+), including the **real-money crossing protocol** (§6 Phase 4: preconditions, Tier-0 at 0.25% risk, the new **drawdown governor** −5%/−8% MTD thresholds) and **sleeve architecture** for evidence-driven capital allocation (Phase 5); an honest edge assessment vs retail (structural win, already built) vs institutions (winnable: capacity niches, learning velocity, AI-native breadth, discipline without fatigue — unwinnable: speed, balance sheet); the Never-List (10 hard invariants that survive every phase); standing audit program; post-Fable Sonnet/Opus working protocol; failure playbook.
   - `alphaos-pr-implementation-specs.md` — full implementation-ready specs for **PR9** (LaunchAgent-driven unattended scheduler cadence, an `alphaos/util/alerts.py` ntfy sender, a consecutive-failure self-halt fuse, a dead-man heartbeat CLI+LaunchAgent), **PR10** (versioned setup cards as YAML+DB registry, `card_id`/`card_version` stamping, the new `invalidation_reason` field, the "no entry without a written exit" invariant enforced at the `_execute()` chokepoint), **PR11** (position-health engine + daily brief builder + Moonshot Gap arithmetic, merged into one PR); deliberate skeletons (not full specs — written at build time instead) for **PR12** (hypothesis engine + pre-registration registry), **PR13** (promotion/demotion state machine), **PR14** (red-team debate v0, ONE bear agent, shadow-only), **PR15** (first bounded auto-approval promotion, evidence-gated); reusable **T1–T4 templates** (spec / build-report-back / Opus-audit-rubric / merge-protocol formats — literally the format used to build PR7/PR8); a **house-patterns appendix** writing down the tribal knowledge this session paid for in bugs (date-seeded mock data traps, the SQLite NULL-uniqueness partial-index recipe, additive migration mechanics, the enricher/pure-compute split, the `_execute()` chokepoint rule, the shadow-layer proof kit, the reporting law, "auditors run their own empirical probes, never trust testimony").
   - `alphaos-ui-ux-design.md` — the operator-console design for a controlled-autonomy trading OS (explicitly NOT a generic brokerage dashboard): the annunciator principle (permanent mode/autonomy/kill-switch/heartbeat strip on every screen), asymmetric friction (viewing instant, approving deliberate, escalating risk heavy, **stopping always the single easiest action**, real-money lock has literally no unlock UI affordance), evidence-state honesty enforced in pixels (no score without confidence, no aggregate without n-vs-floor, mock/paper always watermarked), a fixed 5-rung reasoning-disclosure ladder, 9 screens across 3 planes (Operate/Understand/Govern) with full written wireframes for each, the "Tonight" home-screen wireframe, a false-confidence avoid-list, and a copy-paste Google Stitch mockup prompt. First-build recommendation: annunciator strip + Tonight tab + position health cards, alongside PR11, on the existing Streamlit dashboard (no rewrite).
@@ -28,22 +30,24 @@
 ---
 
 ## 1. Current project state
-AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). `main` is the single line of development, clean at `b659147` (763/3/0). Pipeline: **Scheduler (cadence exists, CLI-only, still not wired unattended) → Scanner → Candidate Packet → AI Labeller → Catalyst/last30days/Polarity/Earnings-Proximity enrichment → decision combine (lineage-stamped) → Armed Watch → gates (incl. Proposal TTL) → manual approval (+ User Override layer) → sim/paper execution → monitor/reconcile/exit → protection watchdog → ledger → counterfactual outcome measurement → TQS v0 shadow scoring → Attribution v2 counterfactual ΔR ledger.** Real-money trading remains `unreachable` throughout; every layer since PR3 was independently audited zero-diff against the safety-critical paths.
+AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini, Python 3.12 venv at `.venv` (uv). `main` is the single line of development at `85ae705` + this docs commit. Pipeline: **Scheduler (RUNNING UNATTENDED since 2026-07-06 — LaunchAgent tick every 300s + separate heartbeat agent) → Scanner → Candidate Packet → AI Labeller → Catalyst/last30days/Polarity/Earnings-Proximity enrichment → decision combine (lineage-stamped) → Armed Watch → gates (incl. Proposal TTL) → manual approval (+ User Override layer) → sim/paper execution → monitor/reconcile/exit → protection watchdog → ledger → counterfactual outcome measurement → TQS v0 shadow scoring → Attribution v2 counterfactual ΔR ledger → daily digest.** Real-money trading remains `unreachable` throughout (4 independent locks, CRO-verified 2026-07-06).
 
-**The strategic picture, established this checkpoint**: AlphaOS is a complete, audited instrument that has barely been switched on. TQS's own validation floor (≥300 live-resolved candidates over ≥8 weeks) and Attribution's floor (≥30 live events/type over ≥28 days) are both near-zero today because nothing runs the scheduler unattended — `scheduler_run_once`/`scheduler_run_job` still require manual invocation (or an external scheduler not yet configured). **This is now the explicitly-designated next problem to solve (PR9), not an open question** — see the master build plan's Phase 1 (Ignition) and the fully-written PR9 spec in `alphaos-pr-implementation-specs.md`.
+**The strategic picture (updated by the 2026-07-06 exit review)**: the instrument is complete and the tap is now open — but the review established that the current megacap universe/frequency configuration is the **control group, not the fund** (ceiling ~21 trades/month theoretical, 4–8 realistic → can neither reach nor statistically validate the target), "beat the S&P" is currently unmeasurable (no benchmark spine), and the no-news baseline was contaminated by a prompt leak (PR9.1 fixes it). The revised order is in the master reference §5 punch list.
 
 ## 2. What was just implemented (this checkpoint)
-- **Nothing in `alphaos/` changed this checkpoint.** This was a documentation-only handover refresh (per the handover-checkpoint skill's own rule: verify state, do not start new feature work).
-- The actual "just implemented" work belongs to the PREVIOUS session/turn, already on `main`: **PR8 Attribution v2** (merged + audit-fixed, see changelog) and the **three Fable 5 legacy roadmap documents** (`docs/roadmap/alphaos-master-build-plan.md`, `alphaos-pr-implementation-specs.md`, `alphaos-ui-ux-design.md`).
+- **PR9 merged AND activated** (see changelog) — the system runs unattended; data clocks started 2026-07-06.
+- **Full-team exit review** (6 verified specialist reports) + **`docs/ALPHAOS_MASTER_REFERENCE.md`** (new root document) + PR9.1/PR9.5 specs + master-plan v1.1 + this HANDOVER refresh.
+- **PR9.1 hotfix branch built** (prompt-leak fix + 2 date-flaky tests) — see §5; NOT merged, awaiting explicit instruction per T4.
 
 ## 3. What is working (verified this checkpoint)
 - **Full suite: 763 passed, 3 skipped, 0 failed** — directly re-run fresh this session (`.venv/bin/python -m pytest tests/`), exit code 0.
-- `git status` clean; `main` exactly matches `origin/main` at `b659147` (verified via `git fetch` + `git status -sb`).
+- `main` @ `85ae705` (+ this docs commit) pushed to origin; **scheduler verified genuinely unattended** — `job_runs` rows with `trigger_source='scheduler'` at 03:32/03:47 UTC without human invocation; both LaunchAgents in `launchctl list`; heartbeat exit 0.
 - **Live-account facts independently re-verified this session** (this environment DOES have real `.env` credentials, unlike the prior checkpoint's bare-worktree session): read-only Alpaca paper-account check → **0 open positions**. `system_health()` → `real_money_trading="unreachable"`, `market_data_mode="live"`, `ai_primary="openai / configured"`. Kill switch → `is_engaged()=False` (off). `.env` confirms `EXECUTION_PROVIDER=alpaca_paper`, `ALPHAOS_MODE=paper`, `APPROVAL_MODE=manual`, `REAL_TRADING_ENABLED=false`, `ALLOW_REAL_ORDERS=false`; no `ATTRIBUTION_ENABLED`/`TQS_SHADOW_ENABLED`/`SCHEDULER_*` overrides present — all PR3–PR8 features run on code defaults in the real deployment.
 - PR8's own audit re-confirmed with independent adversarial probes this checkpoint's authoring session, not re-run today (nothing changed to warrant it).
 
 ## 4. Partially implemented (and what's missing to finish)
-- **Scheduler has cadence but no automation wiring** (PR3, still true) — `alphaos/scheduler/` jobs (scan/monitor/outcomes_update/daily_digest) exist, are tested, and are correctly gated, but nothing invokes them unattended. **This is PR9, fully spec'd** in `alphaos-pr-implementation-specs.md` §PR9 (LaunchAgent + alert sender + self-halt fuse + heartbeat) — the single highest-leverage next PR, because every downstream floor depends on it.
+- **PR9 acceptance accruing, not complete**: 10-consecutive-trading-day unattended streak (started 2026-07-06), kill-switch drill, failure-alert drill. Drills are **blocked on `NTFY_TOPIC` being set** (empty today → every alert path silently no-ops → the dead-man switch pages nobody; operator day-1 item).
+- **Alerting/backup/benchmark gaps** — the PR9.5 spec covers all three; until it lands the system cannot page a human, the ledger has zero redundancy, and vs-S&P performance is unmeasurable.
 - **TQS v0 and Attribution v2 both have near-zero real accumulated data** — both score/attribute every mock-mode run too (correctly flagged `is_mock`/`'mock'` so it's excludable), but the actual validation questions ("do high-TQS trades outperform?", "what does gate X actually cost/save in ΔR?") can't be answered until the floors are met. Neither has its own calibration/analysis engine yet (explicit non-goal both times) — that's downstream of PR9, not before it.
 - **Earnings-proximity provider is mock/static only** (PR5) — a live earnings-calendar vendor integration is deferred, designed to slot behind the existing `make_earnings_provider` factory later with zero call-site changes.
 - **Protection watchdog cosmetic follow-ups** (PR2.6 audit, still open, all non-blocking): dashboard doesn't show `unverifiable`/qty-mismatch as dedicated tiles (CLI does); qty-mismatch severity doesn't grade by magnitude; no live-gated test confirms Alpaca accepts GTC brackets; `REPLACED` leg state isn't in `_LIVE_LEG_STATES`; `_simulate_fill` doesn't pass a resolved TIF.
@@ -51,28 +55,33 @@ AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini,
 - **Cost-model calibration**: still ~1 real fill ever (the historical META trade). Every expectancy number the system currently produces should be read as a paper upper bound, per the master plan's own operating doctrine.
 
 ## 5. Not done yet (deferred / future)
-**The roadmap is now written down in full** — do not re-derive it from scratch; read `docs/roadmap/alphaos-master-build-plan.md` (strategy/phases) and `docs/roadmap/alphaos-pr-implementation-specs.md` (implementation detail) first. Summary of what's next, in order:
-- **PR9 — Turn It On** (next, fully spec'd): LaunchAgent-driven unattended scheduler cadence, `alphaos/util/alerts.py` (ntfy sender — `ntfy_topic` setting already exists, unused), consecutive-failure self-halt fuse, dead-man heartbeat. Starts every data clock (TQS 8-week, attribution 28-day, cost calibration).
-- **PR10 — Setup Cards v1** + the "no entry without a written exit" invariant (new `invalidation_reason` field, enforced at the `_execute()` chokepoint).
-- **PR11 — Daily Brief + Portfolio Health** (merged): per-position health engine, the Moonshot Gap arithmetic report, one-action-item daily brief.
-- **PR12–PR15** (skeletons only, full specs written at build time): hypothesis engine + pre-registration registry; promotion/demotion state machine; red-team debate v0 (ONE bear agent, shadow); first bounded auto-approval promotion (L3 autonomy, evidence-gated).
-- Beyond PR15: universe expansion (shadow-ranked), live earnings provider, regime engine, portfolio concentration monitor, the real-money crossing protocol (Phase 4, with its own drawdown governor), sleeve-based capital allocation (Phase 5), and the "edge factory" phase (Year 2+: alternative data enrichers, champion-challenger model governance, chaos drills) — all detailed in the master build plan §6.
-- UI/UX work against the new design doc (annunciator strip, Tonight tab, health cards) has no PR assigned yet — natural to bundle with PR11.
+**The order was revised by the 2026-07-06 exit review** — the authoritative ordered punch list is `docs/ALPHAOS_MASTER_REFERENCE.md` §5. Summary:
+- **PR9.1 — hotfix (URGENT, branch `fix/no-news-prompt-leak` built this session)**: strip `_`-keys at prompt construction + live-prompt-composition regression test + fix the 2 date-flaky `test_decision_override` tests. Awaiting explicit merge instruction; every real scan before it lands contaminates the no-news baseline.
+- **Operator day-1 items (user-only)**: set `NTFY_TOPIC` + subscribe phone; resolve `MAX_PAPER_TRADES_PER_DAY=1000000` drift; `pmset -a autorestart 1`; `chmod 600 .env`; run + log the three drills.
+- **PR9.5 — Ops & Measurement Hardening** (spec'd): backup LaunchAgent + restore drill; benchmark spine (equity snapshots + SPY series + relative-performance report); cost-cap true-up (labeller+polarity+tokens); logs out of /tmp; requirements lockfile; stable config hash.
+- **PR10 — Setup Cards v1** (spec ready) → **PR11 — Daily Brief + Portfolio Health + Moonshot Gap** (consumes the benchmark spine) + UI-PR-A alongside.
+- **Structural PR before PR12**: typed `ScanContext` replacing the `cand["_*"]` side-channel (two independent reviewers converged on this seam); ruff + loose mypy in CI.
+- **Eval harness before any prompt/model change** (`alphaos eval`, golden set, keep raw completions incl. failures) → then **PR12–PR15** per skeletons.
+- **Phase-3 pull-forwards, evidence-gated**: time-of-day-normalized rel_volume (currently structurally broken intraday), ATR-scaled stops, real earnings provider as hard gate, shadow small/mid catalyst universe, portfolio-level gates (gross-notional/sector caps, live-equity sizing — kill the static 100k constant).
+- Beyond: as previously listed (Phase 4 crossing + drawdown governor, sleeves, edge factory) — master build plan §6; **plus the new CRO law: no autonomy promotion until every alert path has fired once for real and a backup has been restored once.**
 
 ## 6. Test results
-- **763 passed, 3 skipped, 0 failed** on `main` @ `b659147`, directly re-verified this session.
+- **804 passed, 3 skipped, 0 failed** on `main` @ `85ae705` — three fresh full runs on 2026-07-05 ET-seed dates (pre-merge branch, post-merge main ×2).
+- ⚠️ **On the 2026-07-06+ ET mock seed the suite is RED: 2 failed / 802 passed** — `test_decision_override.py::test_armed_upgrade_promotes_watch_to_propose_with_audit` and `::test_rule5_upgrades_still_require_gates_and_manual_approval` assert on the organic mock scan's output (third occurrence of the banned §H.1 date-flake class). Fixed in the PR9.1 branch. Until merged, CI on any push may fail depending on the date.
 - Skips = `tests/test_live_alpaca.py` (gated behind `RUN_LIVE_ALPACA_TESTS=true`). Fully hermetic otherwise.
-- 62 test files total. This checkpoint's relevant additions since the last handover (681 baseline): PR8 attribution +82 (`test_attribution.py` 29, `test_attribution_flow.py` 53, the latter including the 2 audit-fixup regression tests).
+- 64 test files. PR9 added +41 (fuse/heartbeat/alerts/kill-switch-regression/no-read greps; `test_alerts.py` new).
 - Run: `.venv/bin/python -m pytest` (~6–7 minutes; budget for it).
 
 ## 7. Known risks / blockers
-1. **Data bottleneck, not intelligence bottleneck** (the master plan's central finding): TQS/Attribution validation floors are near-zero because nothing runs the scheduler unattended. This is the #1 risk to the whole roadmap's credibility and is exactly what PR9 exists to fix — do not let PR10+ get built before PR9 lands, or you'll be building consumers for data that still isn't flowing.
-2. **Concurrent-session pushes to `main`**: has now happened at least twice (see the ⚠️ banner). Harmless so far. `git fetch` + check before pushing if you suspect another session is active against this repo.
-3. **Stale local feature branches**: `feat/attribution-v2-counterfactual-delta-r` plus everything already listed at prior checkpoints. All content is in `main`; harmless; `git branch -d` at your discretion.
-4. **Chain cost**: every real `interest_scan` still costs OpenAI money; `LAST30DAYS_ENABLED`/`POLARITY_ENABLED` on in `.env`.
-5. **Mock market data is date-seeded** (`{symbol}:{market_date()}`) — has broken merged tests twice already via two different failure shapes (exact-boundary price probes; assuming the mock scan's organic candidate mix always contains a specific decision category). Generalized rule, now proven twice: prefer deterministic direct construction (`inject_pending_proposal`, hand-built rows) over depending on what a natural mock scan happens to produce, for anything even loosely safety- or assertion-critical. Written down permanently in the PR specs doc's house-patterns appendix (§H.1).
-6. **Protection watchdog cosmetic follow-ups** (§4) — none urgent/blocking.
-7. **Paper expectancy is an upper bound, not a fact** — cost model calibrated on ~1 real fill; treat every expectancy/ΔR number in reports as optimistic until the calibration campaign (Phase 3 of the master plan) runs.
+1. **Prompt-leak contamination window (URGENT)**: until PR9.1 merges, every real scan feeds catalyst/narrative text into the "no-news" eval — the baseline dataset corrupts silently. First unattended scan: Mon 09:35 ET.
+2. **Operator blindness**: NTFY_TOPIC empty → job-failure/fuse/heartbeat alerts and the digest all silently no-op. The expected unattended failure mode is a SILENT halt. User-only fix.
+3. **Single-copy ledger**: no backups, no Time Machine destination, `pmset autorestart 0` (power cut = machine stays off, silently). PR9.5 + operator items.
+4. **Suite date-flaky** (§6) — red on Jul-6+ seeds until PR9.1 merges; the §H.1 class has now bitten three times.
+5. **Strategy/mission mismatch** (exit review T3): the megacap book is the control group; treat all its numbers as plumbing-validation, not edge evidence. Config drift: `MAX_PAPER_TRADES_PER_DAY=1000000` disables a documented gate (mitigated by manual approval).
+6. **Concurrent-session pushes to `main`**: two chip sessions in flight (README note; alerts.py tightening). `git fetch` before pushing.
+7. **Chain cost**: every real `interest_scan` costs OpenAI money (~$1–3/day worst case, hard-capped 2000 calls/30d — but the counter undercounts 2–3×; PR9.5 fixes).
+8. **Paper expectancy is an upper bound, not a fact** — cost model calibrated on ~1 real fill.
+9. Stale local feature branches (harmless); protection-watchdog cosmetic follow-ups (§4, non-blocking).
 
 ## 8. Exact commands to run next
 ```bash
@@ -87,13 +96,18 @@ print('open positions:', tc.get_all_positions())
 "   # expect: []
 
 # verify code state
-.venv/bin/python -m pytest                 # expect: 763 passed, 3 skipped, 0 failed (~6-7 min)
-git status -sb && git log --oneline | head -8
+.venv/bin/python -m pytest                 # 804/3/0 on Jul-5 seed; 2 known date-flakes on Jul-6+ seeds until PR9.1 merges
+git fetch && git status -sb && git log --oneline | head -8
 git branch --show-current                  # expect: main
 
-# read the roadmap BEFORE proposing "what's next" -- it's already answered (PR9)
-# docs/roadmap/alphaos-master-build-plan.md            (strategy, phases, autonomy ladder)
-# docs/roadmap/alphaos-pr-implementation-specs.md      (PR9-PR11 full specs, PR12-15 skeletons)
+# verify the unattended scheduler is alive (PR9)
+launchctl list | grep com.ck.alphaos       # expect: scheduler + heartbeat, exit 0
+.venv/bin/python -m alphaos scheduler_health   # exit 0 (or honest exit 1 + reason)
+tail -20 /tmp/alphaos-scheduler.log
+
+# read FIRST: docs/ALPHAOS_MASTER_REFERENCE.md          (root: review findings, punch list, ops manual)
+# then: docs/roadmap/alphaos-master-build-plan.md       (strategy, phases, autonomy ladder)
+# then: docs/roadmap/alphaos-pr-implementation-specs.md (PR9.1/9.5/10/11 specs, PR12-15 skeletons)
 # docs/roadmap/alphaos-ui-ux-design.md                 (operator console design)
 
 # system status
@@ -114,51 +128,30 @@ ALPHAOS_MODE=mock EXECUTION_PROVIDER=simulated_internal LAST30DAYS_ENABLED=false
 
 ## 9. Recommended next prompt (paste into a fresh window)
 ```
-Read HANDOVER.md in the AlphaOS repo first (single source of truth). Then read
-docs/roadmap/alphaos-master-build-plan.md and docs/roadmap/alphaos-pr-implementation-specs.md
-before proposing anything -- the roadmap is already written down in detail, not an open
-question. main is clean at b659147, 763 passed / 3 skipped / 0 failed. PR3 through PR8 are
-all merged and independently audited (PR8 = Attribution v2 / counterfactual ΔR, its own
-Opus audit found + fixed 2 LOW findings, both re-verified). Three Fable 5 legacy roadmap
-docs were added this checkpoint (master build plan, PR implementation specs, UI/UX design).
+Read docs/ALPHAOS_MASTER_REFERENCE.md first (root document: exit review, punch list,
+operating manual), then HANDOVER.md (current state). main is at 85ae705 + the review
+docs commit. PR9 is merged AND activated -- the scheduler runs unattended via two
+LaunchAgents since 2026-07-06; do not re-install or re-activate anything.
 
-Verify state first: `.venv/bin/python -m pytest` (expect 763/3/0, ~6-7 min), confirm branch
-main @ b659147 or later, confirm the paper account has 0 open positions (§8 has the
-read-only command -- real credentials ARE available in this environment).
+State check: `git fetch && git status -sb`; `.venv/bin/python -m pytest` -- NOTE the
+suite has 2 known date-flaky failures on the Jul-6+ mock seed (test_decision_override,
+being fixed in PR9.1); 0 open positions via the §8 read-only command; kill switch off;
+`launchctl list | grep com.ck.alphaos` should show scheduler + heartbeat.
 
-The next task is PR9 -- "Turn It On": unattended scheduler cadence via a LaunchAgent
-(the pattern already exists for the SG Card Tracker project's own automation -- follow the
-same launchctl approach, NOT cron), a new alphaos/util/alerts.py ntfy sender (the
-ntfy_topic setting already exists in Settings, unused so far), a consecutive-failure
-self-halt fuse, and a dead-man heartbeat CLI + second LaunchAgent. Full implementation-
-ready spec is in docs/roadmap/alphaos-pr-implementation-specs.md section "PR9 -- TURN IT
-ON" -- read it in full before writing any code; it specifies exact deliverables, settings,
-tests, and acceptance criteria (10 consecutive unattended trading days + one kill-switch
-drill + one failure-alert drill).
+Work through the master reference §5 punch list IN ORDER. If the PR9.1 hotfix branch
+(fix/no-news-prompt-leak) is not yet merged, that is the top priority -- review it,
+re-run the suite, and ask the user for the explicit merge instruction (T4: never merge
+without it). Next unbuilt code item after that: PR9.5 (Ops & Measurement Hardening),
+fully spec'd in docs/roadmap/alphaos-pr-implementation-specs.md. The operator day-1
+items (NTFY_TOPIC, trade-cap drift, pmset autorestart, chmod .env, drills) are
+user-only -- remind, don't do.
 
-This PR matters more than it looks: TQS's validation floor (>=300 live-resolved candidates
-over >=8 weeks) and Attribution's floor (>=30 live events/type over >=28 days) are both
-near-zero today specifically because nothing runs the scheduler unattended. PR9 is what
-starts those clocks. Do not let a later PR (setup cards, hypothesis engine, debate layer)
-get built before this one -- per the master plan, that's building intelligence layers
-before the data engine runs, the single biggest strategic risk this codebase currently has.
-
-Follow the established protocol: ground in the current code before speccing anything not
-already fully spec'd, implement, write deterministic tests (never depend on what a natural
-mock scan produces -- see HANDOVER section 7.5 and the PR specs doc's house-patterns
-appendix), run the full suite, get an independent review + Opus-style audit before merge,
-and do NOT merge to main without explicit instruction.
-
-Hard constraints (HANDOVER section 10): real-money stays unreachable; manual approval
-non-bypassable; no AI/catalyst/last30days/polarity/earnings/TQS/attribution output bypasses
-gates or auto-executes; migrations additive only; keep tests green; TQS/attribution/
-lineage/earnings are measurement/audit-only -- none may be read by any gate/eval/labeller/
-risk/execution path; the protection watchdog detects + blocks only; the proposal-TTL guard
-must stay enforced at the _execute() chokepoint; attribution's two SQLite partial unique
-indexes (proposal-anchored, override-anchored) must not be collapsed into a single naive
-UNIQUE constraint (NULL-uniqueness trap); attribution never builds a second replay engine
--- it only ever reads candidate_outcomes.replay_r / trade_outcomes.realized_r as already
-computed.
+Follow the established protocol: ground in current code, deterministic
+direct-construction tests only (§H.1 -- the date-flake class has now bitten THREE
+times), full suite, independent review + Opus audit, merge only on explicit human
+instruction. Hard constraints: HANDOVER §10 + master reference §4 (incl. the new CRO
+law: no autonomy promotion until every alert path has fired for real and a backup has
+been restored once).
 ```
 
 ## 10. Anything the next session must NOT change (hard invariants)

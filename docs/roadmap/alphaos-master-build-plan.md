@@ -1,7 +1,14 @@
 # AlphaOS Master Build Plan — The Long Game
 
-**Version 1.0 · 2026-07-05 · Authored by Fable 5 (final strategic architect pass)**
-**Baseline: `main` @ `799d9cc` · 763 passed / 0 failed / 3 skipped · PR1–PR8 merged**
+**Version 1.1 · 2026-07-06 · Authored by Fable 5 (final strategic architect pass)**
+**Baseline: `main` @ `85ae705` · 804 passed / 0 failed / 3 skipped · PR1–PR9 merged · scheduler LIVE unattended since 2026-07-06**
+
+> **v1.1 (2026-07-06):** PR9 shipped and activated — the Ignition phase is underway, L1
+> entered pending its drills + 10-day streak. The team's consolidated exit review and
+> the root reference document now live at `docs/ALPHAOS_MASTER_REFERENCE.md` — read
+> THAT first; it indexes this plan. Rationale for this version bump: recording the
+> Phase-1 state change, per this plan's own §0 rule that changes are commits with
+> rationale, never silent edits.
 
 ---
 
@@ -102,12 +109,19 @@ What exists and is audited (PR1–PR8, all merged, 763 tests green):
   provenance on every decision); PR7 `tqs_scores` shadow quality score (7 components,
   data-confidence-scaled, version-pinned); PR8 `attribution_records` counterfactual
   ΔR ledger (5 divergence event types, floor-gated reporting).
-- **Cadence machinery (dormant):** Scheduler v1.5 jobs (scan/monitor/outcomes/digest),
-  job locks, AI cost cap — **CLI-only; nothing runs unattended.**
+- **Cadence machinery (LIVE as of 2026-07-06, PR9):** Scheduler jobs
+  (scan/monitor/outcomes/digest) now run unattended via two LaunchAgents
+  (`com.ck.alphaos.scheduler` 300s tick; `com.ck.alphaos.heartbeat` 1800s dead-man
+  check), with a per-job-type consecutive-failure self-halt fuse and ntfy failure
+  alerting (`alphaos/util/alerts.py`). First unattended ticks verified same day.
+  Still pending from PR9 acceptance: the 10-trading-day streak, kill-switch drill,
+  failure-alert drill — and `NTFY_TOPIC` must be set or every alert silently no-ops.
 - **Known deliberate gaps:** earnings provider is mock; cost model calibrated on ~1
-  real fill; universe small; no LaunchAgent wiring; TQS floors (≥300 live-resolved
-  candidates over ≥8 weeks) and attribution floors (≥30 live events/type over ≥28
-  days) unmet — **live learning data ≈ zero.**
+  real fill; universe small (20 mega-caps/ETFs); no benchmark-vs-S&P tracking yet;
+  no DB backup automation yet; TQS floors (≥300 live-resolved candidates over ≥8
+  weeks) and attribution floors (≥30 live events/type over ≥28 days) unmet —
+  **live learning data ≈ zero (1 closed trade in the production ledger). PR9 started
+  the clocks; the floors now fill on their own.**
 
 The strategic implication that shapes everything below: **AlphaOS today is a complete,
 audited instrument that has barely been switched on.** Data is the bottleneck, not
@@ -166,7 +180,7 @@ audit). Each level names its rollback trigger — rollback is automatic.
 | Level | Capability | Entry criteria | Auto-rollback trigger |
 |---|---|---|---|
 | **L0** | Observe + measure (TQS, attribution, outcomes) | ✅ live today | — |
-| **L1** | Unattended cadence: scans/monitor/outcomes/digest run on schedule; all decisions still gated | PR9 shipped; heartbeat + fuses tested | ≥N consecutive job failures → self-halt |
+| **L1** | Unattended cadence: scans/monitor/outcomes/digest run on schedule; all decisions still gated | PR9 shipped ✅ (2026-07-06); heartbeat + fuses unit-tested ✅; live drills + 10-day streak PENDING | ≥N consecutive job failures → self-halt |
 | **L2** | Self-directed learning: nightly hypothesis generation, auto-demotion of decayed cards | PR12–13 shipped; pre-registration enforced | hypothesis volume/cost cap breach → pause engine |
 | **L3** | Bounded auto-approval, **paper**: existing `MAX_AUTO_APPROVALS_PER_DAY`-capped path, live-eligible cards only | ≥8 weeks L1 data; attribution floors met; TTL/watchdog/kill-switch drills passed | any auto-approved trade violating a gate invariant → revert to manual |
 | **L4** | Bounded auto-approval, **live, tier-1 size** (see §6 Phase 5) | ≥3 months profitable-after-costs L3 record; crossing protocol (§6 Phase 4) complete | drawdown governor breach → demote to paper |
@@ -538,3 +552,6 @@ has to rediscover them:
 *Fable 5, 2026-07-05. The foundation is sound, the law is written, the machine is one
 PR away from running. Turn it on, let the evidence accumulate, promote nothing without
 proof, and let the target size the roadmap — never the trade.*
+
+*Addendum, 2026-07-06: it is on. The scheduler ticks unattended; the data clocks are
+running. From here the constraint is patience and process, not code. — Fable 5*
