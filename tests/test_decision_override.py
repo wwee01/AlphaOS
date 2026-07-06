@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from alphaos.ai.openai_client import OpenAIEvaluation
 from alphaos.ai.playbook_classifier import PlaybookClassification
 from alphaos.constants import (
-    OFFICIAL_LABELS,
     CatalystStatus,
     Decision,
     DecisionAdjustment,
@@ -167,14 +166,27 @@ def test_rule4_mixed_driver_requires_a_real_positive_driver():
 
 # Rule 5 — every upgrade is still just a PROPOSAL: gates + manual approval apply
 def test_rule5_upgrades_still_require_gates_and_manual_approval(monkeypatch):
+    """Direct construction (§H.1): a previous version ran a full mock scan and
+    asserted `summ.decision_upgraded > 0`, which silently depends on the
+    date-seeded organic scan producing at least one WATCH-eval candidate that
+    day — the third bite of the same flake class (broke on the 2026-07-06
+    seed). Build the WATCH candidate by hand instead; the upgrade is then
+    decided ONLY by the override mechanism under test."""
     o = _orch()
-    monkeypatch.setattr(o.labeller, "classify", _propose_label)
+    cand, evaluation, classification = _watch_ready_candidate(o)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
     monkeypatch.setattr(o, "_real_decision_driver",
                         lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {}}))
-    summ = o.run_scan_once()
-    assert summ.decision_upgraded > 0                       # upgrades did happen
-    assert o.journal.count_rows("paper_orders") == 0        # ...yet nothing executed
+
+    summary = ScanSummary(scan_id="rule5-test")
+    final = o._resolve_decision(cand, evaluation, classification, "rule5-batch", summary)
+    assert final == Decision.PROPOSE.value                  # the upgrade happened
+    assert summary.decision_upgraded > 0
+    o._handle_proposal(cand, evaluation, summary, scan_batch_id="rule5-batch")
+    # ...and it became exactly a PENDING proposal, nothing more:
+    rows = o.journal.query("SELECT status FROM trade_proposals")
+    assert rows and all(r["status"] == "pending_approval" for r in rows)
+    assert o.journal.count_rows("paper_orders") == 0        # nothing executed
     assert o.journal.count_rows("paper_fills") == 0
     assert o.journal.count_open_positions() == 0
     assert o.journal.count_rows("approvals") == 0           # manual approval still required
@@ -245,15 +257,30 @@ def _propose_label(packet):
 
 def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     """With arming + a real driver forced, a PROPOSE label upgrades a WATCH eval —
-    and the move is journaled as 'upgraded' with its driver. Still no execution."""
+    and the move is journaled as 'upgraded' with its driver. Still no execution.
+
+    Direct construction (§H.1): a previous version ran a full mock scan and
+    asserted the organic shortlist contained an upgradeable WATCH candidate —
+    date-flaky (broke on the 2026-07-06 seed, third bite of this class). The
+    candidate is now hand-built; every audit-trail assertion is unchanged.
+    (The old organic-scan version also asserted candidate_labels stay official
+    — meaningless under direct construction since the labeller never runs, and
+    already covered by test_scan_records_one_adjustment_per_labelled_candidate's
+    organic scan plus the classifier's own whitelist coercion tests.)"""
     o = _orch()
-    monkeypatch.setattr(o.labeller, "classify", _propose_label)        # force PROPOSE labels
+    cand, evaluation, classification = _watch_ready_candidate(o)
+    # Stash a real-shaped last30days enrichment on the candidate: evidence_json
+    # is snapshotted from the ACTUAL cand["_last30"] object (never from the
+    # driver tuple), so the audit-trail assertion below stays meaningful.
+    cand["_last30"] = _l30(sentiment="bullish")
     monkeypatch.setattr(o, "_override_armed", lambda: True)            # arm
     monkeypatch.setattr(o, "_real_decision_driver",
                         lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
-    summ = o.run_scan_once()
+    summary = ScanSummary(scan_id="audit-test")
+    final = o._resolve_decision(cand, evaluation, classification, "audit-batch", summary)
 
-    assert summ.decision_upgraded > 0
+    assert final == Decision.PROPOSE.value
+    assert summary.decision_upgraded > 0
     ups = o.journal.query("SELECT * FROM decision_adjustments WHERE adjustment = ?",
                           (DecisionAdjustment.UPGRADED.value,))
     assert ups
@@ -265,20 +292,18 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
         assert r["driver"] == "last30days:bullish"          # driver recorded for learning
         assert r["driver_source"] == "last30days"           # categorical source recorded
         ev = json.loads(r["evidence_json"])                 # evidence snapshot present + parseable
-        assert ev and "last30days" in ev                    # last30days ran for every shortlisted
+        assert ev and "last30days" in ev
     tagged = o.journal.query("SELECT * FROM candidates WHERE decision_adjustment = ?",
                              (DecisionAdjustment.UPGRADED.value,))
     assert tagged and all(t["decision_adjustment_reason"] for t in tagged)
 
-    # SAFETY: an upgraded proposal still passed through gates + manual approval; it
-    # never auto-executed and never bypassed approval.
+    # SAFETY: the upgraded decision becomes at most a pending proposal; it
+    # never auto-executes and never bypasses approval.
+    o._handle_proposal(cand, evaluation, summary, scan_batch_id="audit-batch")
     assert o.journal.count_rows("paper_orders") == 0
     assert o.journal.count_rows("paper_fills") == 0
     assert o.journal.count_open_positions() == 0
     assert o.journal.count_rows("approvals") == 0
-    # labels stay official
-    labels = o.journal.query("SELECT primary_label FROM candidate_labels")
-    assert labels and all(l["primary_label"] in OFFICIAL_LABELS for l in labels)
     o.close()
 
 
@@ -288,7 +313,14 @@ def _watch_ready_candidate(orch, symbol="ZWATCH"):
     to clear risk sizing regardless of the mock market data's date seed.
     Whether it ends up upgraded is then decided ONLY by the override
     mechanism under test, not by whether today's mock scan happens to
-    independently produce a WATCH candidate at all."""
+    independently produce a WATCH candidate at all.
+
+    The stashed ``_snapshot`` carries ``market_session='regular'`` exactly like
+    every real MockDataProvider snapshot does: ``_stamp_proposal_ttl`` reads
+    the session from the snapshot, and an empty snapshot would fall back to
+    the REAL wall-clock session -- outside US market hours that is CLOSED,
+    whose TTL is 0, so the created proposal would be born-expired and any
+    status assertion would depend on WHEN the test suite runs (§H.1)."""
     cand_id = new_id("cand")
     orch.journal.insert("candidates", {
         "candidate_id": cand_id, "symbol": symbol, "direction": "long", "strategy": "swing",
@@ -301,7 +333,8 @@ def _watch_ready_candidate(orch, symbol="ZWATCH"):
         reasoning_summary="test fixture", data_freshness_status="usable", is_mock=True,
     )
     classification = _propose_label(SimpleNamespace(candidate_id=cand_id, symbol=symbol))
-    cand = {"candidate_id": cand_id, "symbol": symbol, "_snapshot": {},
+    cand = {"candidate_id": cand_id, "symbol": symbol, "last_price": 100.0,
+            "_snapshot": {"symbol": symbol, "last_price": 100.0, "market_session": "regular"},
             "_catalyst": None, "_last30": None, "_polarity": None}
     return cand, evaluation, classification
 
