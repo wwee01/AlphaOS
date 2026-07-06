@@ -109,8 +109,10 @@ adding intelligence.
 **Live config truth** (`.env` overrides code defaults — always check it): paper mode,
 `alpaca_paper` execution, manual approval, real trading unreachable, last30days +
 polarity ON (each real scan costs OpenAI calls), `gpt-5.4-mini` primary+review,
-NTFY_TOPIC **empty** (see §3), MAX_PAPER_TRADES_PER_DAY **1000000 — config drift,
-see punch list**.
+NTFY_TOPIC **now set** (operator's own topic, subscribed 2026-07-06 — see §3),
+MAX_PAPER_TRADES_PER_DAY **1000000, deliberate** (operator's own inline `.env`
+comment: "removed per operator request" — NOT a bug; confirmed with the operator
+2026-07-06 after an earlier draft of this review wrongly called it drift).
 
 ---
 
@@ -246,8 +248,12 @@ installer doesn't validate the python path; `data/demo-*.db` clutter.
 unreachable via 4 independent locks** (settings startup check · order_manager guard ·
 alpaca_client refusal · safety.assert_paper_or_mock); the full gate inventory below
 verified at file:line. Open: T1/T2, 🔴 HIGH drills never run (0 kill-switch events in
-the journal, ever), 🔴 HIGH `MAX_PAPER_TRADES_PER_DAY=1000000` config drift (a
-silently disabled hard gate; mitigated by manual approval). MED: kill-switch engage
+the journal, ever). ~~`MAX_PAPER_TRADES_PER_DAY=1000000` config drift~~ — RETRACTED
+2026-07-06: this was flagged as drift without reading the `.env` comment directly
+above it ("removed per operator request") — it is a deliberate operator choice, not
+a bug. Left standing as a lesson: even an empirically-minded review can miss
+recorded intent it didn't think to look for; see the memory file
+`feedback_check_env_comments_before_correcting.md`. MED: kill-switch engage
 doesn't cancel existing broker GTC legs (flatten stays manual — acceptable,
 documented here); fused monitor pauses detection (residual ≈0 today: broker-side
 brackets hold). **Not built, risk-ranked for Phase 4:** drawdown governor (nothing
@@ -308,17 +314,18 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
 ## 5. The punch list (ordered; owner in brackets; struck when done)
 
 **Tonight — before the first unattended scan (Mon 09:35 ET / 21:35 SGT):**
-1. 🟡 **PR9.1 hotfix** [AI build → user merges]: strip `_`-keys at prompt
-   construction + live-prompt-composition regression test (T5); fix the 2
-   date-flaky `test_decision_override` tests via direct construction (SWE HIGH).
+1. ✅ **PR9.1 hotfix** — merged `b70ff2e` 2026-07-06, 810/3/0 post-merge. Done.
 
 **Day 1 (operator-only inputs):**
-2. 🔴 Set `NTFY_TOPIC` in `.env` to a long random topic string; subscribe the ntfy
-   app on your phone (T1). One line; activates everything.
-3. 🔴 Decide `MAX_PAPER_TRADES_PER_DAY` (documented default 5; `.env` has 1000000).
-4. 🔴 `sudo pmset -a autorestart 1` · `chmod 600 .env`.
+2. ✅ `NTFY_TOPIC` set (operator's own topic) + subscribed on the ntfy app. Done 2026-07-06.
+3. ✅ `MAX_PAPER_TRADES_PER_DAY` — kept at `1000000`, confirmed deliberate by the
+   operator (see §2's live-config-truth note; this is NOT the drift it was
+   first flagged as). Resolved, no code change needed.
+4. ✅ `sudo pmset -a autorestart 1` (operator ran it, verified `autorestart 1`)
+   · ✅ `chmod 600 .env` (done). Done.
 5. 🔴 Run + log the drills in `docs/incidents/`: kill-switch engage→verify scan
    skipped→release; forced job failure → phone pages; stale heartbeat → phone pages.
+   **Next up** — ready to run now that NTFY is live.
 
 **Week 1 — PR9.5 "Ops & Measurement Hardening" (small, spec in the specs doc):**
 6. 🔴 Backup LaunchAgent (`.backup` → integrity_check → gzip → iCloud → 30d/12m
@@ -458,6 +465,7 @@ belongs in these documents, not in any session's memory.
 | Streamlit dashboard, read-only render | UI must never do what the CLI cannot; same orchestrator, same gates | When it demonstrably hurts |
 | gpt-5.4-mini both roles | Cost floor while N≈0; quality upgrades are champion-challenger material later | Eval harness exists + floors met |
 | Megacap 20-name universe v1 | Deliberate training wheels: liquid, cheap data, low blowup risk while plumbing matured | NOW — it's the control group; Phase 3 builds the real habitat (§3 T3) |
+| `MAX_PAPER_TRADES_PER_DAY=1000000` (uncapped) | **Operator's deliberate choice** ("removed per operator request", per the `.env` comment) — manual approval on every trade already bounds real action; a daily proposal-count cap adds no safety here, only friction. Confirmed 2026-07-06 after an AI session mis-flagged it as drift and briefly "corrected" it to 5 before being told to revert — see the memory lesson `feedback_check_env_comments_before_correcting.md`. **Do not re-flag this without new evidence from the operator.** | If proposal volume ever becomes operationally overwhelming to review daily |
 
 ---
 

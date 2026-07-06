@@ -190,10 +190,12 @@ Consolidated from the exit review (docs/ALPHAOS_MASTER_REFERENCE.md §3/§5).
    is purged on reboot); commit `requirements-lock.txt` (pip freeze); fix
    `config_versions.config_hash` builtin-`hash()` → `lineage.hashing.stable_hash`;
    installer validates the python path before `launchctl load`.
-5. **Operator prerequisites documented, not coded** (user-only, day-1 items):
-   `NTFY_TOPIC` set + phone subscribed; `MAX_PAPER_TRADES_PER_DAY` drift resolved;
-   `sudo pmset -a autorestart 1`; `chmod 600 .env`; the three drills logged in
-   `docs/incidents/`.
+5. **Operator prerequisites** (user-only, day-1 items — ✅ all done 2026-07-06
+   except the drills): `NTFY_TOPIC` set + phone subscribed; `MAX_PAPER_TRADES_PER_DAY`
+   confirmed intentional at 1000000 (NOT drift — `.env`'s own comment says
+   "removed per operator request"; do not re-flag this without new evidence);
+   `sudo pmset -a autorestart 1`; `chmod 600 .env`. Still open: the three
+   drills logged in `docs/incidents/`.
 
 **Non-goals:** no new gates, no strategy changes, no universe changes, no autonomy
 change. Tests: backup script against a temp DB (integrity + rotation), benchmark
