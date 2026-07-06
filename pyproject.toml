@@ -8,7 +8,9 @@ version = "0.1.0"
 description = "AlphaOS — a learning-first, paper-trading operating system (v1 skeleton)."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.3",
+]
 
 [project.optional-dependencies]
 # Live connectors are optional; mock mode + tests need none of them.

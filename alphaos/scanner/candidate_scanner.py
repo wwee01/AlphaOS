@@ -27,6 +27,7 @@ from alphaos.constants import (
 from alphaos.data.freshness_guard import FreshnessGuard, quote_crossed_or_invalid
 from alphaos.data.market_data import MarketDataClient
 from alphaos import lineage
+from alphaos.cards.registry import get_default_card
 from alphaos.scanner.interest_scanner import InterestScanner
 from alphaos.util.ids import new_id
 
@@ -163,6 +164,7 @@ class CandidateScanner:
 
         candidate_id = new_id("cand")
         asset_type = "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock"
+        card = get_default_card()
         cand = {
             "candidate_id": candidate_id,
             "scan_id": scan_id,
@@ -183,6 +185,8 @@ class CandidateScanner:
             "asset_type": asset_type,
             "playbook_name": PLAYBOOK_V1,
             "setup_classification": "momentum_continuation",
+            "card_id": card["card_id"],
+            "card_version": card["version"],
             "status_reason": "detected",
             "price_at_scan": snapshot.get("last_price"),
             "volume_at_scan": snapshot.get("volume"),

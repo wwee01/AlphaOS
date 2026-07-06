@@ -242,11 +242,26 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     for r in tqs_rows_today:
         tqs_bucket_histogram[r["tqs_bucket"]] = tqs_bucket_histogram.get(r["tqs_bucket"], 0) + 1
     confidences = [r["data_confidence"] for r in tqs_rows_today if r["data_confidence"] is not None]
+    # PR10: bucket histogram grouped by setup card -- same shape as
+    # bucket_histogram_today above, just sliced by card_id via a join on
+    # candidates (tqs_scores itself never stores card_id, preserving its
+    # measurement-only isolation -- see alphaos/tqs/ module docstring).
+    tqs_rows_by_card_today = journal.query(
+        "SELECT t.tqs_bucket, c.card_id FROM tqs_scores t "
+        "JOIN candidates c ON c.candidate_id = t.candidate_id "
+        "WHERE t.created_at_utc >= ? AND c.card_id IS NOT NULL",
+        (since_sgt,),
+    )
+    tqs_bucket_histogram_by_card: dict = {}
+    for r in tqs_rows_by_card_today:
+        by_card = tqs_bucket_histogram_by_card.setdefault(r["card_id"], {})
+        by_card[r["tqs_bucket"]] = by_card.get(r["tqs_bucket"], 0) + 1
     tqs_shadow = {
         "enabled": bool(settings.tqs_shadow_enabled),
         "tqs_version": TQS_VERSION,
         "scored_count_today": len(tqs_rows_today),
         "bucket_histogram_today": tqs_bucket_histogram,
+        "bucket_histogram_by_card_today": tqs_bucket_histogram_by_card,
         "mean_data_confidence_today": round(sum(confidences) / len(confidences), 2) if confidences else None,
         "unscorable_count_today": tqs_bucket_histogram.get("unscorable", 0),
         "mock_share_today": (

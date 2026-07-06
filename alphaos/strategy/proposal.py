@@ -46,6 +46,10 @@ class TradeProposal:
     claude_review_id: Optional[str] = None
     playbook_name: Optional[str] = None
     setup_classification: Optional[str] = None
+    # --- setup cards (Roadmap PR10) ---
+    card_id: Optional[str] = None
+    card_version: Optional[int] = None
+    invalidation_reason: Optional[str] = None
     expected_hold_days: Optional[int] = None
     scan_batch_id: Optional[str] = None
     proposal_reason: Optional[str] = None
@@ -94,6 +98,9 @@ class TradeProposal:
             claude_review_id=row.get("claude_review_id"),
             playbook_name=row.get("playbook_name"),
             setup_classification=row.get("setup_classification"),
+            card_id=row.get("card_id"),
+            card_version=row.get("card_version"),
+            invalidation_reason=row.get("invalidation_reason"),
             expected_hold_days=row.get("expected_hold_days"),
             scan_batch_id=row.get("scan_batch_id"),
             proposal_reason=row.get("proposal_reason"),
@@ -140,6 +147,9 @@ class TradeProposal:
             "claude_review_id": self.claude_review_id,
             "playbook_name": self.playbook_name,
             "setup_classification": self.setup_classification,
+            "card_id": self.card_id,
+            "card_version": self.card_version,
+            "invalidation_reason": self.invalidation_reason,
             "expected_hold_days": self.expected_hold_days,
             "scan_batch_id": self.scan_batch_id,
             "proposal_reason": self.proposal_reason,

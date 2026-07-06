@@ -172,6 +172,37 @@ output, row counts) — the same discipline as the kill-switch/alert drills.
 
 ---
 
+## Setup cards (PR10)
+
+The versioned join key for the whole learning loop. Cards are declarative YAML
+in `alphaos/cards/*.yaml` (reviewable, diffable, git-versioned) plus a
+`setup_cards` DB registry synced at every orchestrator startup (idempotent
+upsert keyed by `(card_id, version)`), so every candidate/proposal row can
+join on `card_id` without touching the filesystem. Registry rows are
+append-only per version — changing a card's content WITHOUT bumping its
+`version` field refuses to start (a loud `SettingsError`, not a silent drift).
+
+v1 ships with exactly one card, `catalyst_momentum_v1` — a faithful
+transcription of the pre-card pipeline's existing behavior. This PR changes
+no decision behavior; it makes existing behavior addressable.
+
+**Exit-first invariant** ("no entry without a written exit"): every proposal's
+`invalidation_reason` is populated from the card at creation time; `_execute()`
+— the single chokepoint every submission route funnels through — blocks any
+proposal missing `entry`/`stop`/`target`/`max_holding_days`/`invalidation_reason`
+with `ReasonCode.EXIT_PLAN_INCOMPLETE`, including legacy pre-PR10 proposals
+that somehow reach approval without one (fail-safe: block, never wave through).
+
+```bash
+# Inspect the registered cards
+sqlite3 data/alphaos.db "SELECT card_id, version, state FROM setup_cards;"
+
+# See per-card outcomes (once volume clears the sample floor)
+python -m alphaos attribution_report   # now includes an "Aggregate ΔR by setup card" section
+```
+
+---
+
 ## Architecture
 
 ```

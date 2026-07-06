@@ -351,6 +351,8 @@ class ReasonCode(StrEnum):
     # --- Roadmap PR6: proposal TTL / stale-approval guard ---
     PROPOSAL_EXPIRED = "PROPOSAL_EXPIRED"
     PROPOSAL_SUPERSEDED = "PROPOSAL_SUPERSEDED"
+    # --- PR10: setup cards / exit-first invariant ---
+    EXIT_PLAN_INCOMPLETE = "EXIT_PLAN_INCOMPLETE"
 
 
 # --- Labels & sentinels ------------------------------------------------------
