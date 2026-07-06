@@ -60,6 +60,7 @@ from alphaos.constants import (
     TriggerSource,
 )
 from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+from alphaos.cards import registry as cards
 from alphaos.util import timeutils
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.data.market_data import MarketDataClient
@@ -153,6 +154,15 @@ class Orchestrator:
     def startup(self) -> list:
         """Record config + run startup-safety checks, logging each to events."""
         self.journal.record_config_version(self.settings)
+        # PR10: sync the setup-card registry BEFORE anything else can run --
+        # unlike the checks below (which log-and-continue), a mutated card
+        # (SettingsError) must stop startup cold, not just warn. See
+        # alphaos/cards/registry.py's module docstring.
+        synced = cards.sync_registry(self.journal, self.settings)
+        if synced:
+            self.journal.log_system_event(
+                Severity.INFO, "startup", f"Setup cards registry synced: {', '.join(synced)}",
+            )
         checks = self.settings.validate_startup()
         for c in checks:
             sev = c.severity if c.ok else c.severity
@@ -404,6 +414,7 @@ class Orchestrator:
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
         snapshot = cand.get("_snapshot", {})
+        card = cards.get_default_card()
 
         risk = self.risk.assess(
             direction=direction,
@@ -422,6 +433,9 @@ class Orchestrator:
             proposal.scan_batch_id = scan_batch_id
             proposal.playbook_name = PLAYBOOK_V1
             proposal.setup_classification = "momentum_continuation"
+            proposal.card_id = card["card_id"]
+            proposal.card_version = card["version"]
+            proposal.invalidation_reason = card["invalidation_rule"]
             proposal.expected_hold_days = evaluation.max_holding_days
             self._stamp_proposal_ttl(proposal, snapshot)
             # Persist the risk check (does NOT change whether the trade proceeds).
@@ -442,6 +456,9 @@ class Orchestrator:
         proposal.scan_batch_id = scan_batch_id
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "momentum_continuation"
+        proposal.card_id = card["card_id"]
+        proposal.card_version = card["version"]
+        proposal.invalidation_reason = card["invalidation_rule"]
         proposal.expected_hold_days = evaluation.max_holding_days
         self._stamp_proposal_ttl(proposal, snapshot)
         rc_id = self._record_risk_check(proposal, evaluation, risk)
@@ -876,6 +893,10 @@ class Orchestrator:
         self._tag_target_profile(proposal, from_config=evaluation.is_mock)
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "user_override"
+        card = cards.get_default_card()
+        proposal.card_id = card["card_id"]
+        proposal.card_version = card["version"]
+        proposal.invalidation_reason = card["invalidation_rule"]
         proposal.expected_hold_days = evaluation.max_holding_days
         proposal.proposal_reason = f"user_override:{rec['user_override_action']}"
         proposal.status = "pending_approval"
@@ -1227,6 +1248,7 @@ class Orchestrator:
             },
         )
         risk = self.risk.assess(direction="long", entry=entry, stop=stop, snapshot=snap)
+        card = cards.get_default_card()
         proposal = TradeProposal(
             symbol=symbol, direction="long", strategy=Strategy.SWING.value,
             entry=entry, stop=stop, target=target, max_holding_days=3,
@@ -1235,6 +1257,8 @@ class Orchestrator:
             dollar_risk=(risk.sizing.dollar_risk if risk.sizing else (entry - stop)),
             expected_r=2.0, same_day_exit_eligible=True, candidate_id=cand_id,
             eval_id="demo", is_demo=True, status="pending_approval",
+            card_id=card["card_id"], card_version=card["version"],
+            invalidation_reason=card["invalidation_rule"],
         )
         self._tag_target_profile(proposal, from_config=True)
         self._stamp_proposal_ttl(proposal, snap)
@@ -1271,6 +1295,37 @@ class Orchestrator:
                 detail="proposal TTL exceeded before submission",
                 state=OrderState.REJECTED.value,
             )
+
+        # PR10 exit-first invariant ("no entry without a written exit"): every
+        # submission route funnels through this SAME chokepoint, so this is
+        # where the law is enforced regardless of caller. Legacy proposals
+        # (pre-PR10, NULL invalidation_reason) are grandfathered everywhere
+        # EXCEPT here -- fail-safe direction is always block, never wave a
+        # stale/incomplete plan through. Falsy checks (not truthy checks)
+        # deliberately catch both NULL-hydrated None and the 0/""-defaulted
+        # values TradeProposal.from_row() produces for a missing DB column --
+        # no real trade ever has a genuine $0 entry/stop/target or 0-day hold.
+        missing = [
+            name for name, value in (
+                ("entry", proposal.entry), ("stop", proposal.stop), ("target", proposal.target),
+                ("max_holding_days", proposal.max_holding_days),
+                ("invalidation_reason", proposal.invalidation_reason),
+            )
+            if not value
+        ]
+        if missing:
+            detail = f"exit plan incomplete: missing {', '.join(missing)}"
+            self.journal.log_system_event(
+                Severity.WARNING, "approval",
+                f"Execution blocked for {proposal.symbol}: {detail}.",
+                {"proposal_id": proposal.proposal_id, "reason_code": ReasonCode.EXIT_PLAN_INCOMPLETE.value,
+                 "missing_fields": missing},
+            )
+            return OrderResult(
+                blocked=True, block_reason=ReasonCode.EXIT_PLAN_INCOMPLETE.value,
+                detail=detail, state=OrderState.REJECTED.value,
+            )
+
         self._set_proposal_status(proposal.proposal_id, "approved")
         return self.orders.execute_proposal(proposal, fill_price=fill_price)
 

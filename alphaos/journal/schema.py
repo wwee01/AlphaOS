@@ -156,6 +156,8 @@ SCHEMA: list[tuple[str, str]] = [
             asset_type TEXT,
             playbook_name TEXT,
             setup_classification TEXT,
+            card_id TEXT,
+            card_version INTEGER,
             status_reason TEXT,
             block_reason TEXT,
             reject_reason TEXT,
@@ -318,6 +320,9 @@ SCHEMA: list[tuple[str, str]] = [
             scan_batch_id TEXT,
             playbook_name TEXT,
             setup_classification TEXT,
+            card_id TEXT,
+            card_version INTEGER,
+            invalidation_reason TEXT,
             expected_hold_days INTEGER,
             proposal_reason TEXT,
             arming_classification TEXT,
@@ -1528,6 +1533,32 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR10: the versioned setup-card registry. Cards themselves are
+        # declarative YAML in alphaos/cards/*.yaml (reviewable, diffable,
+        # git-versioned) -- this table is a DB-synced mirror (idempotent
+        # upsert at orchestrator startup, keyed by (card_id, version)) so
+        # every ledger row can join on card_id without filesystem access.
+        # Append-only per version: alphaos/cards/registry.py refuses to
+        # start if a (card_id, version) already registered has a different
+        # content_hash than what's on disk -- a silently mutated card is the
+        # exact failure mode Prime Directive 7 exists to prevent.
+        "setup_cards",
+        """
+        CREATE TABLE IF NOT EXISTS setup_cards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            name TEXT,
+            state TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            content_json TEXT,
+            lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1646,6 +1677,12 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_snapshots_date ON equity_snapshots(market_date)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmark_bars_symbol_date ON benchmark_bars(symbol, bar_date)",
     "CREATE INDEX IF NOT EXISTS idx_benchmark_bars_symbol ON benchmark_bars(symbol)",
+    # PR10: one registry row per (card_id, version) -- neither column is ever
+    # NULL here (both are required fields on every card), so a plain UNIQUE
+    # is safe; no NULL-uniqueness trap like tqs_scores/attribution_records.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_setup_cards_id_version ON setup_cards(card_id, version)",
+    "CREATE INDEX IF NOT EXISTS idx_candidates_card ON candidates(card_id)",
+    "CREATE INDEX IF NOT EXISTS idx_proposals_card ON trade_proposals(card_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

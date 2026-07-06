@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from alphaos.cards.registry import get_default_card
 from alphaos.config.settings import load_settings
 from alphaos.constants import TEST_FIXTURE_NEWS_LABEL
 from alphaos.journal.journal_store import JournalStore
@@ -67,13 +68,27 @@ def fixture_news_item(symbol="AAPL"):
 
 
 def make_proposal(symbol="AAPL", direction="long", entry=100.0, stop=97.0, target=106.0,
-                  strategy="swing", qty=10, requires_margin=False, candidate_id=None):
+                  strategy="swing", qty=10, requires_margin=False, candidate_id=None,
+                  with_card=True, invalidation_reason=None):
+    """``with_card=True`` (default) stamps the real default setup card, matching
+    what the current pipeline always produces (Roadmap PR10's exit-first
+    invariant blocks _execute() on a proposal missing card_id/invalidation_reason,
+    so every OTHER test relying on execution actually succeeding needs a
+    complete proposal here). Pass ``with_card=False`` to build a deliberately
+    legacy/incomplete proposal for testing that exact blocking behavior."""
+    card = get_default_card() if with_card else None
     return TradeProposal(
         symbol=symbol, direction=direction, strategy=strategy, entry=entry, stop=stop,
         target=target, max_holding_days=3, qty=qty, risk_per_share=abs(entry - stop),
         dollar_risk=abs(entry - stop) * qty, expected_r=2.0, same_day_exit_eligible=True,
         candidate_id=candidate_id or new_id("cand"), eval_id="ev_test",
         requires_margin=requires_margin, status="pending_approval",
+        card_id=card["card_id"] if card else None,
+        card_version=card["version"] if card else None,
+        invalidation_reason=(
+            invalidation_reason if invalidation_reason is not None
+            else (card["invalidation_rule"] if card else None)
+        ),
     )
 
 

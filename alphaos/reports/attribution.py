@@ -272,12 +272,28 @@ def compute_attribution_v2(records: list[dict]) -> dict:
         "status": "below_sample_floor",
     }
 
+    # PR10: by_card slice -- documentation for learning, not a gate (v1 has
+    # exactly one card, so this is mostly scaffolding for when a second card
+    # exists). A lighter floor than the main aggregate (MIN_RESOLVED_FOR_V2_
+    # SUBSLICE, not MIN_RESOLVED_FOR_V2_AGGREGATE) since a per-card slice is
+    # inherently a smaller sample than the whole system's aggregate.
+    resolved_live = [r for r in live if r.get("resolved_status") == "resolved"]
+    card_ids = sorted({r.get("card_id") for r in resolved_live if r.get("card_id")})
+    aggregate_delta_r_by_card = {
+        card_id: _floor_gated_v2_aggregate(
+            [r for r in resolved_live if r.get("card_id") == card_id], "delta_r",
+            min_resolved=MIN_RESOLVED_FOR_V2_SUBSLICE,
+        )
+        for card_id in card_ids
+    }
+
     return {
         "attribution_version": ATTRIBUTION_VERSION,
         "total_records": len(records),
         "mock_excluded_count": mock_excluded,
         "counts_by_type_and_status": counts_by_type_and_status,
         "aggregate_delta_r_by_type_and_agent": aggregate_by_type_and_agent,
+        "aggregate_delta_r_by_card": aggregate_delta_r_by_card,
         "execution_gap_propose_approved_executed": execution_gap,
         "sample_floor_resolved": MIN_RESOLVED_FOR_V2_AGGREGATE,
         "sample_floor_span_days": MIN_SPAN_DAYS_FOR_V2_AGGREGATE,
@@ -309,8 +325,10 @@ def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
     # (never merged into the v1 heuristic fields above, which answer a
     # coarser "who outperformed" question over a different table).
     attribution_records = journal.query(
-        "SELECT attribution_type, agent, resolved_status, delta_r, execution_delta_r, "
-        "is_mock, resolved_at_utc FROM attribution_records ORDER BY id DESC LIMIT ?",
+        "SELECT ar.attribution_type, ar.agent, ar.resolved_status, ar.delta_r, "
+        "ar.execution_delta_r, ar.is_mock, ar.resolved_at_utc, c.card_id "
+        "FROM attribution_records ar LEFT JOIN candidates c ON c.candidate_id = ar.candidate_id "
+        "ORDER BY ar.id DESC LIMIT ?",
         (limit,),
     )
     rep["v2"] = compute_attribution_v2(attribution_records)
@@ -409,6 +427,20 @@ def render_markdown(rep: dict) -> str:
                         f"≥{v2['sample_floor_span_days']}d)"
                     )
         if not v2["aggregate_delta_r_by_type_and_agent"]:
+            lines.append("- (none)")
+        lines += ["", "## Aggregate ΔR by setup card (floor-gated)"]
+        for card_id, agg in v2["aggregate_delta_r_by_card"].items():
+            if agg["status"] == "ok":
+                lines.append(
+                    f"- {card_id}: n={agg['resolved_count']} (span {agg['span_days']}d) "
+                    f"mean ΔR={agg['mean_delta_r']} sum ΔR={agg['sum_delta_r']}"
+                )
+            else:
+                lines.append(
+                    f"- {card_id}: n={agg['resolved_count']} — below_sample_floor "
+                    f"(needs ≥{v2['sample_floor_subslice_resolved']} resolved)"
+                )
+        if not v2["aggregate_delta_r_by_card"]:
             lines.append("- (none)")
         eg = v2["execution_gap_propose_approved_executed"]
         lines += ["", "## Execution gap (propose_approved_executed)"]
