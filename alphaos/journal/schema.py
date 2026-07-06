@@ -238,6 +238,14 @@ SCHEMA: list[tuple[str, str]] = [
             model_provider TEXT,
             prompt_hash TEXT,
             system_prompt_hash TEXT,
+            -- PR9.5: real token usage for cost accounting (cost_guard
+            -- previously only counted rows in THIS table, which happened to
+            -- be the complete AI spend before the labeller/polarity calls
+            -- existed -- now genuinely undercounting without this + the
+            -- other two tables' equivalents).
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -965,6 +973,11 @@ SCHEMA: list[tuple[str, str]] = [
             upgrade_blockers_json TEXT,
             proposal_readiness TEXT,
             what_would_upgrade TEXT,
+            -- PR9.5: real token usage for cost accounting (previously
+            -- invisible to cost_guard, which only counted openai_evaluations).
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1158,6 +1171,13 @@ SCHEMA: list[tuple[str, str]] = [
             model_provider TEXT,
             prompt_hash TEXT,
             system_prompt_hash TEXT,
+            -- PR9.5: real token usage for cost accounting. No is_mock column
+            -- exists on this table (a PR4-era omission, not reproduced) --
+            -- model_provider IS NOT NULL is cost_guard's real-call filter
+            -- here instead (see cost_guard.py's own docstring).
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1460,6 +1480,54 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR9.5: the benchmark spine. One row per US trading day -- the
+        # "paper equity" side of measuring performance against the S&P 500.
+        # `equity_source` distinguishes a real broker-reported reading
+        # ('live_broker') from the static PAPER_EQUITY config fallback
+        # ('static_config', used in mock mode or if the broker read fails) --
+        # never silently conflated, per the unknown-never-zero/mock-never-real
+        # discipline every other measurement layer in this codebase follows.
+        # Write-only from alphaos/reports/benchmark_capture.py; never read by
+        # any gate/eval/labeller/risk/execution path.
+        "equity_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS equity_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            equity REAL NOT NULL,
+            equity_source TEXT NOT NULL,
+            is_mock INTEGER DEFAULT 0,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR9.5: cached daily OHLCV bars for whatever symbol(s) we benchmark
+        # against (SPY today; the symbol column is generic for future
+        # benchmarks -- QQQ, a custom blended index, etc). A cache, not a
+        # measurement of AlphaOS itself: safe to backfill historical dates
+        # (unlike equity_snapshots, SPY's own price history is public record,
+        # not something that would need to be "honestly" forward-only).
+        "benchmark_bars",
+        """
+        CREATE TABLE IF NOT EXISTS benchmark_bars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bar_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            bar_date TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1572,6 +1640,12 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_attr_type ON attribution_records(attribution_type)",
     "CREATE INDEX IF NOT EXISTS idx_attr_candidate ON attribution_records(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_attr_lineage ON attribution_records(lineage_id)",
+    # PR9.5: benchmark spine. One equity snapshot per trading day (idempotent
+    # capture -- a second same-day run must not double-insert); one bar per
+    # (symbol, date) (idempotent re-fetch/backfill).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_snapshots_date ON equity_snapshots(market_date)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_benchmark_bars_symbol_date ON benchmark_bars(symbol, bar_date)",
+    "CREATE INDEX IF NOT EXISTS idx_benchmark_bars_symbol ON benchmark_bars(symbol)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

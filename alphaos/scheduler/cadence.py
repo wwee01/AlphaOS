@@ -28,6 +28,8 @@ class JobType(StrEnum):
     MONITOR = "monitor"
     OUTCOMES_UPDATE = "outcomes_update"
     DAILY_DIGEST = "daily_digest"
+    # PR9.5: once-daily paper-equity + SPY-bar capture (measurement only).
+    BENCHMARK_SPINE = "benchmark_spine"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -97,9 +99,9 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
         interval = max(1, int(settings.scheduler_outcomes_interval_minutes))
         return f"{JobType.OUTCOMES_UPDATE}:{_rounded_down_key(market_dt_et, interval)}"
 
-    if job_type == JobType.DAILY_DIGEST:
+    if job_type in (JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE):
         st = timeutils.stamp(now)
-        return f"{JobType.DAILY_DIGEST}:{st.local_sgt[:10]}"
+        return f"{job_type}:{st.local_sgt[:10]}"
 
     return f"{job_type}:{market_dt_et.isoformat()}"
 
@@ -130,6 +132,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             )
         if job_type == JobType.DAILY_DIGEST:
             return _digest_due(settings, journal, now)
+        if job_type == JobType.BENCHMARK_SPINE:
+            return _benchmark_spine_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -220,20 +224,33 @@ def is_fused(job_type: str, max_consecutive_failures: int, journal) -> tuple[boo
     )
 
 
-def _digest_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+def _once_daily_due(job_type: str, time_str: str, settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    """Generic 'due once per SGT calendar day, at/after time_str (HH:MM)' rule
+    -- the shared cadence shape behind daily_digest and benchmark_spine,
+    parametrized by which settings-driven time-of-day threshold applies."""
     st = timeutils.stamp(now)
     today_sgt = st.local_sgt[:10]
-    hh, mm = (int(p) for p in settings.scheduler_digest_time.split(":"))
+    hh, mm = (int(p) for p in time_str.split(":"))
     now_hhmm = st.local_sgt[11:16]
     if now_hhmm < f"{hh:02d}:{mm:02d}":
-        return (False, f"{now_hhmm} SGT is before digest time {settings.scheduler_digest_time}")
+        return (False, f"{now_hhmm} SGT is before {job_type} time {time_str}")
 
-    lock_key = default_lock_key(JobType.DAILY_DIGEST, settings, now)
+    lock_key = default_lock_key(job_type, settings, now)
     existing = journal.count_rows(
         "job_runs",
         "job_type = ? AND lock_key = ? AND status = 'completed'",
-        (JobType.DAILY_DIGEST, lock_key),
+        (job_type, lock_key),
     )
     if existing:
-        return (False, f"daily_digest already completed today ({today_sgt} SGT)")
-    return (True, f"at/after digest time {settings.scheduler_digest_time} SGT, not yet run today")
+        return (False, f"{job_type} already completed today ({today_sgt} SGT)")
+    return (True, f"at/after {job_type} time {time_str} SGT, not yet run today")
+
+
+def _digest_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(JobType.DAILY_DIGEST, settings.scheduler_digest_time, settings, journal, now)
+
+
+def _benchmark_spine_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(
+        JobType.BENCHMARK_SPINE, settings.scheduler_benchmark_spine_time, settings, journal, now,
+    )

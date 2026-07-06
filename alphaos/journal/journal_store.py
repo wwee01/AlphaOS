@@ -23,6 +23,7 @@ from typing import Any, Iterable, Optional
 
 from alphaos.constants import FailsafeReason, LabelSource, ProposalStatus, Severity
 from alphaos.journal.schema import INDEXES, SCHEMA, SCHEMA_VERSION
+from alphaos.lineage.hashing import stable_hash
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -256,7 +257,14 @@ class JournalStore:
             "allow_fixture_news": settings.allow_fixture_news,
         }
         payload = json.dumps(safe, sort_keys=True, default=str)
-        config_hash = str(abs(hash(payload)) % (10**12))
+        # PR9.5 fix: builtin hash() on a str is PYTHONHASHSEED-randomized (a
+        # security default since Python 3.3) -- the SAME config produced a
+        # DIFFERENT config_hash on every process restart, defeating the whole
+        # point of a config-change fingerprint. stable_hash is the codebase's
+        # own established deterministic-hash convention (lineage/hashing.py),
+        # already used correctly by build_config_hashes() for the lineage
+        # snapshot's own config_hash -- this was the one place that missed it.
+        config_hash = stable_hash(safe)
         self.insert(
             "config_versions",
             {

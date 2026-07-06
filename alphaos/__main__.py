@@ -119,6 +119,18 @@ def cmd_outcomes_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_relative_performance_report(orch: Orchestrator) -> int:
+    """PR9.5: paper-equity vs S&P 500 measurement. No statistical claims —
+    floor-gated exactly like every other report; PURE READ."""
+    from alphaos.reports.relative_performance import render_markdown
+
+    rep = orch.relative_performance_report()
+    print(render_markdown(rep))
+    print()
+    _print({"relative_performance_report": rep})
+    return 0
+
+
 def cmd_decision_lineage(orch: Orchestrator, decision_id: str) -> int:
     """READ-ONLY: which code/config/model/prompt/data/scheduler context
     produced this decision. Accepts a candidate_id, proposal_id,
@@ -326,7 +338,7 @@ def build_parser() -> argparse.ArgumentParser:
     srj = sub.add_parser("scheduler_run_job",
                          help="force-run one scheduler job now, bypassing cadence timing (still respects kill "
                               "switch / protection / cost cap / locking)")
-    srj.add_argument("job_type", choices=["scan", "monitor", "outcomes_update", "daily_digest"])
+    srj.add_argument("job_type", choices=["scan", "monitor", "outcomes_update", "daily_digest", "benchmark_spine"])
     sub.add_parser("scheduler_health",
                    help="dead-man's-switch check: exit 0 if a job completed recently enough during "
                         "market hours, else exit 1 + one alert (run from its own separate LaunchAgent)")
@@ -354,6 +366,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "(1/3/5-day forward returns + bracket replay; measurement only)")
     sub.add_parser("outcomes_report",
                    help="measurement-visibility summary over candidate_outcomes (no statistical claims)")
+    sub.add_parser("relative_performance_report",
+                   help="paper-equity vs S&P 500 measurement (no statistical claims; PR9.5)")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -429,6 +443,8 @@ def main(argv=None) -> int:
             return cmd_outcomes_update(orch)
         if args.command == "outcomes_report":
             return cmd_outcomes_report(orch)
+        if args.command == "relative_performance_report":
+            return cmd_relative_performance_report(orch)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":

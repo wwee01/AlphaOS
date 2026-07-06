@@ -73,3 +73,15 @@ def test_scheduler_cost_cap_bounds_validation():
     assert s.scheduler_ai_cost_cap_calls_per_30d == 50
     s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=100000)
     assert s.scheduler_ai_cost_cap_calls_per_30d == 100000
+
+
+def test_benchmark_spine_time_malformed_fails_fast():
+    with pytest.raises(SettingsError):
+        make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="25:99")
+    with pytest.raises(SettingsError):
+        make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="not-a-time")
+
+
+def test_benchmark_spine_time_valid_hhmm_accepted():
+    s = make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="09:00")
+    assert s.scheduler_benchmark_spine_time == "09:00"

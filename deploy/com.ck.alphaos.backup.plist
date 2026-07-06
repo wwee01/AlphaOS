@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- AlphaOS ledger backup (PR9.5) -- runs deploy/backup_ledger.sh once
+       daily at 05:30 (the Mac mini's system clock is SGT, and US markets are
+       closed at that hour, so the online .backup never races a live write).
+       A THIRD, separate LaunchAgent on purpose -- same rationale as the
+       heartbeat being separate from the scheduler: this job's failure modes
+       must never share a process with the jobs it exists to protect. -->
+  <key>Label</key>
+  <string>com.ck.alphaos.backup</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/ck/Documents/Claude Playground/AlphaOS/deploy/backup_ledger.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ck/Documents/Claude Playground/AlphaOS</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ck</string>
+  </dict>
+
+  <!-- Fire once daily at 05:30 system-local time (SGT on this machine). -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>5</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+
+  <!-- RunAtLoad true (unlike the sibling SG project's daily-parser plist,
+       which intentionally waits for its first scheduled fire): installing
+       this agent should immediately produce a first backup so the operator
+       can verify it actually works right away, not wait until tomorrow. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ck/Library/Logs/alphaos/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ck/Library/Logs/alphaos/backup-error.log</string>
+</dict>
+</plist>

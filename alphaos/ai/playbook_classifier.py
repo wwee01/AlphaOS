@@ -48,6 +48,23 @@ def _classify_exception(exc) -> str:
     return FailsafeReason.LIVE_EXCEPTION.value
 
 
+def _extract_usage(resp) -> Optional[dict]:
+    """PR9.5: best-effort token usage from an OpenAI ChatCompletion response,
+    for real cost accounting (cost_guard previously only counted
+    openai_evaluations, undercounting real AI spend 2-3x). Returns None if
+    unavailable -- never affects/blocks the classification it's measuring.
+    Extracted before any truncation/parse check: a truncated response still
+    consumed real tokens and should still be counted."""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return None
+    return {
+        "prompt_tokens": getattr(usage, "prompt_tokens", None),
+        "completion_tokens": getattr(usage, "completion_tokens", None),
+        "total_tokens": getattr(usage, "total_tokens", None),
+    }
+
+
 @dataclass
 class PlaybookClassification:
     label_id: str
@@ -82,6 +99,11 @@ class PlaybookClassification:
     model_provider: Optional[str] = None
     prompt_hash: Optional[str] = None
     system_prompt_hash: Optional[str] = None
+    # PR9.5: real token usage for cost accounting. None for mock/fail-safe
+    # paths (no real API call was made); populated by _live_classify.
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
     def to_row(self, packet_id: Optional[str], scan_batch_id: Optional[str], frozen_at_utc: str) -> dict:
         return {
@@ -115,6 +137,14 @@ class PlaybookClassification:
             "upgrade_blockers_json": self.upgrade_blockers,
             "proposal_readiness": self.proposal_readiness,
             "what_would_upgrade": self.what_would_upgrade,
+            # PR9.5: unlike model_provider/prompt_hash/system_prompt_hash (which
+            # flow into decision_adjustments.ai_lineage_json instead -- see
+            # Orchestrator._record_decision_adjustment -- not this row), token
+            # usage gets its own columns here so cost_guard can count real AI
+            # spend with a simple query, not a JSON parse.
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
         }
 
 
@@ -216,27 +246,29 @@ class PlaybookClassifier:
             ],
             timeout=HTTP_TIMEOUT,
         )
+        usage = _extract_usage(resp)  # PR9.5: before any truncation/parse check below
         choice = resp.choices[0]
         # A truncated response (token budget too small) yields incomplete JSON that
         # fails to parse. Name that reason explicitly so a fail-safe SPIKE is
         # diagnosable (this was the exact bug that silently blocked all proposals),
         # rather than lumped under a vague "live_exception".
         if getattr(choice, "finish_reason", None) == "length":
-            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value, ai_lineage=ai_lineage)
+            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value, ai_lineage=ai_lineage, usage=usage)
         try:
             obj = structured_json.parse_json_object(choice.message.content)
         except Exception:
-            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value, ai_lineage=ai_lineage)
+            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value, ai_lineage=ai_lineage, usage=usage)
         # Missing keys are tolerated by coerce_and_validate (degrade safely), but a
         # total absence of the core fields should fail safe.
         if "primary_label" not in obj and "decision" not in obj:
-            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value, ai_lineage=ai_lineage)
+            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value, ai_lineage=ai_lineage, usage=usage)
         clean, status = coerce_and_validate(obj, self.settings)
         return self._build(packet, clean, status, LabelSource.OPENAI.value, self.model, False,
-                           raw=obj, ai_lineage=ai_lineage)
+                           raw=obj, ai_lineage=ai_lineage, usage=usage)
 
     # ------------------------------------------------------------- fail-safe
-    def _fail_safe(self, packet, reason: str, ai_lineage: Optional[dict] = None) -> PlaybookClassification:
+    def _fail_safe(self, packet, reason: str, ai_lineage: Optional[dict] = None,
+                   usage: Optional[dict] = None) -> PlaybookClassification:
         clean = {
             "primary_label": LABEL_OTHER,
             "secondary_labels": [],
@@ -254,12 +286,14 @@ class PlaybookClassifier:
         }
         return self._build(packet, clean, reason, LabelSource.FAIL_SAFE.value,
                            self.model if not self.use_mock else "mock", self.use_mock,
-                           raw={"fail_safe": reason}, ai_lineage=ai_lineage)
+                           raw={"fail_safe": reason}, ai_lineage=ai_lineage, usage=usage)
 
     # --------------------------------------------------------------- builder
     def _build(self, packet, clean: dict, status: str, source: str, model: str,
-               is_mock: bool, raw: dict, ai_lineage: Optional[dict] = None) -> PlaybookClassification:
+               is_mock: bool, raw: dict, ai_lineage: Optional[dict] = None,
+               usage: Optional[dict] = None) -> PlaybookClassification:
         ai_lineage = ai_lineage or {}
+        usage = usage or {}
         return PlaybookClassification(
             label_id=new_id("lbl"),
             candidate_id=getattr(packet, "candidate_id", ""),
@@ -290,4 +324,7 @@ class PlaybookClassifier:
             model_provider=ai_lineage.get("model_provider"),
             prompt_hash=ai_lineage.get("prompt_hash"),
             system_prompt_hash=ai_lineage.get("system_prompt_hash"),
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
         )

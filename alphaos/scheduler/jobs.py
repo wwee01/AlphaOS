@@ -87,3 +87,14 @@ def run_daily_digest_job(orch, runner) -> dict:
 
     digest = build_daily_digest(orch.journal, orch.settings, orch.kill_switch)
     return {"status": "completed", "digest": digest}
+
+
+def run_benchmark_spine_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``benchmark_capture.capture_benchmark_spine()``
+    (PR9.5). No gating needed -- pure measurement, never read by any
+    gate/eval/labeller/risk/execution path (same rationale as
+    run_outcomes_job)."""
+    from alphaos.reports.benchmark_capture import capture_benchmark_spine
+
+    result = capture_benchmark_spine(orch.journal, orch.settings)
+    return {"status": "completed", "benchmark_spine_result": result}

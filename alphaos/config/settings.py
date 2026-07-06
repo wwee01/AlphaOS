@@ -226,6 +226,8 @@ class Settings:
     # --- scheduler v1.6 (PR9: unattended cadence -- self-halt fuse + heartbeat) ---
     scheduler_max_consecutive_failures: int
     scheduler_heartbeat_stale_minutes: int
+    # --- scheduler v1.7 (PR9.5: benchmark spine capture cadence) ---
+    scheduler_benchmark_spine_time: str
 
     # --- notifications ---
     ntfy_topic: str
@@ -859,6 +861,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"too high delays the dead-man's-switch alert past the point of being useful."
         )
 
+    # --- scheduler v1.7 (PR9.5): benchmark spine capture time. Defaults to
+    # 30 minutes before the daily digest so a future digest/brief can consume
+    # the same day's equity/SPY capture. Reuses the same HH:MM validation as
+    # SCHEDULER_DIGEST_TIME.
+    scheduler_benchmark_spine_time = _get(src, "SCHEDULER_BENCHMARK_SPINE_TIME", "17:30")
+    _parse_hhmm(scheduler_benchmark_spine_time, "SCHEDULER_BENCHMARK_SPINE_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -952,6 +961,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_stale_job_minutes=scheduler_stale_job_minutes,
         scheduler_max_consecutive_failures=scheduler_max_consecutive_failures,
         scheduler_heartbeat_stale_minutes=scheduler_heartbeat_stale_minutes,
+        scheduler_benchmark_spine_time=scheduler_benchmark_spine_time,
         ntfy_topic=_get(src, "NTFY_TOPIC"),
         mode=mode,
         approval_mode=approval_mode,

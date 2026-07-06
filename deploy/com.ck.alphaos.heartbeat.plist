@@ -32,9 +32,10 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- PR9.5: persistent logs, not /tmp (see the scheduler plist's comment). -->
   <key>StandardOutPath</key>
-  <string>/tmp/alphaos-heartbeat.log</string>
+  <string>/Users/ck/Library/Logs/alphaos/heartbeat.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/alphaos-heartbeat-error.log</string>
+  <string>/Users/ck/Library/Logs/alphaos/heartbeat-error.log</string>
 </dict>
 </plist>
