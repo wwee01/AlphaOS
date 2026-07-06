@@ -12,6 +12,25 @@ import json
 # Prompt-template generation marker (recorded on each evaluation for audit).
 PROMPT_TEMPLATE_VERSION = "v1"
 
+
+def _public(candidate: dict) -> dict:
+    """Strip private ``_``-prefixed keys before ANY candidate dict is serialized
+    into a prompt.
+
+    The scanner/orchestrator stash full enrichment objects on the candidate
+    dict under ``_``-prefixed keys (``_snapshot``/``_interest``/``_catalyst``/
+    ``_last30``/``_polarity``/``_earnings``/``_packet_id``) as internal
+    plumbing between pipeline stages. Serializing the whole dict here leaked
+    catalyst/last30days/polarity text into the NO-NEWS eval prompt — a prompt
+    whose system message asserts no news was provided — and duplicated the
+    snapshot (token bloat). Found + reproduced by the 2026-07-06 exit review
+    (CRITICAL); mock mode never builds prompts, which is why no test caught
+    it. Convention now enforced at this chokepoint: underscore keys are
+    plumbing, never prompt input. (The labeller path is unaffected — it
+    serializes the explicitly whitelisted candidate packet instead.)
+    """
+    return {k: v for k, v in candidate.items() if not (isinstance(k, str) and k.startswith("_"))}
+
 # Required keys in the OpenAI evaluation JSON object.
 OPENAI_EVAL_KEYS = [
     "symbol",
@@ -102,7 +121,7 @@ def build_no_news_user_prompt(candidate: dict, snapshot: dict, freshness_status:
         "trend structure, and risk/reward. Do NOT reference or invent any news or "
         "catalyst.\n\n"
         f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
-        f"CANDIDATE:\n{json.dumps(candidate, default=str)}\n\n"
+        f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
         f"MARKET_SNAPSHOT:\n{json.dumps(snapshot, default=str)}\n\n"
         f"DATA_FRESHNESS:\n{freshness_status}\n\n"
         "Rules: stale/unverifiable data => 'reject'. Long stop below entry; short "
@@ -135,7 +154,7 @@ def build_openai_user_prompt(
     return (
         "Evaluate this candidate. Return JSON ONLY matching the schema.\n\n"
         f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
-        f"CANDIDATE:\n{json.dumps(candidate, default=str)}\n\n"
+        f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
         f"MARKET_SNAPSHOT:\n{json.dumps(snapshot, default=str)}\n\n"
         f"NEWS_ITEMS:\n{json.dumps(news_items, default=str)}\n\n"
         f"DATA_FRESHNESS:\n{freshness_status}\n\n"
@@ -206,7 +225,7 @@ CLAUDE_SYSTEM_PROMPT = (
 def build_claude_user_prompt(candidate: dict, openai_eval: dict) -> str:
     return (
         "Review the primary evaluation for risk. Return JSON ONLY.\n\n"
-        f"CANDIDATE:\n{json.dumps(candidate, default=str)}\n\n"
+        f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
         f"PRIMARY_EVALUATION:\n{json.dumps(openai_eval, default=str)}\n\n"
         "Give your independent verdict now."
     )
