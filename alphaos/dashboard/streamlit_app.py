@@ -657,13 +657,22 @@ def _hindsight_cell(attr: "Optional[dict]") -> str:
     """UI-PR-A item 5: per-row hindsight for the decisions funnel. No
     attribution row yet, or one that exists but hasn't resolved, both read as
     'pending' -- the UI never backfills a fabricated 0 for an unresolved
-    replay (unknown-never-zero, same posture as position_health.py)."""
+    replay (unknown-never-zero, same posture as position_health.py).
+
+    A mock ΔR (is_mock=1 on the attribution row -- happens in mock mode, never
+    in live paper where settings.is_mock is False) is tagged '(mock)' so a
+    simulated learning is never styled identically to a real one (UI/UX doc
+    §1.4 evidence-state honesty / §9 'mock rows carry a MOCK watermark'). This
+    is the ΔR-surface analogue of PR11's daily_brief filtering is_mock=0 out
+    of its 'learned today' sentences -- here the candidate row is shown either
+    way, so the ΔR is tagged rather than hidden."""
     if not attr or attr.get("resolved_status") != "resolved":
         return "pending"
     delta = attr.get("delta_r")
     if delta is None:
         return "pending"
-    return f"{delta:+.2f}R"
+    suffix = " (mock)" if attr.get("is_mock") else ""
+    return f"{delta:+.2f}R{suffix}"
 
 
 def tab_candidate_flow(orch: Orchestrator) -> None:

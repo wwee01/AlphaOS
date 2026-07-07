@@ -90,6 +90,18 @@ def test_hindsight_cell_pending_states_never_read_as_zero():
 def test_hindsight_cell_resolved_shows_signed_r():
     assert streamlit_app._hindsight_cell({"resolved_status": "resolved", "delta_r": 1.5}) == "+1.50R"
     assert streamlit_app._hindsight_cell({"resolved_status": "resolved", "delta_r": -0.75}) == "-0.75R"
+    # A genuine measured zero IS shown (distinct from an unresolved "pending").
+    assert streamlit_app._hindsight_cell({"resolved_status": "resolved", "delta_r": 0.0}) == "+0.00R"
+
+
+def test_hindsight_cell_tags_mock_delta_r():
+    """A simulated (is_mock) ΔR must never be styled identically to a real
+    one -- UI/UX doc §1.4 evidence-state honesty. Production paper mode never
+    produces is_mock=1 attribution rows, but mock-mode dev runs do."""
+    real = streamlit_app._hindsight_cell({"resolved_status": "resolved", "delta_r": 1.2, "is_mock": 0})
+    mock = streamlit_app._hindsight_cell({"resolved_status": "resolved", "delta_r": 1.2, "is_mock": 1})
+    assert real == "+1.20R"
+    assert mock == "+1.20R (mock)"
 
 
 def test_format_age():
