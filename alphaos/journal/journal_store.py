@@ -671,3 +671,24 @@ class JournalStore:
         return self.one(
             "SELECT * FROM trade_outcomes WHERE trade_id = ? ORDER BY id DESC LIMIT 1", (trade_id,)
         )
+
+    def attribution_by_candidate(self, candidate_ids: list[str]) -> dict[str, dict]:
+        """Batch lookup (one query, not N+1): candidate_id -> its latest
+        attribution_records row. A candidate_id with NO entry in the returned
+        dict means no attribution row exists yet -- the UI-PR-A hindsight
+        column must render that as "pending", never as a fabricated zero
+        delta_r (unknown-never-zero, same posture as position_health.py)."""
+        if not candidate_ids:
+            return {}
+        placeholders = ",".join("?" for _ in candidate_ids)
+        rows = self.query(
+            f"SELECT * FROM attribution_records WHERE candidate_id IN ({placeholders}) "
+            f"ORDER BY created_at_utc DESC",
+            tuple(candidate_ids),
+        )
+        out: dict[str, dict] = {}
+        for r in rows:
+            cid = r.get("candidate_id")
+            if cid and cid not in out:  # first row per id wins (DESC = latest)
+                out[cid] = r
+        return out

@@ -1009,6 +1009,11 @@ class Orchestrator:
                     "tqs_score": tqs_row.get("tqs_score"),
                     "tqs_bucket": tqs_row.get("tqs_bucket"),
                     "tqs_data_confidence": tqs_row.get("data_confidence"),
+                    # UI-PR-A: the setup card's invalidation rule, stamped verbatim onto
+                    # the proposal at creation time (see cards/registry.py) -- never
+                    # LLM-derived (PR10 non-goal). None on pre-PR10 rows or a
+                    # demo-seeded proposal that bypassed the cards path.
+                    "invalidation_reason": row.get("invalidation_reason"),
                 }
             )
         return views

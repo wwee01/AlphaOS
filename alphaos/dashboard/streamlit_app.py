@@ -1,11 +1,19 @@
 """AlphaOS v1 dashboard — single local Streamlit app, minimal tabs.
 
 Tabs:
-* Candidates / Proposals — OpenAI eval, optional Claude review, approve/reject,
+* Tonight — the daily human interface (UI-PR-A): one action, needs-you,
+  today's activity, brief narrative, moonshot gap. Consumes daily_brief.py's
+  dict, same as the `alphaos brief` CLI and the scheduler's digest alert.
+* Positions — per-open-position health (R-ladder, thesis/verdict).
+* Approval Center — OpenAI eval, optional Claude review, approve/reject,
   and a "Request Claude second opinion" button (disabled without an Anthropic key).
-* Open Trades
-* Closed Trades
+* Candidates / Proposals, Candidate Flow (decisions funnel + hindsight)
+* Open Trades / Closed Trades
 * System Health — mode, broker status, data freshness, kill switch.
+
+A permanent annunciator strip (UI-PR-A item 1) renders above every tab: mode,
+autonomy level, kill-switch state+control, scheduler heartbeat age, open R,
+pending-approvals count (UI/UX doc §1.2, "the annunciator principle").
 
 Run with:  streamlit run alphaos/dashboard/streamlit_app.py
 
@@ -15,20 +23,113 @@ performance as real: everything is labelled paper/simulated.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import streamlit as st
 
 from alphaos.ai.claude_reviewer import ClaudeUnavailable
 from alphaos.config.settings import load_settings
 from alphaos.constants import ProposalStatus
 from alphaos.orchestrator import Orchestrator
+from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
+from alphaos.reports.daily_brief import build_daily_brief, render_markdown
+from alphaos.reports.position_health import (
+    VERDICT_ATTENTION,
+    VERDICT_EXIT_REVIEW,
+    VERDICT_HOLD,
+    assess_positions,
+)
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
+from alphaos.util import timeutils
+
+# Static until PR15 (L3 autonomy promotion) actually lands -- see UI/UX doc
+# §10 and the specs doc's PR15 skeleton. Not derived from settings because
+# there is nothing to derive yet: v1 has exactly one level.
+AUTONOMY_LEVEL_LABEL = "L1 — unattended cadence"
 
 
 def get_orchestrator() -> Orchestrator:
     # Fresh per run keeps the SQLite connection on Streamlit's script thread.
     settings = load_settings()
     return Orchestrator(settings=settings)
+
+
+def _heartbeat_age_seconds(journal) -> Optional[float]:
+    """Read-only heartbeat staleness check for the annunciator. Deliberately
+    NOT JobRunner.heartbeat_check() -- that method sends an ntfy alert when
+    stale, which would fire on every dashboard page load; this is a pure read
+    of the same job_runs row, safe to call unconditionally on every render."""
+    last = journal.one(
+        "SELECT finished_at_utc FROM job_runs WHERE status = 'completed' "
+        "ORDER BY finished_at_utc DESC LIMIT 1"
+    )
+    if not last or not last.get("finished_at_utc"):
+        return None
+    return timeutils.age_seconds(last["finished_at_utc"])
+
+
+def _format_age(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "unknown"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def render_annunciator(orch: Orchestrator, positions_health: list[dict]) -> None:
+    """Permanent top-of-page status strip (UI-PR-A item 1 / UI/UX doc §1.2):
+    mode, autonomy level, kill-switch state+control, scheduler heartbeat age,
+    open R, pending-approvals count. Never scrolls away -- called once at the
+    top of main(), before the tabs. Read-only except the kill-switch buttons,
+    which are the same explicit, logged actions render_sidebar used to expose."""
+    s = orch.settings
+    ks = KillSwitch()
+    heartbeat_age = _heartbeat_age_seconds(orch.journal)
+    # None current_r (no live price available) is excluded from the sum, not
+    # treated as 0 -- unknown-never-zero. known_r stays None (not "0.0R") if
+    # every open position is currently unmeasurable, so the strip reads as
+    # "can't tell" rather than falsely "flat".
+    r_values = [p["current_r"] for p in positions_health if p.get("current_r") is not None]
+    total_r = round(sum(r_values), 2) if r_values else None
+    unmeasurable = len(positions_health) - len(r_values)
+    approvals_count = len(orch.journal.open_proposals())
+
+    # A single wrapping status line, not a row of st.metric() boxes -- with 5+
+    # fields the per-column width (especially once the sidebar takes its
+    # share) is too narrow for st.metric()'s labels ("Heartbeat", "Approvals")
+    # at common viewport widths, and unlike a metric box, text wraps instead
+    # of silently truncating with an ellipsis (verified via preview at 791px
+    # and desktop widths -- kept to a single markdown line + kill-switch
+    # button as the only two widgets that actually need widget chrome).
+    hb_label = "no runs yet" if heartbeat_age is None else f"{_format_age(heartbeat_age)} ago"
+    r_label = "n/a" if total_r is None else f"{total_r:+.2f}R"
+    if unmeasurable:
+        r_label += f" ({unmeasurable} n/a)"
+
+    col_mode, col_ks = st.columns([1, 2])
+    with col_mode:
+        st.metric("Mode", s.mode.value.upper())
+    with col_ks:
+        if ks.is_engaged():
+            st.error(f"🔴 KILL SWITCH ENGAGED — {ks.reason()}")
+            if st.button("Release kill switch", key="annunciator_release_ks"):
+                ks.release()
+                st.rerun()
+        else:
+            st.success("🟢 Kill switch armed (not engaged)")
+            if st.button("Engage kill switch", key="annunciator_engage_ks"):
+                ks.engage("dashboard")
+                st.rerun()
+    st.markdown(
+        f"**{AUTONOMY_LEVEL_LABEL}**  ·  Heartbeat: **{hb_label}**  ·  "
+        f"Open R ({len(positions_health)} pos): **{r_label}**  ·  "
+        f"Approvals pending: **{approvals_count}**"
+    )
+    st.caption("Real-money trading unreachable (structural, not a setting).")
+    st.divider()
 
 
 def render_sidebar(orch: Orchestrator) -> None:
@@ -41,17 +142,9 @@ def render_sidebar(orch: Orchestrator) -> None:
         f"**Real trading:** `disabled`  \n"
         f"**DB:** `{s.db_path}`"
     )
-    ks = KillSwitch()
-    if ks.is_engaged():
-        st.sidebar.error(f"KILL SWITCH ENGAGED — {ks.reason()}")
-        if st.sidebar.button("Release kill switch"):
-            ks.release()
-            st.rerun()
-    else:
-        if st.sidebar.button("Engage kill switch"):
-            ks.engage("dashboard")
-            st.rerun()
-
+    # Kill-switch state+control lives in the top annunciator now (UI-PR-A item
+    # 1 / UI/UX doc §1.2 "the annunciator principle" -- it must never scroll
+    # away, which a sidebar can).
     st.sidebar.divider()
     st.sidebar.caption("⚠️ Actions below WRITE to the connected ledger.")
     if st.sidebar.button("Run scan_once"):
@@ -79,6 +172,152 @@ def _format_seconds_remaining(seconds) -> str:
     return f"{minutes}m {secs}s"
 
 
+def tab_tonight(orch: Orchestrator) -> None:
+    """UI-PR-A item 2: the daily human interface (UI/UX doc §5 wireframe,
+    blocks ①②③④⑤⑥⑦ — ⑥ moonshot gap included since PR11 shipped the
+    arithmetic). Consumes build_daily_brief() -- the exact dict the
+    `alphaos brief` CLI and the scheduler's digest alert already use. Every
+    section is always present; the empty/quiet state (⑦) is first-class, not
+    an afterthought (UI/UX doc §1.5). Read-only."""
+    st.subheader("Tonight")
+    brief = build_daily_brief(orch.journal, orch.settings, KillSwitch())
+
+    st.markdown(f"### ▶ {brief['one_action']}")
+    if brief["kill_switch_engaged"]:
+        st.error(f"🔴 KILL SWITCH ENGAGED — {brief['kill_switch_reason']}")
+
+    ny = brief["needs_you"]
+    ph = brief["positions_health"]
+    exit_review = [p for p in ph if p["verdict"] == VERDICT_EXIT_REVIEW]
+    quiet = (
+        ny["pending_approval_count"] == 0 and ny["open_incident_count"] == 0
+        and not ny["fused_jobs"] and not exit_review
+    )
+    if quiet:
+        st.success("✓ Nothing needs you right now.")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**② Needs you**")
+            for p in ny["pending_approvals"]:
+                remaining = _format_seconds_remaining(p.get("seconds_remaining"))
+                st.write(f"- {p.get('symbol')} proposal — TTL {remaining} (see Approval Center)")
+            for inc in ny["open_incidents"]:
+                st.write(f"- ⚠️ Open incident: {inc.get('symbol', '?')} — {inc.get('protection_status', '?')}")
+            for fj in ny["fused_jobs"]:
+                st.write(f"- Fused job: `{fj['job_type']}` ({fj['reason']}, {fj['streak']} consecutive failures)")
+            for p in exit_review:
+                st.write(f"- {p['symbol']} position EXIT_REVIEW — human decision required (see Positions)")
+            if not (ny["pending_approvals"] or ny["open_incidents"] or ny["fused_jobs"] or exit_review):
+                st.write("(nothing here)")
+        with c2:
+            st.markdown("**③ Open risk now**")
+            r_values = [p["current_r"] for p in ph if p.get("current_r") is not None]
+            if ph:
+                r_label = f"{round(sum(r_values), 2):+.2f}R total" if r_values else "R n/a"
+                st.write(f"{len(ph)} position(s) · {r_label}")
+                worst = min((p for p in ph if p.get("current_r") is not None),
+                           key=lambda p: p["current_r"], default=None)
+                if worst is not None:
+                    st.write(f"worst: {worst['symbol']} {worst['current_r']:+.2f}R")
+            else:
+                st.write("No open positions.")
+
+    st.divider()
+    ta = brief["todays_activity"]
+    st.markdown("**④ Today's machine activity**")
+    st.write(
+        f"Candidates: {ta['candidates_today']} · Proposed: {ta['proposed_today']} · "
+        f"Blocked: {ta['blocked_today']} · Rejected: {ta['rejected_today']}"
+    )
+
+    st.divider()
+    st.markdown("**⑤ Tonight's brief**")
+    mc = brief["market_condition"]
+    if mc.get("excess_return_pct") is not None:
+        st.write(
+            f"Market: excess return **{mc['excess_return_pct']:+.2f}%** vs S&P "
+            f"(paired {mc['paired_trading_days']} trading days)"
+        )
+    else:
+        st.write(f"Market: {mc.get('note', 'not yet measurable')}")
+    st.caption(f"⚠️ {mc['caveat']}")
+
+    bc = brief["best_candidate"]
+    if bc:
+        st.write(
+            f"Best candidate today: **{bc['symbol']}** — TQS {bc['tqs_score']} ({bc['tqs_bucket']}), "
+            f"interest {bc['interest_score']}, confidence {bc['label_confidence']}"
+        )
+    else:
+        st.write("Best candidate today: (none)")
+
+    wl = brief["what_learned"]
+    st.write(f"Learned today ({wl['count']} resolved):")
+    if wl["sentences"]:
+        for sentence in wl["sentences"]:
+            st.write(f"- {sentence}")
+    else:
+        st.write("- (nothing newly resolved today)")
+    st.caption(f"⚠️ {wl['caveat']}")
+
+    st.divider()
+    st.markdown("**⑥ Moonshot gap (10% MoM target)**")
+    mg = brief["moonshot_gap"]
+    if mg["status"] == "ok":
+        st.write(
+            f"Implied monthly: **{mg['implied_monthly_pct']}%** vs target {mg['target_monthly_pct']}% "
+            f"(expectancy {mg['expectancy_r']}R × {mg['trades_this_month']} trades × "
+            f"{mg['risk_per_trade_pct'] * 100:.2f}% risk/trade)"
+        )
+        st.write(f"Binding constraint: **{mg['binding_constraint']}**")
+    else:
+        st.write(mg["note"])
+    st.caption(mg["data_progress"])
+
+    with st.expander("Full brief (same content as the `alphaos brief` CLI / digest alert)"):
+        st.markdown(render_markdown(brief))
+
+
+_VERDICT_ICON = {VERDICT_HOLD: "🟢", VERDICT_ATTENTION: "🟡", VERDICT_EXIT_REVIEW: "🔴"}
+
+
+def tab_positions_health(positions_health: list[dict]) -> None:
+    """UI-PR-A item 3: per-open-position health cards with a text/emoji
+    R-ladder (UI/UX doc §8 wireframe / §12 item 3 -- no charting library
+    needed in v1). EXIT_REVIEW is a human decision flag ONLY: AlphaOS never
+    auto-exits on a health verdict (position_health.py's own invariant)."""
+    st.subheader("Positions")
+    st.caption(
+        "Per-open-position thesis validity, reusing position_manager's R math. "
+        "EXIT_REVIEW is a human decision flag -- AlphaOS never auto-exits on a "
+        "health verdict."
+    )
+    if not positions_health:
+        st.info("No open positions.")
+        return
+
+    for p in positions_health:
+        icon = _VERDICT_ICON.get(p["verdict"], "⚪")
+        with st.container(border=True):
+            st.markdown(f"**{icon} {p['symbol']}** · {p['direction']} · verdict: **{p['verdict']}**")
+            if p["current_r"] is not None:
+                st.write(
+                    f"`stop` ── now **{p['current_r']:+.2f}R** ── `entry` ── `target`   "
+                    f"(distance to stop: {p['distance_to_stop_r']}, to target: {p['distance_to_target_r']})"
+                )
+            else:
+                st.write("R: unavailable (no live price, or a degenerate risk basis)")
+            st.write(f"thesis: **{p['thesis_status']}**")
+            if p["verdict"] == VERDICT_EXIT_REVIEW:
+                st.warning("Human decision required — AlphaOS does not auto-exit on health verdicts.")
+            st.caption(
+                f"protection: {p['protection_status']} · freshness: {p['freshness_status']} · "
+                f"days held: {p['days_held']}/{p['max_holding_days']} · "
+                f"earnings in hold window: {'yes' if p['earnings_within_hold_window'] else 'no'}"
+            )
+
+
 def tab_approval_center(orch: Orchestrator) -> None:
     """The actionable approval queue. Listing is read-only; ledger writes happen
     only when the user clicks Approve/Reject (each is an explicit action)."""
@@ -93,6 +332,17 @@ def tab_approval_center(orch: Orchestrator) -> None:
         st.info("No open proposals. Run a scan from the sidebar to generate proposals.")
         return
 
+    # UI-PR-A item 4: soonest-to-expire first -- the whole point of a TTL is
+    # that it's a deadline, so the queue should read like one. A proposal
+    # with an unknown/unparseable expiry sorts LAST, not first: we can't
+    # claim it's urgent just because we can't measure it (unknown-never-zero
+    # extends to "unknown-never-most-urgent" here).
+    views = sorted(
+        views,
+        key=lambda v: v["proposal_seconds_remaining"]
+        if v["proposal_seconds_remaining"] is not None else float("inf"),
+    )
+
     st.dataframe(
         [
             {
@@ -103,8 +353,10 @@ def tab_approval_center(orch: Orchestrator) -> None:
                 "expires_in": _format_seconds_remaining(v["proposal_seconds_remaining"]),
                 "stale": v["proposal_is_stale"],
                 # PR7 TQS v0: DISPLAY ONLY -- a shadow measurement signal, never
-                # read by approval/risk/execution logic (see alphaos/tqs/).
+                # read by approval/risk/execution logic (see alphaos/tqs/). Score
+                # and confidence shown paired, never separated (UI/UX doc §9).
                 "tqs": v["tqs_score"], "tqs_bucket": v["tqs_bucket"],
+                "tqs_confidence": v["tqs_data_confidence"],
             }
             for v in views
         ],
@@ -115,13 +367,22 @@ def tab_approval_center(orch: Orchestrator) -> None:
         pid = v["proposal_id"]
         stale_flag = " ⚠️ STALE (TTL exceeded)" if v["proposal_is_stale"] else ""
         with st.expander(
-            f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · {pid}{stale_flag}"
+            f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · "
+            f"expires in {_format_seconds_remaining(v['proposal_seconds_remaining'])} · {pid}{stale_flag}"
         ):
             if v["proposal_is_stale"]:
                 st.warning(
                     "This proposal's TTL has expired — approval will be rejected. "
                     "Run a fresh scan to get a current proposal for this symbol."
                 )
+            # UI-PR-A item 4: the exit plan verbatim, ahead of the raw field
+            # dump -- asymmetric friction means the thing you're about to
+            # commit to should be the most visible thing before you click.
+            invalidation = v.get("invalidation_reason")
+            st.markdown(
+                f"**Exit plan:** stop `{v['stop']}` · target `{v['target']}`  \n"
+                f"**Invalidation:** {invalidation if invalidation else '(not set on this proposal)'}"
+            )
             st.write(
                 {
                     "trade_id": v["trade_id"], "candidate_id": v["candidate_id"],
@@ -392,6 +653,19 @@ def tab_system_events(orch: Orchestrator) -> None:
         st.info("No system events yet.")
 
 
+def _hindsight_cell(attr: "Optional[dict]") -> str:
+    """UI-PR-A item 5: per-row hindsight for the decisions funnel. No
+    attribution row yet, or one that exists but hasn't resolved, both read as
+    'pending' -- the UI never backfills a fabricated 0 for an unresolved
+    replay (unknown-never-zero, same posture as position_health.py)."""
+    if not attr or attr.get("resolved_status") != "resolved":
+        return "pending"
+    delta = attr.get("delta_r")
+    if delta is None:
+        return "pending"
+    return f"{delta:+.2f}R"
+
+
 def tab_candidate_flow(orch: Orchestrator) -> None:
     """Read-only Roadmap 2.3 candidate flow: labels summary + proposed / watch /
     rejected / blocked sections. All reads — render writes nothing to the ledger."""
@@ -638,20 +912,41 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         st.dataframe(_rows(w), width="stretch") if w else st.info("None.")
 
     with st.expander("Rejected candidates"):
+        st.caption(
+            "Hindsight column (UI-PR-A item 5): the attribution-v2 replay's ΔR for "
+            "this decision, once resolved. ΔR>0 = the actual (non-trade) path added "
+            "value vs AlphaOS's frozen plan; ΔR<0 = it cost value. 'pending' = not yet "
+            "resolved, never shown as 0. " + ATTRIBUTION_V2_CAVEAT
+        )
         r = j.rejected_candidates_recent(200)
         if r:
+            hindsight = j.attribution_by_candidate([x.get("candidate_id") for x in r if x.get("candidate_id")])
             st.dataframe(
-                [{k: x.get(k) for k in ("symbol", "stage", "reason_code", "reason_detail")} for x in r],
+                [
+                    {
+                        **{k: x.get(k) for k in ("symbol", "stage", "reason_code", "reason_detail")},
+                        "hindsight": _hindsight_cell(hindsight.get(x.get("candidate_id"))),
+                    }
+                    for x in r
+                ],
                 width="stretch",
             )
         else:
             st.info("None.")
 
     with st.expander("Blocked by gate (proposals)"):
+        st.caption("Hindsight column: see the Rejected candidates caption above for the ΔR convention.")
         b = j.blocked_proposals(200)
         if b:
+            hindsight = j.attribution_by_candidate([x.get("candidate_id") for x in b if x.get("candidate_id")])
             st.dataframe(
-                [{k: x.get(k) for k in ("symbol", "proposal_id", "trade_id", "status")} for x in b],
+                [
+                    {
+                        **{k: x.get(k) for k in ("symbol", "proposal_id", "trade_id", "status")},
+                        "hindsight": _hindsight_cell(hindsight.get(x.get("candidate_id"))),
+                    }
+                    for x in b
+                ],
                 width="stretch",
             )
         else:
@@ -675,32 +970,48 @@ def main(orch: Orchestrator | None = None) -> None:
         f"real-money trading unreachable · writes happen ONLY via explicit actions "
         f"(Run scan / Approve / Reject / Monitor / Seed)."
     )
+    # Computed once per page load and shared by the annunciator + Positions
+    # tab (both need the same per-position R/verdict data); reuses orch.market
+    # rather than constructing a fresh MarketDataClient -- a second instance
+    # would re-trigger that class's one-time-per-instance "market data is
+    # mocked" system_event notice. The Tonight tab calls build_daily_brief()
+    # separately, which does its own internal assess_positions() call (and
+    # its own internal client) -- an accepted double-compute, same reasoning
+    # PR11 already documented for daily_brief.py/scheduler/digest.py (open
+    # positions are few; not worth threading a precomputed list through).
+    positions_health = assess_positions(orch.journal, s, orch.market)
+    render_annunciator(orch, positions_health)
+
     tabs = st.tabs(
         [
-            "Approval Center", "Candidates / Proposals", "Candidate Flow", "Open Trades",
-            "Closed Trades", "System Health", "Trade Packet", "Scan Batches",
-            "Scheduler Runs", "System Events",
+            "Tonight", "Positions", "Approval Center", "Candidates / Proposals",
+            "Candidate Flow", "Open Trades", "Closed Trades", "System Health",
+            "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
         ]
     )
     with tabs[0]:
-        tab_approval_center(orch)
+        tab_tonight(orch)
     with tabs[1]:
-        tab_candidates(orch)
+        tab_positions_health(positions_health)
     with tabs[2]:
-        tab_candidate_flow(orch)
+        tab_approval_center(orch)
     with tabs[3]:
-        tab_open_trades(orch)
+        tab_candidates(orch)
     with tabs[4]:
-        tab_closed_trades(orch)
+        tab_candidate_flow(orch)
     with tabs[5]:
-        tab_system_health(orch)
+        tab_open_trades(orch)
     with tabs[6]:
-        tab_trade_packet(orch)
+        tab_closed_trades(orch)
     with tabs[7]:
-        tab_scan_batches(orch)
+        tab_system_health(orch)
     with tabs[8]:
-        tab_scheduler_runs(orch)
+        tab_trade_packet(orch)
     with tabs[9]:
+        tab_scan_batches(orch)
+    with tabs[10]:
+        tab_scheduler_runs(orch)
+    with tabs[11]:
         tab_system_events(orch)
 
 
