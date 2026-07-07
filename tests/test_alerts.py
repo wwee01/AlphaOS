@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import urllib.error
 
-import pytest
-
 from alphaos.util import alerts
 from conftest import make_settings
 

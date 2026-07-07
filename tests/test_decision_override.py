@@ -19,6 +19,7 @@ from alphaos.constants import (
 )
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator, ScanSummary
+from alphaos.scanner.scan_context import ScanContext
 from alphaos.util.ids import new_id
 from conftest import make_settings
 
@@ -176,7 +177,8 @@ def test_rule5_upgrades_still_require_gates_and_manual_approval(monkeypatch):
     cand, evaluation, classification = _watch_ready_candidate(o)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {}}))
+                        lambda catalyst, last30, direction, polarity=None:
+                        (True, "last30days:bullish", {"last30days": {}}))
 
     summary = ScanSummary(scan_id="rule5-test")
     final = o._resolve_decision(cand, evaluation, classification, "rule5-batch", summary)
@@ -270,12 +272,13 @@ def test_armed_upgrade_promotes_watch_to_propose_with_audit(monkeypatch):
     o = _orch()
     cand, evaluation, classification = _watch_ready_candidate(o)
     # Stash a real-shaped last30days enrichment on the candidate: evidence_json
-    # is snapshotted from the ACTUAL cand["_last30"] object (never from the
+    # is snapshotted from the ACTUAL cand.last30 object (never from the
     # driver tuple), so the audit-trail assertion below stays meaningful.
-    cand["_last30"] = _l30(sentiment="bullish")
+    cand.last30 = _l30(sentiment="bullish")
     monkeypatch.setattr(o, "_override_armed", lambda: True)            # arm
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l, d, p=None: (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
+                        lambda catalyst, last30, direction, polarity=None:
+                        (True, "last30days:bullish", {"last30days": {"sentiment": "bullish"}}))
     summary = ScanSummary(scan_id="audit-test")
     final = o._resolve_decision(cand, evaluation, classification, "audit-batch", summary)
 
@@ -315,7 +318,7 @@ def _watch_ready_candidate(orch, symbol="ZWATCH"):
     mechanism under test, not by whether today's mock scan happens to
     independently produce a WATCH candidate at all.
 
-    The stashed ``_snapshot`` carries ``market_session='regular'`` exactly like
+    ``ScanContext.snapshot`` carries ``market_session='regular'`` exactly like
     every real MockDataProvider snapshot does: ``_stamp_proposal_ttl`` reads
     the session from the snapshot, and an empty snapshot would fall back to
     the REAL wall-clock session -- outside US market hours that is CLOSED,
@@ -333,9 +336,8 @@ def _watch_ready_candidate(orch, symbol="ZWATCH"):
         reasoning_summary="test fixture", data_freshness_status="usable", is_mock=True,
     )
     classification = _propose_label(SimpleNamespace(candidate_id=cand_id, symbol=symbol))
-    cand = {"candidate_id": cand_id, "symbol": symbol, "last_price": 100.0,
-            "_snapshot": {"symbol": symbol, "last_price": 100.0, "market_session": "regular"},
-            "_catalyst": None, "_last30": None, "_polarity": None}
+    cand = ScanContext(row={"candidate_id": cand_id, "symbol": symbol, "last_price": 100.0})
+    cand.snapshot = {"symbol": symbol, "last_price": 100.0, "market_session": "regular"}
     return cand, evaluation, classification
 
 
@@ -369,7 +371,8 @@ def test_armed_upgrade_increases_proposals_vs_downgrade_only(monkeypatch):
     cand2, evaluation2, classification2 = _watch_ready_candidate(armed)
     monkeypatch.setattr(armed, "_override_armed", lambda: True)
     monkeypatch.setattr(armed, "_real_decision_driver",
-                        lambda c, l, d, p=None: (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
+                        lambda catalyst, last30, direction, polarity=None:
+                        (True, "catalyst:confirmed:product_launch", {"catalyst": {"status": "confirmed"}}))
     summary_armed = ScanSummary(scan_id="armed-test")
     final_armed = armed._resolve_decision(cand2, evaluation2, classification2, "armed-batch", summary_armed)
     assert final_armed == Decision.PROPOSE.value   # armed: the override upgraded it
@@ -397,7 +400,8 @@ def test_dashboard_readonly_with_adjustments(monkeypatch):
     o = _orch()
     monkeypatch.setattr(o.labeller, "classify", _propose_label)
     monkeypatch.setattr(o, "_override_armed", lambda: True)
-    monkeypatch.setattr(o, "_real_decision_driver", lambda c, l, d, p=None: (True, "forced", {}))
+    monkeypatch.setattr(o, "_real_decision_driver",
+                        lambda catalyst, last30, direction, polarity=None: (True, "forced", {}))
     o.run_scan_once()
     j = o.journal
     assert j.count_rows("decision_adjustments") > 0

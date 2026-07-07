@@ -7,7 +7,7 @@ nothing here ever raises regardless of failure mode.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 

@@ -114,8 +114,8 @@ def check_position(journal, alpaca_client, position: dict,
         )
 
     legs = norm.get("legs") or []
-    stop_leg = next((l for l in legs if l.get("role") == "stop_loss"), None)
-    target_leg = next((l for l in legs if l.get("role") == "take_profit"), None)
+    stop_leg = next((leg for leg in legs if leg.get("role") == "stop_loss"), None)
+    target_leg = next((leg for leg in legs if leg.get("role") == "take_profit"), None)
     stop_live = bool(stop_leg) and stop_leg.get("state") in _LIVE_LEG_STATES
     target_live = bool(target_leg) and target_leg.get("state") in _LIVE_LEG_STATES
 

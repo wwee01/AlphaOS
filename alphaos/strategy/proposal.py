@@ -6,7 +6,7 @@ tagged by ``strategy`` so the two books are never co-mingled downstream.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional
 
 from alphaos.constants import TargetProfile

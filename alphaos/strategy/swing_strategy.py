@@ -8,7 +8,6 @@ the explicit-approval gate before any short-execution capability is used.
 
 from __future__ import annotations
 
-from typing import Optional
 
 from alphaos.ai.openai_client import OpenAIEvaluation
 from alphaos.constants import Strategy, TradeDirection

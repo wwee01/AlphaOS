@@ -545,6 +545,18 @@ class ProposalStatus(StrEnum):
         return (cls.PENDING_APPROVAL.value, cls.PROPOSED.value)
 
 
+class CandidateStatus(StrEnum):
+    """Lifecycle of a ``candidates`` row (enum-ified during the ScanContext
+    structural refactor -- every value below was already in use as a raw
+    string). Rows are never deleted; status is a point-in-time label, the
+    full history lives in system_events/candidate_labels/decision_adjustments."""
+
+    DETECTED = "detected"
+    WATCH = "watch"
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+
+
 class TqsSourceType(StrEnum):
     """PR7: what a tqs_scores row was computed for. A candidate-level row
     exists for every scored candidate; a proposal-level row is a SEPARATE,

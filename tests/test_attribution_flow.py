@@ -19,7 +19,6 @@ import pytest
 
 from alphaos.attribution import discover_events, resolve_pending
 from alphaos.attribution.resolve import ATTRIBUTION_VERSION
-from alphaos.constants import AttributionResolvedStatus
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.util.ids import new_id
@@ -267,7 +266,7 @@ def test_candidate_with_two_proposals_does_not_cross_link_the_wrong_replay():
     s = make_settings()
     cand_id = _cand(j, status="rejected")
     prop_a = _proposal(j, cand_id, status="rejected", entry=100.0, stop=97.0, target=106.0)
-    prop_b = _proposal(j, cand_id, status="filled", entry=200.0, stop=194.0, target=212.0)
+    _proposal(j, cand_id, status="filled", entry=200.0, stop=194.0, target=212.0)
     # frozen row belongs to B (the "first seeded" proposal in this scenario)
     _co(j, cand_id, candidate_type="proposal", replay_result="target_hit", replay_r=5.0,
        entry_reference_price=200.0, stop_price=194.0, target_price=212.0)
@@ -395,7 +394,7 @@ def test_running_twice_inserts_zero_new_rows():
     s = make_settings()
     cand_id = _cand(j, status="rejected")
     _proposal(j, cand_id, status="rejected")
-    d1 = discover_events(j, s)
+    discover_events(j, s)
     n1 = j.count_rows("attribution_records")
     assert n1 == 1
     d2 = discover_events(j, s)
@@ -817,7 +816,7 @@ def test_attribution_pass_never_mutates_its_own_source_tables():
     j = JournalStore(":memory:")
     s = make_settings()
     cand_id = _cand(j, status="rejected")
-    prop_id = _proposal(j, cand_id, status="rejected")
+    _proposal(j, cand_id, status="rejected")
     _co(j, cand_id, candidate_type="proposal", replay_result="stop_hit", replay_r=-1.0)
     ov_cand = _cand(j, status="watch")
     ov_prop = _proposal(j, ov_cand, status="filled")

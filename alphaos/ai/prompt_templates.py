@@ -8,26 +8,35 @@ defensive in case the model misbehaves.
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Union
+
+if TYPE_CHECKING:
+    from alphaos.scanner.scan_context import ScanContext
 
 # Prompt-template generation marker (recorded on each evaluation for audit).
 PROMPT_TEMPLATE_VERSION = "v1"
 
 
-def _public(candidate: dict) -> dict:
-    """Strip private ``_``-prefixed keys before ANY candidate dict is serialized
+def _public(candidate: "Union[dict, ScanContext]") -> dict:
+    """Strip private ``_``-prefixed keys before ANY candidate is serialized
     into a prompt.
 
-    The scanner/orchestrator stash full enrichment objects on the candidate
-    dict under ``_``-prefixed keys (``_snapshot``/``_interest``/``_catalyst``/
-    ``_last30``/``_polarity``/``_earnings``/``_packet_id``) as internal
-    plumbing between pipeline stages. Serializing the whole dict here leaked
-    catalyst/last30days/polarity text into the NO-NEWS eval prompt — a prompt
-    whose system message asserts no news was provided — and duplicated the
-    snapshot (token bloat). Found + reproduced by the 2026-07-06 exit review
-    (CRITICAL); mock mode never builds prompts, which is why no test caught
-    it. Convention now enforced at this chokepoint: underscore keys are
-    plumbing, never prompt input. (The labeller path is unaffected — it
-    serializes the explicitly whitelisted candidate packet instead.)
+    Historically the scanner/orchestrator stashed full enrichment objects on
+    the candidate dict under ``_``-prefixed keys (``_snapshot``/``_interest``/
+    ``_catalyst``/``_last30``/``_polarity``/``_earnings``/``_packet_id``) as
+    internal plumbing between pipeline stages. Serializing the whole dict here
+    leaked catalyst/last30days/polarity text into the NO-NEWS eval prompt — a
+    prompt whose system message asserts no news was provided — and duplicated
+    the snapshot (token bloat). Found + reproduced by the 2026-07-06 exit
+    review (CRITICAL); mock mode never builds prompts, which is why no test
+    caught it. The scanner/orchestrator now carry that plumbing on
+    ``ScanContext`` typed attributes instead of ``row`` (see
+    ``alphaos/scanner/scan_context.py``), which makes a private key in
+    ``row``/``candidate.items()`` structurally impossible going forward. This
+    filter stays anyway as the enforced chokepoint (defense in depth) and to
+    keep supporting plain dicts (e.g. test fixtures). (The labeller path is
+    unaffected — it serializes the explicitly whitelisted candidate packet
+    instead.)
     """
     return {k: v for k, v in candidate.items() if not (isinstance(k, str) and k.startswith("_"))}
 
@@ -96,7 +105,9 @@ NO_NEWS_EVAL_KEYS = [
 ]
 
 
-def build_no_news_user_prompt(candidate: dict, snapshot: dict, freshness_status: str) -> str:
+def build_no_news_user_prompt(
+    candidate: "Union[dict, ScanContext]", snapshot: dict, freshness_status: str
+) -> str:
     """User prompt for no-news mode. Forces the catalyst/news sentinels."""
     schema = {
         "symbol": "string",
@@ -131,7 +142,8 @@ def build_no_news_user_prompt(candidate: dict, snapshot: dict, freshness_status:
 
 
 def build_openai_user_prompt(
-    candidate: dict, snapshot: dict, news_items: list[dict], freshness_status: str
+    candidate: "Union[dict, ScanContext]", snapshot: dict, news_items: list[dict],
+    freshness_status: str
 ) -> str:
     """Construct the user prompt with the strict JSON schema instruction."""
     schema = {
@@ -222,7 +234,7 @@ CLAUDE_SYSTEM_PROMPT = (
 )
 
 
-def build_claude_user_prompt(candidate: dict, openai_eval: dict) -> str:
+def build_claude_user_prompt(candidate: "Union[dict, ScanContext]", openai_eval: dict) -> str:
     return (
         "Review the primary evaluation for risk. Return JSON ONLY.\n\n"
         f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"

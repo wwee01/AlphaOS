@@ -11,7 +11,7 @@ from __future__ import annotations
 import pathlib
 
 import alphaos.tqs as tqs_pkg
-from alphaos.constants import TqsBucket, TqsDataQualityStatus
+from alphaos.constants import TqsDataQualityStatus
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.tqs import TQS_VERSION

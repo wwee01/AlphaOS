@@ -8,8 +8,5 @@ The active runtime must never import these modules. An import-graph test enforce
 that; only tests that specifically check deferred behavior may import them.
 """
 
-from alphaos.constants import DEFERRED_IN_V1
-
-
 class DeferredConnectorError(NotImplementedError):
     """Raised when deferred connector code is invoked in v1."""

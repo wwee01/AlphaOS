@@ -15,7 +15,7 @@ OFFICIAL/market news only (no social, no web scraping, no last30days).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from alphaos.constants import (

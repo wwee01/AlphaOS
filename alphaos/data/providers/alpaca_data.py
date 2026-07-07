@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Optional
 
 from alphaos.config.settings import ALPACA_DATA_BASE_URL
 from alphaos.constants import Severity

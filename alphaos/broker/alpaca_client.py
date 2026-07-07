@@ -18,7 +18,6 @@ normalized to SDK-agnostic dicts (see ``order_mapping``).
 
 from __future__ import annotations
 
-from typing import Optional
 
 from alphaos.broker import order_mapping
 from alphaos.config.settings import PAPER_BASE_URL, Settings

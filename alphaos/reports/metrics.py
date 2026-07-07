@@ -8,7 +8,6 @@ forward sample (the ``small_sample`` flag and ``note`` make that explicit).
 
 from __future__ import annotations
 
-from typing import Optional
 
 # Below this many closed trades, treat results as anecdotal, not statistical.
 MIN_MEANINGFUL_SAMPLE = 30

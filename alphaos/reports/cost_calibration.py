@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from alphaos.constants import ExecutionSource, TradeDirection
+from alphaos.constants import ExecutionSource
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 

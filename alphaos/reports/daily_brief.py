@@ -11,16 +11,13 @@ CLAIMS a section can make, never whether the section key itself exists.
 
 from __future__ import annotations
 
-from datetime import timedelta
 from typing import Optional
 
 from alphaos.data.market_data import MarketDataClient
-from alphaos.execution import protection_watchdog
 from alphaos.proposals import seconds_remaining
 from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
 from alphaos.reports.position_health import VERDICT_EXIT_REVIEW, assess_positions
 from alphaos.reports.relative_performance import (
-    MIN_PAIRED_DAYS_FOR_RELATIVE_RETURN,
     build_relative_performance_report,
 )
 from alphaos.scheduler import cadence

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-from alphaos.constants import NewsStatus, Severity
+from alphaos.constants import NewsStatus
 
 
 @dataclass

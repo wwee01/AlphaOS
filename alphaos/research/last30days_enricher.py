@@ -20,7 +20,7 @@ outside the cap get an explicit ``skipped_budget_cap`` row (distinct from
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from alphaos.constants import (

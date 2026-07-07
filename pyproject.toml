@@ -16,6 +16,7 @@ dependencies = [
 # Live connectors are optional; mock mode + tests need none of them.
 live = ["streamlit>=1.30", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", "requests>=2.31"]
 test = ["pytest>=7.0", "tzdata>=2023.3"]
+lint = ["ruff>=0.15", "mypy>=2.1"]
 
 [tool.setuptools.packages.find]
 include = ["alphaos*", "connectors*"]
@@ -25,3 +26,72 @@ include = ["alphaos*", "connectors*"]
 pythonpath = [".", "tests"]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Deliberately loose (structural PR before PR12, exit-review punch list item
+# 12): pyflakes (F) catches real bugs (unused imports/vars, undefined names --
+# the class of thing a stray `_snapshot` reference would trip); E4/E7/E9 are
+# the pycodestyle checks pyflakes itself doesn't cover (import position,
+# ambiguous names, syntax). No stylistic/pedantic rule sets (UP/B/SIM/PL/...)
+# -- ratchet those on later, deliberately, not as a side effect of this PR.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.12"
+# Loose (see ruff note above): most of the codebase predates type hints, so
+# this does not require annotating everything. ignore_missing_imports keeps
+# unstubbed third-party live-connector deps (openai/anthropic/alpaca-py/
+# streamlit) from failing CI. check_untyped_defs is the one flag that matters
+# for catching the actual bug class this PR fixes -- without it mypy skips
+# checking the BODY of any function that isn't fully annotated, which is most
+# of this codebase; with it, an untyped call site that hands a plain dict to
+# a ``cand: ScanContext`` parameter (an ``AttributeError`` at runtime -- see
+# the ScanContext migration) is a reported error instead of a silent skip.
+ignore_missing_imports = true
+check_untyped_defs = true
+
+# Baseline of pre-existing type debt (2026-07-07, first CI mypy run -- see
+# docs/ALPHAOS_MASTER_REFERENCE.md punch list item 12). None of these were
+# introduced by the ScanContext PR; they're mostly Optional/None-handling
+# gaps (e.g. `row.get(x)` used somewhere that wants a non-None `str`) that
+# predate any type-checking in this repo. Every module NOT listed here --
+# including orchestrator.py, the scanner package, and openai_client.py, i.e.
+# every module this PR actually touched -- stays fully checked, so this list
+# is a ratchet, not an escape hatch: fix a module's real errors and remove it
+# from the list, don't add new modules to it to make a future CI run pass.
+[[tool.mypy.overrides]]
+module = [
+    "alphaos.ai.label_validation",
+    "alphaos.ai.labeller_health",
+    "alphaos.ai.last30days_polarity",
+    "alphaos.ai.playbook_classifier",
+    "alphaos.config.settings",
+    "alphaos.dashboard.streamlit_app",
+    "alphaos.data.market_data",
+    "alphaos.earnings.earnings_enricher",
+    "alphaos.execution.order_manager",
+    "alphaos.execution.position_manager",
+    "alphaos.execution.protection_watchdog",
+    "alphaos.journal.journal_store",
+    "alphaos.learning.outcomes_tracker",
+    "alphaos.news.catalyst_enricher",
+    "alphaos.reports.attribution",
+    "alphaos.reports.benchmark_capture",
+    "alphaos.reports.cost_calibration",
+    "alphaos.reports.outcomes_summary",
+    "alphaos.reports.position_health",
+    "alphaos.reports.relative_performance",
+    "alphaos.research.last30days_enricher",
+    "alphaos.research.last30days_provider",
+    "alphaos.risk.risk_engine",
+    "alphaos.scanner.interest_scanner",
+    "alphaos.scheduler.cadence",
+    "alphaos.scheduler.job_runner",
+    "alphaos.strategy.daytrade_experiment",
+    "alphaos.strategy.swing_strategy",
+    "alphaos.util.timeutils",
+]
+ignore_errors = true

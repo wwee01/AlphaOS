@@ -12,11 +12,14 @@ here so later enrichment slots in without faking data now.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from alphaos.constants import CONTEXT_UNAVAILABLE_V1
 from alphaos.scanner.interest_scanner import InterestSignals
 from alphaos.util.ids import new_id
+
+if TYPE_CHECKING:
+    from alphaos.scanner.scan_context import ScanContext
 
 # The exact compact keys sent to the AI. Kept explicit so a test can assert the
 # packet never leaks raw data and stays token-efficient.
@@ -167,7 +170,7 @@ class CandidatePacket:
         }
 
 
-def build_packet(cand: dict, snapshot: dict, signals: InterestSignals,
+def build_packet(cand: "Union[dict, ScanContext]", snapshot: dict, signals: InterestSignals,
                  interest_rank: Optional[int] = None) -> CandidatePacket:
     """Build a compact packet from a scanner candidate + its snapshot + interest
     signals. Pure — no I/O. ``cand`` carries momentum_score; ``signals`` carries
@@ -175,7 +178,7 @@ def build_packet(cand: dict, snapshot: dict, signals: InterestSignals,
     return CandidatePacket(
         packet_id=new_id("pkt"),
         candidate_id=cand.get("candidate_id", ""),
-        symbol=cand.get("symbol"),
+        symbol=cand.get("symbol"),  # type: ignore[arg-type]  # pre-existing: candidate rows always carry a symbol
         last_price=snapshot.get("last_price"),
         direction=cand.get("direction") or signals.direction_hint,
         freshness_status=snapshot.get("freshness_status") or "usable",

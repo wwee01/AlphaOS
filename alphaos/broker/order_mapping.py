@@ -93,7 +93,7 @@ def normalize_order(order) -> dict:
         "submitted_at": _s(getattr(order, "submitted_at", None)),
         "filled_at": _s(getattr(order, "filled_at", None)),
         "time_in_force": _s(getattr(order, "time_in_force", None)),
-        "legs": [normalize_leg(l) for l in legs],
+        "legs": [normalize_leg(leg) for leg in legs],
     }
 
 

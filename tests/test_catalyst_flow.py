@@ -39,7 +39,7 @@ def test_catalyst_cannot_create_official_labels():
     o = _orch()
     o.run_scan_once()
     labels = o.journal.query("SELECT primary_label FROM candidate_labels")
-    assert labels and all(l["primary_label"] in OFFICIAL_LABELS for l in labels)
+    assert labels and all(label["primary_label"] in OFFICIAL_LABELS for label in labels)
     o.close()
 
 

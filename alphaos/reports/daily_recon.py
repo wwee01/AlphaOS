@@ -12,7 +12,6 @@ by the model; otherwise a deterministic template is used and labelled as such.
 
 from __future__ import annotations
 
-from typing import Optional
 
 from alphaos.constants import Severity
 from alphaos.reports.metrics import compute_metrics
