@@ -244,15 +244,20 @@ Goal: **AlphaOS generates, tests, and promotes/demotes its own ideas — under l
 
 > **Phase 2 revision (2026-07-08 final review — authoritative; the PR12–15 sketches
 > below stand as intent, the revision governs order and emphasis):**
-> 1. **The statistical substrate comes first.** EVAL-1 (eval harness + ground-truth
->    golden set) → PORT-1 (effective-N one-floor law, cumulative BH-FDR,
->    `preregistrations` with one-shot evaluation) → INSTR-1 (honest rel_volume +
->    ATR-scaled "R") → BASELINE (three-arm AI-vs-deterministic paired instrument) →
->    EARN-1 (real earnings provider) → **EXP-1: the shadow small/mid catalyst
->    universe, pulled forward from Phase 3** — learnable flow is the binding
->    constraint, and shadow expansion multiplies learning velocity ~10× at zero
->    decision risk, but only after the instruments it will be measured with are
->    honest. CANARY (Lane B) must be live before EXP-1 widens the tap.
+> 1. **The statistical substrate comes first — but the dataset starts immediately.**
+>    **EXP-0 (added 2026-07-08 late session, operator-directed): the shadow tier's
+>    deterministic capture ships right after OPS-A** — ~300 small/mid names
+>    ($5–50M ADV), batch snapshots, interest-scored, instrument-version labeled,
+>    zero AI calls, structurally unable to create proposals. Then EVAL-1 (eval
+>    harness + ground-truth golden set) → PORT-1 (effective-N one-floor law,
+>    cumulative BH-FDR, `preregistrations` with one-shot evaluation) → INSTR-1
+>    (honest rel_volume + ATR-scaled "R") → BASELINE (three-arm
+>    AI-vs-deterministic paired instrument) → EARN-1 (real earnings provider) →
+>    **EXP-1: AI labelling (top-K) on the tier EXP-0 has been capturing** —
+>    learnable flow is the binding constraint, and shadow expansion multiplies
+>    learning velocity ~10× at zero decision risk, but AI labels wait until the
+>    instruments they'll be ranked by are honest. CANARY (Lane B) must be live
+>    before EXP-1 widens the AI tap.
 > 2. **PR12 is registry-first**: v1 = pre-registration registry + resolver seeded
 >    with 8 named hypotheses; the nightly LLM generator is v1.1, gated on the
 >    registry proving it can resolve anything at all.

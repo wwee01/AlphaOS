@@ -494,16 +494,19 @@ replacing the addendum's placeholder PR9.6/PR9.7 labels:
 | PORT-1 — effective-N + FDR + preregistrations | PORT-1 | A3 (hard prereq of PR12) |
 | EVAL-1 — offline eval harness (punch #13) | — | A2 |
 | INSTR-1 — rel_volume + ATR micro-pack | — | A4 |
-| EARN-1 — real earnings provider (punch #14 part) | — | A6 |
-| EXP-1 — shadow small/mid catalyst universe | — | A7 |
+| EARN-1 — real earnings provider (punch #14 part) | — | A7 |
+| EXP-0 — shadow-tier deterministic capture (no AI) | — | **A2 — start the dataset now** |
+| EXP-1 — shadow small/mid catalyst universe (AI top-K) | — | A8 |
 | COST-1 — execution-cost model v1 | — | Phase 3; gates expectancy-ladder rung 2 |
 
 **Lane A (critical path, one build session at a time):** ✅ UI-PR-A → **A1**
-OPS-A → ✅ SC → **A2** EVAL-1 → **A3** PORT-1 → **A4** INSTR-1 → **A5** BASELINE
-→ **A6** EARN-1 → **A7** EXP-1 → **A8** PR12 (registry-first) → **A9** PR13
-slice 1 (scoreboard + demotion) then slice 2 + PR13.5 → **A10** cards v2–v3 →
-PR14 → Regime Engine v1 + COST-1 → portfolio-risk gates (Class C) → PR15/L3
-(evidence-gated; additionally blocked on the CRO restore-drill law).
+OPS-A → ✅ SC → **A2** EXP-0 (deterministic shadow-tier capture — added
+2026-07-08 late session, operator-directed) → **A3** EVAL-1 → **A4** PORT-1 →
+**A5** INSTR-1 → **A6** BASELINE → **A7** EARN-1 → **A8** EXP-1 (AI labelling
+on the tier EXP-0 has been capturing) → **A9** PR12 (registry-first) → **A10**
+PR13 slice 1 (scoreboard + demotion) then slice 2 + PR13.5 → **A11** cards
+v2–v3 → PR14 → Regime Engine v1 + COST-1 → portfolio-risk gates (Class C) →
+PR15/L3 (evidence-gated; additionally blocked on the CRO restore-drill law).
 **Lane B (parallel, any slack):** TASK-R · CANARY (before EXP-1) · OPS-B ·
 BRIEF-FIX-1 (small: audit C4) · the operator's quarterly restore drill
 (user-only; blocks L3).
@@ -846,21 +849,86 @@ hypothesis may go live on the mock provider.** Vendor choice at build time
 
 ---
 
+## EXP-0 — Shadow-tier universe capture, deterministic only (START THE DATASET NOW)
+
+**Added 2026-07-08 late session, operator-directed ("the current universe is way too
+small") — the PM dissent from verdict V1, upgraded with instrument-version labeling
+to answer the quant's contamination objection.** The debate's concern was archiving
+AI labels ranked by broken instruments; it was never about *collecting* deterministic
+data. Snapshot + interest-score capture on a shadow tier is the benchmark-spine
+argument again: contemporaneous data that cannot be backfilled honestly later. Every
+week the 20-name book runs alone is unrecoverable niche data. **Lane A —
+immediately after OPS-A; one build session; zero AI calls.**
+
+Grounding facts (verified against code 2026-07-08): universe is a hardcoded 20-name
+list (`candidate_scanner.py:38`); `UniverseTier` already defines unused
+`WATCHLIST`/`EXPERIMENTAL` tiers (`constants.py:201`); snapshots fetch ONE HTTP call
+per symbol (`market_data.py:57` loops singles) — a 500-name tier requires Alpaca's
+batch endpoint; the free IEX feed is sparse on small/mids, which the freshness
+guard will honestly mark — that sparsity is itself a measurement (see #6).
+
+1. **Universe builder CLI** `alphaos universe_build` (one-off + quarterly refresh,
+   never a scheduler job in v0): screen Alpaca's assets endpoint (tradable US
+   common stock, exclude ETFs) → pull daily bars in batches → select the
+   **$5–50M ADV(20d) band, price $5–100** (the master plan §7 capacity niche),
+   target ~300 names to start (500 max). Output: a reviewed, committed
+   `alphaos/universe/shadow_universe.json` (symbols + as-of date + screen
+   parameters + sha) — git-versioned like a card; the operator eyeballs the list
+   before it's committed. Refresh = new file version, old rows keep their version.
+2. **Batch snapshots**: extend `AlpacaDataProvider` with
+   `GET /v2/stocks/snapshots?symbols=…` (~100 symbols/call; ~5 calls per window
+   for the full tier); `MarketDataClient.get_snapshots()` uses it transparently.
+   Core-tier behavior byte-identical (A/B test).
+3. **Shadow-tier scan pass**, same 3 windows: batch snapshots → freshness assess →
+   deterministic interest score → journal `universe` rows with
+   `tier='watchlist'` + candidates stamped `shadow_tier=1` (additive column).
+   **NO AI labelling, NO enrichment calls, NO proposals from the shadow tier —
+   structurally**: the proposal-creation path refuses `shadow_tier=1` candidates
+   (chokepoint-style check + test), and the labeller is never invoked for them
+   in v0. Zero OpenAI cost, zero decision surface, zero approval-queue noise.
+4. **Instrument-version labeling (the quant's condition):** every shadow-tier
+   candidate row stamps `instrument_version='pre_instr1'` until INSTR-1 lands,
+   then `'instr1'`. Post-INSTR-1 analysis segments on it; pre-fix interest ranks
+   are known-biased (dead intraday rel_volume) and labeled as such, never mixed.
+5. **Digest additions** (floor-gated, counts only): shadow tier scanned N,
+   fresh M, stale K, top-decile interest count — plus `feed_coverage`: fraction
+   of shadow-tier snapshots with usable quotes on the free IEX feed. **This
+   number decides empirically whether the SIP data upgrade (~$99/mo) is needed
+   before EXP-1 — measure first, spend on evidence** (decision-log row added).
+6. **Storage arithmetic** (fine for SQLite/WAL): ~300 symbols × 3 windows/day ≈
+   900 snapshot rows/day (~25k/month); prune nothing — this IS the dataset.
+
+**Non-goals:** no AI labelling (EXP-1), no rel_volume fix (INSTR-1), no
+tradeability (ever, until per-card earned promotion much later), no new gates,
+no scheduler cadence changes (the shadow pass rides the existing scan job).
+**Tests:** builder screen math on constructed bars; batch-snapshot mapping parity
+with the single path; shadow tier can never reach `_handle_proposal`/labeller
+(grep + behavior probe); core-tier scan artifacts byte-identical with the shadow
+tier enabled/disabled (§H.6 A/B); freshness/degraded statuses recorded honestly;
+migration test for the additive columns.
+**Acceptance:** one week of unattended shadow-tier capture; `feed_coverage`
+number in the digest; operator-reviewed universe file committed; zero AI-cost
+delta; zero proposals from the shadow tier.
+
+---
+
 ## EXP-1 — Shadow small/mid catalyst universe (the payload)
 
-**Lane A7 — the partners' verdict V1: the single highest-leverage change for
+**Lane A8 — the partners' verdict V1: the single highest-leverage change for
 finding tradeable alpha, pulled forward from Phase 3, shipped only behind
 EVAL-1/PORT-1/INSTR-1/EARN-1 (+ CANARY live).** Learnable trade flow is the
 named binding constraint (master reference §1: the megacap book cannot validate
 its own hypothesis on a useful timeline); a ~10× shadow universe is a ~10×
 learning-velocity multiplier at zero decision risk (PD#2 — shadow symbols are
 scanned/scored/attributed, never tradeable; tradeability is earned per-card
-later).
+later). **EXP-0 (above) already started the deterministic capture; EXP-1 is
+the AI-labelling layer on top of it** — by the time EXP-1 lands, the tier has
+weeks of instrument-versioned interest/freshness history to pick its top-K from.
 
 Skeleton (full spec at build time):
-1. Universe: 300–500 liquid small/mid names, $5–50M ADV band (the capacity
-   niche institutions can't enter, master plan §7), flagged
-   `shadow_tier=true` in the `universe` table (additive column).
+1. Universe: EXP-0's committed tier file (300–500 liquid small/mid names,
+   $5–50M ADV band — the capacity niche institutions can't enter, master plan
+   §7), `tier='watchlist'` + `shadow_tier=1` rows already flowing.
 2. **Cost-tiered scanning (CRO condition):** deterministic pre-rank
    (interest-score family, honest rel_volume from INSTR-1) over the whole
    shadow tier → **AI labelling only for the top-K per window** (K in config;
