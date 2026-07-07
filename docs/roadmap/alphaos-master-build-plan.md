@@ -1,14 +1,23 @@
 # AlphaOS Master Build Plan — The Long Game
 
-**Version 1.1 · 2026-07-06 · Authored by Fable 5 (final strategic architect pass)**
-**Baseline: `main` @ `85ae705` · 804 passed / 0 failed / 3 skipped · PR1–PR9 merged · scheduler LIVE unattended since 2026-07-06**
+**Version 1.2 · 2026-07-08 · Authored by Fable 5 (final strategic architect pass)**
+**Baseline: `main` @ `c3eeefb` · ~959 tests collected · PR1–PR11 + SC + UI-PR-A merged · scheduler LIVE unattended since 2026-07-06 · Phase 1 (Ignition) build-complete**
 
-> **v1.1 (2026-07-06):** PR9 shipped and activated — the Ignition phase is underway, L1
+> **v1.2 (2026-07-08, the founding team's last night):** Phase 1's build scope is
+> complete — PR9/9.1/9.5/10/11 shipped, plus SC (typed ScanContext; exit-review T5
+> structurally closed) and UI-PR-A (the operator console v1). The phase exit gate
+> still accrues on the calendar (the ≥2-week unattended streak). The 2026-07-08
+> final review (Opus learning-loop audit + four-partner debate — findings and
+> verdicts in the master reference §3.5/§9) **revises Phase 2's content and order**:
+> see the "Phase 2 revision" block in §6. The exit-review addendum items now live in
+> the specs doc under canonical names (TASK-R, CANARY, BASELINE, OPS-A/B, PORT-1,
+> EVAL-1, INSTR-1, EARN-1, EXP-1, COST-1). Rationale for this bump: recording the
+> phase-state change and the Phase-2 revision, per §0's own rule.
+>
+> **v1.1 (2026-07-06):** PR9 shipped and activated — the Ignition phase underway, L1
 > entered pending its drills + 10-day streak. The team's consolidated exit review and
-> the root reference document now live at `docs/ALPHAOS_MASTER_REFERENCE.md` — read
-> THAT first; it indexes this plan. Rationale for this version bump: recording the
-> Phase-1 state change, per this plan's own §0 rule that changes are commits with
-> rationale, never silent edits.
+> the root reference document live at `docs/ALPHAOS_MASTER_REFERENCE.md` — read THAT
+> first; it indexes this plan.
 
 ---
 
@@ -127,6 +136,14 @@ The strategic implication that shapes everything below: **AlphaOS today is a com
 audited instrument that has barely been switched on.** Data is the bottleneck, not
 intelligence. Phase 1 exists to fix exactly that.
 
+*Update 2026-07-08:* Phase 1's build scope is done — add to the above: PR9.1
+(prompt-leak hotfix), PR9.5 (backups + benchmark spine + cost true-up), PR10 (setup
+cards + exit-first invariant), PR11 (daily brief + position health), SC (typed
+ScanContext — the `_*` side-channel is structurally dead; ruff+mypy CI), UI-PR-A
+(operator console v1: annunciator, Tonight, health cards, hindsight ΔR). The data
+bottleneck diagnosis stands and now has a treatment plan: Phase 2's revision block
+(§6) pulls the shadow universe forward behind honest instruments.
+
 ---
 
 ## 3. The moonshot arithmetic
@@ -224,6 +241,30 @@ candidates; brief delivered daily.*
 ### Phase 2 — THE LOOP CLOSES (Month 1–3) · PR12–PR15
 
 Goal: **AlphaOS generates, tests, and promotes/demotes its own ideas — under law.**
+
+> **Phase 2 revision (2026-07-08 final review — authoritative; the PR12–15 sketches
+> below stand as intent, the revision governs order and emphasis):**
+> 1. **The statistical substrate comes first.** EVAL-1 (eval harness + ground-truth
+>    golden set) → PORT-1 (effective-N one-floor law, cumulative BH-FDR,
+>    `preregistrations` with one-shot evaluation) → INSTR-1 (honest rel_volume +
+>    ATR-scaled "R") → BASELINE (three-arm AI-vs-deterministic paired instrument) →
+>    EARN-1 (real earnings provider) → **EXP-1: the shadow small/mid catalyst
+>    universe, pulled forward from Phase 3** — learnable flow is the binding
+>    constraint, and shadow expansion multiplies learning velocity ~10× at zero
+>    decision risk, but only after the instruments it will be measured with are
+>    honest. CANARY (Lane B) must be live before EXP-1 widens the tap.
+> 2. **PR12 is registry-first**: v1 = pre-registration registry + resolver seeded
+>    with 8 named hypotheses; the nightly LLM generator is v1.1, gated on the
+>    registry proving it can resolve anything at all.
+> 3. **PR13 ships demotion-first** (the per-card scoreboard + auto_floor_breach —
+>    the smallest loop-closing mechanism, safe under PD#3), then promotion, then
+>    **PR13.5**: the diff→version joint — *PR12 proposes diffs; PR13 toggles state;
+>    only an operator-committed YAML version changes card behavior; no job ever
+>    writes `cards/*.yaml`.*
+> 4. Cards v2–v5 are named and sketched (specs doc): earnings-reaction drift,
+>    catalyst continuation pullback, no-news gap fade, polarity-divergence reclaim.
+> 5. PR15/L3 additionally gates on the CRO restore-drill law and the
+>    portfolio-risk gates (Class C).
 
 - **PR12 — Hypothesis Engine v0 + pre-registration registry.** Nightly shadow agent
   pass over the ledger → structured `hypothesis_proposals` (card-diff, risk class
@@ -542,10 +583,12 @@ has to rediscover them:
   risk, machine activity, brief, moonshot gap line.
 - **Build order:** annunciator strip + Tonight tab + position health cards +
   approvals TTL/exit-plan upgrades + decisions funnel — all on the existing
-  Streamlit substrate (UI-PR-A, alongside PR11). Stay on Streamlit until it
-  demonstrably hurts; the IA is substrate-independent; ntfy push is the mobile app
-  until the crossing justifies more. The UI can never do what the CLI cannot —
-  same orchestrator methods, same gates, forever.
+  Streamlit substrate (**UI-PR-A — ✅ shipped 2026-07-08, all five items; next UI
+  work is the Learning/Cards tabs once PR12/PR13 produce their data, plus OPS-A's
+  loopback-bind guard immediately**). Stay on Streamlit until it demonstrably
+  hurts; the IA is substrate-independent; ntfy push is the mobile app until the
+  crossing justifies more. The UI can never do what the CLI cannot — same
+  orchestrator methods, same gates, forever.
 
 ---
 

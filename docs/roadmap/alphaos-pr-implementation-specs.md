@@ -1,7 +1,15 @@
-# AlphaOS PR Implementation Specs — PR9–PR15 (+ standing templates)
+# AlphaOS PR Implementation Specs — PR9–PR15 + final-review items (+ standing templates)
 
-**Version 1.0 · 2026-07-05 · Fable 5 (retiring-trader handoff detail)**
+**Version 1.1 · 2026-07-08 · Fable 5 (final founding-team review, last session)**
 **Companion to `alphaos-master-build-plan.md` (strategy) and `HANDOVER.md` (state).**
+
+> **v1.1 (2026-07-08):** SC (ScanContext refactor) and UI-PR-A recorded as SHIPPED;
+> the exit-review addendum (TASK-R / canary / shadow baseline / OPS-A / OPS-B /
+> PORT-1) integrated under canonical names with the two-lane build order; PR12–PR15
+> skeletons expanded per the 2026-07-08 Opus learning-loop audit + four-partner
+> debate (verdicts recorded in the master reference §3.5/§9); new items EVAL-1 /
+> INSTR-1 / EARN-1 / EXP-1 / COST-1 added. Original addendum archived at
+> `docs/roadmap/alphaos-exit-review-addendum-specs.md`.
 
 This document is the machine-drawing layer: implementation-ready specs for the
 Ignition phase (PR9–PR11), tight skeletons for PR12–PR15, the reusable
@@ -430,29 +438,614 @@ intra-day state).
 
 ---
 
+## SC — ScanContext structural refactor (punch #12)
+
+> ✅ **SHIPPED 2026-07-08** — merged `5e39f6f` (branch commit `931de21`,
+> `feat/scancontext-structural-refactor`). The `cand["_*"]` side-channel
+> (exit-review T5) is gone: candidates travel as a typed `ScanContext` dataclass
+> (`alphaos/scanner/scan_context.py`) whose `row` holds exactly the persisted
+> candidates-table shape (always safe to serialize); every former `_`-key is a
+> typed attribute; `__setitem__` raises on any `_`-prefixed key — the PR9.1
+> prompt-leak bug class is now structurally impossible, with the prompt-builder
+> strip retained as defense in depth. Enum-ified the 4 raw candidate-status
+> literals (`CandidateStatus`). Ruff + mypy (loose: default rules,
+> `check_untyped_defs`) added to CI as a lint job. Consequence for BASELINE
+> below: its frozen rule reads the typed public fields, as the addendum required.
+
+---
+
+## UI-PR-A — Operator Console v1
+
+> ✅ **SHIPPED 2026-07-08** — merged `c3eeefb` (branch commits `2dd1d75` +
+> post-audit `449a0ff`). First build of the UI/UX doc §12 list, all five items:
+> (1) permanent annunciator strip (mode · autonomy L1 · kill-switch state+control
+> moved from sidebar · heartbeat age via a pure-read check that never alerts ·
+> open R · approvals count); (2) Tonight tab rendering the PR11
+> `build_daily_brief()` dict; (3) Positions tab → per-position health cards with
+> a text R-ladder (EXIT_REVIEW labeled "human decision — never auto-exited");
+> (4) Approval Center gains TTL soonest-first sort (unknown expiry sorts last,
+> fail-safe), verbatim exit plan + `invalidation_reason`, TQS-with-confidence
+> pairing; (5) Candidate Flow gains the hindsight ΔR column via a new batch
+> `JournalStore.attribution_by_candidate()` (one query, no N+1), with
+> pending/unresolvable rendered honestly (never 0R) and mock ΔR tagged `(mock)`
+> (post-audit fix). Read-only-on-render preserved; every action routes through
+> the same orchestrator methods and gates as the CLI. +67 tests; suite 959
+> collected post-merge. **Follow-up raised by the addendum: OPS-A must land
+> promptly — the console widened the dashboard's action surface.**
+
+---
+
+## Final-review integration (2026-07-08) — canonical names, lanes, order
+
+The exit-review addendum (drafted 2026-07-07; archived verbatim at
+`docs/roadmap/alphaos-exit-review-addendum-specs.md`) is integrated below,
+renumbered per its own rebase note and upgraded with the 2026-07-08 final-review
+findings (Opus learning-loop audit findings cited as A1–D4; four-partner debate
+verdicts V1–V5 — both recorded in the master reference §3.5/§9). Canonical names,
+replacing the addendum's placeholder PR9.6/PR9.7 labels:
+
+| Item | Was | Lane / slot |
+|---|---|---|
+| TASK-R — retro-relabel of 2026-07-01 | TASK-R | B (any session's slack) |
+| OPS-A — dashboard loopback bind | OPS-A | A1 (immediately, UI-PR-A follow-up) |
+| OPS-B — off-ecosystem backup + env.enc | OPS-B | B |
+| CANARY — model-drift canary | "PR9.6" | B — **must be live before EXP-1** |
+| BASELINE — deterministic shadow baseline | "PR9.7" | A5 |
+| PORT-1 — effective-N + FDR + preregistrations | PORT-1 | A3 (hard prereq of PR12) |
+| EVAL-1 — offline eval harness (punch #13) | — | A2 |
+| INSTR-1 — rel_volume + ATR micro-pack | — | A4 |
+| EARN-1 — real earnings provider (punch #14 part) | — | A6 |
+| EXP-1 — shadow small/mid catalyst universe | — | A7 |
+| COST-1 — execution-cost model v1 | — | Phase 3; gates expectancy-ladder rung 2 |
+
+**Lane A (critical path, one build session at a time):** ✅ UI-PR-A → **A1**
+OPS-A → ✅ SC → **A2** EVAL-1 → **A3** PORT-1 → **A4** INSTR-1 → **A5** BASELINE
+→ **A6** EARN-1 → **A7** EXP-1 → **A8** PR12 (registry-first) → **A9** PR13
+slice 1 (scoreboard + demotion) then slice 2 + PR13.5 → **A10** cards v2–v3 →
+PR14 → Regime Engine v1 + COST-1 → portfolio-risk gates (Class C) → PR15/L3
+(evidence-gated; additionally blocked on the CRO restore-drill law).
+**Lane B (parallel, any slack):** TASK-R · CANARY (before EXP-1) · OPS-B ·
+BRIEF-FIX-1 (small: audit C4) · the operator's quarterly restore drill
+(user-only; blocks L3).
+
+Everything below inherits the same standing rules as the addendum: shadow/ops
+only, nothing reads into any live decision path, schema changes additive only,
+§H.1 test discipline, T4 merge protocol.
+
+---
+
+## TASK-R — Retro-relabel of the contaminated 2026-07-01 baseline
+
+**Type:** one-off CLI task, not a standing job. Run once, keep the code.
+**Depends on:** PR9.1 ✅ (satisfied). **Lane B — any session's slack.**
+
+Produce clean AI labels for the 7 journaled 2026-07-01 candidates by replaying
+their stored `packet_json` through the fixed prompt builder — (a) a clean
+baseline row set, (b) live proof the T5 fix works on real inputs (the bug class
+mock mode cannot catch). Bonus discovered in this review: the relabeled packets
+are prime **CANARY-corpus and EVAL-1 golden-set candidates** — select from them.
+
+1. CLI `python -m alphaos relabel --from 2026-07-01 --to 2026-07-01 [--dry-run]`.
+   `--dry-run` prints fully composed prompts, **zero** OpenAI calls (operator
+   eyeballs that no `_`-keys appear — post-SC this is structurally guaranteed,
+   the eyeball is belt-and-suspenders).
+2. Build prompts from stored `packet_json` exactly as stored — no re-scan.
+3. Standard client path; **cost guard counts these calls**.
+4. Persist as NEW rows in the existing evaluations table: full PR4 lineage
+   stamp; new additive nullable column `relabel_of` (→ original evaluation id,
+   NULL on all normal rows); raw completion stored verbatim.
+5. One `system_event` per packet: `event=relabel`,
+   payload={original_id, new_id, prompt_sha256}.
+
+**Never:** modify/overwrite the original contaminated evaluations (append-only
+law); touch any decision/outcome/attribution row; generalize into a relabeling
+framework (operator-passed id lists/date ranges only).
+
+**Tests:** `_catalyst`/`_polarity`-bearing packet → composed prompt clean
+(through the relabel path specifically); `--dry-run` → zero network (client not
+invoked); `relabel_of` set on new rows, originals checksum-identical
+before/after; cost-guard accounting includes relabel calls.
+**Acceptance:** dry-run inspected, then live; 7 new rows with `relabel_of`
+populated; CLI prints an old-vs-new label diff table; no original row modified.
+
+---
+
+## CANARY — Model-Drift Canary
+
+**Type:** small standing job + golden corpus. Shadow-only. **Lane B, but must be
+live before EXP-1** (CRO: never multiply archived model output 10× while blind
+to silent upstream model changes).
+
+Detect silent upstream changes to the configured OpenAI model before they
+contaminate weeks of ledger data: weekly replay of a frozen prompt set, alert on
+drift. NOT the eval harness (EVAL-1 answers "which prompt is better?"; CANARY
+answers only "did the upstream model change?") — but they share corpus
+machinery, and EVAL-1 may consume the canary corpus.
+
+1. **Golden corpus** `data/canary/` (committed to git — frozen fixtures, not
+   runtime data; note `.gitignore` excludes only `data/*.db*` patterns, JSON
+   commits fine): 12–20 operator-selected journaled real packets (post-PR9.1
+   clean; prefer TASK-R's relabeled seven plus a spread across symbols and
+   interest-score bands). JSON files + `MANIFEST.json` with sha256 each. Corpus
+   versioned: any change = new `corpus_version`, never edited in place.
+2. **Job:** new scheduler job type `canary_run`, weekly (Sun 10:00 SGT — market
+   closed). Standard fuse + cost-guard coverage. Compose prompts with the live
+   builder, call the live configured model, store full raw completions. Record
+   per run: configured model name + every model-identity field the API exposes
+   (`response.model`, `system_fingerprint` if present), token usage, latency.
+3. **Storage (additive):** `canary_runs` (run id, ts, corpus_version,
+   configured_model, response_model, fingerprint, n_prompts, cost fields) +
+   `canary_results` (run id, packet sha, prompt sha, raw completion, parsed
+   label fields).
+4. **Drift tiers vs the pinned baseline run** (first post-merge run; re-pin via
+   CLI): Tier 1 (page immediately) `response_model`/fingerprint changed, or any
+   parse/failsafe rate change from 0 · Tier 2 (page) any categorical label
+   field differs on ≥20% of packets (threshold in config, not code) · Tier 3
+   (digest line) numeric mean shift beyond a configured band. Tiers exist to
+   avoid crying wolf on sampling noise while never missing an identity change.
+5. **Alerting:** ntfy on Tier 1/2 (`alerts.py`); always one digest line
+   ("Canary: last run <date>, drift: none / TIER-n").
+6. CLI `alphaos canary run|status|pin-baseline`.
+7. **Lineage joint (audit D4):** attribution/moonshot reports must segment ΔR by
+   `prompt_hash`/`response_model` and **refuse to aggregate across a canary
+   Tier-1 boundary** (mirror of §H.8's cross-version law). A silent model shift
+   that also moves ΔR must be attributable to the model, never to a card.
+
+**Tests:** fixture completions → drift=none; changed `response.model` fixture →
+Tier 1 alert (mocked); label flip 3/12 → Tier 2, 1/12 → none; corpus tamper
+(sha mismatch) → loud job failure, fuse-eligible; cost guard counts canary
+calls; cross-boundary ΔR aggregation refuses (D4).
+**Acceptance:** two consecutive real weekly runs; forced-drift drill on a COPY
+of the DB (never the live ledger) → page received; drill logged in
+`docs/incidents/`.
+
+---
+
+## BASELINE — Deterministic Shadow Baseline (the "does the AI add R?" instrument)
+
+**Type:** shadow measurement layer. Ported by design from NightDesk #81 (paired
+AI-vs-deterministic forward measurement) — see PORT-1's method note. **Lane A5 —
+as early as possible: it accrues paired data forward-only; every week without
+it is unrecoverable evidence.** Depends on SC ✅ (typed public fields) and
+PORT-1 (its pre-registration becomes `preregistrations` row #1).
+
+⚠️ **Naming:** a legacy `baseline_outcomes` table already exists (old no-news
+hypothetical-P&L tracker, `journal/schema.py:620`). This item's table is
+`shadow_baseline_decisions` — distinct on purpose; never conflate them.
+
+For every candidate packet sent to the AI labeller, also compute and journal a
+frozen deterministic decision from the same inputs; attribution later computes
+`ai_delta_r = replay_r(AI path) − replay_r(deterministic path)` per candidate.
+This is the evidence gate for ever spending on bigger models.
+
+1. **Three arms, not two (audit C2):** the original two-arm design (AI vs
+   interest-threshold rule) is confounded — both arms condition on
+   `interest_score`, which sits on both sides of the scanner gate
+   (`candidate_scanner.py:158`). v1 therefore journals TWO frozen rules:
+   `threshold_v1` (PROPOSE iff `interest_score ≥ X`, X pre-registered as the
+   historical median interest score of AI-proposed candidates, computed at
+   build time, frozen as a literal, stored as `baseline_rule_x` in reports) and
+   `propose_all_v1` (PROPOSE every labeller-eligible candidate). The pair
+   brackets the AI between "propose-all" and "interest-threshold" and exposes
+   whether its value is selection or inherited from interest_score. The honest
+   claim is **conditional** added-R (given a candidate reached the labeller) —
+   the pre-registration must say so, never overclaim.
+2. Inputs: only typed public `ScanContext` fields (post-SC). Bracket
+   construction: the identical live function (one sizing formula law). Output
+   per rule: {decision, bracket, rule_version, input_sha}.
+3. **Storage (additive):** `shadow_baseline_decisions` (candidate id FK, ts,
+   rule_version, decision, bracket fields, input sha, nullable `setup_card_id`
+   join key — populated when the AI path assigned one, never read by the rule).
+   Written by the orchestrator in the same tick, strictly AFTER the live
+   decision fully resolves (ordering enforced by test).
+4. **Counterfactual join:** extend the existing counterfactual outcomes job to
+   produce `replay_r` for shadow-baseline PROPOSEs via the ONE replay engine,
+   stored with `path='baseline_threshold'` / `path='baseline_all'` — labeled,
+   never mixed. Note audit C1: replay idealizes fills (no gap risk); until
+   COST-1 lands, every ΔR line carries "gross, gap-free upper bound" verbatim,
+   and stop-hit rows are earmarked for the COST-1 gap-haircut re-statement
+   (applied identically to all arms, versioned). Add `entry_fill_status`
+   (assumed_filled/needs_review) so ΔR never credits a path that couldn't have
+   entered.
+5. **Estimator (audit A3 — replaces the addendum's naive CI):** paired mean ΔR
+   with a **day-block bootstrap CI** (resample whole decision-days, 10k
+   resamples, BCa; fallback: `se = sd(ΔR)/sqrt(effective_n)`). Store `n_rows`,
+   `effective_n`, `ci_method` with every report row. One-sided test at the
+   pre-registered floor, reported as `q` (PORT-1 FDR), not raw `p`.
+6. **Pre-registration block** (= `preregistrations` row #1, per PD#4):
+   hypothesis "AI adds ≥ +0.05R mean paired ΔR over `threshold_v1` on proposed
+   candidates, conditional on labeller reach"; metric per #5; floors
+   (min effective-N, min span); analysis-not-before date; rule v1 immutable —
+   improvements are rule v2, a new pre-registered arm.
+
+**Never:** read by the live combine/gates/execution (shadow law, import-graph
+test per §H.6); a second replay engine; tuning any frozen rule after freeze.
+
+**Tests:** shadow rows written iff an AI evaluation occurred; write ordering
+(shadow never precedes live resolution); determinism across runs and
+PYTHONHASHSEED; `_`-key-injected packet → identical output to stripped packet
+(defense in depth even post-SC); `path` labels never aggregated with realized
+rows in any existing report query; constructed clustered fixture → block
+bootstrap CI wider than naive CI (assert the naive method would false-positive,
+the clustered one doesn't); mock prices date-seeded, direct construction (§H.1).
+**Acceptance:** one unattended week; `shadow_baseline_decisions` rows 2:1 with
+AI evaluations (two rules); one paired ΔR reproduced by hand matches stored.
+
+---
+
+## OPS-A — Dashboard network binding (small, immediate — UI-PR-A follow-up)
+
+The approval surface must not be reachable from the LAN — priority raised now
+that UI-PR-A has SHIPPED and widened the dashboard's action surface.
+
+1. Streamlit invoked with `--server.address=127.0.0.1 --server.headless=true`;
+   pinned in config if a config file is used; installer writes it.
+2. Startup guard in the dashboard entrypoint: read the effective bind address;
+   if not loopback → red full-page refusal + **all action components disabled**
+   (approve/reject/kill-switch release — including everything UI-PR-A added).
+   Defense in depth: the flag protects, the guard verifies.
+3. Dashboard runner/installer validates the flag; refuses to install otherwise.
+4. HANDOVER §operating notes: remote access, if ever wanted, is an SSH tunnel
+   (`ssh -L 8501:127.0.0.1:8501 ck@macmini`) — never a LAN bind, never
+   port-forwarding.
+
+**Tests:** mocked non-loopback address → action components not rendered/raise;
+installer validation. **Acceptance:** `lsof -iTCP -sTCP:LISTEN | grep <port>`
+shows `127.0.0.1` only; a phone on the same wifi cannot load the page; check
+logged in `docs/incidents/` as a mini-drill.
+
+---
+
+## OPS-B — Off-ecosystem backup + encrypted `.env` (extends shipped PR9.5)
+
+Break the single-ecosystem failure domain (everything lands in iCloud) and stop
+`.env` recovery depending on a possibly-stale password-manager copy. **Lane B.**
+
+1. Nightly PR9.5 job additionally encrypts `.env` → `env.enc` next to the DB
+   backup, same dated folder, same rotation (DB backup and the config that ran
+   it can never drift apart).
+2. Monthly (1st, after the nightly succeeds): copy `{db.gz, env.enc, MANIFEST}`
+   to a second target OUTSIDE Apple's account domain. Operator-configured:
+   `BACKUP2_METHOD=rclone|disk`, `BACKUP2_DEST=…` (rclone → any S3/B2/GDrive
+   remote; disk → external drive, loud alert if volume absent). Keep 12
+   monthlies at the second target.
+3. Encryption: `age -p` (or symmetric openssl); passphrase ONLY in the
+   operator's head/password manager — never `.env`, never the repo. Encrypt the
+   DB at the second target too (cheap); local plain `.backup` stays for fast
+   restore.
+4. MANIFEST per backup: sha256 of each artifact + schema_version + git rev;
+   restore verifies shas before use.
+5. Failure of either leg pages via ntfy; digest carries
+   `Backups: nightly OK <ts> · offsite OK <date>`.
+6. Quarterly restore drill (master reference §6) now includes decrypting
+   `env.enc` and restoring from the SECOND target, not just iCloud.
+
+**Tests:** mocked targets → artifacts + MANIFEST + sha round-trip; `env.enc`
+decrypts byte-identical (fixture env, never the real one); second target absent
+→ alert, nightly leg still completes; grep test — no passphrase/key material in
+any captured log/journal output. ⚠️ New LaunchAgent legs hit §H.13 (Full Disk
+Access) — read it first. **Acceptance:** one real restore from the second
+target onto a scratch directory, logged in `docs/incidents/`.
+
+---
+
+## PORT-1 — Effective-N + FDR + preregistrations (the statistical-discipline layer)
+
+**Lane A3 — hard prerequisite of PR12 AND of EXP-1's first aggregate** (audit
+A1: today every floor gates on `len(rows)` — `reports/attribution.py:212–231` —
+on a one-beta-cluster universe where 30 rows ≈ 3–5 independent bets; a
+promotion decided on that is the false-edge machine).
+
+**Port method (contract, not code — applies to all NightDesk ports):** extract
+a portable design doc in the NightDesk repo from #85 (Thesis Research Layer)
+and #81 (paired instrument) — inputs, outputs, invariants, formulas (FDR
+procedure, effective-N rules, pre-registration fields), failure modes; **no
+NightDesk code, no AlphaOS code — prose, schemas, math only** — saved as
+`docs/roadmap/ported/nightdesk-stats-contract.md`. Then map each concept onto
+AlphaOS's actual tables in an adaptation review; anything that doesn't map
+cleanly gets a decision in the doc, not an improvisation in code. Build as a
+normal T-process PR. Record lineage in the Decision Log. (BASELINE is the #81
+port done this way; PORT-1 is the #85 port.)
+
+1. **`effective_n(rows)`** — ONE shared function
+   (`alphaos/stats/effective_n.py`): dedup to one observation per
+   `(symbol, decision_date)`; overlapping `[decision_date, +max_holding_days]`
+   windows on the same symbol cluster together. **Every floor call site
+   switches from `len(rows)` to `effective_n(rows)`** — reports AND the PR13
+   promotion gate consume the IDENTICAL function (one floor law, mirror of the
+   one-replay-engine rule). Reports show both `resolved_count` and
+   `effective_n` so row inflation stays visible.
+2. **FDR gate:** Benjamini–Hochberg with the family defined explicitly (audit
+   A5) as **all pre-registered hypotheses with `evaluated_at_utc` set to date**
+   — cumulative, never per-render. `q_value` stored on the preregistration row
+   at evaluation time (immutable, one-shot); reports read `q_value`, never
+   recompute BH over ad-hoc slices. Digest prints `q=…`, not `p=…`.
+3. **`preregistrations` table (additive):** hypothesis text, metric, floors
+   (effective-N + span), `analysis_not_before`, `registered_at_utc`,
+   `evaluated_at_utc` (nullable, **set exactly once** — a second write raises;
+   audit A2's optional-stopping guard), `q_value`, immutable. PR12 writes here
+   BEFORE any forward test; BASELINE's block migrates in as row #1.
+4. **Ride-alongs (punch #15, researcher MEDs):** attribution touch-conditioning
+   caveat text; candidate-level `max_favorable_*_r` anchoring — decide ONE way
+   (0-anchor to match trade MFE, or rename `path_favorable_extreme_r` and
+   document as signed-from-reference), version the change per §H.8, test on an
+   all-adverse fixture (audit C3).
+5. **Survivorship denominator (audit A4):** any report claiming system-level
+   edge (moonshot gap, pivot-criteria evaluation) computes over the FULL
+   preregistration family (promoted + demoted + withdrawn) and prints
+   `hypotheses_tested=N, promoted=k` as a mandatory caveat line.
+
+**Tests:** clustered fixtures (10 rows, 3 symbol-days → n_eff=3); BH on a
+textbook vector → exact q's; two renders of the same evaluated set → identical
+q (family stability); grep/AST — no remaining `len(` floor checks; one-shot
+`evaluated_at_utc` write enforcement.
+
+---
+
+## EVAL-1 — Offline eval harness (punch #13, now with ground truth)
+
+**Lane A2 — before any prompt/model change, and before PR12-era temptation
+arrives.** `alphaos eval`: replay journaled `packet_json` through current
+templates vs a frozen golden set; store raw completions on ALL paths INCLUDING
+failures (`raw={"fail_safe": …}` rows are precisely the examples the harness
+needs most — retention starts here).
+
+**Ground truth (audit D1 — the piece the punch-list item was missing):** a
+canary can only detect drift-from-baseline, not drift-from-correct; ΔR-based
+quality takes years at current cadence. So: a small **operator-adjudicated
+ground-truth set** — 20–30 golden packets where the operator records the
+ex-post correct decision (with hindsight bars), stored as
+`ground_truth_label` alongside the corpus MANIFEST. Both EVAL-1 and CANARY
+score against it (accuracy, not just drift). This is the only instrument that
+judges a prompt change in days instead of years — and it de-confounds BASELINE
+(a labeller that agrees with ground truth but adds no R says the *edge* is
+absent, not the labeller). Seed from TASK-R's relabeled packets + the cleanest
+post-PR9.1 week.
+
+Skeleton (full spec at build time): frozen golden corpus shared with CANARY
+machinery; metrics = parse rate, label agreement vs ground truth, categorical
+stability across temperature; every eval run lineage-stamped
+(prompt/model/config hashes); report block + one digest line; zero decision
+surface.
+
+---
+
+## INSTR-1 — Honest-instruments micro-pack (rel_volume + ATR stops)
+
+**Lane A4 — the niche must be measured with honest instruments BEFORE its data
+is archived (T5's lesson at universe scale).** Two small changes, both
+behavior-affecting (Class A/B — NOT shadow; spec, review, and audit
+accordingly; neither is a gate change):
+
+1. **Time-of-day-normalized rel_volume:** replace today-cumulative ÷
+   yesterday-full-day (reads 0.1–0.3 every morning — the volume trigger is
+   structurally dead intraday, exit review T3) with cumulative-to-now ÷ 20-day
+   average cumulative-to-same-time-of-day. The scanner's core catalyst signal
+   starts meaning what it says.
+2. **ATR-scaled stops** as `catalyst_momentum_v2` (version bump per PD#7,
+   never retro-scored): a fixed 3% stop is ~4 daily sigma on SPY and <1 on
+   TSLA — "1R" currently means different trades. Stop = k×ATR(14) with k
+   pre-registered per card; risk engine still validates.
+
+Pre-registered before/after instrumentation: H-WIN-1 (PR12 seed) audits the old
+rel_volume's window bias from our own ledger; card v2 vs v1 is a clean
+versioned comparison. **Non-goals:** no threshold retuning beyond the formula
+swap, no new gates, no universe change (that's EXP-1).
+
+---
+
+## EARN-1 — Real earnings-calendar provider (punch #14 part)
+
+**Lane A6 — defines "catalyst" for the niche; hard gate for card v2
+(`earnings_reaction_drift_v1`).** Live vendor behind the existing PR5
+`make_earnings_provider` factory — zero call-site changes by design. Missing/
+stale/unavailable stays an explicit non-`ok` status (never silently safe).
+Mock provider remains for tests; **mock ≠ real: no earnings-conditioned card or
+hypothesis may go live on the mock provider.** Vendor choice at build time
+(cost floor; the factory makes it swappable).
+
+---
+
+## EXP-1 — Shadow small/mid catalyst universe (the payload)
+
+**Lane A7 — the partners' verdict V1: the single highest-leverage change for
+finding tradeable alpha, pulled forward from Phase 3, shipped only behind
+EVAL-1/PORT-1/INSTR-1/EARN-1 (+ CANARY live).** Learnable trade flow is the
+named binding constraint (master reference §1: the megacap book cannot validate
+its own hypothesis on a useful timeline); a ~10× shadow universe is a ~10×
+learning-velocity multiplier at zero decision risk (PD#2 — shadow symbols are
+scanned/scored/attributed, never tradeable; tradeability is earned per-card
+later).
+
+Skeleton (full spec at build time):
+1. Universe: 300–500 liquid small/mid names, $5–50M ADV band (the capacity
+   niche institutions can't enter, master plan §7), flagged
+   `shadow_tier=true` in the `universe` table (additive column).
+2. **Cost-tiered scanning (CRO condition):** deterministic pre-rank
+   (interest-score family, honest rel_volume from INSTR-1) over the whole
+   shadow tier → **AI labelling only for the top-K per window** (K in config;
+   budget arithmetic in the spec vs the 2000/30d hard cap using PR9.5's
+   true-up accounting). Naive full-universe labelling would be 15–25× current
+   spend — refused by design, not by hope.
+3. Spread/liquidity instrumentation for the band (the 1bps slippage + $2M
+   floor assumptions are megacap-calibrated fantasy here — record honest
+   spread/ADV fields on every shadow candidate for COST-1 to consume).
+4. **Regime tag v0 (audit A6):** stamp `regime_tag` on candidate outcomes at
+   decision time from a frozen, dumb, versioned classifier (SPY 20d
+   realized-vol tercile × 50d trend sign — pre-registered, never tuned;
+   Regime Engine v1 refines later). Cross-regime aggregates carry
+   `regime_mixed=true` caveat; per-regime claims need per-regime effective-N
+   floors.
+5. Every aggregate over the new universe floor-gates through `effective_n()`
+   from day one (correlated small-caps on the same catalyst day inflate row
+   counts worst of all).
+6. Fuse coverage, `is_mock`/shadow-tier exclusion from all live aggregates,
+   BASELINE arms cover shadow candidates from their first day.
+
+---
+
+## COST-1 — Execution-cost model v1 (Phase 3; gates expectancy-ladder rung 2)
+
+**Audit D2: the whole ladder gates on "positive net expectancy after calibrated
+costs" and no PR owned the calibration** (`cost_calibration.py` is OpenAI spend,
+not execution cost). Skeleton: per-symbol half-spread + ADV-scaled impact +
+gap-slippage-on-stop, calibrated against actual paper fills vs mid (the
+reconcile path already captures fills — join it); versioned; applied
+IDENTICALLY in `replay_bracket` (audit C1's gap haircut:
+`replay_r = −(1.0 + gap_penalty)` on stop-hits) and in realized R; calibration
+window pre-registered. Until it lands, the ladder freezes at rung 1 and every
+net-expectancy claim carries "uncalibrated — upper bound" verbatim. Feeds on
+EXP-1's spread/ADV instrumentation; target ≥100 real paper fills (Phase 3
+campaign).
+
+**Card capacity ride-along (audit D3):** additive card fields
+`max_position_adv_bps` + `max_concurrent_positions`; stamp realized
+`entry_adv_fraction` on outcomes; capacity-decay caveat on any promoted-card
+report when observed sizes approach the cap. Shadow-only until Phase 3.
+
+---
+
+## BRIEF-FIX-1 — Daily-brief reporting-law fix (small, Lane B)
+
+**Audit C4 (MED, live in shipped code):** `daily_brief.py`'s "what learned"
+block renders per-event ΔR sentences with no floor gate and no caveat
+(`reports/daily_brief.py:121–139`) — violating §H.9 ("no per-event verdicts")
+in the one artifact the human reads daily. Fix: aggregate, floor-gated language
+only ("N decisions resolved today, M cumulative; aggregates in
+`alphaos attribution` once floors met"); if per-symbol lines stay, strip the ΔR
+number below the aggregate floor and attach the standing
+`ATTRIBUTION_V2_CAVEAT` (already imported at `:20`, unused here). Test: single
+resolved row → no ΔR figure in rendered markdown; caveat present.
+
+---
+
 ## PR12–PR15 — skeletons (full spec at build time via §T1)
 
-### PR12 — Hypothesis Engine v0 + pre-registration registry
-Table `hypothesis_proposals`: `hypothesis_id, card_id, card_version,
-proposed_diff_json, risk_class TEXT CHECK IN ('A','B','C'), claim TEXT,
-evidence_json, success_metric TEXT, success_floor REAL, min_sample INTEGER,
-min_span_days INTEGER, frozen_at_utc, status
-(proposed|testing|met|failed|withdrawn), resolved_at_utc, lineage_id, …`.
-Nightly scheduler job `hypothesis_pass` (cost-capped, schema-forced agent
-output) reads attribution/TQS/outcomes/rejects → INSERTs proposals.
-**Frozen-at-insert criteria; a later UPDATE to success_* fields is forbidden
-by trigger-style test.** Report block + digest counts. Zero decision surface;
-risk-class enumeration lives in `constants.py` (`HypothesisRiskClass`).
+### PR12 — Hypothesis Engine v0: registry-first (REVISED 2026-07-08, verdict V2)
 
-### PR13 — Promotion/Demotion state machine
-Table `promotion_decisions` (append-only): card_id/version, from_state,
-to_state, direction (promote|demote), trigger (auto_floor_breach|manual),
-evidence_json, decided_by, lineage_id. Card state transitions ONLY via
-`alphaos/cards/promotion.py`; auto-demote job (rolling per-card ΔR/expectancy
-floor breached → demote + alert); promote requires floors met AND
-`decided_by != 'system'` (tested). Class C → NightDesk memo reference field
-REQUIRED (`research_ref` non-null when risk_class='C'). CLI `alphaos cards` /
-`card_promote` / `card_demote`.
+**Inversion:** v1 is the **pre-registration registry + resolver, seeded with 8
+human pre-registered hypotheses**; the nightly LLM generator is deferred to
+v1.1, cost-capped, and gated on the registry demonstrating it can resolve
+hypotheses at all. PD#4's load-bearing part is the registry, not the generator
+— at current N a generative agent emits plausible hypotheses the data cannot
+resolve, and the registry fills with zombies. **Depends on PORT-1** (consumes
+`preregistrations`, `effective_n()`, and the FDR gate).
+
+- Table `hypothesis_proposals`: `hypothesis_id, card_id, card_version,
+  proposed_diff_json, risk_class TEXT CHECK IN ('A','B','C'), claim TEXT,
+  evidence_json, success_metric TEXT, success_floor REAL, min_sample INTEGER,
+  min_span_days INTEGER, frozen_at_utc, status
+  (proposed|testing|met|failed|withdrawn), resolved_at_utc, lineage_id,
+  preregistration_id FK, …`. Frozen-at-insert; later UPDATE to success_*
+  fields forbidden by trigger-style test. Risk-class enum in `constants.py`.
+- **Test rigor is code-fixed, never model-authored (audit B4):**
+  `success_floor`/`min_sample`/`min_span_days` are looked up from a frozen
+  `constants.py` table keyed by `risk_class` (Class C strictest); an
+  agent-supplied value is overwritten; test asserts stored == constant.
+- **One-shot evaluation (audit A2):** each hypothesis evaluates exactly once,
+  at/after `analysis_not_before` (`evaluated_at_utc` set once, second write
+  refused). Early promotion attempt → `NOT_YET_ELIGIBLE`.
+- Resolver: nightly job computes each testing hypothesis's metric via the SAME
+  floor function reports use (`effective_n`, never `len(rows)`); resolution
+  stores `q_value` from the PORT-1 cumulative FDR family.
+- **Seeded v1 set (8, frozen at merge; full entry/floor sketches in the
+  2026-07-08 debate record, master reference §9):** H-TQS-1 (top-vs-bottom
+  quartile TQS ≥ +0.3R on 3d replay_r — precondition for TQS ever leaving
+  shadow) · H-CAT-1 (catalyst presence ≥ +0.2R — the card family's core
+  thesis; FALSE starts the §12 pivot clock) · H-INT-1 (interest-score top
+  decile > median, q<0.10 — if FALSE the scanner ranking EXP-1 multiplies is
+  noise) · H-WIN-1 (morning vs afternoon windows — the rel_volume audit on our
+  own ledger) · H-TTL-1 (expired proposals' replay_r ≈ approved realized —
+  TRUE is the evidence case for L3; FALSE kills the "approval is the
+  bottleneck" narrative) · H-REJ-1 (operator rejections ΔR ≤ 0 — either way is
+  gold) · H-POL-1 (polarity divergence underperforms — gates card v5) ·
+  H-AI-1 (= BASELINE's pre-registration verbatim, `preregistrations` row #1).
+  No earnings-conditioned hypothesis until EARN-1 (mock ≠ real).
+- v1.1 generator (separate mini-PR): schema-forced agent output, fuse +
+  cost-cap coverage like any job; hypothesis-volume cap is the L2 rollback
+  trigger (master plan §5).
+- Report block + digest counts. Zero decision surface, as before.
+
+### PR13 — Promotion/Demotion state machine (REVISED 2026-07-08: demotion first)
+
+Ship in two slices. **Slice 1 — the per-card scoreboard + auto-demotion (the
+safe half; may ship before slice 2):** a deterministic rolling per-card ledger
+(expectancy, ΔR, effective-N vs floor, span vs floor) computed by the outcomes
+job, rendered in brief/digest/Cards tab, wired to `auto_floor_breach → demote +
+alert`. Partners' verdict V4: this is the smallest mechanism that closes the
+loop at the actuator — today every measured fact terminates in the brief's
+prose and changes nothing. Demotion satisfies PD#3 with zero promotion risk. A
+demotion breach must persist **≥2 consecutive evaluation windows** before
+firing (audit A2 — a sequential-test crumb against single-night noise;
+documented asymmetry, not a floor weakening).
+
+**Slice 2 — promotion.** Table `promotion_decisions` (append-only): card_id/
+version, from_state, to_state, direction, trigger (auto_floor_breach|manual),
+evidence_json, decided_by, lineage_id, **required `preregistration_id` FK**
+(audit A4 — makes the full test family reconstructable; the survivorship
+denominator). Card state transitions ONLY via `alphaos/cards/promotion.py`.
+Promote preconditions, enforced in code and surfaced by
+`alphaos autonomy_readiness`: effective-N floors met via the IDENTICAL floor
+function the reports use (audits A1/B2) · `q_value < 0.1` · span floor ·
+`decided_by != 'system'` (tested) · `research_ref` non-null when
+risk_class='C'. CLI `alphaos cards` / `card_promote` / `card_demote`.
+
+**Anti-double-jeopardy (audit B3):** a demoted card VERSION is terminal —
+re-entry to `live_eligible` requires a NEW version evaluated on a
+pre-registered forward window whose start is after the demotion timestamp;
+`card_promote` refuses overlapping windows with `STALE_DATA_REUSE` (tested:
+demote v1, attempt re-promote v1 on overlapping data → refused).
+
+### PR13.5 — Diff→Version materialization (NEW — the joint that closes the loop)
+
+Audit B1 (CRITICAL): as previously drawn, PR12 proposes diffs and PR13 toggles
+STATE, but no mechanism turned a promoted `proposed_diff_json` into a new card
+VERSION — cards are YAML files read from disk, the registry refuses unversioned
+content changes (`registry.py:103–109`), and no spec said who writes
+`catalyst_momentum_v2.yaml`. The loop could toggle cards on/off but never
+change what a card DOES. The law, now written:
+
+> **PR12 proposes diffs; PR13 toggles state; only an operator-committed YAML
+> version changes card behavior. No job ever writes `cards/*.yaml`.**
+
+- `alphaos card_promote <hypothesis_id>`: (a) renders the promoted diff as a
+  proposed `<card_id>_v<N+1>.yaml` on disk for the operator to inspect;
+  (b) BLOCKS until the operator commits the YAML and re-runs with `--confirm`;
+  (c) registry sync registers the new version; the new version enters its
+  declared state, the old version retires. The YAML author is the operator,
+  aided by the rendered diff — never the nightly job (PD#3: promotion is never
+  automatic, now structurally).
+- Test: `hypothesis_pass` and `promotion.py` have zero filesystem-write
+  reachability to `cards/` (grep/AST, §H.6 pattern).
+
+### Cards v2–v5 (Lane A10+, all Class B, born `state: shadow`, verdict V3)
+
+Entry/stop/invalidation sketches from the 2026-07-08 debate — full card specs
+at build time; all long-only, ATR-scaled stops (INSTR-1), exit-first invariant,
+`regimes: [any]` until Regime Engine v1 (no imaginary regime conditioning):
+
+- **v2 `earnings_reaction_drift_v1`** (needs EARN-1, hard-gated on real data):
+  earnings within 1–2 sessions + day-1 reaction ≥ +3% on normalized
+  rel_volume ≥ 2 → enter first pullback holding above earnings-day open; stop
+  1.5×ATR(14) below earnings-day low; target ≥ 2R; hold ≤ 5d; invalidation:
+  close below earnings-day open, or catalyst-reversing headline → EXIT_REVIEW.
+  No entry if next earnings inside hold window.
+- **v3 `catalyst_continuation_pullback_v1`**: day-1 catalyst move ≥ +4% +
+  sustained day-2 rel_volume ≥ 2 → enter day-2/3 pullback holding the upper
+  half of day-1's range; stop below day-1 low (ATR-floored); hold ≤ 4d;
+  invalidation: close below day-1 midpoint or polarity flip. Promotion gated
+  on H-CAT-1 resolving TRUE.
+- **v4 `no_news_gap_fade_long_v1`**: gap down ≥ 3% with EMPTY catalyst
+  enrichment + neutral/positive polarity (no news IS the signal) → enter on
+  opening-range-high reclaim; stop below gap-day low; target prior close
+  (gap fill), half off at 50% fill; hold ≤ 3d; invalidation: a catalyst
+  emerges explaining the gap, or second gap-down. Exists partly to trade the
+  reversal regime that bleeds v1.
+- **v5 `polarity_divergence_reclaim_v1`**: price −5%/5d while polarity
+  positive and improving → enter first close above the 5-day high; stop below
+  divergence low (ATR-floored); hold ≤ 7d; invalidation: polarity turns
+  negative or fresh negative catalyst. Stays shadow until H-POL-1 resolves —
+  a hypothesis wearing a card schema, joined on `card_id`, on purpose.
 
 ### PR14 — Red-Team Debate v0 (shadow)
 Table `agent_votes`: vote_id, proposal_id, candidate_id, agent_role ('bear'
@@ -461,9 +1054,10 @@ failure_modes_json (top-3), invalidation_triggers_json, model/prompt lineage,
 is_mock, cost fields. Invoked batch-at-scan-end for PROPOSE decisions only
 (the PR7 call-site pattern, after commit), capped `DEBATE_MAX_CALLS_PER_DAY`
 (default 10) inside the PR3 cost budget. Pre-registered evaluation hypothesis
-shipped WITH the PR (via PR12 registry): "proposals with bear stance=oppose &
-conviction ≥0.7 underperform by ≥0.3R over n≥30, 28d" — expansion to a triad
-is gated on that resolving TRUE.
+shipped WITH the PR (as a `preregistrations` row, one-shot-evaluated like every
+other): "proposals with bear stance=oppose & conviction ≥0.7 underperform by
+≥0.3R over effective-N≥30, 28d" — expansion to a triad is gated on that
+resolving TRUE.
 
 ### PR15 — First autonomy promotion (L3: bounded auto-approval, paper)
 No new machinery — an EVIDENCE + DRILL + AUDIT gate around flipping
@@ -473,7 +1067,10 @@ auto-path guard). Deliverables: the L3 entry-criteria checklist as an
 executable report (`alphaos autonomy_readiness`), the drill script (born-
 expired proposals in AUTO mode → zero fills — re-run of the PR6 adversarial
 probe), the Opus audit, HANDOVER §10 autonomy-state note. Live-eligible cards
-only (join on `setup_cards.state`).
+only (join on `setup_cards.state`). **Additional preconditions (2026-07-08):**
+the CRO restore-drill law (a backup restored once for real) and the
+portfolio-risk gates (Class C — the 166%-gross / static-100k findings bind at
+L3, not before) must both be closed first; `autonomy_readiness` checks them.
 
 ---
 

@@ -1,16 +1,30 @@
 # AlphaOS UI/UX Design — The Operator Console
 
-**Version 1.0 · 2026-07-05 · Fable 5**
+**Version 1.1 · 2026-07-08 · Fable 5** *(v1.1: UI-PR-A recorded shipped-as-designed;
+next-UI pointers added. v1.0: 2026-07-05.)*
 **Reviewed as: trading command-center product designer · trading systems architect ·
 risk/audit UX designer · AI-agent transparency designer.**
 **Companion to `alphaos-master-build-plan.md` §13 and `alphaos-pr-implementation-specs.md`.**
 
-Current substrate (ground truth): Streamlit dashboard
-(`alphaos/dashboard/streamlit_app.py`) — sidebar with kill-switch engage/release +
-manual action buttons, four tabs (Approval Center, Candidates, Open Trades, Closed
-Trades), read-only rendering with actions routed through orchestrator methods (same
-gates as CLI). This document designs where that grows — not a generic brokerage
-dashboard, but the console for a **controlled-autonomy AI trading OS**.
+> ✅ **UI-PR-A SHIPPED 2026-07-08** (merged `c3eeefb`, branch commits `2dd1d75` +
+> post-audit `449a0ff`) — all five §12 items built: permanent annunciator strip
+> (kill switch moved from sidebar; heartbeat age via a pure-read check that never
+> alerts), Tonight tab consuming `build_daily_brief()`, Positions → health cards
+> with a text R-ladder, Approval Center TTL-sort + verbatim exit plan +
+> `invalidation_reason` + TQS-with-confidence, Candidate Flow hindsight ΔR column
+> (batch `attribution_by_candidate()`, pending-never-zero, mock ΔR tagged
+> `(mock)` per post-audit fix). Read-only-on-render preserved; +67 tests.
+> **Console v1 exists. Next UI work:** OPS-A loopback-bind guard (immediate — the
+> console widened the action surface; spec in the specs doc), then the Learning +
+> Cards tabs once PR12/PR13 produce their data (§11).
+
+Current substrate (ground truth, pre-UI-PR-A — preserved for design lineage):
+Streamlit dashboard (`alphaos/dashboard/streamlit_app.py`) — sidebar with
+kill-switch engage/release + manual action buttons, four tabs (Approval Center,
+Candidates, Open Trades, Closed Trades), read-only rendering with actions routed
+through orchestrator methods (same gates as CLI). This document designs where that
+grows — not a generic brokerage dashboard, but the console for a
+**controlled-autonomy AI trading OS**.
 
 ---
 
@@ -289,7 +303,7 @@ a reason string (both logged to system_events, as the current dashboard already 
   Server-side read-only rendering + gate-checked actions remain law regardless of
   substrate.
 
-## 12. What Sonnet builds first (UI-PR-A, alongside PR11)
+## 12. What Sonnet builds first (UI-PR-A — ✅ built as designed, 2026-07-08)
 
 1. Annunciator strip (top of every page): mode badge, autonomy label (static "L1"
    until PR15), kill-switch state+control (move from sidebar), heartbeat age (max
