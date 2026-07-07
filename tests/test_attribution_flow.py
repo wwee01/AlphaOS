@@ -966,3 +966,58 @@ def test_digest_attribution_shadow_section_is_read_only():
     assert "attribution_shadow" in digest
     assert digest["attribution_shadow"]["enabled"] is True
     o.close()
+
+
+# ------------------------------------------- UI-PR-A hindsight batch lookup
+def _attribution_row(journal, candidate_id, symbol="AAPL", resolved_status="resolved",
+                     delta_r=None, **kw):
+    """Direct construction of one attribution_records row -- the discover/
+    resolve pipeline itself is exhaustively covered elsewhere in this file;
+    this only needs to exercise journal_store.attribution_by_candidate()'s
+    own SQL, not re-prove attribution correctness."""
+    row = {
+        "attribution_id": new_id("attr"), "attribution_type": "propose_user_rejected",
+        "attribution_version": ATTRIBUTION_VERSION, "agent": "system", "source_id": candidate_id,
+        "candidate_id": candidate_id, "symbol": symbol, "resolved_status": resolved_status,
+        "delta_r": delta_r, "data_quality_status": "ok",
+    }
+    row.update(kw)
+    journal.insert("attribution_records", row)
+
+
+def test_attribution_by_candidate_batch_lookup():
+    j = JournalStore(":memory:")
+    cid_resolved = _cand(j, status="rejected")
+    cid_pending = _cand(j, status="rejected")
+    cid_missing = _cand(j, status="rejected")  # never gets an attribution row
+    _attribution_row(j, cid_resolved, resolved_status="resolved", delta_r=1.23)
+    _attribution_row(j, cid_pending, resolved_status="pending", delta_r=None)
+
+    out = j.attribution_by_candidate([cid_resolved, cid_pending, cid_missing])
+
+    assert out[cid_resolved]["resolved_status"] == "resolved"
+    assert out[cid_resolved]["delta_r"] == 1.23
+    assert out[cid_pending]["resolved_status"] == "pending"
+    assert cid_missing not in out  # absent, never a fabricated entry
+    assert j.attribution_by_candidate([]) == {}
+
+
+def test_attribution_by_candidate_latest_row_wins():
+    """A candidate can accumulate more than one attribution row over its
+    lifecycle (e.g. re-discovered after a later config change) -- the batch
+    lookup must return the newest, not an arbitrary one. created_at_utc is
+    passed explicitly (not left to real wall-clock insert order) -- two
+    inserts in the same test can otherwise land in the same timestamp
+    resolution and make "latest wins" nondeterministic (see this project's
+    own false-green-from-wall-clock lesson)."""
+    j = JournalStore(":memory:")
+    cid = _cand(j, status="rejected")
+    _attribution_row(j, cid, resolved_status="pending", delta_r=None,
+                     created_at_utc="2026-01-01T00:00:00+00:00")
+    _attribution_row(j, cid, resolved_status="resolved", delta_r=-0.5,
+                     created_at_utc="2026-01-02T00:00:00+00:00")
+
+    out = j.attribution_by_candidate([cid])
+
+    assert out[cid]["resolved_status"] == "resolved"
+    assert out[cid]["delta_r"] == -0.5
