@@ -278,6 +278,77 @@ def test_what_learned_caveat_always_present(orchestrator):
     assert brief["what_learned"]["caveat"]
 
 
+def _resolved_attribution_row(journal, symbol="AAPL", delta_r=1.23, resolved_at_utc=None):
+    journal.insert("attribution_records", {
+        "attribution_id": new_id("attr"), "attribution_type": "propose_blocked",
+        "attribution_version": "v2", "agent": "alphaos", "source_id": new_id("s"),
+        "symbol": symbol, "resolved_status": "resolved", "delta_r": delta_r,
+        "data_quality_status": "ok", "is_mock": 0,
+        "resolved_at_utc": resolved_at_utc or timeutils.to_iso(timeutils.now_utc()),
+    })
+
+
+def test_single_resolved_row_renders_no_per_event_delta_r(orchestrator):
+    """BRIEF-FIX-1 (audit C4): one resolved real row must NOT surface its
+    ΔR figure anywhere in the rendered brief -- per-event verdicts are
+    forbidden (§H.9); ΔR appears only floor-gated via `alphaos attribution`.
+    The standing caveat must be present."""
+    from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
+
+    _resolved_attribution_row(orchestrator.journal, delta_r=1.23)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert "ΔR=" not in md
+    assert "1.23" not in md  # the row's delta_r figure never reaches the operator
+    assert "AAPL: propose blocked resolved." in md  # descriptive line survives, number-free
+    assert "1 decision(s) resolved today, 1 cumulative" in md
+    assert ATTRIBUTION_V2_CAVEAT in md
+
+
+def test_learned_headline_is_floor_gated_below_floor(journal):
+    from alphaos.reports.daily_brief import _what_learned
+
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=1))
+    _resolved_attribution_row(journal)
+
+    learned = _what_learned(journal, since)
+
+    assert learned["count"] == 1
+    assert learned["cumulative_resolved_count"] == 1
+    assert learned["aggregate_floor_met"] is False
+    assert "once floors met" in learned["headline"]
+    assert all("ΔR" not in s for s in learned["sentences"])
+
+
+def test_learned_headline_flips_wording_once_aggregate_floor_met(journal):
+    """30 resolved rows spread over 29 calendar days meets both v2 floors
+    (n>=30, span>=28d); the headline then points at the attribution report
+    as *available* rather than 'once floors met' -- still never a ΔR figure."""
+    from alphaos.reports.attribution import (
+        MIN_RESOLVED_FOR_V2_AGGREGATE,
+        MIN_SPAN_DAYS_FOR_V2_AGGREGATE,
+    )
+    from alphaos.reports.daily_brief import _what_learned
+
+    now = timeutils.now_utc()
+    since = timeutils.to_iso(now - timedelta(hours=1))
+    for i in range(MIN_RESOLVED_FOR_V2_AGGREGATE):  # days 0..29 -> span 29d >= 28d floor
+        _resolved_attribution_row(
+            journal, symbol=f"SYM{i:02d}", resolved_at_utc=timeutils.to_iso(now - timedelta(days=i)),
+        )
+    assert MIN_RESOLVED_FOR_V2_AGGREGATE - 1 >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE  # fixture sanity
+
+    learned = _what_learned(journal, since)
+
+    assert learned["cumulative_resolved_count"] == MIN_RESOLVED_FOR_V2_AGGREGATE
+    assert learned["aggregate_floor_met"] is True
+    assert "once floors met" not in learned["headline"]
+    assert "alphaos attribution" in learned["headline"]
+    assert all("ΔR" not in s for s in learned["sentences"])
+
+
 def test_what_learned_excludes_mock_rows(journal):
     from alphaos.reports.daily_brief import _what_learned
 

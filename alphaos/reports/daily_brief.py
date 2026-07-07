@@ -15,7 +15,11 @@ from typing import Optional
 
 from alphaos.data.market_data import MarketDataClient
 from alphaos.proposals import seconds_remaining
-from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
+from alphaos.reports.attribution import (
+    ATTRIBUTION_V2_CAVEAT,
+    MIN_RESOLVED_FOR_V2_AGGREGATE,
+    MIN_SPAN_DAYS_FOR_V2_AGGREGATE,
+)
 from alphaos.reports.position_health import VERDICT_EXIT_REVIEW, assess_positions
 from alphaos.reports.relative_performance import (
     build_relative_performance_report,
@@ -116,25 +120,65 @@ def _best_candidate_today(journal, since_sgt: str) -> Optional[dict]:
 
 
 def _learned_sentence(row: dict) -> str:
-    """Plain, descriptive, non-judgmental -- reuses the reporting law's
-    'aggregate tone, no moralizing' rule (specs doc §H.9)."""
-    delta = row.get("delta_r")
-    delta_str = f"{delta:+.2f}R" if delta is not None else "an unresolved ΔR"
+    """Plain, descriptive, non-judgmental -- and deliberately ΔR-free. A
+    per-event ΔR figure in the daily brief is a per-event verdict, which the
+    reporting law forbids outright (specs doc §H.9; audit C4 / BRIEF-FIX-1):
+    ΔR only ever appears as a floor-gated aggregate via `alphaos attribution`."""
     kind = (row.get("attribution_type") or "decision").replace("_", " ")
-    return f"{row.get('symbol', '?')}: {kind} resolved, ΔR={delta_str}."
+    return f"{row.get('symbol', '?')}: {kind} resolved."
 
 
 def _what_learned(journal, since_sgt: str, limit: int = UP_TO_N_LEARNED_SENTENCES) -> dict:
+    """Aggregate, floor-gated language only (§H.9). Per-symbol lines stay as
+    descriptive what-happened notes; every ΔR claim is deferred to the
+    attribution report, whose own floors decide when a mean is speakable."""
     rows = journal.query(
         "SELECT attribution_type, agent, delta_r, symbol FROM attribution_records "
         "WHERE resolved_status = 'resolved' AND is_mock = 0 AND resolved_at_utc >= ? "
         "ORDER BY resolved_at_utc DESC LIMIT ?",
         (since_sgt, limit),
     )
+    resolved_today = journal.count_rows(
+        "attribution_records",
+        "resolved_status = 'resolved' AND is_mock = 0 AND resolved_at_utc >= ?",
+        (since_sgt,),
+    )
+    agg = journal.one(
+        "SELECT COUNT(*) AS n, MIN(resolved_at_utc) AS first, MAX(resolved_at_utc) AS last "
+        "FROM attribution_records WHERE resolved_status = 'resolved' AND is_mock = 0"
+    )
+    cumulative = int(agg["n"] or 0)
+    first, last = timeutils.parse_iso(agg["first"]), timeutils.parse_iso(agg["last"])
+    span_days = (
+        (last - first).total_seconds() / 86400.0
+        if first is not None and last is not None else None
+    )
+    # Deliberately POOLED across all types/agents, unlike attribution.py's
+    # per-slice gate -- this only steers the headline's wording ("available"
+    # vs "once floors met"), never a ΔR number, so a pooled pass while every
+    # individual slice is still below its own floor merely points the operator
+    # at a report that will itself say "below_sample_floor" (audit-reviewed:
+    # over-promising the pointer is harmless; emitting a number would not be).
+    floor_met = (
+        cumulative >= MIN_RESOLVED_FOR_V2_AGGREGATE
+        and (span_days or 0) >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE
+    )
+    if floor_met:
+        tail = "floor-gated ΔR aggregates available via `alphaos attribution`"
+    else:
+        tail = (
+            "ΔR aggregates in `alphaos attribution` once floors met "
+            f"(needs ≥{MIN_RESOLVED_FOR_V2_AGGREGATE} resolved over "
+            f"≥{MIN_SPAN_DAYS_FOR_V2_AGGREGATE}d)"
+        )
+    headline = f"{resolved_today} decision(s) resolved today, {cumulative} cumulative; {tail}."
     return {
         "resolved_today": rows,
         "sentences": [_learned_sentence(r) for r in rows],
-        "count": len(rows),
+        "count": resolved_today,
+        "cumulative_resolved_count": cumulative,
+        "aggregate_floor_met": floor_met,
+        "headline": headline,
         "caveat": ATTRIBUTION_V2_CAVEAT,
     }
 
@@ -355,8 +399,8 @@ def render_markdown(brief: dict) -> str:
     lines.append("")
 
     wl = brief["what_learned"]
-    lines += ["## What AlphaOS learned"]
-    lines += [f"- {s}" for s in wl["sentences"]] or ["- (nothing newly resolved today)"]
+    lines += ["## What AlphaOS learned", f"- {wl['headline']}"]
+    lines += [f"- {s}" for s in wl["sentences"]]
     lines += [f"> ⚠️ {wl['caveat']}", ""]
 
     mg = brief["moonshot_gap"]
