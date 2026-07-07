@@ -16,8 +16,10 @@ from datetime import datetime, time as _time, timedelta, timezone as _tz
 
 from alphaos.attribution import ATTRIBUTION_VERSION
 from alphaos.constants import ProposalStatus
+from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
+from alphaos.reports.position_health import assess_positions
 from alphaos.scheduler import cost_guard
 from alphaos.tqs import TQS_VERSION
 from alphaos.util import timeutils
@@ -300,6 +302,24 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         ),
     }
 
+    # PR11: portfolio health summary, same bucket-histogram shape as
+    # tqs_shadow above. Runs the same live-price sweep benchmark_capture.py
+    # (PR9.5) already precedents inside a scheduled report job -- open
+    # positions are few (the risk engine caps concurrent count), so this is
+    # a modest cost, not a new architecture.
+    health_rows = assess_positions(journal, settings, MarketDataClient(settings, journal))
+    verdict_histogram: dict = {}
+    thesis_histogram: dict = {}
+    for h in health_rows:
+        verdict_histogram[h["verdict"]] = verdict_histogram.get(h["verdict"], 0) + 1
+        thesis_histogram[h["thesis_status"]] = thesis_histogram.get(h["thesis_status"], 0) + 1
+    position_health = {
+        "open_position_count": len(health_rows),
+        "verdict_histogram": verdict_histogram,
+        "thesis_histogram": thesis_histogram,
+        "exit_review_count": verdict_histogram.get("EXIT_REVIEW", 0),
+    }
+
     return {
         "date_sgt": timeutils.stamp().local_sgt[:10],
         "kill_switch_engaged": kill_switch.is_engaged(),
@@ -320,4 +340,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "proposal_lifecycle": proposal_lifecycle,
         "tqs_shadow": tqs_shadow,
         "attribution_shadow": attribution_shadow,
+        "position_health": position_health,
     }

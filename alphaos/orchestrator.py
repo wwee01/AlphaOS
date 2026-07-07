@@ -1173,6 +1173,14 @@ class Orchestrator:
 
         return build_decision_lineage_report(self.journal, decision_id)
 
+    def daily_brief_report(self) -> dict:
+        """PR11: the daily human interface. PURE READ — needs-you, portfolio
+        health, today's activity, best candidate, what-learned, moonshot gap,
+        one action. Never auto-exits anything; EXIT_REVIEW is a human flag."""
+        from alphaos.reports.daily_brief import build_daily_brief
+
+        return build_daily_brief(self.journal, self.settings, self.kill_switch)
+
     def flatten_paper_account(self) -> dict:
         """Paper-ONLY: cancel all open Alpaca paper orders + close all open Alpaca
         paper positions. Refuses unless the paper-only guardrails hold; the broker
