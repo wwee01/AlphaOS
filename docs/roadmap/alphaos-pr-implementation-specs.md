@@ -341,7 +341,38 @@ LLM-derived invalidation text, no gate threshold changes.
 
 ---
 
-## PR11 — DAILY BRIEF + PORTFOLIO HEALTH (not started — stale "(merged)" label removed 2026-07-07; verified against code: no `daily_brief.py`/`position_health.py` exist yet)
+## PR11 — DAILY BRIEF + PORTFOLIO HEALTH
+
+> ✅ **SHIPPED 2026-07-07** — merged `1656b3b` (branch commit `b530ac8`,
+> `feat/pr11-daily-brief-portfolio-health`), two Opus-subagent audit passes +
+> a direct Opus main-loop verification; verdict APPROVE. Suite 946/3/0.
+> **Backend only** — UI-PR-A (dashboard annunciator/Tonight tab) deferred as a
+> separate follow-up per operator decision. **As-built deltas vs this spec:**
+> 1. `position_health.py` gained a 4th AT_RISK trigger not named in §11.1: a
+>    degenerate risk basis (a live price IS available but current_r is
+>    uncomputable because stop_price is missing or == entry) surfaces as
+>    AT_RISK, never silently INTACT ("unknown must never read as fine" --
+>    audit-caught). thesis_status's BROKEN still triggers ONLY on an open
+>    protection incident (no live invalidation-condition detector in v1; that
+>    would mean re-running enrichment against current market state, explicitly
+>    out of scope -- inherits PR10's "no LLM-derived invalidation text").
+> 2. `_one_action`'s EXIT_REVIEW symbol list is capped (MAX_SYMBOLS_IN_ONE_
+>    ACTION=5, then "+N more") -- an unbounded join could exceed alerts.py's
+>    1000-char cap and truncate mid-ticker at large position counts
+>    (audit-caught; risk engine caps concurrent positions well below this in
+>    practice, so it's a defensive floor).
+> 3. The digest position_health summary and the brief's own positions_health
+>    both call assess_positions() (a deliberate double-compute -- open
+>    positions are few, builds once daily). Documented live-mode caveat: the
+>    two uncached snapshot fetches can disagree at a verdict boundary, so the
+>    two histograms should not be assumed to always agree to the row (cosmetic
+>    -- nothing gates on either count).
+> 4. Regression fixed in the same PR: `test_scheduler.py`'s fuse-realert test
+>    force-mocked every job type "due", which now also runs daily_digest (which
+>    always sends its own brief alert), inflating an exact alert-count
+>    assertion -- scoped that one test's mock to only force 'monitor' due.
+> **Still open:** UI-PR-A (the dashboard consumes the same brief dict; see
+> UI/UX doc §5) -- deferred, tracked as the next UI item.
 
 **Goal:** the daily human interface: what needs you, what the machine did, what
 it learned, the one action — plus per-position health with thesis validity.

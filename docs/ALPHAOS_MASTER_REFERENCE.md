@@ -373,11 +373,18 @@ doc's PR9.5 SHIPPED banner.
     enforced at `_execute()`, attribution/digest gain floor-gated by_card
     slices. v1 = one card (`catalyst_momentum_v1`), a behavior-neutral
     transcription. Suite 909/3/0.
-11. 🔴 **PR11 Daily Brief + Portfolio Health + Moonshot Gap** (now measurable,
-    thanks to #7's benchmark spine) + UI-PR-A annunciator/Tonight tab alongside.
-    **Next up.**
+11. ✅ **PR11 Daily Brief + Portfolio Health + Moonshot Gap** — merged `1656b3b`
+    2026-07-07, Opus-audited APPROVE (two subagent passes + a direct Opus
+    verification; 3 real issues found and fixed). The daily human interface is
+    live: `alphaos brief` CLI, per-position health (thesis INTACT/AT_RISK/BROKEN,
+    verdict HOLD/ATTENTION/EXIT_REVIEW — never auto-exits), moonshot-gap
+    arithmetic vs the 10% target (now measurable thanks to #7's benchmark spine),
+    a compact digest-job alert, and a digest position_health summary. **Backend
+    only — UI-PR-A (dashboard annunciator/Tonight tab) deferred as the next UI
+    item**, consuming the same brief dict. Suite 946/3/0.
 12. 🔴 **Structural PR before PR12** (SWE #1): typed `ScanContext` replacing the
     `_*` side-channel; ruff + loose mypy in CI; enum-ify status literals as touched.
+    **Next up** (or UI-PR-A first, operator's call).
 13. 🔴 **Eval harness before any prompt/model change** (ML #1): `alphaos eval` —
     replay journaled `packet_json` through current templates vs a frozen golden set;
     store raw completions on ALL paths including failures; then PR12–15 per specs.
