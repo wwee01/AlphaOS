@@ -15,7 +15,10 @@ and the no-news prompt, then validates defensively.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
+
+if TYPE_CHECKING:
+    from alphaos.scanner.scan_context import ScanContext
 
 from alphaos.ai import prompt_templates as pt
 from alphaos.ai.validation import enforce_no_news_sentinels, validate_no_news_eval
@@ -135,7 +138,8 @@ class OpenAIClient:
         self.use_mock = settings.is_mock or not settings.has_openai_key
         self.model = settings.openai_primary_model
 
-    def evaluate(self, candidate: dict, snapshot: dict, freshness_status: str = "usable") -> OpenAIEvaluation:
+    def evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
+                freshness_status: str = "usable") -> OpenAIEvaluation:
         """Evaluate a candidate in no-news mode (the v1 path)."""
         if self.use_mock:
             evaluation = self._mock_eval(candidate, snapshot, freshness_status)
@@ -153,7 +157,8 @@ class OpenAIClient:
                                        [ReasonCode.OPENAI_REJECT.value])
         return self._enforce_min_reward_risk(evaluation, candidate)
 
-    def _enforce_min_reward_risk(self, evaluation: OpenAIEvaluation, candidate: dict) -> OpenAIEvaluation:
+    def _enforce_min_reward_risk(self, evaluation: OpenAIEvaluation,
+                                 candidate: "Union[dict, ScanContext]") -> OpenAIEvaluation:
         """A proposal must clear the configured minimum reward:risk. Guards the
         live engine (which sets its own levels); a no-op for the mock baseline
         whose reward:risk equals TARGET_REWARD_RISK by construction."""
@@ -287,7 +292,7 @@ class OpenAIClient:
             timeout=HTTP_TIMEOUT,
         )
         usage = _extract_usage(resp)  # PR9.5: before any validation/rejection branch below
-        obj = structured_json.parse_json_object(resp.choices[0].message.content)
+        obj = structured_json.parse_json_object(resp.choices[0].message.content)  # type: ignore[arg-type]
         structured_json.require_keys(obj, pt.NO_NEWS_EVAL_KEYS)
 
         # Enforce no-news output: reject any invented/inferred catalyst.

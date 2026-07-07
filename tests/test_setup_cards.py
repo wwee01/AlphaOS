@@ -19,7 +19,7 @@ from alphaos.cards import registry as cards
 from alphaos.config.settings import SettingsError
 from alphaos.constants import PLAYBOOK_V1, ReasonCode
 from alphaos.journal.journal_store import JournalStore
-from conftest import inject_pending_proposal, make_proposal, make_settings
+from conftest import inject_pending_proposal, make_proposal
 
 
 def _write_card(directory, filename, card_id="test_card", version=1,
@@ -88,7 +88,7 @@ def test_sync_registry_inserts_new_card_and_is_idempotent(journal, settings, tmp
 
 
 def test_sync_registry_refuses_on_mutated_content_same_version(journal, settings, tmp_path):
-    path = _write_card(tmp_path, "test_card.yaml", invalidation_rule="original rule")
+    _write_card(tmp_path, "test_card.yaml", invalidation_rule="original rule")
     cards.sync_registry(journal, settings, cards_dir=tmp_path)
 
     _write_card(tmp_path, "test_card.yaml", invalidation_rule="MUTATED rule")  # same v1, different content

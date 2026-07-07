@@ -12,6 +12,7 @@ from alphaos import lineage
 from alphaos.constants import UserOverrideAction
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
+from alphaos.scanner.scan_context import ScanContext
 from conftest import inject_pending_proposal, make_settings
 
 
@@ -90,7 +91,7 @@ def test_reject_rows_get_lineage_stamps():
         "candidate_id": cand_id, "symbol": "AAPL", "direction": "long",
         "strategy": "swing", "status": "detected",
     })
-    cand = {"candidate_id": cand_id, "symbol": "AAPL"}
+    cand = ScanContext(row={"candidate_id": cand_id, "symbol": "AAPL"})
     evaluation = SimpleNamespace(
         validation_status="passed", reasoning_summary="test reject",
         direction="long", entry=100.0, stop=97.0,

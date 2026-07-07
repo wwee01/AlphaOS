@@ -61,7 +61,6 @@ def excursion_from_bars(entry: Optional[float], stop: Optional[float], direction
 
 
 def _update(journal, outcome_id: str, mfe, mae, source: str) -> None:
-    st = timeutils.stamp()
     journal.conn.execute(
         "UPDATE trade_outcomes SET mfe = ?, mae = ?, mfe_mae_source = ? WHERE outcome_id = ?",
         (mfe, mae, source, outcome_id),

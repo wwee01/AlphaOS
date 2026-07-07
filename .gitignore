@@ -30,6 +30,9 @@ alphaos.log
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+# This repo's CI/tooling uses pip, not uv -- uv.lock is incidental local
+# byproduct of `uv run`, not a committed dependency source of truth.
+uv.lock
 
 # OS / editor
 .DS_Store

@@ -17,7 +17,7 @@ Settings are plain data. Enforcement lives here (validation) and in
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from alphaos.constants import (
@@ -26,7 +26,6 @@ from alphaos.constants import (
     ApprovalMode,
     DataProvider,
     ExecutionProvider,
-    MarketDataFeed,
     MarketDataMode,
     REAL_TRADING_REQUIRED_VALUE,
     RuntimeMode,

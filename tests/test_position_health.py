@@ -66,7 +66,7 @@ def _open_incident(journal, position_id, symbol="AAPL"):
 # ------------------------------------------------------------- thesis/verdict
 def test_intact_when_healthy_no_incident_no_earnings(journal):
     settings = make_settings()
-    pos = _open_position(journal, symbol="AAPL", entry=100.0, stop=97.0, target=106.0)
+    _open_position(journal, symbol="AAPL", entry=100.0, stop=97.0, target=106.0)
     market = _FakeMarket({"AAPL": 101.0})  # +1/3 R, above the -0.5 floor
 
     health = assess_positions(journal, settings, market)

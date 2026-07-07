@@ -36,3 +36,31 @@ jobs:
 
       - name: Run test suite (offline, mock mode)
         run: python -m pytest
+
+  lint:
+    name: lint (ruff + mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to one version (not the test matrix): mypy's `python_version`
+      # setting in pyproject.toml is fixed at 3.12, and third-party stub
+      # packages (e.g. numpy, pulled in transitively) can use syntax mypy
+      # refuses to parse under an older target -- see [tool.mypy] in
+      # pyproject.toml for the full rationale.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (test + lint extras; mypy needs the test-side types too)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,lint]"
+
+      - name: ruff check
+        run: ruff check alphaos connectors tests
+
+      - name: mypy (loose -- see pyproject.toml [tool.mypy] for scope/baseline)
+        run: mypy alphaos

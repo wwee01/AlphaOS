@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from alphaos.broker.alpaca_client import AlpacaClient, AlpacaNotConnected, AlpacaSafetyError
+from alphaos.broker.alpaca_client import AlpacaClient, AlpacaSafetyError
 from alphaos.constants import (
     ExecutionProvider,
     ExecutionSource,
@@ -31,14 +31,14 @@ from alphaos.constants import (
     ReasonCode,
     Severity,
 )
-
-FILL_PRICE_BASIS = "latest_quote_or_bar"
-EXEC_MODE_SIM = "internal_simulation"
 from alphaos.execution import order_schema, protection_watchdog
 from alphaos.execution.position_manager import PositionManager
 from alphaos.safety import KillSwitch, real_trading_guard
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+
+FILL_PRICE_BASIS = "latest_quote_or_bar"
+EXEC_MODE_SIM = "internal_simulation"
 
 
 @dataclass

@@ -35,7 +35,8 @@ def _scan_orch(monkeypatch, label_decision, has_driver=True,
     monkeypatch.setattr(o, "_override_armed", lambda: True)
     detail = {"last30days": {"arming_classification": arming}} if has_driver else {}
     monkeypatch.setattr(o, "_real_decision_driver",
-                        lambda c, l, d, p=None: (has_driver, "drv" if has_driver else "", detail))
+                        lambda catalyst, last30, direction, polarity=None:
+                        (has_driver, "drv" if has_driver else "", detail))
     monkeypatch.setattr(o.labeller, "classify", _label(label_decision))
     _orig = o.openai.evaluate
 
@@ -116,5 +117,5 @@ def test_labeller_reasoning_does_not_change_decision():
     summ = o.run_scan_once()
     assert summ.labelled > 0
     labels = o.journal.query("SELECT proposal_readiness FROM candidate_labels")
-    assert labels and all(l["proposal_readiness"] for l in labels)   # populated, advisory
+    assert labels and all(label["proposal_readiness"] for label in labels)   # populated, advisory
     o.close()

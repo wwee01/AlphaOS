@@ -30,19 +30,17 @@ from alphaos.constants import (
     OverrideOutcomeStatus,
     UserOverrideAction,
     BASELINE_MOMENTUM_NO_NEWS_V1,
-    BaselineType,
     BEARISH_CATALYST_TYPES,
     BULLISH_CATALYST_TYPES,
+    CandidateStatus,
     CATALYST_NOT_AVAILABLE_V1,
     CatalystStatus,
-    CatalystType,
     DecisionAdjustment,
     Decision,
     EnrichmentSource,
     Last30DaysProvider,
     Last30DaysStatus,
     SentimentLabel,
-    ExecutionProvider,
     NEWS_STATUS_DISABLED_V1,
     NewsStatus,
     OrderState,
@@ -77,6 +75,7 @@ from alphaos.reports.daily_recon import DailyRecon
 from alphaos.safety import KillSwitch
 from alphaos.scanner.candidate_scanner import CandidateScanner
 from alphaos.scanner.candidate_packet import build_packet
+from alphaos.scanner.scan_context import ScanContext
 from alphaos.ai.playbook_classifier import PlaybookClassifier
 from alphaos.ai.last30days_polarity import Last30DaysPolarityClassifier, PolarityEvidence
 from alphaos.news.catalyst_enricher import CatalystEnricher
@@ -165,7 +164,6 @@ class Orchestrator:
             )
         checks = self.settings.validate_startup()
         for c in checks:
-            sev = c.severity if c.ok else c.severity
             level = Severity.INFO if c.ok else c.severity
             self.journal.log_system_event(
                 level, "startup", f"[{'OK' if c.ok else 'FAIL'}] {c.name}: {c.detail}"
@@ -294,7 +292,7 @@ class Orchestrator:
         }
 
         for cand in scan.candidates:
-            snapshot = cand.get("_snapshot", {})
+            snapshot = cand.snapshot or {}
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
 
@@ -328,7 +326,7 @@ class Orchestrator:
                     summary.earnings_enriched += 1
                 elif earnings_mode == "skipped_budget_cap":
                     summary.earnings_skipped_budget_cap += 1
-                if cand.get("_polarity") is not None:
+                if cand.polarity is not None:
                     summary.polarity_classified += 1
 
             evaluation = self.openai.evaluate(
@@ -356,7 +354,7 @@ class Orchestrator:
                 summary.rejected += 1
                 continue
             if decision == Decision.WATCH.value:
-                self._set_candidate_status(cand["candidate_id"], "watch")
+                self._set_candidate_status(cand["candidate_id"], CandidateStatus.WATCH.value)
                 summary.watch += 1
                 continue
 
@@ -410,10 +408,11 @@ class Orchestrator:
 
         return summary
 
-    def _handle_proposal(self, cand, evaluation, summary: ScanSummary, scan_batch_id=None) -> bool:
+    def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
+                         scan_batch_id=None) -> bool:
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
-        snapshot = cand.get("_snapshot", {})
+        snapshot = cand.snapshot or {}
         card = cards.get_default_card()
 
         risk = self.risk.assess(
@@ -441,10 +440,10 @@ class Orchestrator:
             # Persist the risk check (does NOT change whether the trade proceeds).
             rc_id = self._record_risk_check(proposal, evaluation, risk)
             proposal.risk_check_id = rc_id
-            proposal.status = "blocked"
+            proposal.status = ProposalStatus.BLOCKED.value
             self.journal.insert("trade_proposals", {
                 **proposal.to_row(),
-                **self._earnings_fields_for(cand.get("_earnings"), proposal.max_holding_days),
+                **self._earnings_fields_for(cand.earnings, proposal.max_holding_days),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             })
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
@@ -463,10 +462,10 @@ class Orchestrator:
         self._stamp_proposal_ttl(proposal, snapshot)
         rc_id = self._record_risk_check(proposal, evaluation, risk)
         proposal.risk_check_id = rc_id
-        proposal.status = "pending_approval"
+        proposal.status = ProposalStatus.PENDING_APPROVAL.value
         self.journal.insert("trade_proposals", {
             **proposal.to_row(),
-            **self._earnings_fields_for(cand.get("_earnings"), proposal.max_holding_days),
+            **self._earnings_fields_for(cand.earnings, proposal.max_holding_days),
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
         })
         # PR6: a fresh approvable proposal for this symbol supersedes any OTHER
@@ -476,8 +475,8 @@ class Orchestrator:
         self._supersede_open_proposals(cand["symbol"], proposal.proposal_id)
         # Roadmap 2.7: surface the polarity arming classification + high-risk
         # narrative warning on the proposal (advisory; never changes levels/sizing).
-        arming_cls = cand.get("_arming_classification")
-        warning = cand.get("_narrative_warning")
+        arming_cls = cand.arming_classification
+        warning = cand.narrative_warning
         if arming_cls or warning:
             self.journal.conn.execute(
                 "UPDATE trade_proposals SET arming_classification = ?, narrative_warning = ? "
@@ -490,7 +489,7 @@ class Orchestrator:
             (proposal.trade_id, cand["candidate_id"]),
         )
         self.journal.conn.commit()
-        self._set_candidate_status(cand["candidate_id"], "proposed")
+        self._set_candidate_status(cand["candidate_id"], CandidateStatus.PROPOSED.value)
         summary.proposed += 1
 
         # HIGH-RISK narrative (hype/meme/squeeze) is MANUAL-ONLY: never auto-approve,
@@ -514,9 +513,9 @@ class Orchestrator:
         if outcome.approved:
             result = self._execute(proposal)
             if result.blocked:
-                self._set_proposal_status(proposal.proposal_id, "blocked")
+                self._set_proposal_status(proposal.proposal_id, ProposalStatus.BLOCKED.value)
             else:
-                self._set_proposal_status(proposal.proposal_id, "filled")
+                self._set_proposal_status(proposal.proposal_id, ProposalStatus.FILLED.value)
                 summary.auto_submitted += 1
         else:
             summary.pending_manual += 1
@@ -732,8 +731,9 @@ class Orchestrator:
     @staticmethod
     def _eval_from_row(row: dict) -> OpenAIEvaluation:
         return OpenAIEvaluation(
-            eval_id=row.get("eval_id") or new_id("eval"), candidate_id=row.get("candidate_id"),
-            symbol=row.get("symbol"), model=row.get("model") or "unknown",
+            eval_id=row.get("eval_id") or new_id("eval"),
+            candidate_id=row.get("candidate_id"),  # type: ignore[arg-type]  # pre-existing: row is always DB-populated
+            symbol=row.get("symbol"), model=row.get("model") or "unknown",  # type: ignore[arg-type]
             direction=row.get("direction") or TradeDirection.LONG.value,
             entry=row.get("entry"), stop=row.get("stop"), target=row.get("target"),
             max_holding_days=row.get("max_holding_days"), expected_r=row.get("expected_r"),
@@ -1430,7 +1430,7 @@ class Orchestrator:
                 earnings_ctx, hold_days, self.settings.earnings_proximity_warning_days)
         return ctx.summary_fields()
 
-    def _label_candidate(self, cand: dict, snapshot: dict, scan_batch_id, enrich: bool = True,
+    def _label_candidate(self, cand: "ScanContext", snapshot: dict, scan_batch_id, enrich: bool = True,
                          l30_mode: Optional[str] = None, earnings_mode: Optional[str] = None):
         """Build the compact packet, (optionally) enrich it with catalyst +
         last30days + earnings-proximity context, journal it, AI-classify it, and
@@ -1440,7 +1440,7 @@ class Orchestrator:
         'skipped_budget_cap' (eligible but outside it), or None (disabled).
         Earnings context is NEVER applied to the packet -- it must not reach the
         AI eval/labeller prompt."""
-        signals = cand.get("_interest")
+        signals = cand.interest
         if signals is None:  # defensive: recompute if the scanner didn't attach it
             from alphaos.scanner.interest_scanner import InterestScanner
 
@@ -1525,14 +1525,14 @@ class Orchestrator:
                            polarity, earnings)
         # Stash the advisory context so _resolve_decision can (a) decide whether a
         # real driver justifies a symmetric override and (b) record the driver.
-        cand["_catalyst"] = catalyst
-        cand["_last30"] = last30
-        cand["_polarity"] = polarity
-        cand["_earnings"] = earnings
-        cand["_packet_id"] = packet.packet_id
+        cand.catalyst = catalyst
+        cand.last30 = last30
+        cand.polarity = polarity
+        cand.earnings = earnings
+        cand.packet_id = packet.packet_id
         return classification
 
-    def _freeze_label(self, cand, packet, classification, scan_batch_id, catalyst=None,
+    def _freeze_label(self, cand: "ScanContext", packet, classification, scan_batch_id, catalyst=None,
                       last30=None, polarity=None, earnings=None) -> None:
         """Persist the label (append-only history) + freeze the current view onto
         the candidate, including the advisory catalyst (2.4) + last30days (2.5) +
@@ -1692,16 +1692,17 @@ class Orchestrator:
             return base
         return label
 
-    def _resolve_decision(self, cand, evaluation, classification, scan_batch_id, summary) -> str:
+    def _resolve_decision(self, cand: "ScanContext", evaluation, classification, scan_batch_id,
+                          summary) -> str:
         """Compute the final trade decision from the eval + label, applying the
         gated symmetric override, and ALWAYS record how/why it moved (audit for
         learning). Returns the final decision; downstream gates + manual approval
         are unchanged and still authoritative."""
         base = evaluation.decision
         label = classification.label_decision
-        catalyst = cand.get("_catalyst")
-        last30 = cand.get("_last30")
-        polarity = cand.get("_polarity")
+        catalyst = cand.catalyst
+        last30 = cand.last30
+        polarity = cand.polarity
         has_driver, driver_str, driver_detail = self._real_decision_driver(
             catalyst, last30, evaluation.direction, polarity)
         override_active = self._override_armed() and has_driver
@@ -1729,11 +1730,11 @@ class Orchestrator:
                       or getattr(polarity, "arming_classification", None))
         if (adjustment == DecisionAdjustment.UPGRADED.value
                 and arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value):
-            cand["_arming_classification"] = ArmingClassification.HIGH_RISK_NARRATIVE.value
-            cand["_narrative_warning"] = getattr(polarity, "warning_message", "") or ""
+            cand.arming_classification = ArmingClassification.HIGH_RISK_NARRATIVE.value
+            cand.narrative_warning = getattr(polarity, "warning_message", "") or ""
             summary.high_risk_narrative += 1
         elif adjustment == DecisionAdjustment.UPGRADED.value and arming_cls:
-            cand["_arming_classification"] = arming_cls
+            cand.arming_classification = arming_cls
 
         # Roadmap 2.8 (Part A) — ARMED WATCH: the override armed a real driver but
         # the decision stayed WATCH (no upgrade) because eval/labeller produced no
@@ -1747,7 +1748,7 @@ class Orchestrator:
                                   else ArmedWatchReason.EVAL_NOT_TRADEABLE.value)
             summary.armed_watch += 1
 
-        earnings = cand.get("_earnings")
+        earnings = cand.earnings
         self._record_decision_adjustment(
             cand, evaluation, classification, base, final, adjustment,
             override_active, driver_str, driver_detail, catalyst, last30, earnings, scan_batch_id,
@@ -1804,7 +1805,7 @@ class Orchestrator:
             }
         return ev
 
-    def _record_decision_adjustment(self, cand, evaluation, classification, base, final,
+    def _record_decision_adjustment(self, cand: "ScanContext", evaluation, classification, base, final,
                                     adjustment, override_active, driver_str, driver_detail,
                                     catalyst, last30, earnings, scan_batch_id, armed_watch=False,
                                     armed_watch_reason=None, arming_cls=None) -> None:
@@ -1818,7 +1819,7 @@ class Orchestrator:
         self.journal.insert("decision_adjustments", {
             "adjustment_id": new_id("dadj"),
             "candidate_id": cand["candidate_id"],
-            "packet_id": cand.get("_packet_id"),
+            "packet_id": cand.packet_id,
             "scan_batch_id": scan_batch_id,
             "symbol": cand.get("symbol"),
             "eval_decision": base,
@@ -1946,7 +1947,8 @@ class Orchestrator:
         proposal.target_price_source = src
         proposal.stop_price_source = src
 
-    def _reject_candidate(self, cand, stage, evaluation, reason: Optional[str] = None) -> None:
+    def _reject_candidate(self, cand: "ScanContext", stage, evaluation,
+                          reason: Optional[str] = None) -> None:
         if reason is None:
             # No-news mode: rejections come from data/validation/risk, not "no news".
             if evaluation.validation_status not in (None, "", "passed"):
@@ -1967,15 +1969,15 @@ class Orchestrator:
                 "would_be_stop": evaluation.stop,
                 # PR5: earnings-proximity, recomputed against the REAL max_holding_days.
                 **self._earnings_fields_for(
-                    cand.get("_earnings"),
+                    cand.earnings,
                     getattr(evaluation, "max_holding_days", None)
                     or self.settings.earnings_proximity_default_hold_days),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             },
         )
-        self._set_candidate_status(cand["candidate_id"], "rejected")
+        self._set_candidate_status(cand["candidate_id"], CandidateStatus.REJECTED.value)
 
-    def _record_baselines(self, cand, evaluation) -> None:
+    def _record_baselines(self, cand: "ScanContext", evaluation) -> None:
         """Record the v1 no-news baseline (the live measurement path).
 
         News-dependent fields are written as NULL so the news layer can populate
@@ -1996,7 +1998,7 @@ class Orchestrator:
                 "target_profile": TargetProfile.CONFIGURED_STANDARD.value,
                 "direction": evaluation.direction,
                 "reference_price": ref_price,
-                "ref_timestamp": cand.get("_snapshot", {}).get("quote_timestamp"),
+                "ref_timestamp": (cand.snapshot or {}).get("quote_timestamp"),
                 "ai_decision": evaluation.decision,
                 "claude_consulted": 0,
                 "news_status": NEWS_STATUS_DISABLED_V1,

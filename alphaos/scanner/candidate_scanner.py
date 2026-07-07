@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from alphaos.constants import (
+    CandidateStatus,
     NewsStatus,
     PLAYBOOK_V1,
     ReasonCode,
@@ -29,6 +30,7 @@ from alphaos.data.market_data import MarketDataClient
 from alphaos import lineage
 from alphaos.cards.registry import get_default_card
 from alphaos.scanner.interest_scanner import InterestScanner
+from alphaos.scanner.scan_context import ScanContext
 from alphaos.util.ids import new_id
 
 # A small, deliberately liquid default universe for v1 (core tier). Illiquid
@@ -42,7 +44,7 @@ DEFAULT_UNIVERSE = [
 @dataclass
 class ScanResult:
     scan_id: str
-    candidates: list = field(default_factory=list)
+    candidates: "list[ScanContext]" = field(default_factory=list)
     snapshots: int = 0
     blocked_stale: int = 0
     rejected_illiquid: int = 0
@@ -55,8 +57,8 @@ class CandidateScanner:
         self.market = market_data or MarketDataClient(settings, journal)
         self.freshness = FreshnessGuard.from_settings(settings)
         self.interest = InterestScanner(settings)   # Roadmap 2.3: deterministic interest scoring
-        self._spy = None
-        self._qqq = None
+        self._spy: Optional[dict] = None
+        self._qqq: Optional[dict] = None
 
     def build_universe(self, scan_id: str, symbols: Optional[list[str]] = None) -> list[str]:
         symbols = symbols or DEFAULT_UNIVERSE
@@ -145,7 +147,7 @@ class CandidateScanner:
             return ReasonCode.WIDE_SPREAD.value
         return None
 
-    def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[dict]:
+    def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[ScanContext]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
         # Roadmap 2.3: deterministic market-interest signals (broadens discovery
@@ -180,14 +182,14 @@ class CandidateScanner:
             "spread_ok": 1,
             "news_status": NewsStatus.NEWS_UNAVAILABLE.value,  # set later by orchestrator
             "price_snapshot_id": snapshot_id,
-            "status": "detected",
+            "status": CandidateStatus.DETECTED.value,
             # --- Trade Packet v1 evidence fields ---
             "asset_type": asset_type,
             "playbook_name": PLAYBOOK_V1,
             "setup_classification": "momentum_continuation",
             "card_id": card["card_id"],
             "card_version": card["version"],
-            "status_reason": "detected",
+            "status_reason": CandidateStatus.DETECTED.value,
             "price_at_scan": snapshot.get("last_price"),
             "volume_at_scan": snapshot.get("volume"),
             # --- Roadmap 2.3: deterministic interest evidence (rank assigned later) ---
@@ -200,9 +202,10 @@ class CandidateScanner:
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).
         cand["last_price"] = snapshot.get("last_price")
-        cand["_snapshot"] = snapshot
-        cand["_interest"] = signals   # full InterestSignals for the packet builder
-        return cand
+        ctx = ScanContext(row=cand)
+        ctx.snapshot = snapshot
+        ctx.interest = signals   # full InterestSignals for the packet builder
+        return ctx
 
     def _persist_snapshot(self, snapshot_id, snapshot, report) -> None:
         self.journal.insert(

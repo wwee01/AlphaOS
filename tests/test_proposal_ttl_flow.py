@@ -15,6 +15,7 @@ from alphaos.constants import EarningsDataStatus, ProposalStatus, ReasonCode
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
+from alphaos.scanner.scan_context import ScanContext
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 from conftest import inject_pending_proposal, make_settings
@@ -354,7 +355,8 @@ def _propose_evaluation(o, symbol="AAPL"):
         "candidate_id": cand_id, "symbol": symbol, "direction": "long",
         "strategy": "swing", "status": "detected",
     })
-    cand = {"candidate_id": cand_id, "symbol": symbol, "_snapshot": snap}
+    cand = ScanContext(row={"candidate_id": cand_id, "symbol": symbol})
+    cand.snapshot = snap
     evaluation = OpenAIEvaluation(
         eval_id=new_id("eval"), candidate_id=cand_id, symbol=symbol, model="mock",
         direction="long", entry=entry, stop=round(entry * 0.97, 2), target=round(entry * 1.06, 2),
