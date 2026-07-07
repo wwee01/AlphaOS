@@ -628,6 +628,18 @@ def test_run_due_jobs_logs_scheduler_fused_system_event(orchestrator):
 def test_fuse_alert_and_log_are_deduped_across_two_consecutive_fused_ticks(orchestrator, monkeypatch):
     calls = []
     monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    # Force ONLY 'monitor' due so this alert-count assertion measures the fuse
+    # alert alone -- PR11's daily_digest job now sends its own brief alert
+    # whenever IT is due, and its real cadence (a wall-clock time-of-day check)
+    # would otherwise leak a second, unrelated alert into this count depending
+    # on when the suite happens to run (the §H.1 "never depend on organic
+    # cadence" flake class -- this bit the merged-main run).
+    monkeypatch.setattr(
+        cadence, "is_due",
+        lambda job_type, settings, journal, now=None: (
+            (True, "forced for test") if job_type == cadence.JobType.MONITOR.value else (False, "not due")
+        ),
+    )
 
     for _ in range(3):
         _insert_job_run(orchestrator.journal, "monitor", "failed")
@@ -648,6 +660,14 @@ def test_fuse_dedupe_survives_a_null_finished_at_utc_on_the_last_completed_row(o
     make _handle_fuse re-alert on every single tick instead of once)."""
     calls = []
     monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    # Force ONLY 'monitor' due -- same reason as the sibling dedupe test above:
+    # keep PR11's daily_digest brief alert out of this fuse-alert count.
+    monkeypatch.setattr(
+        cadence, "is_due",
+        lambda job_type, settings, journal, now=None: (
+            (True, "forced for test") if job_type == cadence.JobType.MONITOR.value else (False, "not due")
+        ),
+    )
     # A completed row with an explicit NULL finished_at_utc -- schema-legal
     # (the column is nullable), even though no current writer produces it.
     orchestrator.journal.insert("job_runs", {
