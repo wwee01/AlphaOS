@@ -131,6 +131,17 @@ def cmd_relative_performance_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_brief(orch: Orchestrator) -> int:
+    """PR11: the daily human interface. PURE READ."""
+    from alphaos.reports.daily_brief import render_markdown
+
+    brief = orch.daily_brief_report()
+    print(render_markdown(brief))
+    print()
+    _print({"daily_brief": brief})
+    return 0
+
+
 def cmd_decision_lineage(orch: Orchestrator, decision_id: str) -> int:
     """READ-ONLY: which code/config/model/prompt/data/scheduler context
     produced this decision. Accepts a candidate_id, proposal_id,
@@ -359,6 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("overrides", help="list user overrides + attribution summary")
     sub.add_parser("attribution_report",
                    help="user-override attribution learning report (AlphaOS vs user; heuristic)")
+    sub.add_parser("brief", help="the daily human interface: needs-you, portfolio health, one action (PR11)")
     sub.add_parser("backfill_mfe_mae",
                    help="backfill MFE/MAE on closed trades from before excursion tracking existed (idempotent)")
     sub.add_parser("outcomes_update",
@@ -437,6 +449,8 @@ def main(argv=None) -> int:
             return cmd_overrides(orch)
         if args.command == "attribution_report":
             return cmd_attribution_report(orch)
+        if args.command == "brief":
+            return cmd_brief(orch)
         if args.command == "backfill_mfe_mae":
             return cmd_backfill_mfe_mae(orch)
         if args.command == "outcomes_update":

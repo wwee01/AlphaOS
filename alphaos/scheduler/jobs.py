@@ -82,11 +82,25 @@ def run_outcomes_job(orch, runner) -> dict:
 
 
 def run_daily_digest_job(orch, runner) -> dict:
-    """Scheduler wrapper around ``digest.build_daily_digest()``. PURE READ."""
+    """Scheduler wrapper around ``digest.build_daily_digest()``. PURE READ,
+    plus (PR11) building the daily brief and sending its compact form via
+    ``alerts.send_alert`` -- title is the brief's own one action item, so an
+    operator sees what needs them without opening a terminal. ``send_alert``
+    never raises and no-ops silently when NTFY_TOPIC is unset."""
+    from alphaos.reports.daily_brief import build_daily_brief, render_compact
     from alphaos.scheduler.digest import build_daily_digest
+    from alphaos.util import alerts
 
     digest = build_daily_digest(orch.journal, orch.settings, orch.kill_switch)
-    return {"status": "completed", "digest": digest}
+    brief = build_daily_brief(orch.journal, orch.settings, orch.kill_switch)
+    alerts.send_alert(
+        orch.settings,
+        title=brief["one_action"],
+        message=render_compact(brief),
+        priority="default",
+        journal=orch.journal,
+    )
+    return {"status": "completed", "digest": digest, "brief": brief}
 
 
 def run_benchmark_spine_job(orch, runner) -> dict:

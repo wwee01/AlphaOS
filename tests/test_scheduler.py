@@ -702,8 +702,19 @@ def test_fuse_clears_after_a_manual_successful_run(orchestrator, monkeypatch):
 def test_fuse_re_alerts_on_a_genuinely_new_episode_after_clearing(orchestrator, monkeypatch):
     """Two SEPARATE fuse episodes (cleared by a manual success in between)
     must each alert once -- the dedupe watermark must advance, not permanently
-    suppress every future episode for the same job_type."""
-    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+    suppress every future episode for the same job_type.
+
+    Scoped to ONLY 'monitor' being due (not a blanket force-everything-due
+    like sibling tests use) -- PR11's daily_digest job now sends its own
+    unrelated alert whenever it runs, which would otherwise inflate this
+    test's exact alert-count assertions with a call that has nothing to do
+    with the fuse behavior actually under test."""
+    monkeypatch.setattr(
+        cadence, "is_due",
+        lambda job_type, settings, journal, now=None: (
+            (True, "forced for test") if job_type == cadence.JobType.MONITOR.value else (False, "not due")
+        ),
+    )
     calls = []
     monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
     runner = JobRunner(orchestrator)
