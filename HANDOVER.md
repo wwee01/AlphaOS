@@ -1,6 +1,6 @@
 # HANDOVER
 
-**Checkpoint: 2026-07-07 — PR11 COMPLETE (merged, audited, post-merge flake fixed) · branch `main` @ `0710dbc` · tests 947/3/0 · mode PAPER · execution `alpaca_paper` · AI = LIVE (OpenAI) · real-money UNREACHABLE · 0 open positions · kill switch OFF · **SCHEDULER RUNNING UNATTENDED** (2 LaunchAgents live since 2026-07-06) · **backup automation LIVE** (3rd LaunchAgent, verified 2026-07-07) · **benchmark spine capturing daily** · **setup cards + exit-first invariant LIVE** · **daily brief + portfolio health LIVE** (`alphaos brief`) · **Next: PR12-prep ScanContext refactor OR UI-PR-A (operator's call), neither started**
+**Checkpoint: 2026-07-08 — FINAL FOUNDING-TEAM NIGHT · branch `main` @ `df8e879` (pushed) · SC (ScanContext) + UI-PR-A both MERGED (`5e39f6f`, `c3eeefb`, operator-pushed) · 959 tests collected post-merges (per their audits; this checkpoint's session did not re-run the full suite) · mode PAPER · execution `alpaca_paper` · AI = LIVE (OpenAI) · real-money UNREACHABLE · kill switch OFF · **SCHEDULER RUNNING UNATTENDED** (3 LaunchAgents) · **benchmark spine capturing daily** · **setup cards + exit-first invariant LIVE** · **daily brief + portfolio health LIVE** · **operator console v1 LIVE** (annunciator/Tonight/Positions/hindsight) · **Final review COMPLETE: docs are v1.1/v1.2 — read master reference §3.5 + §5; Next: OPS-A → EXP-0, then Lane A per §5; BRIEF-FIX-1 running in a parallel session**
 
 > Single entry point for the next session — but read `docs/ALPHAOS_MASTER_REFERENCE.md` FIRST if you're new: it is now the root document (team exit review, gate inventory, punch list, operating manual, decision log). This file answers "where are we right now"; that file answers everything else.
 > ✅ **PR11 (Daily Brief + Portfolio Health) is fully done** — merged `1656b3b`, Opus-audited (two subagent passes + a direct Opus main-loop verification; verdict APPROVE; 3 real issues found and fixed). The daily human interface: `alphaos brief` CLI + per-position health (thesis INTACT/AT_RISK/BROKEN, verdict HOLD/ATTENTION/EXIT_REVIEW — **never auto-exits**, EXIT_REVIEW is a human flag) + moonshot-gap arithmetic vs the 10% target + a compact digest-job alert + a digest position_health summary. **Backend only — UI-PR-A (dashboard annunciator/Tonight tab) is deferred as the next UI item**, consuming the same brief dict. Full details: specs doc's PR11 SHIPPED banner.
@@ -13,6 +13,9 @@
 > ✅ Protection watchdog, TTL chokepoint, 4-lock real-money unreachability: all re-verified by the CRO lens (243 safety tests + file:line trace, gate table in master reference §3) — and the kill-switch + monitor-keeps-running behavior was independently re-verified again during the live drills, against real production, not just tests.
 
 ## Changelog (most recent first)
+- **Final founding-team review + EXP-0 staging** (`ab84284` + `df8e879`, 2026-07-08, docs-only): three parallel instruments — a codebase reality audit, an adversarial Opus audit of the self-learning loop, and a four-partner strategy debate (PM/quant/trader/CRO) — consolidated and written into the four roadmap docs. Headlines: (1) the loop as previously drawn **could not close** — nothing turned a promoted hypothesis diff into a new card version; now law via PR13.5 ("PR12 proposes diffs; PR13 toggles state; only an operator-committed YAML changes card behavior; no job writes `cards/*.yaml`"); (2) floors counted rows not independent bets → PORT-1's `effective_n()` one-floor law + one-shot preregistration evaluation + cumulative BH-FDR; (3) the exit-review addendum integrated into the specs doc under canonical names (TASK-R/CANARY/BASELINE/OPS-A/OPS-B/PORT-1, original archived in `docs/roadmap/`), with BASELINE upgraded to three arms + day-block-bootstrap CI; (4) new items EVAL-1 (eval harness + operator-adjudicated ground truth), INSTR-1 (time-normalized rel_volume + ATR stops = `catalyst_momentum_v2`), EARN-1, EXP-0/EXP-1, COST-1, BRIEF-FIX-1 (audit C4: the brief renders per-event ΔR unfloored — fix running in a parallel session); (5) PR12 inverted to **registry-first** with 8 seeded hypotheses; PR13 ships **demotion-first** (per-card scoreboard); cards v2–v5 named with sketches; (6) **EXP-0** (operator-directed): deterministic shadow-tier capture of ~300 small/mid names ($5–50M ADV, batch snapshots, instrument-version labeled, zero AI calls, structurally no proposals) slots immediately after OPS-A — the niche dataset starts now, AI labelling waits for honest instruments. **The authoritative order is master reference §5 (two lanes).** All doc versions bumped with rationale.
+- **UI-PR-A — Operator Console v1** (merged `c3eeefb`, branch commits `2dd1d75`+`449a0ff`, 2026-07-08, operator-pushed): annunciator strip (kill switch moved from sidebar; pure-read heartbeat), Tonight tab (brief dict), Positions health cards (text R-ladder), Approval Center TTL-sort + verbatim exit plan, Candidate Flow hindsight ΔR (batch `attribution_by_candidate()`, pending-never-zero, mock-tagged). +67 tests. OPS-A (loopback bind) is the named follow-up.
+- **SC — ScanContext structural refactor** (merged `5e39f6f`, branch commit `931de21`, 2026-07-08, operator-pushed): exit-review T5 closed structurally — typed `ScanContext` dataclass, `__setitem__` refuses `_`-prefixed keys (prompt-leak bug class now impossible; PR9.1 strip retained as defense in depth), `CandidateStatus` enum, ruff + loose mypy in CI.
 - **PR11 post-merge flake fix** (`0710dbc`, 2026-07-07): the FIRST post-merge full-suite verification went RED on 2 `test_scheduler.py` fuse-dedupe tests. PR11's `daily_digest` job now sends its own brief alert; those tests count exact `send_alert` calls after `run_due_jobs()` WITHOUT mocking `is_due`, so when daily_digest's real time-of-day cadence was due at run time, a second unrelated alert inflated the count. My pre-merge "green" run had passed only because daily_digest wasn't due at that instant — a **false green**. Fixed by scoping both tests' `is_due` to force only 'monitor' due (deterministic, matches the sibling fix from the PR11 build). Test-only, no production change; production behavior (digest sends a brief alert) is correct. Suite re-verified 947/3/0. Lesson recorded in memory `feedback_false_green_cadence_dependent_tests.md`. **Open product question for the operator**: should the daily_digest alert suppress the "Nothing needs you right now" case to avoid alert fatigue? (Spec says always-send; not changed unilaterally.)
 - **PR11 — Daily Brief + Portfolio Health** (merged `1656b3b`, branch commit `b530ac8`, 2026-07-07): the daily human interface, backend only (UI-PR-A deferred). Two new pure-read report modules: `position_health.py`'s `assess_positions()` (per open position: `current_r`/`distance_to_stop_r`/`distance_to_target_r` reusing `PositionManager._unrealized_r`; `thesis_status` INTACT/AT_RISK/BROKEN; `verdict` HOLD/ATTENTION/EXIT_REVIEW — **EXIT_REVIEW never auto-exits, it's a human flag**) and `daily_brief.py`'s `build_daily_brief()` (market condition from PR9.5's `excess_return_pct`, needs-you, positions health, today's activity, best TQS candidate, up-to-3 newly-resolved attribution rows as plain sentences, moonshot-gap arithmetic vs the 10% MoM target with the binding constraint named, one prioritized action). CLI `alphaos brief`; the scheduler `daily_digest` job now also sends a compact brief alert (title = the one action item); digest dict gains a `position_health` summary. **Opus audit** (two subagent passes + a direct Opus main-loop verification): 3 real issues found and fixed — (a) a degenerate zero-risk-basis position silently read INTACT (now AT_RISK); (b) an unbounded EXIT_REVIEW symbol list could overflow alerts.py's 1000-char cap and truncate mid-ticker (now capped at 5 + "+N more"); (c) the digest/brief double `assess_positions()` compute can disagree at a verdict boundary in live mode (documented honestly, cosmetic — nothing gates on it). One real regression caught by the full suite and fixed: `test_scheduler.py`'s fuse-realert test force-mocked every job type "due", which now also runs `daily_digest` (which always sends its own alert), inflating an exact alert-count assertion — scoped that one test's mock to only 'monitor'. R-math correctness (incl. shorts + zero-risk edge cases), verdict priority ordering under real DB state, and full isolation (no gate/risk/execution path reads either module) all independently verified. Suite: 946 passed, 3 skipped, 0 failed. As-built deltas: specs doc's PR11 SHIPPED banner.
 - **PR10 — Setup Cards v1 + exit-first invariant** (merged `0e5b3fa`, branch commit `6c4e6a1`, 2026-07-07): the versioned join key for the whole learning loop. Declarative YAML cards in `alphaos/cards/*.yaml` + a `setup_cards` DB registry synced at every orchestrator startup (idempotent upsert keyed by `(card_id, version)`, append-only per version — a content change without a version bump refuses to start with a loud `SettingsError`, per Prime Directive 7). v1 ships exactly one card, `catalyst_momentum_v1`, a faithful transcription of the pre-card pipeline (no decision behavior changes). Every candidate + proposal now stamped with `card_id`/`card_version` (100% coverage across all 5 creation paths — `_handle_proposal`'s two branches, `_override_open_trade`, `seed_demo`, the scanner). **Exit-first invariant** ("no entry without a written exit"): every proposal's `invalidation_reason` populated from its card; `_execute()` (the one submission chokepoint) blocks any proposal missing entry/stop/target/max_holding_days/invalidation_reason with the new `ReasonCode.EXIT_PLAN_INCOMPLETE`, including legacy pre-PR10 rows (fail-safe: block, never wave through). Attribution v2 + daily-digest TQS gain floor-gated by_card slices (report-time joins; the shadow tables never store `card_id`, preserving their measurement-only isolation). New dependency `pyyaml` (the project's first — was zero; `yaml.safe_load` only). +25 tests. **Opus audit** (two subagent passes + a direct Opus pass): APPROVE, no findings, no bypass — report neutrality (attribution LEFT JOIN can't fan out since `candidate_id` is UNIQUE; digest main histogram byte-identical), decision neutrality (`risk_engine`/`swing_strategy` git-diff-untouched), and isolation (no gate/risk/execution/approval path reads card data) all independently verified. Suite: 909 passed, 3 skipped, 0 failed. As-built deltas: specs doc's PR10 SHIPPED banner.
@@ -45,9 +48,10 @@ AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini,
 
 **The strategic picture (updated by the 2026-07-06 exit review, PR9.5/PR10/PR11-adjusted 2026-07-07)**: the instrument is complete and the tap is now open. Of the review's three convergent CRITICALs, two are closed by PR9.5 — the ledger has real off-machine backups, and vs-S&P performance measurement is now capturing daily. PR10 added the versioned join key (setup cards) making per-strategy learning attributable; PR11 added the daily human interface (brief + portfolio health) that surfaces the vs-S&P line and moonshot gap. The third CRITICAL remains open: the current megacap universe/frequency configuration is still the **control group, not the fund** (ceiling ~21 trades/month theoretical, 4–8 realistic → can neither reach nor statistically validate the target). That's what the Phase-3 pull-forwards (master reference §5 item 14) address; the ScanContext structural refactor (item 12) and UI-PR-A come first. The revised order is in the master reference §5 punch list.
 
-## 2. What was just implemented (this checkpoint)
-- **PR11 Daily Brief + Portfolio Health merged AND Opus-audited** (see changelog) — `alphaos brief` CLI, per-position health engine, moonshot-gap arithmetic, compact digest alert, digest position_health summary. Backend only (UI-PR-A deferred). Shipped `1656b3b`. Suite 946/3/0.
-- **Next: the ScanContext structural refactor (§5 item 12) OR UI-PR-A (dashboard) — operator's call, neither started.**
+## 2. What was just implemented (this checkpoint, 2026-07-08)
+- **SC + UI-PR-A merged and pushed** (see changelog) — the side-channel is structurally dead; the operator console v1 is live.
+- **The final founding-team review is written into the docs** — master reference v1.1 (§3.5 audit findings + partners' verdicts, §5 two-lane punch list, §9 new decision rows), specs doc v1.1 (addendum integrated, PR12–13.5 expanded, EXP-0/EVAL-1/INSTR-1/EARN-1/EXP-1/COST-1 added), build plan v1.2, UI/UX doc v1.1. Docs-only commits `ab84284` + `df8e879`, pushed.
+- **Next build items, in order: OPS-A (dashboard loopback bind — small, urgent) → EXP-0 (deterministic shadow-tier universe capture) → EVAL-1 → PORT-1 → …** per master reference §5 Lane A. Lane B (any slack): TASK-R, CANARY, OPS-B. BRIEF-FIX-1 is already running in a parallel session.
 
 ## 3. What is working (verified this checkpoint)
 - **Full suite: 946 passed, 3 skipped, 0 failed** — full run confirmed post-PR11-merge, exit code 0 (949 collected).
@@ -70,9 +74,8 @@ AlphaOS is a **learning-first, paper-trading "operating system"** on a Mac mini,
 - ~~PR9.5 — Ops & Measurement Hardening~~ ✅ merged `e075adb`, audited, activated. Backup automation, benchmark spine, cost-cap true-up, ops hygiene all live. Only the operator's own quarterly restore-drill remains (human-only, non-blocking).
 - ~~PR10 — Setup Cards v1 + exit-first invariant~~ ✅ merged `0e5b3fa`, Opus-audited APPROVE. Setup-card registry, 100% stamping, exit-first enforcement, by_card slices all live.
 - ~~PR11 — Daily Brief + Portfolio Health + Moonshot Gap~~ ✅ merged `1656b3b`, Opus-audited APPROVE. `alphaos brief` CLI, per-position health, moonshot-gap arithmetic, compact digest alert. **Backend only — UI-PR-A (dashboard, consumes the same brief dict) deferred as the next UI item.**
-- **Next up (operator's call): the structural PR before PR12** — typed `ScanContext` replacing the `cand["_*"]` side-channel (two independent reviewers converged on this seam); ruff + loose mypy in CI — **OR UI-PR-A** (the dashboard annunciator/Tonight tab, now that PR11's brief dict exists to feed it). Neither started.
-- **Eval harness before any prompt/model change** (`alphaos eval`, golden set, keep raw completions incl. failures) → then **PR12–PR15** per skeletons.
-- **Phase-3 pull-forwards, evidence-gated**: time-of-day-normalized rel_volume (currently structurally broken intraday), ATR-scaled stops, real earnings provider as hard gate, shadow small/mid catalyst universe, portfolio-level gates (gross-notional/sector caps, live-equity sizing — kill the static 100k constant).
+- ~~ScanContext structural PR~~ ✅ merged `5e39f6f` 2026-07-08. ~~UI-PR-A~~ ✅ merged `c3eeefb` 2026-07-08.
+- **The authoritative order is now master reference §5's two-lane ruling (2026-07-08 final review).** Lane A: OPS-A → EXP-0 → EVAL-1 → PORT-1 → INSTR-1 → BASELINE → EARN-1 → EXP-1 → PR12 (registry-first) → PR13 (demotion-first) + PR13.5 → cards v2–v3 → PR14 → Regime v1 + COST-1 → portfolio gates → PR15/L3. Lane B: TASK-R · CANARY (before EXP-1) · OPS-B · BRIEF-FIX-1 · quarterly restore drill (user-only, blocks L3). Every item has a buildable spec in the specs doc v1.1.
 - Beyond: as previously listed (Phase 4 crossing + drawdown governor, sleeves, edge factory) — master build plan §6; **plus the new CRO law: no autonomy promotion until every alert path has fired once for real and a backup has been restored once.**
 
 ## 6. Test results
@@ -137,30 +140,32 @@ ALPHAOS_MODE=mock EXECUTION_PROVIDER=simulated_internal LAST30DAYS_ENABLED=false
 
 ## 9. Recommended next prompt (paste into a fresh window)
 ```
-Read docs/ALPHAOS_MASTER_REFERENCE.md first (root document: exit review, punch list,
-operating manual), then HANDOVER.md (current state). main is at 85ae705 + the review
-docs commit. PR9 is merged AND activated -- the scheduler runs unattended via two
-LaunchAgents since 2026-07-06; do not re-install or re-activate anything.
+Read docs/ALPHAOS_MASTER_REFERENCE.md first (root document -- note the new §3.5
+final-review record and the §5 two-lane punch list), then HANDOVER.md (current
+state). main is at df8e879, pushed. The scheduler runs unattended via three
+LaunchAgents; do not re-install or re-activate anything.
 
-State check: `git fetch && git status -sb`; `.venv/bin/python -m pytest` -- NOTE the
-suite has 2 known date-flaky failures on the Jul-6+ mock seed (test_decision_override,
-being fixed in PR9.1); 0 open positions via the §8 read-only command; kill switch off;
-`launchctl list | grep com.ck.alphaos` should show scheduler + heartbeat.
+State check: `git fetch && git status -sb`; `.venv/bin/python -m pytest` (expect
+~959 collected, 0 failed -- if the parallel BRIEF-FIX-1 session merged, slightly
+more); 0 open positions via the §8 read-only command; kill switch off;
+`launchctl list | grep com.ck.alphaos` shows scheduler + heartbeat + backup.
 
-Work through the master reference §5 punch list IN ORDER. If the PR9.1 hotfix branch
-(fix/no-news-prompt-leak) is not yet merged, that is the top priority -- review it,
-re-run the suite, and ask the user for the explicit merge instruction (T4: never merge
-without it). Next unbuilt code item after that: PR9.5 (Ops & Measurement Hardening),
-fully spec'd in docs/roadmap/alphaos-pr-implementation-specs.md. The operator day-1
-items (NTFY_TOPIC, trade-cap drift, pmset autorestart, chmod .env, drills) are
+Work Lane A of the master reference §5 punch list IN ORDER. Next unbuilt items:
+OPS-A (dashboard loopback bind -- small, urgent since UI-PR-A widened the action
+surface), then EXP-0 (deterministic shadow-tier universe capture -- zero AI calls,
+structurally no proposals). Both fully spec'd in
+docs/roadmap/alphaos-pr-implementation-specs.md v1.1. Lane B items (TASK-R,
+CANARY, OPS-B) can ride any session's slack. The quarterly restore drill is
 user-only -- remind, don't do.
 
 Follow the established protocol: ground in current code, deterministic
-direct-construction tests only (§H.1 -- the date-flake class has now bitten THREE
-times), full suite, independent review + Opus audit, merge only on explicit human
-instruction. Hard constraints: HANDOVER §10 + master reference §4 (incl. the new CRO
-law: no autonomy promotion until every alert path has fired for real and a backup has
-been restored once).
+direct-construction tests only (§H.1), full suite, independent review + Opus
+audit, merge only on explicit human instruction (T4). Hard constraints: HANDOVER
+§10 + master reference §4 (incl. the CRO law: no autonomy promotion until every
+alert path has fired for real AND a backup has been restored once -- the restore
+half is still open). The learning-loop laws from the final review are in master
+reference §3.5/§7: one floor function, one-shot preregistration evaluation, and
+"only an operator-committed YAML changes card behavior."
 ```
 
 ## 10. Anything the next session must NOT change (hard invariants)

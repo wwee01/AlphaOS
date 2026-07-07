@@ -1,8 +1,11 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.0 · 2026-07-06 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.1 · 2026-07-08 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.**
+chief risk officer.** *(v1.1, the team's last night: T5 resolved; §3.5 final-review
+record added — learning-loop audit + partners' verdicts; §5 punch list reordered to
+the two-lane ruling incl. EXP-0; §7 loop-closure law; §9 decision rows. v1.0:
+2026-07-06.)*
 
 This is the root document of AlphaOS. If you read one file before touching anything —
 human or AI, this year or in five — read this one. It consolidates what we built, what
