@@ -388,6 +388,28 @@ class Settings:
     # Inert while mock. Never bypasses gates / manual approval / real-money guard.
     labeller_decision_override_enabled: bool
 
+    # --- EXP-0: shadow-tier deterministic universe capture ---
+    # Measurement-only expansion of the scanned universe downward in
+    # liquidity: a committed, git-versioned symbol file (built by the
+    # ``universe_build`` CLI, never a scheduler job) is scanned every window
+    # alongside the core 20-name book, tagged ``tier=watchlist``. Zero AI
+    # calls, zero decision surface -- the labeller/proposal chokepoints
+    # structurally refuse ``shadow_tier=1`` candidates (see orchestrator.py).
+    # Defaults OFF: the shadow pass has nothing safe to iterate until an
+    # operator has actually run ``universe_build``, reviewed the resulting
+    # symbol list, and committed it (the spec's own acceptance gate) --
+    # flipping this on is a deliberate, later, separate step, not a side
+    # effect of shipping the mechanism.
+    shadow_tier_enabled: bool
+    shadow_tier_universe_file: str        # committed JSON path
+    shadow_tier_min_adv_usd: float         # $5M -- 20d avg dollar volume floor
+    shadow_tier_max_adv_usd: float         # $50M -- ceiling (megacap book starts above this)
+    shadow_tier_min_price: float           # $5 -- excludes penny-stock manipulation risk
+    shadow_tier_max_price: float           # $100
+    shadow_tier_adv_lookback_days: int     # 20
+    shadow_tier_target_count: int          # ~300 names, builder soft target
+    shadow_tier_max_count: int             # 500 hard cap
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -1044,6 +1066,16 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         earnings_proximity_timeout_seconds=_get_float(src, "EARNINGS_PROXIMITY_TIMEOUT_SECONDS", 10.0),
         earnings_proximity_fail_open_as_unavailable=_get_bool(
             src, "EARNINGS_PROXIMITY_FAIL_OPEN_AS_UNAVAILABLE", True),
+        shadow_tier_enabled=_get_bool(src, "SHADOW_TIER_ENABLED", False),
+        shadow_tier_universe_file=_get(
+            src, "SHADOW_TIER_UNIVERSE_FILE", "alphaos/universe/shadow_universe.json"),
+        shadow_tier_min_adv_usd=_get_float(src, "SHADOW_TIER_MIN_ADV_USD", 5_000_000.0),
+        shadow_tier_max_adv_usd=_get_float(src, "SHADOW_TIER_MAX_ADV_USD", 50_000_000.0),
+        shadow_tier_min_price=_get_float(src, "SHADOW_TIER_MIN_PRICE", 5.0),
+        shadow_tier_max_price=_get_float(src, "SHADOW_TIER_MAX_PRICE", 100.0),
+        shadow_tier_adv_lookback_days=_get_int(src, "SHADOW_TIER_ADV_LOOKBACK_DAYS", 20),
+        shadow_tier_target_count=_get_int(src, "SHADOW_TIER_TARGET_COUNT", 300),
+        shadow_tier_max_count=_get_int(src, "SHADOW_TIER_MAX_COUNT", 500),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,

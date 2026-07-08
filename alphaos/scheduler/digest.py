@@ -320,6 +320,46 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "exit_review_count": verdict_histogram.get("EXIT_REVIEW", 0),
     }
 
+    # EXP-0: shadow-tier deterministic universe capture visibility. PURE
+    # READ, counts only (floor-gating like tqs_shadow/attribution_shadow
+    # above doesn't apply here -- there's no delta_r/mean being claimed, just
+    # today's scan coverage). feed_coverage measures the free IEX feed's
+    # usable-quote rate on the shadow band specifically -- the number that
+    # decides (empirically, not by guess) whether the ~$99/mo SIP upgrade is
+    # needed before EXP-1 (master reference §9 decision row).
+    shadow_tier_rows_today = journal.query(
+        "SELECT freshness_status, candidate_found FROM universe_days WHERE created_at_utc >= ?",
+        (since_sgt,),
+    )
+    shadow_scanned = len(shadow_tier_rows_today)
+    shadow_fresh = sum(1 for r in shadow_tier_rows_today if r["freshness_status"] == "usable")
+    shadow_interest_scores = sorted(
+        (r["interest_score"] or 0.0) for r in journal.query(
+            "SELECT c.interest_score FROM universe_days u "
+            "JOIN candidates c ON c.candidate_id = u.candidate_id "
+            "WHERE u.created_at_utc >= ? AND u.candidate_id IS NOT NULL",
+            (since_sgt,),
+        )
+    )
+    top_decile_count = 0
+    if shadow_interest_scores:
+        threshold = shadow_interest_scores[max(0, int(0.9 * (len(shadow_interest_scores) - 1)))]
+        top_decile_count = sum(1 for s in shadow_interest_scores if s >= threshold)
+    shadow_tier = {
+        "enabled": bool(settings.shadow_tier_enabled),
+        "scanned_today": shadow_scanned,
+        "fresh_today": shadow_fresh,
+        "stale_today": shadow_scanned - shadow_fresh,
+        "candidates_today": sum(1 for r in shadow_tier_rows_today if r["candidate_found"]),
+        # Top decile of TODAY's shadow-tier candidates' own interest scores
+        # (nearest-rank) -- a "standouts among tonight's standouts" signal,
+        # not a percentile of the whole shadow universe. See
+        # Orchestrator._count_top_decile_interest for the same definition
+        # computed once already per scan; this is the daily rollup.
+        "top_decile_interest_count_today": top_decile_count,
+        "feed_coverage_today": round(shadow_fresh / shadow_scanned, 4) if shadow_scanned else None,
+    }
+
     return {
         "date_sgt": timeutils.stamp().local_sgt[:10],
         "kill_switch_engaged": kill_switch.is_engaged(),
@@ -341,4 +381,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "tqs_shadow": tqs_shadow,
         "attribution_shadow": attribution_shadow,
         "position_health": position_health,
+        "shadow_tier": shadow_tier,
     }

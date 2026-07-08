@@ -172,3 +172,43 @@ def test_ai_token_usage_columns_added_to_a_pre_pr9_5_db(tmp_path):
             assert {"prompt_tokens", "completion_tokens", "total_tokens"} <= cols, table
     finally:
         j.close()
+
+
+def test_exp_0_columns_and_table_added_to_a_pre_exp_0_db(tmp_path):
+    """EXP-0 added recent_ipo/spac_flag/universe_file_version to `universe`,
+    shadow_tier/instrument_version to `candidates`, and the new universe_days
+    table -- all additive, SCHEMA_VERSION must not have moved."""
+    db = str(tmp_path / "pre_exp_0.db")
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "CREATE TABLE universe (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL, "
+        "tier TEXT, created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute(
+        "CREATE TABLE candidates (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "candidate_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL, "
+        "created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        universe_cols = {r["name"] for r in j.conn.execute("PRAGMA table_info(universe)")}
+        assert {"recent_ipo", "spac_flag", "universe_file_version"} <= universe_cols
+        candidate_cols = {r["name"] for r in j.conn.execute("PRAGMA table_info(candidates)")}
+        assert {"shadow_tier", "instrument_version"} <= candidate_cols
+
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert "universe_days" in tables
+        j.insert("universe_days", {
+            "universe_day_id": "ud1", "market_date": "2026-07-08", "symbol": "AAAA", "tier": "watchlist",
+        })
+        assert j.count_rows("universe_days") == 1
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()

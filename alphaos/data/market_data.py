@@ -55,7 +55,15 @@ class MarketDataClient:
         return self.provider.get_snapshot(symbol)
 
     def get_snapshots(self, symbols: list[str]) -> list[dict]:
-        return [self.get_snapshot(s) for s in symbols]
+        """EXP-0: delegates to the provider's own batch implementation
+        (``AlpacaDataProvider`` does one HTTP call per ~100 symbols instead of
+        one per symbol; ``MockDataProvider`` falls back to the base class's
+        per-symbol loop). The mock-mode warning fires once per batch call
+        here, not once per symbol as calling ``get_snapshot`` in a loop
+        would."""
+        if self.use_mock:
+            self._warn_once()
+        return self.provider.get_snapshots(symbols)
 
     # ------------------------------------------------------------------ helpers
     def _warn_once(self) -> None:

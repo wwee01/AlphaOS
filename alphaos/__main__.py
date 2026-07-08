@@ -107,6 +107,41 @@ def cmd_outcomes_update(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_universe_build(orch: Orchestrator) -> int:
+    """EXP-0: screen the tradable universe down to the shadow-tier ADV/price
+    band and write the result to the committed universe file (NOT git-add'd
+    or committed by this command — reviewing the symbol list and committing
+    it is a deliberate operator step, per the spec's own acceptance gate).
+    One-off / quarterly refresh; never a scheduler job. Requires live Alpaca
+    credentials (mock/offline mode has nothing to screen against)."""
+    from alphaos.universe.builder import build_shadow_universe, write_universe_file
+
+    screened = build_shadow_universe(orch.settings, orch.journal)
+    if not screened["symbols"] and screened["screened"] == 0:
+        _print({
+            "universe_build": screened,
+            "note": "no live Alpaca screen available (mock/offline mode, or missing credentials) "
+                    "-- nothing written",
+        })
+        return 1
+    doc = write_universe_file(screened, orch.settings.shadow_tier_universe_file)
+    _print({
+        "universe_build": {
+            "path": orch.settings.shadow_tier_universe_file,
+            "version": doc["version"],
+            "sha256": doc["sha256"],
+            "as_of_date": doc["as_of_date"],
+            "screened": doc["screened"],
+            "passed": doc["passed"],
+            "skipped_count": len(doc["skipped"]),
+            "skipped_reasons": sorted({s["reason"] for s in doc["skipped"]}),
+        },
+        "next_step": "Review the symbol list, then `git add` + commit the file yourself "
+                     "before setting SHADOW_TIER_ENABLED=true.",
+    })
+    return 0
+
+
 def cmd_outcomes_report(orch: Orchestrator) -> int:
     """Measurement-visibility summary over candidate_outcomes. No statistical
     claims — always surfaces a small-sample caveat."""
@@ -380,6 +415,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="measurement-visibility summary over candidate_outcomes (no statistical claims)")
     sub.add_parser("relative_performance_report",
                    help="paper-equity vs S&P 500 measurement (no statistical claims; PR9.5)")
+    sub.add_parser("universe_build",
+                   help="EXP-0: screen + write the shadow-tier universe file ($5-50M ADV band); "
+                        "one-off/quarterly, requires live Alpaca creds, never auto-commits")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -459,6 +497,8 @@ def main(argv=None) -> int:
             return cmd_outcomes_report(orch)
         if args.command == "relative_performance_report":
             return cmd_relative_performance_report(orch)
+        if args.command == "universe_build":
+            return cmd_universe_build(orch)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":
