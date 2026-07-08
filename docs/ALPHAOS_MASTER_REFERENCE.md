@@ -1,11 +1,13 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.2 · 2026-07-08 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.3 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.2, 2026-07-08 late: the operator+Fable regime/text-archive
-specs reconciled into Lane A — REG-1 at 13b, TEXT-0 at 13c, UNIV-1 superseded (salvage
-into EXP-0; UNIV-D later), EXP-1's own classifier deleted, item-20 "Regime Engine v1"
-renamed REG-2; §9 decision rows added. v1.1, the team's last night: T5 resolved; §3.5
+chief risk officer.** *(v1.3, 2026-07-09: OPS-A and EXP-0 struck as merged in §5
+(items 13/13a); §9 gains the EXP-0 override-path guard decision row. v1.2, 2026-07-08
+late: the operator+Fable regime/text-archive specs reconciled into Lane A — REG-1 at
+13b, TEXT-0 at 13c, UNIV-1 superseded (salvage into EXP-0; UNIV-D later), EXP-1's own
+classifier deleted, item-20 "Regime Engine v1" renamed REG-2; §9 decision rows added.
+v1.1, the team's last night: T5 resolved; §3.5
 final-review record added — learning-loop audit + partners' verdicts; §5 punch list
 reordered to the two-lane ruling incl. EXP-0; §7 loop-closure law; §9 decision rows.
 v1.0: 2026-07-06.)*
@@ -479,16 +481,30 @@ doc's PR9.5 SHIPPED banner.
 item specs under their canonical names in the specs doc):**
 
 **Lane A — critical path, one build session at a time:**
-13. 🔴 **OPS-A** — dashboard loopback bind + non-loopback action-disable guard
-    (immediate: UI-PR-A widened the action surface).
-13a. 🔴 **EXP-0** — shadow-tier deterministic universe capture (~300 small/mid
-    names, $5–50M ADV, batch snapshots, interest-scored, instrument-version
-    labeled, **zero AI calls, structurally no proposals**). Added 2026-07-08
-    late session, operator-directed — start the irreplaceable niche dataset
-    now; AI labelling stays gated at EXP-1. Spec: specs doc EXP-0 — **as
-    amended 2026-07-08 late (UNIV-1 salvage): + `universe_days` survivorship
-    journaling, + floor/flags (leveraged-ETF/SPAC/recent-IPO), + per-symbol
-    screen-time stats in the universe file.**
+13. ✅ **OPS-A** — dashboard loopback bind + non-loopback action-disable guard,
+    merged `de92be7` 2026-07-08 (+ a post-merge false-lockout fix, `b0ce043`:
+    the server's own bind address is now the authoritative loopback signal,
+    `st.context.ip_address` only actionable when it positively contradicts a
+    safe bind, never on mere absence — see specs doc OPS-A SHIPPED banner).
+13a. ✅ **EXP-0** — shadow-tier deterministic universe capture, merged `ec92c55`
+    2026-07-09 (branch commits `329584b`+`d394361`). ~300+ small/mid names
+    ($5–50M ADV, price $5–100), `alphaos universe_build` CLI (Alpaca assets +
+    historical bars, committed/git-versioned JSON, operator reviews +
+    commits — never auto-armed), batched snapshot fetch, same 3-window
+    pipeline as core, **zero AI calls, structurally no proposals** (both the
+    AI-evaluation and proposal-creation chokepoints refuse `shadow_tier=1`).
+    `universe_days` survivorship table (append-only, one row/symbol/trading
+    day regardless of candidate outcome). As amended 2026-07-08 late (UNIV-1
+    salvage): floor/flags (leveraged-ETF/SPAC/recent-IPO best-effort), + the
+    survivorship journaling itself. **Two independent Opus audits (APPROVE
+    WITH NOTES)** converged on the same HIGH finding — the user-override path
+    had no shadow_tier guard (a stale docstring wrongly claimed full
+    coverage) — reproduced by both, fixed with a dedicated graceful-refusal
+    guard + regression test before merge. +41 tests, suite 1009/3/0.
+    `SHADOW_TIER_ENABLED=false` by default — **the dataset has not started
+    accumulating yet**; an operator still needs to run `universe_build`,
+    review the symbol list, commit it, and flip the setting. Spec: specs doc
+    EXP-0 + reconciliation deltas.
 13b. 🔴 **REG-1** — regime classifier + packet stamping (shadow/measurement
     only). Frozen four-state classifier (CRISIS/CHOP/TREND_UP/TREND_DN) from
     SPY daily bars, `regime_days` table + backfill, packet stamping, shadow
@@ -683,6 +699,7 @@ belongs in these documents, not in any session's memory.
 | REG-1 pulled forward to A2.5 (was item 20's "Regime Engine v1" measurement half) | 2026-07-08 late reconciliation: the PORT-1 gate was about trusting sliced *claims*, never collecting labels. REG-1's urgency is epistemic — the classifier must be frozen BEFORE anyone examines regime-conditional outcomes, or every later regime definition is contaminated by peeking. Backfill is a deterministic derivation from vendor daily bars, so stamp-at-birth is recoverable — which is also why EXP-0 (unrecoverable snapshots) keeps the front slot. One classifier, one truth: EXP-1's own "regime tag v0" deleted, consumes `regime_days`. | Never relabel v1 rows in place; threshold changes = `regime_rules_v2`, new rows |
 | UNIV-1 (market-cap tiers) superseded by EXP-0's ADV-band screen + UNIV-D later derivation | The capacity niche is liquidity-defined, not cap-defined — ADV is the direct measure, cap a proxy needing reference data that didn't exist. UNIV-1's salvaged parts (survivorship `universe_days` law, floor/flags, non-executability of widened names) are in EXP-0 amended; cap tiers become a retroactive date-join once TEXT-0's SEC data exists. Operator-reviewed committed universe file beats an automated monthly rebalance (human-in-loop, versioned like a card). | If the ADV band systematically misses names the thesis wants (then UNIV-D graduates from derivation to screen input) |
 | TEXT-0 ships early (A2.7); reference data = SEC only, free, official | Archive value compounds strictly with calendar time and is pure collection — zero contamination risk. The seen-at law (backtests may only condition on `seen_at`, never `published_at`) is the single fact that makes the archive worth anything. SEC company-facts doubles as UNIV-D's reference source — one source, no new vendors, no scraping. Pre-inception backfill rows are never valid for point-in-time tests. Paid sources (transcripts, news wires) stay gated behind the paired-comparison law. | Never weaken the seen-at law; new free sources only if official-primary-publisher + stable API |
+| EXP-0's `_override_open_trade` gets its own `shadow_tier` guard, separate from `_handle_proposal`'s | 2026-07-09, two independent Opus audits (correctness + scope/safety) both reproduced a real gap: `_handle_proposal`'s guard comment claimed it was the one true proposal-creation chokepoint, but `_override_open_trade` builds and inserts its own `trade_proposals` row independently and never calls it — a shadow-tier candidate with a stored eval (harmless today; exactly what EXP-1 is specced to add) could become a real approvable proposal via `alphaos override`. Fixed with a dedicated guard returning a graceful `OverrideBlockedReason.SHADOW_TIER_EXCLUDED` (not a RuntimeError — unlike the scan-loop backstops, this path is reachable by an ordinary user action, not an internal-logic bug). | Any future PR adding a new candidate-to-proposal path must independently verify shadow-tier isolation — do not trust a prior PR's "single chokepoint" comment without re-checking the actual call graph |
 
 ---
 
