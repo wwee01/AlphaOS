@@ -23,16 +23,22 @@ _TRAILING_DAYS = 30
 
 
 def calls_in_last_30_days(journal) -> int:
-    """Count of real (non-mock) AI calls across all three call sites in the
-    trailing 30 days: the primary evaluator, the playbook labeller, and the
-    narrative-polarity classifier -- each a separate real OpenAI API call
-    that should count toward the same spend cap.
+    """Count of real (non-mock) AI calls across all four call sites in the
+    trailing 30 days: the primary evaluator, the playbook labeller, the
+    narrative-polarity classifier, and EVAL-1's offline replay harness --
+    each a separate real OpenAI API call that should count toward the same
+    spend cap.
 
     ``last30days_polarity`` has no ``is_mock`` column (a PR4-era omission,
     not reproduced here); ``model_provider`` is only ever populated by a real
     live API call (``lineage.ai_call_lineage``'s own "openai" stamp) -- every
     mock/skipped/error path leaves it NULL, so ``model_provider IS NOT NULL``
     is an equally precise real-call filter without a schema change.
+
+    EVAL-1's ``eval_results`` reuses the SAME ``PlaybookClassifier.classify()``
+    call as ``candidate_labels`` (a genuinely separate invocation, not a
+    duplicate of an existing row), so omitting it here would repeat the exact
+    2026-07-06 exit-review undercount finding a third time.
     """
     since = timeutils.to_iso(timeutils.now_utc() - timedelta(days=_TRAILING_DAYS))
     evaluations = journal.count_rows(
@@ -44,7 +50,10 @@ def calls_in_last_30_days(journal) -> int:
     polarity = journal.count_rows(
         "last30days_polarity", "model_provider IS NOT NULL AND created_at_utc >= ?", (since,),
     )
-    return evaluations + labels + polarity
+    eval_replays = journal.count_rows(
+        "eval_results", "is_mock = 0 AND created_at_utc >= ?", (since,),
+    )
+    return evaluations + labels + polarity + eval_replays
 
 
 def check_scan_budget(settings, journal) -> tuple[bool, str]:

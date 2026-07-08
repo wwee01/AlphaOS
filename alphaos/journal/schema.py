@@ -1691,6 +1691,70 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # EVAL-1: the offline eval harness. One row per `alphaos eval`
+        # invocation (a "run" = one pass over the frozen golden corpus,
+        # `repeats` times per packet). Zero decision surface -- never read by
+        # any gate/eval/labeller/risk/execution path; this table exists so a
+        # prompt/model change can be measured in days via replay, instead of
+        # waiting months for enough real ledger data.
+        "eval_runs",
+        """
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            corpus_dir TEXT NOT NULL,
+            corpus_version INTEGER,
+            label_version TEXT,
+            model TEXT,
+            is_mock INTEGER DEFAULT 0,
+            repeats INTEGER NOT NULL DEFAULT 1,
+            n_packets INTEGER NOT NULL DEFAULT 0,
+            lineage_id TEXT,
+            started_at_utc TEXT NOT NULL,
+            started_at_sgt TEXT NOT NULL,
+            finished_at_utc TEXT,
+            finished_at_sgt TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # EVAL-1: one row per (packet x repeat) replayed through the CURRENT
+        # PlaybookClassifier -- the real production classify() path, never a
+        # reimplementation. Stored on EVERY path including fail-safe (a
+        # discarded fail-safe completion is precisely the example the
+        # harness needs most -- see raw_json). ground_truth_label is
+        # deliberately NOT duplicated here: it lives in the corpus fixture
+        # file (operator-editable) and is joined fresh at report time by
+        # packet_id, so a report always reflects the LATEST adjudication,
+        # never a stale snapshot frozen at run time.
+        "eval_results",
+        """
+        CREATE TABLE IF NOT EXISTS eval_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            result_id TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            packet_id TEXT NOT NULL,
+            symbol TEXT,
+            repeat_index INTEGER NOT NULL DEFAULT 0,
+            primary_label TEXT,
+            label_decision TEXT,
+            label_confidence REAL,
+            validation_status TEXT,
+            label_source TEXT,
+            raw_json TEXT,
+            model TEXT,
+            is_mock INTEGER DEFAULT 0,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1833,6 +1897,11 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_text_documents_cik ON text_documents(cik)",
     "CREATE INDEX IF NOT EXISTS idx_text_documents_seen_at ON text_documents(seen_at)",
     "CREATE INDEX IF NOT EXISTS idx_text_documents_fetch_run ON text_documents(fetch_run_id)",
+    # EVAL-1: recent-run lookups (report defaults to the latest run) and
+    # per-run result joins.
+    "CREATE INDEX IF NOT EXISTS idx_eval_runs_started ON eval_runs(started_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_eval_results_packet ON eval_results(packet_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

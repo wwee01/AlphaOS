@@ -157,6 +157,19 @@ def _text_archive_health(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
+def _eval_health(journal) -> Optional[dict]:
+    """The latest eval-harness run's summary, or None if no operator has
+    ever run `alphaos eval` yet -- an expected, honest empty state (EVAL-1
+    has no scheduler job; it's operator-invoked before a prompt/model
+    change), never an error. Shows the LATEST run's status regardless of
+    when it happened (a persistent state line, like the backup/regime
+    surfaces), not a "did this run today" activity count."""
+    from alphaos.reports.eval_report import build_eval_report
+
+    rep = build_eval_report(journal)
+    return None if rep["status"] == "no_runs_yet" else rep
+
+
 def _fused_jobs(journal, settings) -> list[dict]:
     """Every job_type currently self-halted, independent of due-ness (a
     fused job stays fused outside its own due window too -- see
@@ -391,6 +404,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     from alphaos.reports.regime_arming_scorer import build_regime_arming_report
 
     regime_arming = build_regime_arming_report(journal, settings)
+    eval_health = _eval_health(journal)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -403,6 +417,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "positions_health": positions_health,
         "todays_activity": todays_activity,
         "text_archive_health": text_archive_health,
+        "eval_health": eval_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -480,6 +495,12 @@ def render_markdown(brief: dict) -> str:
             f"oldest gap: {gap}",
             "",
         ]
+
+    eh = brief.get("eval_health")
+    if eh:
+        from alphaos.reports.eval_report import render_markdown as _render_eval
+
+        lines += [_render_eval(eh), ""]
 
     bc = brief["best_candidate"]
     lines += ["## Best candidate today"]
