@@ -1,8 +1,10 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.4 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.5 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.4, 2026-07-09 overnight autonomous session: REG-1 struck
+chief risk officer.** *(v1.5, 2026-07-09 overnight autonomous session continued:
+TEXT-0 struck as merged in §5 (item 13c); §9 gains the TEXT_ARCHIVE_ENABLED-default
++ once-daily-lock-key decision rows. v1.4, 2026-07-09: REG-1 struck
 as merged in §5 (item 13b); §9 gains the stale-regime-refusal + REGIME_ENABLED-default
 decision rows. v1.3, 2026-07-09: OPS-A and EXP-0 struck as merged in §5
 (items 13/13a); §9 gains the EXP-0 override-path guard decision row. v1.2, 2026-07-08
@@ -528,14 +530,38 @@ item specs under their canonical names in the specs doc):**
     same-day-forward coverage until then. Spec:
     `docs/roadmap/alphaos-regime-and-text-archive-specs.md` REG-1 + the
     specs doc's reconciliation deltas.
-13c. 🔴 **TEXT-0** — point-in-time EDGAR text archive (collect only; no
-    strategy, no AI, no trades). Seen-at-stamped, append-only; value compounds
-    with calendar time — the entire reason it ships this early. `cik_map`
-    from EXP-0's universe ∪ current book ("once archived-for, always
-    archived-for"); its SEC company-facts capture is the designated reference
-    source for the later UNIV-D cap-tier derivation. Interim backup: extend
-    `backup_ledger.sh` in the same PR; **OPS-B's Lane B priority rises the day
-    the archive starts growing.** Spec: same archived file, TEXT-0 + deltas.
+13c. ✅ **TEXT-0** — point-in-time EDGAR text archive, merged `1b70a85`
+    2026-07-09 (branch commits `3ddc70e`+`cfe3930`, overnight autonomous
+    session). Collect only (no strategy, no AI, no trades); every
+    `text_documents` row stamps both `published_at` (source) and `seen_at`
+    (wall-clock fetch) — all future backtests may only ever condition on
+    `seen_at`. Raw `urllib` REST client (no SDK), rate-limited at 4 req/s
+    (below SEC's own 10/s ceiling), refuses to fetch live without an
+    operator-configured contact email (SEC fair-access policy). Form catalog
+    v1 (`EDGAR_FORMS_V1`, exact + prefix families). `cik_map` from EXP-0's
+    universe ∪ current book ("once archived-for, always archived-for", never
+    deleted). Gzip write-then-verify round-trip check before any row is
+    journaled. Scheduler job (`text_archive_pull`, once-daily), backup script
+    extended to mirror the archive + sha256 spot-verify, daily brief health
+    line (`docs last night · total · fetch errors · oldest gap`).
+    `TEXT_ARCHIVE_ENABLED` defaults **false** (unlike REG-1's true) — this
+    makes real outbound requests under the operator's own identity, so it
+    stays opt-in. **Two independent Opus audits**, both APPROVE WITH NOTES:
+    correctness (one MEDIUM — a gzip write/read-back exception, not just a
+    hash mismatch, aborted the whole run and orphaned the file; three LOW —
+    non-numeric-CIK abort, an already-fully-archived day false-triggering the
+    "fetcher is broken" alert, a ragged forms-array silently dropping
+    entries); scope/safety (one MEDIUM, reproduced — the scheduler's
+    once-daily lock key had no stable per-day branch for this job, so it
+    would have re-dispatched, and re-fetched from SEC, on every tick all day
+    instead of once; one LOW/MEDIUM, reproduced — an unsanitized
+    `accession_no` from SEC's own response could write outside
+    `storage_root`, defense-in-depth now closed with a format check).
+    Byte-identical-decisions proof (enabled vs. disabled) repeated from
+    REG-1's own playbook. All reproduced findings fixed pre-merge; +12 tests
+    for the fixes (incl. the daily-brief health line's own coverage gap the
+    audit flagged). Suite 1107/3/0, ruff + mypy clean. Spec: same archived
+    file, TEXT-0 + deltas.
 14. 🔴 **EVAL-1** — offline eval harness + raw-completion retention (incl.
     failures) + the operator-adjudicated ground-truth golden set. Before any
     prompt/model change, before PR12-era temptation.
@@ -715,6 +741,8 @@ belongs in these documents, not in any session's memory.
 | EXP-0's `_override_open_trade` gets its own `shadow_tier` guard, separate from `_handle_proposal`'s | 2026-07-09, two independent Opus audits (correctness + scope/safety) both reproduced a real gap: `_handle_proposal`'s guard comment claimed it was the one true proposal-creation chokepoint, but `_override_open_trade` builds and inserts its own `trade_proposals` row independently and never calls it — a shadow-tier candidate with a stored eval (harmless today; exactly what EXP-1 is specced to add) could become a real approvable proposal via `alphaos override`. Fixed with a dedicated guard returning a graceful `OverrideBlockedReason.SHADOW_TIER_EXCLUDED` (not a RuntimeError — unlike the scan-loop backstops, this path is reachable by an ordinary user action, not an internal-logic bug). | Any future PR adding a new candidate-to-proposal path must independently verify shadow-tier isolation — do not trust a prior PR's "single chokepoint" comment without re-checking the actual call graph |
 | `ensure_regime_for_today()` refuses (returns None) rather than returning a stale day's regime | 2026-07-09, scope/safety Opus audit reproduced: on a benchmark-spine gap of several days, the function's fallback took "the most recently computable day" and returned it unconditionally — silently stamping a stale label onto TODAY's packets with no marker distinguishing it from a fresh one. The `regime_days` table itself was never wrong (each row keeps its true date); only what the ongoing per-scan lookup handed back as "today's" answer was. Fixed: an explicit today-date equality check routes a stale gap through the same NULL-stamp + one-alert path already built for insufficient history. | Any function claiming to answer "as of today" from a cached/derived data source must verify the answer's own timestamp actually matches today, not just that AN answer exists |
 | `REGIME_ENABLED` defaults true (unlike EXP-0's `shadow_tier_enabled=False`) | REG-1 is pure computation from data already being captured (`benchmark_bars`), shadow/measurement only, with no human-reviewed artifact to wait for (unlike EXP-0's committed universe file) — both Opus audits independently agreed this default is safe, and the scope/safety audit specifically proved a poisoned/wrong regime label produces zero decision impact by direct comparison of scan output with regime enabled vs. disabled. | If a future regime-conditional report or gate is ever built that DOES trust `candidate_packets.regime` as more than descriptive, re-examine whether the default should gate behind a review step the way EXP-0's does |
+| `TEXT_ARCHIVE_ENABLED` defaults **false**, unlike REG-1's true | Unlike REG-1 (pure computation over already-captured data), TEXT-0 makes real outbound HTTP requests to sec.gov under the operator's own identifying contact email the moment it runs — a genuinely new external side effect, not just a new computation over existing data. Stays opt-in until an operator deliberately configures `SEC_EDGAR_CONTACT_EMAIL` and flips the flag, mirroring EXP-0's "ship the mechanism, operator arms it" pattern rather than REG-1's "safe by construction, default on" one. | If a future PR adds a similarly real-outbound-request feature, default to false and require the same explicit two-step arming (contact/identity config + enable flag), not REG-1's precedent |
+| `default_lock_key`'s once-daily jobs (daily_digest, benchmark_spine, text_archive_pull) MUST share the same stable-per-SGT-day branch | 2026-07-09, scope/safety Opus audit reproduced: TEXT-0 was built without adding it to that branch, so `_once_daily_due`'s "already ran today" dedup (which keys purely off `default_lock_key`) never matched — the job re-dispatched, and re-fetched from SEC, on every scheduler tick all day instead of once. Fixed by adding it to the existing tuple. | Any FUTURE once-daily job type must be added to this exact tuple in `cadence.default_lock_key` — falling through to the generic per-instant key is the failure mode, and it is silent (the job still "works," it just runs far more often than intended) |
 
 ---
 
