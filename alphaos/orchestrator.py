@@ -59,6 +59,7 @@ from alphaos.constants import (
     TriggerSource,
     UniverseTier,
 )
+from alphaos.regime.service import ensure_regime_for_today
 from alphaos.scanner.candidate_scanner import CURRENT_INSTRUMENT_VERSION, DEFAULT_UNIVERSE
 from alphaos.universe.builder import load_universe_file
 from alphaos.cards import registry as cards
@@ -244,6 +245,25 @@ class Orchestrator:
             scan_id=scan.scan_id, candidates=len(scan.candidates),
             scan_batch_id=scan_batch_id, scheduler_run_id=scheduler_run_id,
         )
+
+        # --- REG-1: regime classifier + packet stamping (shadow/measurement
+        # only -- no arming, no gating, no allocation changes). Computed (or
+        # looked up, if already computed earlier today) ONCE per scan here,
+        # then stamped onto every packet built below via self._today_regime
+        # -- mirrors candidate_scanner.py's own self._spy/self._qqq
+        # once-per-scan pattern. A missing/unavailable regime NEVER blocks
+        # the scan -- packets simply stamp NULL and a loud alert is journaled
+        # (see the stamping call site in _label_candidate). ---
+        self._today_regime = None
+        if self.settings.regime_enabled:
+            self._today_regime = ensure_regime_for_today(self.journal, self.settings)
+            if self._today_regime is None:
+                self.journal.log_system_event(
+                    Severity.WARNING, "regime",
+                    "No regime_days row available for today (insufficient trailing SPY "
+                    "history, or a benchmark-spine gap) -- packets will stamp regime=NULL "
+                    "this scan. Never blocks the scan itself.",
+                )
 
         # --- EXP-0: shadow-tier deterministic universe capture. Rides this
         # same scan job (no new scheduler cadence). `shadow_result` is NEVER
@@ -1214,6 +1234,27 @@ class Orchestrator:
         provider = make_bars_provider(self.settings, self.journal)
         return backfill_mfe_mae(self.journal, bars_provider=provider, limit=limit)
 
+    def regime_arming_report(self, limit: int = 2000) -> dict:
+        """REG-1: the shadow arming-map scorer -- armed_always vs
+        armed_per_map paired replay ΔR per card. PURE READ, pure ledger math
+        over existing shadow rows; nothing armed/disarmed for real. See
+        alphaos/reports/regime_arming_scorer.py's pre-registration block."""
+        from alphaos.reports.regime_arming_scorer import build_regime_arming_report
+
+        return build_regime_arming_report(self.journal, self.settings, limit=limit)
+
+    def backfill_regime_days(self) -> dict:
+        """REG-1 one-off: extend benchmark_bars SPY history, classify the
+        full available series into regime_days, and stamp any pre-existing
+        candidate_packets rows still missing a regime. Idempotent; a
+        derivation from stored/vendor daily bars, never a mutation of
+        already-stamped evidence -- see alphaos/regime/service.py."""
+        from alphaos.data.providers.alpaca_bars import make_bars_provider
+        from alphaos.regime.service import backfill_regime_days
+
+        provider = make_bars_provider(self.settings, self.journal)
+        return backfill_regime_days(self.journal, self.settings, bars_provider=provider)
+
     def outcomes_update(self, limit: int = 500) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/
@@ -1627,7 +1668,12 @@ class Orchestrator:
             earnings = self.earnings_enricher.enrich(packet)
         elif earnings_mode == "skipped_budget_cap":
             earnings = self.earnings_enricher.skipped_budget_cap(packet)
-        self.journal.insert("candidate_packets", packet.to_row(scan_batch_id))
+        regime_row = getattr(self, "_today_regime", None)
+        self.journal.insert("candidate_packets", packet.to_row(
+            scan_batch_id,
+            regime=regime_row["regime"] if regime_row else None,
+            regime_rules_version=regime_row["regime_rules_version"] if regime_row else None,
+        ))
         classification = self.labeller.classify(packet)
         if catalyst is not None:
             # Advisory label-review: if the catalyst implies a different OFFICIAL

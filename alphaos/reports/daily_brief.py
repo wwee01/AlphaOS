@@ -54,6 +54,48 @@ def _market_condition(journal, settings) -> dict:
     }
 
 
+REGIME_CAVEAT = (
+    "descriptive only -- no significance claimed (regime-sliced statistics "
+    "gain q-values once PORT-1 lands)"
+)
+
+
+def _regime_header(journal) -> Optional[dict]:
+    """Today's regime + how many consecutive days (under the SAME rules
+    version) it's held, most-recent-first until the first mismatch. None
+    when no regime_days row exists for today (REG-1 disabled, cold start, or
+    a benchmark-spine gap) -- the brief omits the section entirely rather
+    than fabricate a regime; see render_markdown."""
+    from alphaos.regime.classifier import REGIME_RULES_V1
+
+    today_row = journal.one(
+        "SELECT * FROM regime_days WHERE market_date = ? AND regime_rules_version = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (timeutils.market_date().isoformat(), REGIME_RULES_V1),
+    )
+    if not today_row:
+        return None
+
+    history = journal.query(
+        "SELECT market_date, regime FROM regime_days WHERE regime_rules_version = ? "
+        "AND market_date <= ? ORDER BY market_date DESC",
+        (REGIME_RULES_V1, today_row["market_date"]),
+    )
+    streak = 0
+    for row in history:
+        if row["regime"] == today_row["regime"]:
+            streak += 1
+        else:
+            break
+
+    return {
+        "regime": today_row["regime"],
+        "rules_version": today_row["regime_rules_version"],
+        "consecutive_days": streak,
+        "caveat": REGIME_CAVEAT,
+    }
+
+
 def _fused_jobs(journal, settings) -> list[dict]:
     """Every job_type currently self-halted, independent of due-ness (a
     fused job stays fused outside its own due window too -- see
@@ -271,6 +313,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     market = MarketDataClient(settings, journal)
 
     positions_health = assess_positions(journal, settings, market)
+    regime = _regime_header(journal)
     fused_jobs = _fused_jobs(journal, settings)
     needs_you = _needs_you(journal, digest, fused_jobs)
     todays_activity = _todays_activity(journal, since_sgt)
@@ -279,11 +322,21 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     moonshot_gap = _moonshot_gap(journal, settings, now)
     one_action = _one_action(needs_you, positions_health, moonshot_gap)
 
+    # REG-1 acceptance criterion: the shadow arming-map scorer's first
+    # (caveated) report surfaces in the brief. Import kept local -- avoids a
+    # brief -> regime_arming_scorer -> ... import cycle risk and matches this
+    # module's existing local-import style for report submodules.
+    from alphaos.reports.regime_arming_scorer import build_regime_arming_report
+
+    regime_arming = build_regime_arming_report(journal, settings)
+
     return {
         "date_sgt": since_sgt[:10],
         "kill_switch_engaged": kill_switch.is_engaged(),
         "kill_switch_reason": kill_switch.reason(),
         "market_condition": _market_condition(journal, settings),
+        "regime": regime,
+        "regime_arming": regime_arming,
         "needs_you": needs_you,
         "positions_health": positions_health,
         "todays_activity": todays_activity,
@@ -303,6 +356,15 @@ def render_markdown(brief: dict) -> str:
     ]
     if brief["kill_switch_engaged"]:
         lines += [f"⚠️ **KILL SWITCH ENGAGED** — {brief['kill_switch_reason']}", ""]
+
+    regime = brief.get("regime")
+    if regime:
+        lines += [
+            f"## Regime: {regime['regime']} ({regime['rules_version']}, day "
+            f"{regime['consecutive_days']} of current state)",
+            f"> ⚠️ {regime['caveat']}",
+            "",
+        ]
 
     mc = brief["market_condition"]
     lines += ["## Market condition (vs S&P 500)"]
@@ -358,6 +420,10 @@ def render_markdown(brief: dict) -> str:
     lines += ["## What AlphaOS learned"]
     lines += [f"- {s}" for s in wl["sentences"]] or ["- (nothing newly resolved today)"]
     lines += [f"> ⚠️ {wl['caveat']}", ""]
+
+    from alphaos.reports.regime_arming_scorer import render_markdown as _render_regime_arming
+
+    lines += [_render_regime_arming(brief["regime_arming"]), ""]
 
     mg = brief["moonshot_gap"]
     lines += ["## Moonshot gap (10% MoM target)"]

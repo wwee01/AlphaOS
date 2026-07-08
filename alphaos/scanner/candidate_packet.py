@@ -151,8 +151,17 @@ class CandidatePacket:
         }
         return d
 
-    def to_row(self, scan_batch_id: Optional[str] = None) -> dict:
-        """Row for the ``candidate_packets`` journal table (full compact packet)."""
+    def to_row(
+        self, scan_batch_id: Optional[str] = None,
+        regime: Optional[str] = None, regime_rules_version: Optional[str] = None,
+    ) -> dict:
+        """Row for the ``candidate_packets`` journal table (full compact
+        packet). ``regime``/``regime_rules_version`` (REG-1) follow the same
+        pattern as ``scan_batch_id``: context computed once per SCAN, not
+        known at packet-BUILD time, so it's threaded in here at insert time
+        rather than stored on the packet instance itself. Both stay None
+        (never fabricated) when REG-1 is disabled or no regime_days row was
+        available for today -- see Orchestrator.run_scan_once's REG-1 block."""
         return {
             "packet_id": self.packet_id,
             "candidate_id": self.candidate_id,
@@ -167,6 +176,8 @@ class CandidatePacket:
             "official_news_context": self.official_news_context,
             "last30days_context": self.last30days_context,
             "sentiment_context": self.sentiment_context,
+            "regime": regime,
+            "regime_rules_version": regime_rules_version,
         }
 
 

@@ -100,6 +100,15 @@ SHADOW_TIER_CONFIG_FIELDS = (
     "shadow_tier_adv_lookback_days", "shadow_tier_target_count", "shadow_tier_max_count",
 )
 
+# REG-1: the classifier's actual thresholds are CODE CONSTANTS tied to
+# REGIME_RULES_V1 (alphaos/regime/classifier.py), not settings -- same
+# rationale as TQS/attribution: env-tunable thresholds would destroy
+# comparability across the shadow record this PR exists to build. The real
+# settings are the on/off switch + the one-off backfill's lookback depth.
+REGIME_CONFIG_FIELDS = (
+    "regime_enabled", "regime_backfill_lookback_days",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -133,4 +142,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "tqs_config_hash": _subset_hash(full, TQS_CONFIG_FIELDS),
         "attribution_config_hash": _subset_hash(full, ATTRIBUTION_CONFIG_FIELDS),
         "shadow_tier_config_hash": _subset_hash(full, SHADOW_TIER_CONFIG_FIELDS),
+        "regime_config_hash": _subset_hash(full, REGIME_CONFIG_FIELDS),
     }

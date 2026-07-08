@@ -410,6 +410,19 @@ class Settings:
     shadow_tier_target_count: int          # ~300 names, builder soft target
     shadow_tier_max_count: int             # 500 hard cap
 
+    # --- REG-1: regime classifier + packet stamping ---
+    # Shadow/measurement only -- no arming, no gating, no allocation changes.
+    # Defaults ON (unlike shadow_tier_enabled): unlike EXP-0's shadow tier,
+    # there is no human-review gate blocking this from being safe on day
+    # one -- it's pure computation from data already being captured
+    # (benchmark_bars), and the whole point is that every packet journaled
+    # from now on is born regime-stamped instead of retrofitted, so waiting
+    # for a manual flip would defeat that.
+    regime_enabled: bool
+    regime_backfill_lookback_days: int     # ~2.5yr: covers the classifier's own
+                                            # trailing-1-year vol-percentile window
+                                            # plus meaningful history beyond it
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -1076,6 +1089,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         shadow_tier_adv_lookback_days=_get_int(src, "SHADOW_TIER_ADV_LOOKBACK_DAYS", 20),
         shadow_tier_target_count=_get_int(src, "SHADOW_TIER_TARGET_COUNT", 300),
         shadow_tier_max_count=_get_int(src, "SHADOW_TIER_MAX_COUNT", 500),
+        regime_enabled=_get_bool(src, "REGIME_ENABLED", True),
+        regime_backfill_lookback_days=_get_int(src, "REGIME_BACKFILL_LOOKBACK_DAYS", 900),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,

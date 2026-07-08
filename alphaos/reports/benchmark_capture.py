@@ -74,21 +74,34 @@ def _capture_equity(journal, settings, alpaca_client=None) -> tuple[float, str]:
     return float(settings.paper_equity), "static_config"
 
 
-def _backfill_benchmark_bars(journal, settings, symbol: str, market_dt: date, bars_provider=None) -> int:
+def _backfill_benchmark_bars(
+    journal, settings, symbol: str, market_dt: date, bars_provider=None,
+    initial_lookback_days: Optional[int] = None,
+) -> int:
     """Fetch + insert any SPY daily bars between the last cached date (or
-    ``INITIAL_BENCHMARK_LOOKBACK_DAYS`` back, on the very first run) and
-    today. Returns the count actually written (0 in mock/offline mode, or if
-    already up to date, or on a provider-side fetch failure -- all
-    indistinguishable non-errors to the caller by design; the
-    system_events WARNING is where a real operator would notice a
-    persistent gap).
+    ``initial_lookback_days`` back -- default ``INITIAL_BENCHMARK_LOOKBACK_DAYS``
+    -- on the very first run) and today. Returns the count actually written
+    (0 in mock/offline mode, or if already up to date, or on a provider-side
+    fetch failure -- all indistinguishable non-errors to the caller by
+    design; the system_events WARNING is where a real operator would notice
+    a persistent gap).
 
     Pages through the range ``_BARS_PAGE_SIZE`` bars at a time so a gap
     larger than one page still closes fully within a single run (see module
     docstring for ``_BARS_PAGE_SIZE``/``_MAX_BACKFILL_PAGES``).
 
     ``bars_provider`` is injectable (a fake in tests); production call sites
-    always omit it and get ``make_bars_provider``'s real result."""
+    always omit it and get ``make_bars_provider``'s real result.
+
+    ``initial_lookback_days`` is an override for the FIRST-EVER-RUN window
+    only (once any bar exists for ``symbol``, backfill always resumes from
+    the last cached date regardless of this parameter) -- REG-1's regime
+    backfill needs much deeper SPY history (~2+ years, to cover its
+    classifier's own trailing-1-year vol-percentile window plus a
+    meaningful history beyond that) than the benchmark-spine job's own
+    default 90-day window, and passes a larger value here rather than
+    standing up a second bar-history fetcher (one-source rule: this
+    function + ``benchmark_bars`` stays the only SPY history path)."""
     provider = bars_provider if bars_provider is not None else make_bars_provider(settings, journal)
     if provider is None:
         return 0  # mock/offline -- nothing to fetch against, not a failure
@@ -99,7 +112,8 @@ def _backfill_benchmark_bars(journal, settings, symbol: str, market_dt: date, ba
     if last and last.get("d"):
         start = date.fromisoformat(last["d"]) + timedelta(days=1)
     else:
-        start = market_dt - timedelta(days=INITIAL_BENCHMARK_LOOKBACK_DAYS)
+        lookback = initial_lookback_days if initial_lookback_days is not None else INITIAL_BENCHMARK_LOOKBACK_DAYS
+        start = market_dt - timedelta(days=lookback)
 
     if start > market_dt:
         return 0  # already up to date (e.g. a second run the same day)

@@ -972,6 +972,39 @@ SCHEMA: list[tuple[str, str]] = [
             official_news_context TEXT,
             last30days_context TEXT,
             sentiment_context TEXT,
+            regime TEXT,
+            regime_rules_version TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # REG-1: one row per trading day per rules_version, append-only --
+        # recompute under a new rules_version (e.g. a future regime_rules_v2)
+        # adds new rows, NEVER mutates/relabels an existing v1 row in place
+        # (anti-data-mining law: a threshold change must never retroactively
+        # rewrite history). market_date is the day this classification
+        # APPLIES to; spy_close/sma_*/vol fields are computed from whatever
+        # benchmark_bars history was available at classification time (under
+        # normal cadence, that's the prior session's official close -- EOD
+        # data only, never an intraday peek).
+        "regime_days",
+        """
+        CREATE TABLE IF NOT EXISTS regime_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            regime_day_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            regime TEXT NOT NULL,
+            regime_rules_version TEXT NOT NULL,
+            spy_close REAL,
+            sma_50 REAL,
+            sma_200 REAL,
+            realized_vol_20d REAL,
+            vol_percentile_1y REAL,
+            dev_from_sma50_pct REAL,
+            chop_streak_days INTEGER,
+            computed_at_utc TEXT NOT NULL,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1380,6 +1413,7 @@ SCHEMA: list[tuple[str, str]] = [
             tqs_config_hash TEXT,
             attribution_config_hash TEXT,
             shadow_tier_config_hash TEXT,
+            regime_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1730,6 +1764,11 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_universe_days_symbol_date ON universe_days(symbol, market_date)",
     "CREATE INDEX IF NOT EXISTS idx_universe_days_date ON universe_days(market_date)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_shadow_tier ON candidates(shadow_tier)",
+    # REG-1: one regime_days row per (market_date, regime_rules_version) --
+    # a v2 rules recompute adds new rows under the new version rather than
+    # colliding with (or mutating) v1 rows for the same date.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_regime_days_date_version ON regime_days(market_date, regime_rules_version)",
+    "CREATE INDEX IF NOT EXISTS idx_candidate_packets_regime ON candidate_packets(regime)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
