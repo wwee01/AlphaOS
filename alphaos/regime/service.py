@@ -112,6 +112,20 @@ def ensure_regime_for_today(journal, settings, market_dt=None, bars_provider=Non
             return None  # insufficient trailing history -- caller alerts, never blocks
 
         latest = classified[-1]
+        # Correctness/safety audit finding (2026-07-09): a stale benchmark-
+        # spine (a job outage, a multi-day gap) means the MOST RECENT
+        # classifiable day can be well before today -- `classify_regime_
+        # series`'s own row is still correctly dated (a derivation, never
+        # fabricated), but silently treating "most recent computable" as
+        # "today's regime" would stamp a stale label onto TODAY's packets
+        # with no marker distinguishing it from a fresh one. Fail the same
+        # way as insufficient history -- packets stamp NULL, one loud alert,
+        # never a silently-wrong-but-plausible value. A caller wanting the
+        # last KNOWN regime regardless of staleness can still query
+        # regime_days directly; this function's contract is specifically
+        # "today's regime, or None."
+        if latest["date"] != today.isoformat():
+            return None
         _insert_regime_day(journal, latest)
         # Re-read rather than trust the just-computed dict verbatim, so the
         # returned shape always matches the DB row shape (incl. regime_day_id).

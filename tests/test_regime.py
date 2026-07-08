@@ -223,6 +223,31 @@ def test_classifier_rules_version_stamped_on_every_row():
 
 
 # --------------------------------------------------------------------- service
+def test_ensure_regime_for_today_stale_benchmark_spine_never_mislabels_today(journal, settings):
+    """Regression for a scope/safety audit finding: a stale benchmark-spine
+    gap (bars stop 10 days before today) must NOT get silently stamped onto
+    today's packets as if it were fresh -- ensure_regime_for_today's
+    contract is "today's regime, or None," never "the last known regime.\""""
+    from datetime import timedelta
+
+    from alphaos.util import timeutils
+
+    stale_end = timeutils.market_date() - timedelta(days=10)
+    bars = _trend_bars(MIN_BARS_FOR_FIRST_CLASSIFICATION + 60, end=stale_end)
+    provider = _FakeBars(bars)
+
+    row = ensure_regime_for_today(journal, settings, bars_provider=provider)
+    assert row is None  # never the stale row, never fabricated as "today"
+
+    # And no regime_days row was inserted under the WRONG (today's) date --
+    # the stale day itself is fine to have been classified internally, just
+    # never returned/used as if it were today's answer.
+    todays_row = journal.one(
+        "SELECT * FROM regime_days WHERE market_date = ?", (timeutils.market_date().isoformat(),)
+    )
+    assert todays_row is None
+
+
 def test_ensure_regime_for_today_cold_start_returns_none_without_a_prior_backfill(journal, settings):
     """ensure_regime_for_today's own catch-up window is deliberately small
     (it only extends benchmark_bars using _backfill_benchmark_bars' DEFAULT
