@@ -1,0 +1,16 @@
+# OPS-A: the dashboard's approval surface (approve/reject/kill-switch, and
+# everything UI-PR-A widened) must never be reachable off-machine. This file
+# pins the safe default so even the README's bare `streamlit run
+# alphaos/dashboard/streamlit_app.py` binds to loopback only -- previously
+# that command had no --server.address flag at all and would fall through to
+# Streamlit's own default (effectively all interfaces). CLI flags still win
+# over this file, so `deploy/run_dashboard.sh` (which passes the flags
+# explicitly) and this file agree, not compete. See alphaos/dashboard/
+# streamlit_app.py's _is_loopback_request() for the code-level guard that
+# verifies this at runtime regardless of how the process was launched.
+[server]
+address = "127.0.0.1"
+headless = true
+
+[browser]
+gatherUsageStats = false

@@ -62,8 +62,20 @@ python -m alphaos kill engage|release    # kill switch
 
 # Dashboard (needs streamlit):
 pip install streamlit
-streamlit run alphaos/dashboard/streamlit_app.py
+deploy/run_dashboard.sh          # recommended -- hardcodes loopback bind, see OPS-A below
+# or: streamlit run alphaos/dashboard/streamlit_app.py   # .streamlit/config.toml pins the same default
 ```
+
+**OPS-A — the dashboard's approve/reject/kill-switch surface must never be
+reachable off-machine.** `deploy/run_dashboard.sh` hardcodes
+`--server.address 127.0.0.1` (no flag to override it); `.streamlit/config.toml`
+pins the same default even for a bare `streamlit run`. The dashboard itself
+also checks this at runtime (`_is_loopback_request()` in
+`alphaos/dashboard/streamlit_app.py`) and refuses to render anything —
+no sidebar, no tabs, no buttons — for a non-loopback connection: two
+independent layers, not one. Remote access, if ever wanted, is an SSH tunnel
+from the remote machine (`ssh -L 8502:127.0.0.1:8502 user@this-host`) — never
+a LAN bind, never port-forwarding, never a reverse proxy.
 
 In **mock mode** AlphaOS runs fully offline. Market data is simulated (provider
 `massive_mock`, always carrying a fresh source timestamp). **News is never

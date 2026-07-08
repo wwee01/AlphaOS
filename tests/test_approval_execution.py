@@ -177,7 +177,16 @@ def test_trade_id_links_proposal_through_to_monitoring_snapshot():
 # ------------------------------------------------------------- dashboard render
 def _fake_st():
     """A Streamlit stand-in: buttons are never 'pressed', layout helpers return
-    the right number of context-manager mocks. Lets us render headlessly."""
+    the right number of context-manager mocks. Lets us render headlessly.
+
+    OPS-A: represents a genuine loopback connection by default (real IP +
+    real bind address, not just "any truthy mock") so this stand-in exercises
+    the SAME allow path a real local browser hits -- every existing test
+    using this fixture is implicitly asserting "renders fully for a real
+    local connection". Tests that want to exercise the refusal path build
+    their own mock with a non-loopback ip_address/bind address instead of
+    starting from this one (see test_dashboard.py's
+    test_non_loopback_request_is_refused_*)."""
     st = MagicMock(name="st")
     st.button.return_value = False
     st.sidebar.button.return_value = False
@@ -185,6 +194,8 @@ def _fake_st():
     st.text_input.return_value = ""
     st.selectbox.return_value = None
     st.tabs.side_effect = lambda labels: [MagicMock(name=f"tab{i}") for i in range(len(labels))]
+    st.context.ip_address = "127.0.0.1"
+    st.get_option.return_value = "127.0.0.1"
 
     def _cols(spec):
         n = spec if isinstance(spec, int) else len(spec)
