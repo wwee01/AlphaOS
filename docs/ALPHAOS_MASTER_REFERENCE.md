@@ -1,8 +1,10 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.3 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.4 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.3, 2026-07-09: OPS-A and EXP-0 struck as merged in §5
+chief risk officer.** *(v1.4, 2026-07-09 overnight autonomous session: REG-1 struck
+as merged in §5 (item 13b); §9 gains the stale-regime-refusal + REGIME_ENABLED-default
+decision rows. v1.3, 2026-07-09: OPS-A and EXP-0 struck as merged in §5
 (items 13/13a); §9 gains the EXP-0 override-path guard decision row. v1.2, 2026-07-08
 late: the operator+Fable regime/text-archive specs reconciled into Lane A — REG-1 at
 13b, TEXT-0 at 13c, UNIV-1 superseded (salvage into EXP-0; UNIV-D later), EXP-1's own
@@ -505,16 +507,27 @@ item specs under their canonical names in the specs doc):**
     accumulating yet**; an operator still needs to run `universe_build`,
     review the symbol list, commit it, and flip the setting. Spec: specs doc
     EXP-0 + reconciliation deltas.
-13b. 🔴 **REG-1** — regime classifier + packet stamping (shadow/measurement
-    only). Frozen four-state classifier (CRISIS/CHOP/TREND_UP/TREND_DN) from
-    SPY daily bars, `regime_days` table + backfill, packet stamping, shadow
-    arming-map scorer (the earn-its-existence instrument for REG-2). Pulled
-    forward 2026-07-08 late (operator+Fable reconciliation): the classifier
-    must be frozen BEFORE anyone examines regime-conditional outcomes
-    (anti-data-mining); brief slices carry the "descriptive only" caveat until
-    PORT-1. Spec: `docs/roadmap/alphaos-regime-and-text-archive-specs.md`
-    REG-1 + the specs doc's reconciliation deltas (benchmark_bars reuse; new
-    `regime` columns, dead `market_regime` column left alone).
+13b. ✅ **REG-1** — regime classifier + packet stamping, merged `548f484`
+    2026-07-09 (branch commits `ebdd074`+`daca21c`, overnight autonomous
+    session). Frozen four-state classifier (CRISIS/CHOP/TREND_UP/TREND_DN)
+    from SPY daily bars (via `benchmark_bars`, no second data vendor),
+    computed once per scan and stamped onto every `candidate_packets` row;
+    new append-only `regime_days` table; `backfill_regime_days` CLI (one-off,
+    deep history); daily brief regime header + caveat; shadow arming-map
+    scorer (pre-registered v1 map, CRISIS hard-coded never armed regardless
+    of map, floor-gated on distinct regime episodes — the earn-its-existence
+    instrument for REG-2). `REGIME_ENABLED` defaults true (no human-review
+    gate needed, unlike EXP-0's shadow tier). **Two independent Opus audits**:
+    correctness APPROVE (zero bugs after independently reimplementing the
+    classifier math and diffing); scope/safety APPROVE WITH NOTES (safety-
+    critical paths SHA-256-confirmed untouched, a poisoned regime label
+    proven to produce zero decision impact; one MEDIUM — stale-benchmark-
+    spine data could be silently stamped as fresh — found, reproduced, and
+    fixed pre-merge). +40 tests, suite 1048/3/0. **Not yet done**: no
+    operator has run the one-off backfill yet, so `regime_days` only has
+    same-day-forward coverage until then. Spec:
+    `docs/roadmap/alphaos-regime-and-text-archive-specs.md` REG-1 + the
+    specs doc's reconciliation deltas.
 13c. 🔴 **TEXT-0** — point-in-time EDGAR text archive (collect only; no
     strategy, no AI, no trades). Seen-at-stamped, append-only; value compounds
     with calendar time — the entire reason it ships this early. `cik_map`
@@ -700,6 +713,8 @@ belongs in these documents, not in any session's memory.
 | UNIV-1 (market-cap tiers) superseded by EXP-0's ADV-band screen + UNIV-D later derivation | The capacity niche is liquidity-defined, not cap-defined — ADV is the direct measure, cap a proxy needing reference data that didn't exist. UNIV-1's salvaged parts (survivorship `universe_days` law, floor/flags, non-executability of widened names) are in EXP-0 amended; cap tiers become a retroactive date-join once TEXT-0's SEC data exists. Operator-reviewed committed universe file beats an automated monthly rebalance (human-in-loop, versioned like a card). | If the ADV band systematically misses names the thesis wants (then UNIV-D graduates from derivation to screen input) |
 | TEXT-0 ships early (A2.7); reference data = SEC only, free, official | Archive value compounds strictly with calendar time and is pure collection — zero contamination risk. The seen-at law (backtests may only condition on `seen_at`, never `published_at`) is the single fact that makes the archive worth anything. SEC company-facts doubles as UNIV-D's reference source — one source, no new vendors, no scraping. Pre-inception backfill rows are never valid for point-in-time tests. Paid sources (transcripts, news wires) stay gated behind the paired-comparison law. | Never weaken the seen-at law; new free sources only if official-primary-publisher + stable API |
 | EXP-0's `_override_open_trade` gets its own `shadow_tier` guard, separate from `_handle_proposal`'s | 2026-07-09, two independent Opus audits (correctness + scope/safety) both reproduced a real gap: `_handle_proposal`'s guard comment claimed it was the one true proposal-creation chokepoint, but `_override_open_trade` builds and inserts its own `trade_proposals` row independently and never calls it — a shadow-tier candidate with a stored eval (harmless today; exactly what EXP-1 is specced to add) could become a real approvable proposal via `alphaos override`. Fixed with a dedicated guard returning a graceful `OverrideBlockedReason.SHADOW_TIER_EXCLUDED` (not a RuntimeError — unlike the scan-loop backstops, this path is reachable by an ordinary user action, not an internal-logic bug). | Any future PR adding a new candidate-to-proposal path must independently verify shadow-tier isolation — do not trust a prior PR's "single chokepoint" comment without re-checking the actual call graph |
+| `ensure_regime_for_today()` refuses (returns None) rather than returning a stale day's regime | 2026-07-09, scope/safety Opus audit reproduced: on a benchmark-spine gap of several days, the function's fallback took "the most recently computable day" and returned it unconditionally — silently stamping a stale label onto TODAY's packets with no marker distinguishing it from a fresh one. The `regime_days` table itself was never wrong (each row keeps its true date); only what the ongoing per-scan lookup handed back as "today's" answer was. Fixed: an explicit today-date equality check routes a stale gap through the same NULL-stamp + one-alert path already built for insufficient history. | Any function claiming to answer "as of today" from a cached/derived data source must verify the answer's own timestamp actually matches today, not just that AN answer exists |
+| `REGIME_ENABLED` defaults true (unlike EXP-0's `shadow_tier_enabled=False`) | REG-1 is pure computation from data already being captured (`benchmark_bars`), shadow/measurement only, with no human-reviewed artifact to wait for (unlike EXP-0's committed universe file) — both Opus audits independently agreed this default is safe, and the scope/safety audit specifically proved a poisoned/wrong regime label produces zero decision impact by direct comparison of scan output with regime enabled vs. disabled. | If a future regime-conditional report or gate is ever built that DOES trust `candidate_packets.regime` as more than descriptive, re-examine whether the default should gate behind a review step the way EXP-0's does |
 
 ---
 
