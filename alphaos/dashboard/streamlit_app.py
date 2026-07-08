@@ -15,7 +15,15 @@ A permanent annunciator strip (UI-PR-A item 1) renders above every tab: mode,
 autonomy level, kill-switch state+control, scheduler heartbeat age, open R,
 pending-approvals count (UI/UX doc §1.2, "the annunciator principle").
 
-Run with:  streamlit run alphaos/dashboard/streamlit_app.py
+OPS-A: the approval surface must never be reachable off-machine. main()
+refuses to render anything (no sidebar, no tabs, no action buttons -- the
+whole script stops) unless the connection is loopback; see
+_is_loopback_request(). Prefer `deploy/run_dashboard.sh` to launch this, or
+`streamlit run alphaos/dashboard/streamlit_app.py` (the `.streamlit/
+config.toml` in this repo pins the safe bind address as the default either
+way). Remote access, if ever wanted, is an SSH tunnel
+(`ssh -L 8502:127.0.0.1:8502 user@host`) -- never a LAN bind, never
+port-forwarding.
 
 This is intentionally not the full 15-tab UI. It never presents simulated
 performance as real: everything is labelled paper/simulated.
@@ -47,6 +55,53 @@ from alphaos.util import timeutils
 # §10 and the specs doc's PR15 skeleton. Not derived from settings because
 # there is nothing to derive yet: v1 has exactly one level.
 AUTONOMY_LEVEL_LABEL = "L1 — unattended cadence"
+
+_LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
+
+
+def _is_loopback_request() -> bool:
+    """OPS-A: true only if THIS request is genuinely local. Checks two
+    independent signals:
+
+    1. ``st.context.ip_address`` -- the actual connecting client's IP, as
+       Streamlit itself observes it. This is the real signal: it catches a
+       misconfigured bind (e.g. `--server.address 0.0.0.0`) regardless of
+       what the server was told its own address is, and it's what a phone on
+       the same wifi would actually have to satisfy to load the page.
+    2. ``st.get_option("server.address")`` -- the server's own configured
+       bind address, as a second, independent layer (defense in depth: the
+       config/CLI flag is meant to prevent the bind in the first place; this
+       verifies it actually took effect).
+
+    Either signal being missing or non-loopback fails CLOSED, not open --
+    same unknown-never-safe posture the rest of this codebase uses elsewhere
+    (position_health.py's degenerate-risk-basis handling, etc.). This
+    project's own operating doctrine is that remote access is an SSH tunnel,
+    never a LAN bind or reverse proxy (module docstring), so there is no
+    legitimate scenario where an unreadable signal should be treated as
+    fine.
+
+    KNOWN RESIDUAL RISK (accepted, not a defect in this control): a reverse
+    proxy in front of Streamlit would make ``ip_address`` report the proxy's
+    loopback IP, wrongly passing this check while a remote user is connected.
+    That is exactly why reverse proxies are forbidden here and an SSH tunnel
+    -- whose forwarded connection legitimately originates from loopback on
+    this host (the operator already authenticated via SSH) -- is the only
+    sanctioned remote path.
+
+    ``st.context`` is read via getattr so a Streamlit older than the pinned
+    floor (``pyproject`` requires ``streamlit>=1.42``, where ``st.context.
+    ip_address`` exists) fails CLOSED cleanly (refuse) rather than raising
+    AttributeError -- belt-and-suspenders below the floor the pin already
+    guarantees."""
+    ctx = getattr(st, "context", None)
+    ip = getattr(ctx, "ip_address", None) if ctx is not None else None
+    if ip not in _LOOPBACK_ADDRESSES:
+        return False
+    bind_addr = st.get_option("server.address")
+    if bind_addr is not None and bind_addr not in _LOOPBACK_ADDRESSES:
+        return False
+    return True
 
 
 def get_orchestrator() -> Orchestrator:
@@ -964,6 +1019,22 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
 
 def main(orch: Orchestrator | None = None) -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
+    if not _is_loopback_request():
+        st.error(
+            "🔴 REFUSED — this dashboard is only reachable from the loopback "
+            "address (127.0.0.1). Every action here (Approve / Reject / "
+            "kill-switch / Run scan / everything UI-PR-A added) is disabled "
+            "on this connection. Remote access, if ever needed, is an SSH "
+            "tunnel (`ssh -L 8502:127.0.0.1:8502 user@host`) — never a LAN "
+            "bind, never port-forwarding."
+        )
+        st.stop()
+        # Explicit backstop: st.stop() aborts by raising in a real Streamlit
+        # run, but it does NOT raise unconditionally (it returns normally
+        # without a live ScriptRunContext). This return makes the refusal
+        # fail-closed regardless of Streamlit internals -- nothing below may
+        # ever run for a non-loopback connection.
+        return
     orch = orch or get_orchestrator()
     # IMPORTANT: do NOT call orch.startup() here. startup() WRITES (a config
     # snapshot + one system_event per check); calling it on render made the

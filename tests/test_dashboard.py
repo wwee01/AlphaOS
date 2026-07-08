@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from alphaos.dashboard import streamlit_app
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
@@ -227,4 +229,118 @@ def test_invalidation_reason_surfaces_on_open_proposal_view():
     assert len(views) == 1
     assert views[0]["proposal_id"] == pid
     assert views[0]["invalidation_reason"]  # non-empty -- the default card sets a real rule
+    orch.close()
+
+
+# --------------------------------------------------------- OPS-A: loopback guard
+def test_is_loopback_request_true_for_real_loopback(monkeypatch):
+    fake = _fake_st()  # already configured as a genuine loopback connection
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is True
+
+
+def test_is_loopback_request_false_for_lan_ip(monkeypatch):
+    """The primary signal: the ACTUAL connecting client's IP, regardless of
+    what the server believes its own bind address is."""
+    fake = _fake_st()
+    fake.context.ip_address = "192.168.0.42"
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is False
+
+
+def test_is_loopback_request_false_for_non_loopback_bind_address(monkeypatch):
+    """The secondary signal: even if a client somehow appears to connect from
+    127.0.0.1 (e.g. through a misconfigured proxy), a non-loopback SERVER bind
+    address alone is enough to refuse -- defense in depth, not a single point
+    of failure."""
+    fake = _fake_st()
+    fake.get_option.return_value = "0.0.0.0"
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is False
+
+
+def test_is_loopback_request_false_when_ip_unknown(monkeypatch):
+    """Unknown reads as NOT loopback -- unknown-never-safe, not unknown-means-fine."""
+    fake = _fake_st()
+    fake.context.ip_address = None
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is False
+
+
+def test_is_loopback_request_false_when_st_context_missing(monkeypatch):
+    """Audit finding 2 / hardening: a Streamlit older than the pinned floor
+    lacks st.context entirely. The guard must fail CLOSED (refuse) rather than
+    raise AttributeError. Uses a spec'd mock with no `context` attribute."""
+    from unittest.mock import MagicMock
+
+    fake = MagicMock(spec=["get_option"])  # deliberately no `context` attribute
+    fake.get_option.return_value = "127.0.0.1"
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is False
+
+
+class _StreamlitStopped(Exception):
+    """Stand-in for Streamlit's real StopException -- st.stop() is a no-op
+    MagicMock call by default, which would silently let execution fall
+    through past the refusal branch. Raising here and asserting the raise is
+    how we prove main() genuinely halts rather than merely calling st.error()
+    and continuing."""
+
+
+def test_non_loopback_request_renders_nothing_and_writes_nothing(monkeypatch):
+    """The actual OPS-A acceptance bar: a non-loopback connection gets the
+    refusal message and NOTHING else -- no sidebar, no tabs, no orchestrator
+    construction, and (the part that matters) zero ledger writes even though
+    the seeded state below includes a pending proposal a real Approval Center
+    render would otherwise show Approve/Reject buttons for."""
+    fake = _fake_st()
+    fake.context.ip_address = "203.0.113.7"  # TEST-NET-3, definitely not loopback
+    fake.stop.side_effect = _StreamlitStopped
+    monkeypatch.setattr(streamlit_app, "st", fake)
+
+    orch = _orch()
+    inject_pending_proposal(orch, symbol="AAPL")
+    before = orch.journal.count_rows("trade_proposals")
+
+    with pytest.raises(_StreamlitStopped):
+        streamlit_app.main(orch=orch)
+
+    # Refusal fires before ANYTHING else -- get_orchestrator/render_sidebar/
+    # the title/tabs never run for this connection.
+    fake.sidebar.title.assert_not_called()
+    fake.tabs.assert_not_called()
+    fake.title.assert_not_called()
+    assert fake.error.call_count == 1
+    assert "REFUSED" in fake.error.call_args[0][0]
+
+    after = orch.journal.count_rows("trade_proposals")
+    assert after == before
+    orch.close()
+
+
+def test_non_loopback_refusal_halts_even_if_st_stop_does_not_raise(monkeypatch):
+    """Audit finding 1 / hardening: st.stop() does NOT raise unconditionally in
+    a real Streamlit run (returns normally without a live ScriptRunContext).
+    The explicit `return` after it must still halt main() so the action surface
+    never renders even when st.stop() is a plain no-op -- this is the belt to
+    st.stop()'s suspenders. Here st.stop() is left as a no-op (does NOT raise);
+    main() must still return cleanly having rendered nothing past the refusal."""
+    fake = _fake_st()
+    fake.context.ip_address = "203.0.113.7"  # not loopback
+    # NOTE: fake.stop has no side_effect here -- it's a silent no-op, the
+    # worst case the return backstop exists to cover.
+    monkeypatch.setattr(streamlit_app, "st", fake)
+
+    orch = _orch()
+    inject_pending_proposal(orch, symbol="AAPL")
+    before = orch.journal.count_rows("trade_proposals")
+
+    result = streamlit_app.main(orch=orch)  # must NOT raise, must NOT render on
+
+    assert result is None
+    fake.stop.assert_called_once()
+    fake.sidebar.title.assert_not_called()
+    fake.tabs.assert_not_called()
+    fake.title.assert_not_called()
+    assert orch.journal.count_rows("trade_proposals") == before
     orch.close()

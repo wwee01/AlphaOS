@@ -4,7 +4,7 @@
     {
       "name": "alphaos-dashboard",
       "runtimeExecutable": "uv",
-      "runtimeArgs": ["run", "streamlit", "run", "alphaos/dashboard/streamlit_app.py", "--server.headless", "true", "--server.port", "8503"],
+      "runtimeArgs": ["run", "streamlit", "run", "alphaos/dashboard/streamlit_app.py", "--server.headless", "true", "--server.port", "8503", "--server.address", "127.0.0.1"],
       "port": 8503
     }
   ]

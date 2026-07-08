@@ -14,7 +14,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Live connectors are optional; mock mode + tests need none of them.
-live = ["streamlit>=1.30", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", "requests>=2.31"]
+# streamlit>=1.42: OPS-A's dashboard loopback guard reads st.context.ip_address
+# (added ~1.42) as its primary signal; the floor guarantees the attribute exists.
+live = ["streamlit>=1.42", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", "requests>=2.31"]
 test = ["pytest>=7.0", "tzdata>=2023.3"]
 lint = ["ruff>=0.15", "mypy>=2.1"]
 
