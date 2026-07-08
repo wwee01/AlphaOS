@@ -30,6 +30,8 @@ class JobType(StrEnum):
     DAILY_DIGEST = "daily_digest"
     # PR9.5: once-daily paper-equity + SPY-bar capture (measurement only).
     BENCHMARK_SPINE = "benchmark_spine"
+    # TEXT-0: once-daily SEC EDGAR pull (collect only).
+    TEXT_ARCHIVE_PULL = "text_archive_pull"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -134,6 +136,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _digest_due(settings, journal, now)
         if job_type == JobType.BENCHMARK_SPINE:
             return _benchmark_spine_due(settings, journal, now)
+        if job_type == JobType.TEXT_ARCHIVE_PULL:
+            return _text_archive_pull_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -253,4 +257,10 @@ def _digest_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
 def _benchmark_spine_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     return _once_daily_due(
         JobType.BENCHMARK_SPINE, settings.scheduler_benchmark_spine_time, settings, journal, now,
+    )
+
+
+def _text_archive_pull_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(
+        JobType.TEXT_ARCHIVE_PULL, settings.scheduler_text_archive_pull_time, settings, journal, now,
     )

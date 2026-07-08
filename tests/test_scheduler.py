@@ -1075,3 +1075,92 @@ def test_cli_benchmark_spine_is_a_valid_scheduler_run_job_choice():
 
     args = build_parser().parse_args(["scheduler_run_job", "benchmark_spine"])
     assert args.job_type == "benchmark_spine"
+
+
+# =============================================================================
+# TEXT-0: text archive pull cadence + scheduler wiring (mirrors benchmark
+# spine's own cadence tests above exactly -- same _once_daily_due helper).
+# =============================================================================
+def test_text_archive_pull_not_due_before_its_configured_time():
+    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00")
+    j = JournalStore(":memory:")
+    # 06:00 SGT = 22:00 UTC (previous day) -- before 07:00 SGT.
+    before = datetime(2026, 7, 5, 22, 0, tzinfo=timezone.utc)
+
+    due, reason = cadence.is_due(cadence.JobType.TEXT_ARCHIVE_PULL, s, j, now=before)
+
+    assert due is False
+    assert "before text_archive_pull time" in reason
+    j.close()
+
+
+def test_text_archive_pull_due_at_or_after_its_configured_time_and_not_yet_run():
+    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00")
+    j = JournalStore(":memory:")
+    # 08:00 SGT = 00:00 UTC -- after 07:00 SGT, no prior run today.
+    after = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+
+    due, reason = cadence.is_due(cadence.JobType.TEXT_ARCHIVE_PULL, s, j, now=after)
+
+    assert due is True
+    j.close()
+
+
+def test_text_archive_pull_not_due_twice_same_sgt_day(orchestrator):
+    # TEXT_ARCHIVE_ENABLED=true so the dispatched job actually reaches
+    # status='completed' -- disabled (the default) returns 'skipped', which
+    # _once_daily_due deliberately does NOT treat as "already done today"
+    # (see _once_daily_due's own "status = 'completed'" filter), so a
+    # disabled job stays due all day, harmlessly re-skipping each tick.
+    orchestrator.settings = make_settings(
+        SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00", TEXT_ARCHIVE_ENABLED="true",
+    )
+    after = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+    runner = JobRunner(orchestrator)
+    runner.run_job(cadence.JobType.TEXT_ARCHIVE_PULL, lock_key=cadence.default_lock_key(
+        cadence.JobType.TEXT_ARCHIVE_PULL, orchestrator.settings, now=after))
+
+    due, reason = cadence.is_due(cadence.JobType.TEXT_ARCHIVE_PULL, orchestrator.settings,
+                                 orchestrator.journal, now=after)
+
+    assert due is False
+    assert "already completed today" in reason
+
+
+def test_run_due_jobs_includes_text_archive_pull(orchestrator, monkeypatch):
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+
+    results = JobRunner(orchestrator).run_due_jobs()
+
+    by_type = {r["job_type"]: r for r in results}
+    assert cadence.JobType.TEXT_ARCHIVE_PULL in by_type
+    # TEXT_ARCHIVE_ENABLED defaults false -- dispatched, but the job itself no-ops.
+    assert by_type[cadence.JobType.TEXT_ARCHIVE_PULL]["status"] == "skipped"
+
+
+def test_scheduler_status_report_includes_text_archive_pull(orchestrator):
+    report = JobRunner(orchestrator).status_report()
+
+    assert "text_archive_pull" in report["recent_by_job_type"]
+
+
+def test_text_archive_pull_config_hash_changes_with_its_own_setting():
+    """Unlike benchmark_spine's cadence time (folded into scheduler_config_
+    hash), scheduler_text_archive_pull_time lives in its own
+    text_archive_config_hash bucket alongside TEXT_ARCHIVE_ENABLED/
+    SEC_EDGAR_CONTACT_EMAIL -- see TEXT_ARCHIVE_CONFIG_FIELDS."""
+    from alphaos.lineage.config_snapshot import build_config_hashes
+
+    hash_a = build_config_hashes(make_settings())["text_archive_config_hash"]
+    hash_b = build_config_hashes(
+        make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="09:00")
+    )["text_archive_config_hash"]
+
+    assert hash_a != hash_b
+
+
+def test_cli_text_archive_pull_is_a_valid_scheduler_run_job_choice():
+    from alphaos.__main__ import build_parser
+
+    args = build_parser().parse_args(["scheduler_run_job", "text_archive_pull"])
+    assert args.job_type == "text_archive_pull"

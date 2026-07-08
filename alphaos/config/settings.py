@@ -423,6 +423,20 @@ class Settings:
                                             # trailing-1-year vol-percentile window
                                             # plus meaningful history beyond it
 
+    # --- TEXT-0: point-in-time EDGAR text archive (collect only) ---
+    # No trading logic, no scanner, no AI calls, no scoring -- pure collection.
+    # Defaults OFF (unlike REG-1): unlike a pure local computation, this makes
+    # real outbound HTTP requests to a third party under the operator's own
+    # identifying contact email -- that's a deliberate one-time operator
+    # input this mechanism should never assume for them, same posture as
+    # EXP-0's shadow_tier_enabled default-off pending a reviewed universe
+    # file. text_archive_enabled=true with no contact email configured is
+    # ALSO inert (make_edgar_provider refuses without one) -- belt and
+    # suspenders, not just a single switch.
+    text_archive_enabled: bool
+    sec_edgar_contact_email: str            # required for any live EDGAR fetch (SEC fair-access policy)
+    scheduler_text_archive_pull_time: str    # "HH:MM" SGT, once-daily cadence (mirrors benchmark_spine)
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -902,6 +916,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_benchmark_spine_time = _get(src, "SCHEDULER_BENCHMARK_SPINE_TIME", "17:30")
     _parse_hhmm(scheduler_benchmark_spine_time, "SCHEDULER_BENCHMARK_SPINE_TIME")
 
+    # TEXT-0: once-daily EDGAR pull cadence. Reuses the same HH:MM validation.
+    scheduler_text_archive_pull_time = _get(src, "SCHEDULER_TEXT_ARCHIVE_PULL_TIME", "07:00")
+    _parse_hhmm(scheduler_text_archive_pull_time, "SCHEDULER_TEXT_ARCHIVE_PULL_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1091,6 +1109,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         shadow_tier_max_count=_get_int(src, "SHADOW_TIER_MAX_COUNT", 500),
         regime_enabled=_get_bool(src, "REGIME_ENABLED", True),
         regime_backfill_lookback_days=_get_int(src, "REGIME_BACKFILL_LOOKBACK_DAYS", 900),
+        text_archive_enabled=_get_bool(src, "TEXT_ARCHIVE_ENABLED", False),
+        sec_edgar_contact_email=_get(src, "SEC_EDGAR_CONTACT_EMAIL", ""),
+        scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,

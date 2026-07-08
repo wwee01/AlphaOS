@@ -1414,6 +1414,7 @@ SCHEMA: list[tuple[str, str]] = [
             attribution_config_hash TEXT,
             shadow_tier_config_hash TEXT,
             regime_config_hash TEXT,
+            text_archive_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1633,6 +1634,63 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # TEXT-0: ticker -> SEC CIK reference lookup, refreshed weekly. One
+        # CURRENT mapping per ticker (a reference/lookup table, not a
+        # measurement ledger like regime_days/candidate_outcomes -- CIK
+        # reassignment is rare but real, so refresh legitimately updates the
+        # row rather than appending a new one; last_confirmed_at_utc tracks
+        # freshness). "Once archived-for, always archived-for" (spec's own
+        # law): a ticker is never REMOVED from this table just because it's
+        # since been delisted/dropped from the live universe.
+        "cik_map",
+        """
+        CREATE TABLE IF NOT EXISTS cik_map (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL UNIQUE,
+            cik TEXT NOT NULL,
+            company_name TEXT,
+            first_seen_at_utc TEXT NOT NULL,
+            last_confirmed_at_utc TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # TEXT-0: the point-in-time text archive's metadata ledger (raw
+        # gzipped bodies live on disk at storage_path; this table is the
+        # honest, queryable index over them). THE LAW OF THIS SUBSYSTEM:
+        # published_at is the SOURCE's own timestamp; seen_at is the wall
+        # clock when AlphaOS fetched it. ALL future backtests and shadow
+        # tests may only ever condition on seen_at, never published_at --
+        # conditioning on published_at would let a backtest "know" about a
+        # filing before AlphaOS could possibly have seen it (the PEAD-audit
+        # lesson, inverted). Append-only; re-fetch of an already-archived
+        # accession is a no-op via the UNIQUE constraint below.
+        "text_documents",
+        """
+        CREATE TABLE IF NOT EXISTS text_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id TEXT NOT NULL UNIQUE,
+            cik TEXT NOT NULL,
+            ticker_at_time TEXT,
+            form_type TEXT NOT NULL,
+            edgar_forms_version TEXT NOT NULL,
+            accession_no TEXT NOT NULL UNIQUE,
+            published_at TEXT,
+            seen_at TEXT NOT NULL,
+            source_url TEXT,
+            sha256 TEXT NOT NULL,
+            byte_size INTEGER,
+            storage_path TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'edgar',
+            fetch_run_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1769,6 +1827,12 @@ INDEXES: list[str] = [
     # colliding with (or mutating) v1 rows for the same date.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_regime_days_date_version ON regime_days(market_date, regime_rules_version)",
     "CREATE INDEX IF NOT EXISTS idx_candidate_packets_regime ON candidate_packets(regime)",
+    # TEXT-0: re-fetch of an already-archived accession is a no-op (idempotent
+    # insert idiom, same as universe_days/benchmark_bars/regime_days).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_text_documents_accession ON text_documents(accession_no)",
+    "CREATE INDEX IF NOT EXISTS idx_text_documents_cik ON text_documents(cik)",
+    "CREATE INDEX IF NOT EXISTS idx_text_documents_seen_at ON text_documents(seen_at)",
+    "CREATE INDEX IF NOT EXISTS idx_text_documents_fetch_run ON text_documents(fetch_run_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

@@ -109,6 +109,19 @@ REGIME_CONFIG_FIELDS = (
     "regime_enabled", "regime_backfill_lookback_days",
 )
 
+# TEXT-0: the form catalog itself is a CODE CONSTANT tied to EDGAR_FORMS_V1
+# (alphaos/text_archive/forms.py), not settings -- same rationale as TQS/
+# attribution/REGIME. The real settings are the on/off switch, the cadence
+# time, and the contact-email input (a secret-stripped preimage via
+# strip_secrets/SECRET_SETTINGS_FIELDS would normally scrub anything email-
+# shaped, but sec_edgar_contact_email is deliberately NOT a credential -- it
+# has to be sent in plaintext in every EDGAR request's User-Agent header
+# anyway, so hashing it here reveals nothing hashing wouldn't already not
+# protect).
+TEXT_ARCHIVE_CONFIG_FIELDS = (
+    "text_archive_enabled", "sec_edgar_contact_email", "scheduler_text_archive_pull_time",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -143,4 +156,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "attribution_config_hash": _subset_hash(full, ATTRIBUTION_CONFIG_FIELDS),
         "shadow_tier_config_hash": _subset_hash(full, SHADOW_TIER_CONFIG_FIELDS),
         "regime_config_hash": _subset_hash(full, REGIME_CONFIG_FIELDS),
+        "text_archive_config_hash": _subset_hash(full, TEXT_ARCHIVE_CONFIG_FIELDS),
     }
