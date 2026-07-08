@@ -13,6 +13,7 @@ the dashboard and CLI share one code path. Every step is journaled.
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -56,8 +57,10 @@ from alphaos.constants import (
     TargetSource,
     TradeDirection,
     TriggerSource,
+    UniverseTier,
 )
-from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+from alphaos.scanner.candidate_scanner import CURRENT_INSTRUMENT_VERSION, DEFAULT_UNIVERSE
+from alphaos.universe.builder import load_universe_file
 from alphaos.cards import registry as cards
 from alphaos.util import timeutils
 from alphaos.data.freshness_guard import FreshnessGuard
@@ -116,6 +119,15 @@ class ScanSummary:
     scan_batch_id: Optional[str] = None
     scheduler_run_id: Optional[str] = None
     notes: list = field(default_factory=list)
+    # --- EXP-0: shadow-tier deterministic universe capture ---
+    # Zero by definition when shadow_tier_enabled is False or no universe
+    # file has been committed yet -- see Orchestrator.run_scan_once.
+    shadow_tier_scanned: int = 0
+    shadow_tier_fresh: int = 0
+    shadow_tier_stale: int = 0
+    shadow_tier_candidates: int = 0
+    shadow_tier_top_decile: int = 0
+    shadow_tier_feed_coverage: Optional[float] = None
 
     def as_dict(self) -> dict:
         return self.__dict__
@@ -233,6 +245,39 @@ class Orchestrator:
             scan_batch_id=scan_batch_id, scheduler_run_id=scheduler_run_id,
         )
 
+        # --- EXP-0: shadow-tier deterministic universe capture. Rides this
+        # same scan job (no new scheduler cadence). `shadow_result` is NEVER
+        # merged into `scan` -- the `for cand in scan.candidates:` loop below
+        # (AI evaluation -> proposal creation) only ever sees core-tier
+        # candidates; there is no code path from here that hands a
+        # shadow-tier candidate to that loop. Zero AI calls, zero enrichment:
+        # this block calls only the scanner + universe_days journaling. ---
+        if self.settings.shadow_tier_enabled:
+            universe_doc = load_universe_file(self.settings.shadow_tier_universe_file)
+            if universe_doc and universe_doc.get("symbols"):
+                shadow_symbols = [s["symbol"] for s in universe_doc["symbols"] if s.get("symbol")]
+                shadow_result = self.scanner.scan_shadow_tier(
+                    shadow_symbols, scan_batch_id=scan_batch_id,
+                    universe_file_version=universe_doc.get("version"),
+                )
+                self._record_universe_days(shadow_result, universe_doc)
+                summary.shadow_tier_scanned = shadow_result.snapshots
+                summary.shadow_tier_stale = shadow_result.blocked_stale
+                summary.shadow_tier_fresh = shadow_result.snapshots - shadow_result.blocked_stale
+                summary.shadow_tier_candidates = len(shadow_result.candidates)
+                summary.shadow_tier_top_decile = self._count_top_decile_interest(shadow_result.candidates)
+                summary.shadow_tier_feed_coverage = (
+                    round(summary.shadow_tier_fresh / summary.shadow_tier_scanned, 4)
+                    if summary.shadow_tier_scanned else None
+                )
+            else:
+                self.journal.log_system_event(
+                    Severity.WARNING, "scanner",
+                    "SHADOW_TIER_ENABLED is true but no shadow-universe file found at "
+                    f"{self.settings.shadow_tier_universe_file!r} -- run `alphaos universe_build`, "
+                    "review, and commit the result first.",
+                )
+
         if self.kill_switch.is_engaged():
             self.journal.log_system_event(
                 Severity.WARNING, "scan", "Kill switch engaged: no proposals will be executed."
@@ -292,6 +337,17 @@ class Orchestrator:
         }
 
         for cand in scan.candidates:
+            # EXP-0 backstop: structurally this can never be true (the shadow-
+            # tier pass above returns its own separate ScanResult, never
+            # merged into `scan`) -- a loud, unambiguous failure here beats a
+            # silent AI-labelling cost leak if a future refactor ever does
+            # merge the two paths. See also the twin guard in
+            # _handle_proposal, the actual proposal-creation chokepoint.
+            if cand.get("shadow_tier"):
+                raise RuntimeError(
+                    f"shadow_tier candidate {cand.get('candidate_id')!r} reached the core-tier "
+                    "AI-evaluation loop -- this must be structurally impossible (EXP-0)."
+                )
             snapshot = cand.snapshot or {}
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
@@ -410,6 +466,22 @@ class Orchestrator:
 
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
                          scan_batch_id=None) -> bool:
+        # EXP-0: guards the scan loop's two proposal-creation branches.
+        # CORRECTION (scope/safety audit, F-1): this is NOT the one true
+        # proposal-creation chokepoint -- _override_open_trade builds and
+        # inserts its own trade_proposals row independently and never calls
+        # this method; it has its own dedicated shadow_tier guard instead
+        # (a graceful blocked_reason, not a RuntimeError, since that path is
+        # reachable by an ordinary user action, not just an internal-logic
+        # bug). seed_demo hardcodes shadow_tier=0 and needs no guard.
+        # Structurally unreachable today (shadow-tier candidates never enter
+        # scan.candidates, and no other path constructs a ScanContext with
+        # shadow_tier=1) -- a loud failure beats a silent leak.
+        if cand.get("shadow_tier"):
+            raise RuntimeError(
+                f"shadow_tier candidate {cand.get('candidate_id')!r} reached "
+                "_handle_proposal -- this must be structurally impossible (EXP-0)."
+            )
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
         snapshot = cand.snapshot or {}
@@ -850,6 +922,19 @@ class Orchestrator:
         still required. On any gate failure the override is recorded with
         execution_allowed=0 + a blocked_reason."""
         symbol = cand.get("symbol")
+        # EXP-0: unlike the scan loop's two RuntimeError backstops (genuinely
+        # unreachable today -- shadow candidates never enter scan.candidates
+        # at all), THIS path is reachable by an ordinary user action: nothing
+        # stops an operator from calling `alphaos override` against a
+        # shadow-tier candidate_id they noticed in the digest. It's currently
+        # harmless only because no code path plants an openai_evaluations row
+        # for a shadow candidate yet (EXP-1 adds exactly that) -- a graceful,
+        # journaled refusal here, not a crash, matching this function's own
+        # blocked_reason convention for every other refusal below.
+        if cand.get("shadow_tier"):
+            rec["blocked_reason"] = OverrideBlockedReason.SHADOW_TIER_EXCLUDED.value
+            rec["execution_result"] = "candidate is shadow_tier=1 -- no proposal creation permitted"
+            return "blocked: shadow-tier candidates are measurement-only, never tradeable via override"
         if not ev_row or ev_row.get("entry") is None or ev_row.get("stop") is None or ev_row.get("target") is None:
             rec["blocked_reason"] = OverrideBlockedReason.OTHER.value
             rec["execution_result"] = "no usable eval levels for this candidate"
@@ -1394,6 +1479,69 @@ class Orchestrator:
             (ProposalStatus.EXPIRED.value, reason, now, proposal_id),
         )
         self.journal.conn.commit()
+
+    # ------------------------------------------------------ EXP-0 shadow tier
+    def _record_universe_days(self, shadow_result, universe_doc: dict) -> None:
+        """The survivorship-bias law: one row per shadow-tier symbol per
+        trading day, written REGARDLESS of whether that symbol produced a
+        candidate. Idempotent across the (up to 3) scan windows a day via
+        ``idx_universe_days_symbol_date`` -- the first window of the day to
+        reach here wins; later same-day attempts hit the unique-index
+        IntegrityError and are silently skipped (same idiom as
+        ``benchmark_capture._backfill_benchmark_bars``'s own dedup). Rows are
+        NEVER updated after insert -- delisted/dropped names simply stop
+        appearing in future rows; existing rows are untouched."""
+        market_dt = timeutils.market_date().isoformat()
+        flags_by_symbol = {s["symbol"]: s for s in universe_doc.get("symbols", []) if s.get("symbol")}
+        for sym, outcome in shadow_result.per_symbol.items():
+            # Correctness audit F-2: only attempt the insert for a genuinely
+            # nameable row -- narrows the IntegrityError catch below to the
+            # ONE case it's meant for (the same-day unique-index dedup),
+            # rather than also silently swallowing a NOT NULL violation on a
+            # falsy symbol. Not reachable via run_scan_once today (symbols
+            # are pre-filtered before scan_shadow_tier is ever called), but
+            # this table exists specifically to prevent survivorship bias --
+            # a silently-dropped row would defeat its own purpose.
+            if not sym:
+                self.journal.log_system_event(
+                    Severity.WARNING, "scanner",
+                    f"universe_days: skipping a falsy symbol key in shadow scan per_symbol "
+                    f"outcomes ({outcome!r}) -- this should be unreachable; investigate the caller.",
+                )
+                continue
+            flags = flags_by_symbol.get(sym, {})
+            try:
+                self.journal.insert("universe_days", {
+                    "universe_day_id": new_id("univday"),
+                    "market_date": market_dt,
+                    "symbol": sym,
+                    "tier": UniverseTier.WATCHLIST.value,
+                    "universe_file_version": universe_doc.get("version"),
+                    "recent_ipo": 1 if flags.get("recent_ipo") else 0,
+                    "spac_flag": 1 if flags.get("spac_flag") else 0,
+                    "freshness_status": outcome.get("freshness_status"),
+                    "candidate_found": 1 if outcome.get("candidate_id") else 0,
+                    "candidate_id": outcome.get("candidate_id"),
+                    "instrument_version": CURRENT_INSTRUMENT_VERSION,
+                })
+            except sqlite3.IntegrityError:
+                pass  # idx_universe_days_symbol_date backstop -- already recorded today
+
+    @staticmethod
+    def _count_top_decile_interest(candidates: list) -> int:
+        """Count of shadow-tier candidates scoring at/above the 90th
+        percentile of THIS scan's own shadow-tier candidate interest scores
+        (nearest-rank method -- deterministic, no numpy dependency). Scoped
+        to candidates (names that already cleared the momentum/interest bar),
+        not the full scanned population -- a relative "standouts among
+        tonight's standouts" signal, documented here so the digest number is
+        never read as a percentile of the whole shadow universe."""
+        scores = sorted((c.get("interest_score") or 0.0) for c in candidates)
+        n = len(scores)
+        if n == 0:
+            return 0
+        threshold = scores[max(0, int(0.9 * (n - 1)))]
+        return sum(1 for s in scores if s >= threshold)
 
     # -------------------------------------------- 2.3 interest ranking + labels
     def _rank_candidates(self, candidates: list) -> None:

@@ -40,6 +40,11 @@ DEFAULT_UNIVERSE = [
     "GOOGL", "META", "NFLX", "AVGO", "JPM", "XLK", "XLE", "XLF", "SMH", "COST",
 ]
 
+# EXP-0: every shadow-tier candidate row stamps this until INSTR-1 lands (then
+# 'instr1') -- pre-INSTR-1 interest ranks are known-biased (dead intraday
+# rel_volume) and must never be silently mixed with post-fix rows in analysis.
+CURRENT_INSTRUMENT_VERSION = "pre_instr1"
+
 
 @dataclass
 class ScanResult:
@@ -48,6 +53,13 @@ class ScanResult:
     snapshots: int = 0
     blocked_stale: int = 0
     rejected_illiquid: int = 0
+    # EXP-0: per-symbol outcome for the shadow-tier pass ONLY (core-tier scans
+    # leave this empty -- ScanResult's shape/behavior for the core path is
+    # otherwise byte-identical to before EXP-0). Keyed by symbol:
+    # {"freshness_status": str, "candidate_id": Optional[str]} -- lets the
+    # orchestrator write one universe_days survivorship row per requested
+    # shadow symbol, including ones that never became a candidate.
+    per_symbol: "dict[str, dict]" = field(default_factory=dict)
 
 
 class CandidateScanner:
@@ -60,7 +72,10 @@ class CandidateScanner:
         self._spy: Optional[dict] = None
         self._qqq: Optional[dict] = None
 
-    def build_universe(self, scan_id: str, symbols: Optional[list[str]] = None) -> list[str]:
+    def build_universe(
+        self, scan_id: str, symbols: Optional[list[str]] = None,
+        tier: str = UniverseTier.CORE.value, universe_file_version: Optional[int] = None,
+    ) -> list[str]:
         symbols = symbols or DEFAULT_UNIVERSE
         for sym in symbols:
             self.journal.insert(
@@ -68,9 +83,10 @@ class CandidateScanner:
                 {
                     "symbol": sym,
                     "asset_class": "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock",
-                    "tier": UniverseTier.CORE.value,
+                    "tier": tier,
                     "is_active": 1,
                     "scan_id": scan_id,
+                    "universe_file_version": universe_file_version,
                 },
             )
         return symbols
@@ -130,6 +146,74 @@ class CandidateScanner:
         )
         return result
 
+    def scan_shadow_tier(
+        self, symbols: list[str], scan_batch_id: Optional[str] = None,
+        universe_file_version: Optional[int] = None,
+    ) -> ScanResult:
+        """EXP-0: the shadow-tier pass -- same 3 windows (batch snapshot ->
+        freshness assess -> deterministic interest score) as ``scan()``, but
+        against the committed shadow-universe symbol list, tagged
+        ``tier=watchlist`` / ``shadow_tier=1``.
+
+        Returns its OWN, entirely separate ``ScanResult`` -- callers (the
+        orchestrator) must NEVER feed this result's ``.candidates`` into the
+        AI-evaluation/proposal-creation loop. That is a structural property of
+        HOW this result is used downstream, not something this method can
+        enforce by itself (this class never calls AI/proposal code either
+        way) -- see ``Orchestrator.run_scan_once``'s own chokepoint guards for
+        the belt-and-suspenders backstop.
+
+        Uses ``self.market.get_snapshots()`` (one batched call per ~100
+        symbols) rather than looping ``get_snapshot()`` per symbol -- the
+        whole reason EXP-0 needed the batch endpoint at all.
+        """
+        scan_id = scan_batch_id or new_id("scan")
+        self._scan_batch_id = scan_batch_id
+        result = ScanResult(scan_id=scan_id)
+        symbols = self.build_universe(
+            scan_id, symbols, tier=UniverseTier.WATCHLIST.value,
+            universe_file_version=universe_file_version,
+        )
+        snapshots = self.market.get_snapshots(symbols)
+
+        for sym, snapshot in zip(symbols, snapshots):
+            report = self.freshness.assess(snapshot)
+            snapshot_id = new_id("snap")
+            self._persist_snapshot(snapshot_id, snapshot, report)
+            result.snapshots += 1
+            result.per_symbol[sym] = {"freshness_status": report.freshness_status, "candidate_id": None}
+
+            if not report.is_usable:
+                result.blocked_stale += 1
+                self._reject(
+                    None, sym, "shadow_scan", report.block_reason or ReasonCode.STALE_DATA.value,
+                    f"freshness={report.freshness_status}", snapshot,
+                )
+                continue
+
+            reason = self._tradeability_reason(snapshot)
+            if reason is not None:
+                result.rejected_illiquid += 1
+                self._reject(None, sym, "shadow_scan", reason, "tradeability gate", snapshot)
+                continue
+
+            cand = self._maybe_candidate(
+                scan_id, sym, snapshot, snapshot_id,
+                shadow_tier=True, instrument_version=CURRENT_INSTRUMENT_VERSION,
+            )
+            if cand is not None:
+                result.candidates.append(cand)
+                result.per_symbol[sym]["candidate_id"] = cand["candidate_id"]
+
+        self.journal.log_system_event(
+            Severity.INFO,
+            "scanner",
+            f"Shadow-tier scan {scan_id} over {len(symbols)} symbols: "
+            f"{len(result.candidates)} candidates, {result.blocked_stale} stale-blocked, "
+            f"{result.rejected_illiquid} illiquid.",
+        )
+        return result
+
     # ------------------------------------------------------------- internals
     def _tradeability_reason(self, snapshot: dict) -> Optional[str]:
         """Return a reason code if the symbol is not tradeable, else None.
@@ -147,7 +231,10 @@ class CandidateScanner:
             return ReasonCode.WIDE_SPREAD.value
         return None
 
-    def _maybe_candidate(self, scan_id, sym, snapshot, snapshot_id) -> Optional[ScanContext]:
+    def _maybe_candidate(
+        self, scan_id, sym, snapshot, snapshot_id,
+        shadow_tier: bool = False, instrument_version: Optional[str] = None,
+    ) -> Optional[ScanContext]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
         # Roadmap 2.3: deterministic market-interest signals (broadens discovery
@@ -198,6 +285,11 @@ class CandidateScanner:
             "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
             # PR4: measurement-only lineage stamp (never influences the candidate decision above).
             "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            # --- EXP-0: shadow tier stamping. shadow_tier=1 is the structural
+            # marker the orchestrator's chokepoint guards refuse on -- this
+            # scanner class never calls AI/proposal code itself either way. ---
+            "shadow_tier": 1 if shadow_tier else 0,
+            "instrument_version": instrument_version,
         }
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).

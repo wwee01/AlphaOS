@@ -351,6 +351,8 @@ class ReasonCode(StrEnum):
     # --- Roadmap PR6: proposal TTL / stale-approval guard ---
     PROPOSAL_EXPIRED = "PROPOSAL_EXPIRED"
     PROPOSAL_SUPERSEDED = "PROPOSAL_SUPERSEDED"
+    # --- EXP-0: shadow-tier deterministic universe capture ---
+    SHADOW_TIER_EXCLUDED = "SHADOW_TIER_EXCLUDED"
     # --- PR10: setup cards / exit-first invariant ---
     EXIT_PLAN_INCOMPLETE = "EXIT_PLAN_INCOMPLETE"
 
@@ -869,4 +871,5 @@ class OverrideBlockedReason(StrEnum):
     NO_VALID_EXIT_PROTECTION = "no_valid_exit_protection"
     NO_OPEN_POSITION = "no_open_position"
     NO_PROPOSAL = "no_proposal"
+    SHADOW_TIER_EXCLUDED = "shadow_tier_excluded"
     OTHER = "other"

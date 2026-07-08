@@ -56,6 +56,43 @@ SCHEMA: list[tuple[str, str]] = [
             avg_dollar_volume REAL,
             scan_id TEXT,
             notes TEXT,
+            recent_ipo INTEGER DEFAULT 0,
+            spac_flag INTEGER DEFAULT 0,
+            universe_file_version INTEGER,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # EXP-0: the survivorship-bias law. One row per shadow-tier universe
+        # member per TRADING DAY, written by the shadow-tier scan pass
+        # REGARDLESS of whether that name produced a candidate that day --
+        # this is the system's own point-in-time record of what it could see.
+        # Delisted/dropped names simply stop appearing in new rows; existing
+        # rows are never touched (append-only -- enforced by
+        # idx_universe_days_symbol_date below + application-level insert-only
+        # access, mirroring benchmark_bars' own idempotent-insert idiom). A
+        # name observed more than once on the same trading date (multiple
+        # scan windows) writes only its FIRST same-day observation; this
+        # table answers "was this name in the universe and observed on this
+        # date", not a rolling intraday summary -- per-window candidate
+        # detail lives in the ordinary candidates table instead.
+        "universe_days",
+        """
+        CREATE TABLE IF NOT EXISTS universe_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            universe_day_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            universe_file_version INTEGER,
+            recent_ipo INTEGER DEFAULT 0,
+            spac_flag INTEGER DEFAULT 0,
+            freshness_status TEXT,
+            candidate_found INTEGER DEFAULT 0,
+            candidate_id TEXT,
+            instrument_version TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -197,6 +234,8 @@ SCHEMA: list[tuple[str, str]] = [
             earnings_timing TEXT,
             earnings_data_status TEXT,
             lineage_id TEXT,
+            shadow_tier INTEGER DEFAULT 0,
+            instrument_version TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1340,6 +1379,7 @@ SCHEMA: list[tuple[str, str]] = [
             proposal_ttl_config_hash TEXT,
             tqs_config_hash TEXT,
             attribution_config_hash TEXT,
+            shadow_tier_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1683,6 +1723,13 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_setup_cards_id_version ON setup_cards(card_id, version)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_card ON candidates(card_id)",
     "CREATE INDEX IF NOT EXISTS idx_proposals_card ON trade_proposals(card_id)",
+    # EXP-0: one universe_days row per (symbol, market_date) -- the backstop
+    # that makes multi-window-per-day writes idempotent (same idiom as
+    # idx_benchmark_bars_symbol_date: attempt an insert every scan window,
+    # let the DB reject same-day repeats via IntegrityError).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_universe_days_symbol_date ON universe_days(symbol, market_date)",
+    "CREATE INDEX IF NOT EXISTS idx_universe_days_date ON universe_days(market_date)",
+    "CREATE INDEX IF NOT EXISTS idx_candidates_shadow_tier ON candidates(shadow_tier)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

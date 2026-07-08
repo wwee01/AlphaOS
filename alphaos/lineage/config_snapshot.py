@@ -90,6 +90,16 @@ ATTRIBUTION_CONFIG_FIELDS = (
     "attribution_enabled",
 )
 
+# EXP-0: shadow-tier universe capture screen parameters + master switch. The
+# committed universe FILE's own sha/version (not a settings field) is the
+# per-symbol-list lineage stamp; this hash is the screen/threshold lineage.
+SHADOW_TIER_CONFIG_FIELDS = (
+    "shadow_tier_enabled", "shadow_tier_universe_file",
+    "shadow_tier_min_adv_usd", "shadow_tier_max_adv_usd",
+    "shadow_tier_min_price", "shadow_tier_max_price",
+    "shadow_tier_adv_lookback_days", "shadow_tier_target_count", "shadow_tier_max_count",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -106,7 +116,8 @@ def _subset_hash(full: dict, fields: tuple) -> str:
 def build_config_hashes(settings) -> dict[str, str]:
     """{"config_hash", "scanner_config_hash", "risk_config_hash",
     "protection_config_hash", "scheduler_config_hash", "earnings_config_hash",
-    "proposal_ttl_config_hash", "tqs_config_hash", "attribution_config_hash"}.
+    "proposal_ttl_config_hash", "tqs_config_hash", "attribution_config_hash",
+    "shadow_tier_config_hash"}.
     Each hash changes iff a relevant field's VALUE changes -- adding/renaming
     a field it doesn't list does not perturb a category hash that doesn't
     reference it."""
@@ -121,4 +132,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "proposal_ttl_config_hash": _subset_hash(full, PROPOSAL_TTL_CONFIG_FIELDS),
         "tqs_config_hash": _subset_hash(full, TQS_CONFIG_FIELDS),
         "attribution_config_hash": _subset_hash(full, ATTRIBUTION_CONFIG_FIELDS),
+        "shadow_tier_config_hash": _subset_hash(full, SHADOW_TIER_CONFIG_FIELDS),
     }
