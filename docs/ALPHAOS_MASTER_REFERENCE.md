@@ -1,11 +1,14 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.1 · 2026-07-08 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.2 · 2026-07-08 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.1, the team's last night: T5 resolved; §3.5 final-review
-record added — learning-loop audit + partners' verdicts; §5 punch list reordered to
-the two-lane ruling incl. EXP-0; §7 loop-closure law; §9 decision rows. v1.0:
-2026-07-06.)*
+chief risk officer.** *(v1.2, 2026-07-08 late: the operator+Fable regime/text-archive
+specs reconciled into Lane A — REG-1 at 13b, TEXT-0 at 13c, UNIV-1 superseded (salvage
+into EXP-0; UNIV-D later), EXP-1's own classifier deleted, item-20 "Regime Engine v1"
+renamed REG-2; §9 decision rows added. v1.1, the team's last night: T5 resolved; §3.5
+final-review record added — learning-loop audit + partners' verdicts; §5 punch list
+reordered to the two-lane ruling incl. EXP-0; §7 loop-closure law; §9 decision rows.
+v1.0: 2026-07-06.)*
 
 This is the root document of AlphaOS. If you read one file before touching anything —
 human or AI, this year or in five — read this one. It consolidates what we built, what
@@ -482,7 +485,28 @@ item specs under their canonical names in the specs doc):**
     names, $5–50M ADV, batch snapshots, interest-scored, instrument-version
     labeled, **zero AI calls, structurally no proposals**). Added 2026-07-08
     late session, operator-directed — start the irreplaceable niche dataset
-    now; AI labelling stays gated at EXP-1. Spec: specs doc EXP-0.
+    now; AI labelling stays gated at EXP-1. Spec: specs doc EXP-0 — **as
+    amended 2026-07-08 late (UNIV-1 salvage): + `universe_days` survivorship
+    journaling, + floor/flags (leveraged-ETF/SPAC/recent-IPO), + per-symbol
+    screen-time stats in the universe file.**
+13b. 🔴 **REG-1** — regime classifier + packet stamping (shadow/measurement
+    only). Frozen four-state classifier (CRISIS/CHOP/TREND_UP/TREND_DN) from
+    SPY daily bars, `regime_days` table + backfill, packet stamping, shadow
+    arming-map scorer (the earn-its-existence instrument for REG-2). Pulled
+    forward 2026-07-08 late (operator+Fable reconciliation): the classifier
+    must be frozen BEFORE anyone examines regime-conditional outcomes
+    (anti-data-mining); brief slices carry the "descriptive only" caveat until
+    PORT-1. Spec: `docs/roadmap/alphaos-regime-and-text-archive-specs.md`
+    REG-1 + the specs doc's reconciliation deltas (benchmark_bars reuse; new
+    `regime` columns, dead `market_regime` column left alone).
+13c. 🔴 **TEXT-0** — point-in-time EDGAR text archive (collect only; no
+    strategy, no AI, no trades). Seen-at-stamped, append-only; value compounds
+    with calendar time — the entire reason it ships this early. `cik_map`
+    from EXP-0's universe ∪ current book ("once archived-for, always
+    archived-for"); its SEC company-facts capture is the designated reference
+    source for the later UNIV-D cap-tier derivation. Interim backup: extend
+    `backup_ledger.sh` in the same PR; **OPS-B's Lane B priority rises the day
+    the archive starts growing.** Spec: same archived file, TEXT-0 + deltas.
 14. 🔴 **EVAL-1** — offline eval harness + raw-completion retention (incl.
     failures) + the operator-adjudicated ground-truth golden set. Before any
     prompt/model change, before PR12-era temptation.
@@ -501,17 +525,31 @@ item specs under their canonical names in the specs doc):**
     effective-N floors from day one. The payload. CANARY must be live first.
 20. 🔴 **PR12** (registry-first, 8 seeded hypotheses) → **PR13** (scoreboard +
     demotion slice first, then promotion + PR13.5 diff→version) → cards v2–v3 →
-    **PR14** → Regime Engine v1 + **COST-1** (gates ladder rung 2) →
+    **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
+    renamed 2026-07-08 late since REG-1, its measurement half, now lands at
+    13b; evidence-gated on REG-1's shadow arming-map scorer reaching its
+    pre-registered floors) + **COST-1** (gates ladder rung 2) →
     portfolio-risk gates (Class C: gross-notional/sector caps, live-equity sizing
     — kill the static 100k) → **PR15/L3** (evidence-gated; also blocked on the
     CRO restore-drill law).
+20a. 🔴 **UNIV-D** (floats, non-blocking, post-TEXT-0): retroactive market-cap
+    tier derivation (U1/U2/U3) by date-join once TEXT-0's SEC company-facts
+    data exists. UNIV-1 as originally drafted is SUPERSEDED — see §9 and the
+    specs doc reconciliation subsection. **Standing gate regardless of tiering
+    scheme: nothing outside the current book becomes execution-eligible until
+    COST-1 ships + calibration covers that liquidity band + per-card shadow
+    evidence clears the calibrated-cost bar at effective-N floor.**
 
 **Lane B — parallel, any session's slack:**
 21. 🔴 **TASK-R** retro-relabel (run once; feeds the CANARY/EVAL-1 corpora) ·
     🔴 **CANARY** model-drift canary (live before EXP-1) · 🔴 **OPS-B**
-    off-ecosystem backup + `env.enc` · 🔴 **BRIEF-FIX-1** (audit C4: floor-gate the
-    brief's per-event ΔR) · 🔴 the operator's quarterly restore drill (user-only;
-    blocks L3).
+    off-ecosystem backup + `env.enc` — **priority rises the day TEXT-0's archive
+    starts growing** (a 4–8 GB/yr moat on one disk recreates the CRITICAL PR9.5
+    closed) · 🔴 **BRIEF-FIX-1** (audit C4: floor-gate the brief's per-event ΔR)
+    — **more urgent post-reconciliation: the one live reporting-law violation
+    must not sit open while REG-1/TEXT-0 add two new report surfaces; ride
+    along in this window** · 🔴 the operator's quarterly restore drill
+    (user-only; blocks L3).
 
 ---
 
@@ -642,6 +680,9 @@ belongs in these documents, not in any session's memory.
 | One floor law: `effective_n()` shared by reports AND promotion gates; BH-FDR family = cumulative evaluated preregistrations | Audit A1/A5: row-count floors on a one-beta-cluster book ≈ 3–5 independent bets per 30 rows; per-render FDR controls nothing across 365 nightly runs. Mirror of the one-replay-engine rule. | Never |
 | BASELINE runs three arms (AI / interest-threshold / propose-all) | Audit C2: both original arms conditioned on interest_score — two arms measure selection inherited from the scanner, not AI value. The bracket separates them; the claim stays honest-conditional. | Rule v2+ arms are new pre-registrations |
 | CANARY + BASELINE + PORT-1 ported by contract from NightDesk #81/#85 | Port the contract, never the code (method note in the specs doc PORT-1 section) — copying modules imports NightDesk's assumptions and none of AlphaOS's tests. | — |
+| REG-1 pulled forward to A2.5 (was item 20's "Regime Engine v1" measurement half) | 2026-07-08 late reconciliation: the PORT-1 gate was about trusting sliced *claims*, never collecting labels. REG-1's urgency is epistemic — the classifier must be frozen BEFORE anyone examines regime-conditional outcomes, or every later regime definition is contaminated by peeking. Backfill is a deterministic derivation from vendor daily bars, so stamp-at-birth is recoverable — which is also why EXP-0 (unrecoverable snapshots) keeps the front slot. One classifier, one truth: EXP-1's own "regime tag v0" deleted, consumes `regime_days`. | Never relabel v1 rows in place; threshold changes = `regime_rules_v2`, new rows |
+| UNIV-1 (market-cap tiers) superseded by EXP-0's ADV-band screen + UNIV-D later derivation | The capacity niche is liquidity-defined, not cap-defined — ADV is the direct measure, cap a proxy needing reference data that didn't exist. UNIV-1's salvaged parts (survivorship `universe_days` law, floor/flags, non-executability of widened names) are in EXP-0 amended; cap tiers become a retroactive date-join once TEXT-0's SEC data exists. Operator-reviewed committed universe file beats an automated monthly rebalance (human-in-loop, versioned like a card). | If the ADV band systematically misses names the thesis wants (then UNIV-D graduates from derivation to screen input) |
+| TEXT-0 ships early (A2.7); reference data = SEC only, free, official | Archive value compounds strictly with calendar time and is pure collection — zero contamination risk. The seen-at law (backtests may only condition on `seen_at`, never `published_at`) is the single fact that makes the archive worth anything. SEC company-facts doubles as UNIV-D's reference source — one source, no new vendors, no scraping. Pre-inception backfill rows are never valid for point-in-time tests. Paid sources (transcripts, news wires) stay gated behind the paired-comparison law. | Never weaken the seen-at law; new free sources only if official-primary-publisher + stable API |
 
 ---
 

@@ -1,8 +1,18 @@
 # AlphaOS PR Implementation Specs — PR9–PR15 + final-review items (+ standing templates)
 
-**Version 1.1 · 2026-07-08 · Fable 5 (final founding-team review, last session)**
+**Version 1.2 · 2026-07-08 · Fable 5 (final founding-team review, last session)**
 **Companion to `alphaos-master-build-plan.md` (strategy) and `HANDOVER.md` (state).**
 
+> **v1.2 (2026-07-08, late):** the operator+Fable regime/text-archive specs
+> (archived verbatim at `docs/roadmap/alphaos-regime-and-text-archive-specs.md`)
+> reconciled into Lane A — REG-1 and TEXT-0 inserted after EXP-0; UNIV-1
+> superseded as drafted (survivorship journaling + floor exclusions salvaged
+> into EXP-0; cap-tiering deferred to the non-blocking UNIV-D derivation);
+> EXP-1's own regime classifier (§4) deleted in favor of consuming REG-1's
+> `regime_days`; item-20 "Regime Engine v1" renamed REG-2 (the allocator,
+> evidence-gated on REG-1's shadow scorer). Full ruling: the reconciliation
+> subsection below + master reference §5/§9.
+>
 > **v1.1 (2026-07-08):** SC (ScanContext refactor) and UI-PR-A recorded as SHIPPED;
 > the exit-review addendum (TASK-R / canary / shadow baseline / OPS-A / OPS-B /
 > PORT-1) integrated under canonical names with the two-lane build order; PR12–PR15
@@ -515,6 +525,66 @@ Everything below inherits the same standing rules as the addendum: shadow/ops
 only, nothing reads into any live decision path, schema changes additive only,
 §H.1 test discipline, T4 merge protocol.
 
+### Regime/text-archive reconciliation (2026-07-08, late — operator + Fable ruling)
+
+The operator-commissioned specs for a regime layer, point-in-time text archive,
+and universe widening (archived verbatim at
+`docs/roadmap/alphaos-regime-and-text-archive-specs.md`) are reconciled into
+Lane A as follows. Build sessions read the archived file for REG-1/TEXT-0
+implementation detail, **as amended by the deltas below**, which win on conflict.
+
+| Item | Ruling | Lane / slot |
+|---|---|---|
+| REG-1 — regime classifier + packet stamping (shadow) | **Build early** — after EXP-0, not at item 20. The PORT-1 gate was about trusting sliced *claims*, never collecting labels; REG-1's urgency is epistemic (freeze the classifier BEFORE anyone examines regime-conditional outcomes — anti-data-mining law). Brief output carries "descriptive only — no significance claimed" until PORT-1. | **A2.5** |
+| TEXT-0 — point-in-time EDGAR archive (collect only) | **Build early** — value compounds strictly with calendar time, zero contamination risk (pure collection, orthogonal to every decision path). Waiting seven items burns months of unrecoverable archive. | **A2.7** |
+| UNIV-1 — market-cap tiered universe widening | **Superseded as drafted.** EXP-0's ADV-band screen wins: computable today from Alpaca bars alone, and closer to the thesis (the capacity niche is liquidity-defined; cap is a proxy). Three parts salvaged into EXP-0 — see the EXP-0 amendment block. Cap-tier vocabulary survives as UNIV-D. | — |
+| UNIV-D — retroactive cap-tier derivation (NEW, small) | Once TEXT-0's SEC reference data exists (company-facts XBRL → shares outstanding/market cap; SIC → sector), derive U1/U2/U3 tier stamps retroactively by date-join over the point-in-time `universe_days`/snapshot record. Non-blocking, floats after TEXT-0 data accrues. | floats, post-TEXT-0 |
+| REG-2 — regime as allocator (STUB) | Unchanged in position and gate: this is what item 20's "Regime Engine v1" actually was — renamed. Evidence-gated on REG-1's shadow arming-map scorer reaching its pre-registered floors (q-corrected once PORT-1 is live). Not authorized for build. The CRISIS stand-down micro-PR option exists but changes live behavior — operator's explicit call only. | A12 (was "Regime Engine v1") |
+
+**REG-1 build deltas (vs the archived spec):**
+- SPY history comes from PR9.5's `benchmark_bars` + `_backfill_benchmark_bars()`
+  (paging-safe, already shipped) — no second bar-history fetcher (one-source rule).
+- Do NOT repurpose the dead `candidate_packets.market_regime` column (defined in
+  schema, never read or written — verified 2026-07-08). Add fresh `regime` +
+  `regime_rules_version` columns; leave the corpse alone.
+- The shadow arming-map scorer's pre-registration block goes in the PR
+  description now and migrates into PORT-1's `preregistrations` table when that
+  lands; the analysis-not-before date is honored manually until then.
+- PORT-1 inherits REG-1's effective-N requirement: `effective_n()` must cluster
+  same-regime consecutive days when evaluating regime-conditional claims.
+
+**TEXT-0 build deltas (vs the archived spec):**
+- Interim backup: extend `deploy/backup_ledger.sh`'s manifest to cover
+  `data/text_archive/` in the same PR — do not wait for OPS-B. **OPS-B's Lane B
+  priority formally rises the day the archive starts growing** (a 4–8 GB/yr
+  moat on one disk recreates the exact CRITICAL PR9.5 closed).
+- `cik_map` is built from the union of EXP-0's committed universe file + the
+  current book + any name ever previously screened in ("once archived-for,
+  always archived-for"). SEC company-facts capture in this job is also the
+  designated reference source for UNIV-D — one shared source, no new vendors.
+- TEXT-0.1 (FDA/ClinicalTrials/litigation feeds) stays a config-gated follow-on
+  micro-PR, disabled by default, per the archived spec.
+
+**EXP-1 delta:** its §4 ("regime tag v0" — a second frozen classifier) is
+**deleted**; EXP-1 consumes REG-1's `regime_days` by date-join instead. Two
+frozen classifiers would be two truths — same law as one-replay-engine.
+
+**Standing gate preserved from UNIV-1 regardless of tiering scheme:** nothing
+outside the current book becomes execution-eligible until COST-1 has shipped
+AND calibration covers that liquidity band AND per-card shadow evidence clears
+the calibrated-cost bar at effective-N floor. All three, in writing, before an
+eligibility PR is even specced.
+
+**Amended Lane A order:** ✅ OPS-A → **A2** EXP-0 (amended below) → **A2.5**
+REG-1 → **A2.7** TEXT-0 → **A3** EVAL-1 → **A4** PORT-1 → **A5** INSTR-1 →
+**A6** BASELINE → **A7** EARN-1 → **A8** EXP-1 (amended) → **A9** PR12 →
+**A10** PR13 + PR13.5 → **A11** cards v2–v3 → PR14 → **A12** REG-2 + COST-1 →
+portfolio-risk gates → PR15/L3. The ~2-session delay to EVAL-1/PORT-1 is
+accepted because both insertions are collection-only and no statistical claims
+are made in the window — which also makes **BRIEF-FIX-1 (Lane B, audit C4) more
+urgent**: the one live reporting-law violation must not sit open while two new
+report surfaces are added. It should ride along in this window.
+
 ---
 
 ## TASK-R — Retro-relabel of the contaminated 2026-07-01 baseline
@@ -898,9 +968,28 @@ guard will honestly mark — that sparsity is itself a measurement (see #6).
 6. **Storage arithmetic** (fine for SQLite/WAL): ~300 symbols × 3 windows/day ≈
    900 snapshot rows/day (~25k/month); prune nothing — this IS the dataset.
 
+**AMENDED 2026-07-08 late (UNIV-1 reconciliation — three salvaged parts, now
+in-scope for this PR):**
+- **7. The survivorship law (non-negotiable):** additive table `universe_days`
+  (date, symbol, tier, flags, universe_file_version) — one row per shadow-tier
+  member per trading day, append-only, written by the nightly scan REGARDLESS
+  of whether the name produced a candidate. This is the system's point-in-time
+  record of what it *could see*; without it every future backtest inherits
+  survivor bias as delistings silently shrink the universe. Delisted names
+  simply stop appearing; their history remains. (~300 rows/day — trivial.)
+- **8. The floor + flags:** the builder screen excludes leveraged/inverse ETFs
+  (all ETFs already excluded) and, best-effort from Alpaca's assets endpoint,
+  flags rather than excludes `recent_ipo` (<12 months listed, where listing
+  date is available) and pre-deal SPACs. Flags are boolean columns on the
+  universe file entries — event-rich names are wanted, but must be sliceable.
+- **9. Per-symbol screen-time stats in the committed universe file:** ADV(20d),
+  price, and exchange as-of the screen date, so later tier derivations
+  (UNIV-D) have an honest as-of snapshot to join against.
+
 **Non-goals:** no AI labelling (EXP-1), no rel_volume fix (INSTR-1), no
 tradeability (ever, until per-card earned promotion much later), no new gates,
-no scheduler cadence changes (the shadow pass rides the existing scan job).
+no scheduler cadence changes (the shadow pass rides the existing scan job),
+**no market-cap tiering (UNIV-D, post-TEXT-0, non-blocking)**.
 **Tests:** builder screen math on constructed bars; batch-snapshot mapping parity
 with the single path; shadow tier can never reach `_handle_proposal`/labeller
 (grep + behavior probe); core-tier scan artifacts byte-identical with the shadow
@@ -938,12 +1027,13 @@ Skeleton (full spec at build time):
 3. Spread/liquidity instrumentation for the band (the 1bps slippage + $2M
    floor assumptions are megacap-calibrated fantasy here — record honest
    spread/ADV fields on every shadow candidate for COST-1 to consume).
-4. **Regime tag v0 (audit A6):** stamp `regime_tag` on candidate outcomes at
-   decision time from a frozen, dumb, versioned classifier (SPY 20d
-   realized-vol tercile × 50d trend sign — pre-registered, never tuned;
-   Regime Engine v1 refines later). Cross-regime aggregates carry
-   `regime_mixed=true` caveat; per-regime claims need per-regime effective-N
-   floors.
+4. ~~Regime tag v0~~ **DELETED 2026-07-08 (reconciliation ruling): EXP-1 does
+   NOT build its own classifier — it consumes REG-1's `regime_days` by
+   date-join** (REG-1 lands at A2.5, long before this). Two frozen classifiers
+   would be two truths — one-replay-engine law. What survives from the
+   original item: cross-regime aggregates carry a `regime_mixed=true` caveat;
+   per-regime claims need per-regime effective-N floors (now a PORT-1
+   requirement — same-regime consecutive days cluster as one observation).
 5. Every aggregate over the new universe floor-gates through `effective_n()`
    from day one (correlated small-caps on the same catalyst day inflate row
    counts worst of all).
