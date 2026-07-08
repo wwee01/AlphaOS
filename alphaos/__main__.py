@@ -97,6 +97,15 @@ def cmd_backfill_mfe_mae(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_backfill_regime_days(orch: Orchestrator) -> int:
+    """REG-1 one-off: extend SPY history, classify the full series into
+    regime_days, and stamp pre-existing candidate_packets rows still missing
+    a regime. Idempotent; measurement only -- no decision/execution change."""
+    res = orch.backfill_regime_days()
+    _print({"backfill_regime_days": res})
+    return 0 if "error" not in res else 1
+
+
 def cmd_outcomes_update(orch: Orchestrator) -> int:
     """Counterfactual outcome tracker: seed + resolve candidate_outcomes rows
     (candidates/proposals/rejects/armed-watch/user-overrides) with 1/3/5-day
@@ -104,6 +113,18 @@ def cmd_outcomes_update(orch: Orchestrator) -> int:
     change; idempotent."""
     res = orch.outcomes_update()
     _print({"outcomes_update": res})
+    return 0
+
+
+def cmd_regime_arming_report(orch: Orchestrator) -> int:
+    """REG-1: the shadow arming-map scorer report. PURE READ -- pure ledger
+    math over existing shadow rows; nothing armed/disarmed for real."""
+    from alphaos.reports.regime_arming_scorer import render_markdown
+
+    rep = orch.regime_arming_report()
+    print(render_markdown(rep))
+    print()
+    _print({"regime_arming_report": rep})
     return 0
 
 
@@ -418,6 +439,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("universe_build",
                    help="EXP-0: screen + write the shadow-tier universe file ($5-50M ADV band); "
                         "one-off/quarterly, requires live Alpaca creds, never auto-commits")
+    sub.add_parser("backfill_regime_days",
+                   help="REG-1: backfill regime_days from SPY history + stamp existing packets "
+                        "(idempotent, measurement only)")
+    sub.add_parser("regime_arming_report",
+                   help="REG-1: shadow arming-map scorer (armed_always vs armed_per_map paired "
+                        "replay ΔR per card; nothing armed for real)")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -499,6 +526,10 @@ def main(argv=None) -> int:
             return cmd_relative_performance_report(orch)
         if args.command == "universe_build":
             return cmd_universe_build(orch)
+        if args.command == "backfill_regime_days":
+            return cmd_backfill_regime_days(orch)
+        if args.command == "regime_arming_report":
+            return cmd_regime_arming_report(orch)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":
