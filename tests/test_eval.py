@@ -214,6 +214,35 @@ def test_run_eval_with_a_missing_corpus_is_a_safe_noop_with_an_error(tmp_path, j
     assert journal.count_rows("eval_runs") == 0
 
 
+def test_run_eval_isolates_a_malformed_fixture_and_processes_the_rest(tmp_path, journal):
+    """Regression guard, self-caught during audit prep: a corpus fixture
+    missing a required CandidatePacket field (an operator hand-edit typo)
+    must count as one n_corpus_errors entry and let the run continue to the
+    remaining packets, never crash the whole run."""
+    settings = make_settings()
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_real_labelled_packet(journal, symbol="AAPL")
+    _seed_real_labelled_packet(journal, symbol="MSFT")
+    seeds = select_seed_packets(journal)
+    write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
+
+    # Corrupt one fixture in place: drop a required field.
+    broken_file = os.path.join(corpus_dir, f"{seeds[0]['packet_id']}.json")
+    with open(broken_file, encoding="utf-8") as f:
+        broken = json.load(f)
+    del broken["last_price"]  # a required positional CandidatePacket field
+    with open(broken_file, "w", encoding="utf-8") as f:
+        json.dump(broken, f)
+
+    result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=1)
+
+    assert "error" not in result  # the run itself must not crash/error out
+    assert result["n_corpus_errors"] == 1
+    assert result["n_results"] == 1  # the second, well-formed packet still processed
+    run_row = journal.one("SELECT * FROM eval_runs WHERE run_id = ?", (result["run_id"],))
+    assert run_row["finished_at_utc"] is not None
+
+
 def test_run_eval_stores_one_result_per_packet_per_repeat(tmp_path, journal):
     settings = make_settings()
     corpus_dir = str(tmp_path / "corpus")

@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from alphaos import lineage
-from alphaos.constants import LabelSource
+from alphaos.constants import LabelSource, Severity
 from alphaos.eval.corpus import DEFAULT_CORPUS_DIR, load_corpus
 from alphaos.scanner.candidate_packet import PROMPT_KEYS, CandidatePacket
 from alphaos.scheduler import cost_guard
@@ -49,7 +49,7 @@ def run_eval(journal, settings, corpus_dir: Optional[str] = None, repeats: int =
     run_id = new_id("evalrun")
     result: dict[str, Any] = {
         "run_id": run_id, "n_packets": 0, "repeats": repeats,
-        "n_results": 0, "n_fail_safe": 0,
+        "n_results": 0, "n_fail_safe": 0, "n_corpus_errors": 0,
     }
 
     manifest, packets = load_corpus(corpus_dir)
@@ -79,7 +79,23 @@ def run_eval(journal, settings, corpus_dir: Optional[str] = None, repeats: int =
 
     try:
         for fixture in packets:
-            packet = _reconstruct_packet(fixture)
+            # Isolated per-packet: a malformed/hand-edited fixture (e.g. an
+            # operator typo that drops a required field) must count as ONE
+            # corpus error and move on to the next packet, never abort the
+            # whole run and lose every remaining packet's results -- same
+            # isolation principle as every other per-item loop in this
+            # codebase (TEXT-0's fetch loop, etc).
+            try:
+                packet = _reconstruct_packet(fixture)
+            except (KeyError, TypeError) as exc:
+                result["n_corpus_errors"] += 1
+                journal.log_system_event(
+                    Severity.ERROR, "eval",
+                    f"could not reconstruct packet {fixture.get('packet_id', '?')!r} "
+                    f"from its corpus fixture: {exc} -- skipped.",
+                )
+                continue
+
             for repeat_index in range(repeats):
                 classification = classifier.classify(packet)
                 journal.insert("eval_results", {
