@@ -871,4 +871,5 @@ class OverrideBlockedReason(StrEnum):
     NO_VALID_EXIT_PROTECTION = "no_valid_exit_protection"
     NO_OPEN_POSITION = "no_open_position"
     NO_PROPOSAL = "no_proposal"
+    SHADOW_TIER_EXCLUDED = "shadow_tier_excluded"
     OTHER = "other"

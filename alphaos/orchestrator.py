@@ -466,12 +466,14 @@ class Orchestrator:
 
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
                          scan_batch_id=None) -> bool:
-        # EXP-0: the proposal-creation chokepoint. Every proposal-creation
-        # path in this codebase funnels through here (the scan loop's two
-        # branches, _override_open_trade, seed_demo) -- this guard is the
-        # single centralized backstop, independent of the twin guard at the
-        # AI-evaluation call site above (that one protects against wasted AI
-        # spend; this one protects against proposal creation specifically).
+        # EXP-0: guards the scan loop's two proposal-creation branches.
+        # CORRECTION (scope/safety audit, F-1): this is NOT the one true
+        # proposal-creation chokepoint -- _override_open_trade builds and
+        # inserts its own trade_proposals row independently and never calls
+        # this method; it has its own dedicated shadow_tier guard instead
+        # (a graceful blocked_reason, not a RuntimeError, since that path is
+        # reachable by an ordinary user action, not just an internal-logic
+        # bug). seed_demo hardcodes shadow_tier=0 and needs no guard.
         # Structurally unreachable today (shadow-tier candidates never enter
         # scan.candidates, and no other path constructs a ScanContext with
         # shadow_tier=1) -- a loud failure beats a silent leak.
@@ -920,6 +922,19 @@ class Orchestrator:
         still required. On any gate failure the override is recorded with
         execution_allowed=0 + a blocked_reason."""
         symbol = cand.get("symbol")
+        # EXP-0: unlike the scan loop's two RuntimeError backstops (genuinely
+        # unreachable today -- shadow candidates never enter scan.candidates
+        # at all), THIS path is reachable by an ordinary user action: nothing
+        # stops an operator from calling `alphaos override` against a
+        # shadow-tier candidate_id they noticed in the digest. It's currently
+        # harmless only because no code path plants an openai_evaluations row
+        # for a shadow candidate yet (EXP-1 adds exactly that) -- a graceful,
+        # journaled refusal here, not a crash, matching this function's own
+        # blocked_reason convention for every other refusal below.
+        if cand.get("shadow_tier"):
+            rec["blocked_reason"] = OverrideBlockedReason.SHADOW_TIER_EXCLUDED.value
+            rec["execution_result"] = "candidate is shadow_tier=1 -- no proposal creation permitted"
+            return "blocked: shadow-tier candidates are measurement-only, never tradeable via override"
         if not ev_row or ev_row.get("entry") is None or ev_row.get("stop") is None or ev_row.get("target") is None:
             rec["blocked_reason"] = OverrideBlockedReason.OTHER.value
             rec["execution_result"] = "no usable eval levels for this candidate"
@@ -1479,6 +1494,21 @@ class Orchestrator:
         market_dt = timeutils.market_date().isoformat()
         flags_by_symbol = {s["symbol"]: s for s in universe_doc.get("symbols", []) if s.get("symbol")}
         for sym, outcome in shadow_result.per_symbol.items():
+            # Correctness audit F-2: only attempt the insert for a genuinely
+            # nameable row -- narrows the IntegrityError catch below to the
+            # ONE case it's meant for (the same-day unique-index dedup),
+            # rather than also silently swallowing a NOT NULL violation on a
+            # falsy symbol. Not reachable via run_scan_once today (symbols
+            # are pre-filtered before scan_shadow_tier is ever called), but
+            # this table exists specifically to prevent survivorship bias --
+            # a silently-dropped row would defeat its own purpose.
+            if not sym:
+                self.journal.log_system_event(
+                    Severity.WARNING, "scanner",
+                    f"universe_days: skipping a falsy symbol key in shadow scan per_symbol "
+                    f"outcomes ({outcome!r}) -- this should be unreachable; investigate the caller.",
+                )
+                continue
             flags = flags_by_symbol.get(sym, {})
             try:
                 self.journal.insert("universe_days", {

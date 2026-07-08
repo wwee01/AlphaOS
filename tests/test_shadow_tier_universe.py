@@ -380,6 +380,41 @@ def test_shadow_candidates_never_reach_ai_evaluation_or_proposals(tmp_path):
     orch.journal.close()
 
 
+def test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval(tmp_path):
+    """Regression for scope/safety audit finding F-1: _override_open_trade
+    builds its own proposal independently of _handle_proposal's guard, so a
+    user_override on a shadow-tier candidate needed its OWN guard. Reproduces
+    the audit's exact scenario -- a shadow candidate that (as EXP-1 will soon
+    make real) has a stored openai_evaluations row with usable levels -- and
+    confirms watch_to_trade is refused, not silently allowed through."""
+    from alphaos.constants import OverrideBlockedReason, UserOverrideAction
+
+    orch, _ = _orch_with_shadow_universe(tmp_path, [{"symbol": "SSSS1"}])
+    orch.run_scan_once()
+    shadow = orch.journal.one("SELECT * FROM candidates WHERE shadow_tier = 1 LIMIT 1")
+    assert shadow, "expected at least one shadow-tier candidate"
+
+    # Simulate what EXP-1's AI labelling will introduce: a real, usable eval
+    # for a shadow-tier candidate.
+    orch.journal.insert("openai_evaluations", {
+        "eval_id": "ev_shadow_test", "candidate_id": shadow["candidate_id"], "symbol": "SSSS1",
+        "model": "mock", "direction": "long", "entry": 20.0, "stop": 19.0, "target": 22.0,
+        "max_holding_days": 3, "expected_r": 2.0, "confidence": 0.8, "decision": "watch",
+        "reasoning_summary": "test", "is_mock": 1,
+    })
+
+    result = orch.create_user_override(shadow["candidate_id"], UserOverrideAction.WATCH_TO_TRADE.value)
+    assert result["ok"] is True  # the override itself is always recorded
+    assert result["override"]["blocked_reason"] == OverrideBlockedReason.SHADOW_TIER_EXCLUDED.value
+    assert result["override"]["execution_allowed"] == 0
+
+    proposals = orch.journal.query(
+        "SELECT * FROM trade_proposals WHERE candidate_id = ?", (shadow["candidate_id"],)
+    )
+    assert proposals == [], "shadow-tier candidate must never get a proposal via user override"
+    orch.journal.close()
+
+
 def test_shadow_tier_guard_present_at_ai_evaluation_chokepoint():
     """Source-inspection guard-presence check (matches this codebase's own
     test_attribution_flow.py::test_decision_functions_never_reference_
@@ -405,6 +440,22 @@ def test_universe_days_written_once_per_symbol_per_day_idempotent(tmp_path):
     assert rows[0]["recent_ipo"] == 1
     assert rows[0]["instrument_version"] == CURRENT_INSTRUMENT_VERSION
     orch.journal.close()
+
+
+def test_record_universe_days_skips_falsy_symbol_with_a_loud_warning(orchestrator):
+    """Regression for correctness audit finding F-2: a falsy symbol key must
+    be skipped with a journaled warning, never silently swallowed by the
+    same except-IntegrityError clause meant only for the same-day dedup."""
+    from alphaos.scanner.candidate_scanner import ScanResult
+
+    fake_result = ScanResult(scan_id="test", per_symbol={"": {"freshness_status": "usable", "candidate_id": None}})
+    orchestrator._record_universe_days(fake_result, {"version": 1, "symbols": []})
+
+    assert orchestrator.journal.count_rows("universe_days") == 0
+    warnings = orchestrator.journal.query(
+        "SELECT * FROM system_events WHERE category = 'scanner' AND message LIKE '%falsy symbol%'"
+    )
+    assert warnings
 
 
 def test_universe_days_append_only_enforced_at_db_level(journal):
