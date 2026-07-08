@@ -16,6 +16,7 @@ from alphaos.reports.daily_brief import (
     _fused_jobs,
     _moonshot_gap,
     _one_action,
+    _text_archive_health,
     build_daily_brief,
     render_compact,
     render_markdown,
@@ -355,6 +356,161 @@ def test_fused_jobs_detects_a_real_fuse_via_job_runs_rows(orchestrator):
     brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
     assert brief["needs_you"]["fused_jobs"]
     assert "self-halted" in brief["one_action"]
+
+
+# ------------------------------------------------------- TEXT-0 health line
+def _insert_text_doc(journal, seen_at: str, accession: str, sha256: str = "0" * 64) -> None:
+    journal.insert("text_documents", {
+        "document_id": new_id("txtdoc"), "cik": "320193", "ticker_at_time": "AAPL",
+        "form_type": "8-K", "edgar_forms_version": "edgar_forms_v1", "accession_no": accession,
+        "published_at": seen_at, "seen_at": seen_at, "source_url": "https://example.test/doc",
+        "sha256": sha256, "byte_size": 10, "storage_path": f"data/text_archive/x/{accession}.gz",
+        "source": "edgar", "fetch_run_id": "fetchrun_test",
+    })
+
+
+def _insert_job_run(journal, job_type: str, status: str, finished_at_utc: str,
+                    result_summary: dict = None) -> None:
+    import json as _json
+    journal.insert("job_runs", {
+        "job_run_id": new_id("jobrun"), "job_type": job_type, "trigger_source": "test",
+        "lock_key": new_id("lock"), "started_at_utc": finished_at_utc, "started_at_sgt": finished_at_utc,
+        "finished_at_utc": finished_at_utc, "finished_at_sgt": finished_at_utc, "duration_ms": 1,
+        "status": status,
+        "result_summary_json": _json.dumps(result_summary) if result_summary is not None else None,
+    })
+
+
+def test_text_archive_health_none_on_an_empty_archive(journal):
+    since_sgt = timeutils.stamp().utc
+    assert _text_archive_health(journal, since_sgt) is None
+
+
+def test_text_archive_health_counts_and_no_gap(journal):
+    today = timeutils.market_date()
+    days = []
+    d = today - timedelta(days=1)
+    while len(days) < 4:
+        if d.weekday() < 5:
+            days.append(d)
+        d -= timedelta(days=1)
+    days.sort()
+    for i, day in enumerate(days):
+        _insert_text_doc(journal, f"{day.isoformat()}T12:00:00+00:00", f"acc-{i}")
+
+    since_sgt = timeutils.stamp().utc  # nothing archived "tonight" in this test
+    _insert_job_run(journal, "text_archive_pull", "completed", since_sgt, {
+        "status": "completed", "pull_result": {"fetch_errors": 2},
+    })
+
+    result = _text_archive_health(journal, since_sgt)
+
+    assert result["total"] == len(days)
+    assert result["docs_last_night"] == 0
+    assert result["fetch_errors_last_night"] == 2
+    assert result["oldest_gap"] is None
+
+
+def test_text_archive_health_docs_last_night_scoped_to_since_sgt(journal):
+    today = timeutils.market_date()
+    yesterday = today - timedelta(days=1)
+    _insert_text_doc(journal, f"{yesterday.isoformat()}T08:00:00+00:00", "acc-old")
+
+    since_sgt = timeutils.stamp().utc
+    _insert_text_doc(journal, since_sgt, "acc-new")
+
+    result = _text_archive_health(journal, since_sgt)
+
+    assert result["total"] == 2
+    assert result["docs_last_night"] == 1  # only the one at/after since_sgt
+
+
+def test_text_archive_health_fetch_errors_excludes_other_job_types_and_incomplete_runs(journal):
+    today = timeutils.market_date()
+    _insert_text_doc(journal, f"{(today - timedelta(days=1)).isoformat()}T12:00:00+00:00", "acc-1")
+    since_sgt = timeutils.stamp().utc
+
+    _insert_job_run(journal, "text_archive_pull", "completed", since_sgt,
+                    {"status": "completed", "pull_result": {"fetch_errors": 3}})
+    _insert_job_run(journal, "text_archive_pull", "started", since_sgt, None)  # not completed -- excluded
+    _insert_job_run(journal, "benchmark_spine", "completed", since_sgt,
+                    {"status": "completed", "some_other_shape": True})  # different job -- excluded
+    before_window = timeutils.to_iso(timeutils.now_utc() - timedelta(days=2))
+    _insert_job_run(journal, "text_archive_pull", "completed", before_window,
+                    {"status": "completed", "pull_result": {"fetch_errors": 99}})  # outside window
+
+    result = _text_archive_health(journal, since_sgt)
+
+    assert result["fetch_errors_last_night"] == 3
+
+
+def test_text_archive_health_gap_on_the_oldest_eligible_boundary_day(journal):
+    """Regression guard: an off-by-one on the gap-walk's inclusive upper
+    bound (yesterday) would silently miss a gap sitting exactly there."""
+    today = timeutils.market_date()
+    yesterday = today - timedelta(days=1)
+    d = yesterday - timedelta(days=1)
+    while d.weekday() >= 5:  # earliest doc must land on a weekday too
+        d -= timedelta(days=1)
+    earliest = d
+    _insert_text_doc(journal, f"{earliest.isoformat()}T12:00:00+00:00", "acc-earliest")
+    # yesterday deliberately left unarchived -- if yesterday is a weekday,
+    # it's the gap; walk forward from earliest to confirm.
+    gap_day = yesterday if yesterday.weekday() < 5 else None
+    if gap_day is None:
+        pytest.skip("yesterday falls on a weekend this run -- boundary case not exercisable today")
+
+    since_sgt = timeutils.stamp().utc
+    result = _text_archive_health(journal, since_sgt)
+
+    assert result["oldest_gap"] == gap_day.isoformat()
+
+
+def test_text_archive_health_weekend_never_counts_as_a_gap(journal):
+    """A Friday-to-Monday archive with every WEEKDAY covered (including
+    'yesterday') and nothing archived over the weekend itself must report no
+    gap -- weekends are never a probable trading day. Every weekday from the
+    earliest doc through yesterday is inserted so the only unarchived days
+    are the weekend, isolating this from an unrelated real gap."""
+    today = timeutils.market_date()
+    yesterday = today - timedelta(days=1)
+    friday = yesterday
+    while friday.weekday() != 4:
+        friday -= timedelta(days=1)
+    monday = friday + timedelta(days=3)
+    if monday > yesterday:
+        pytest.skip("not enough calendar room before today for this run's date")
+
+    d, i = friday, 0
+    while d <= yesterday:
+        if d.weekday() < 5:
+            _insert_text_doc(journal, f"{d.isoformat()}T12:00:00+00:00", f"acc-{i}")
+            i += 1
+        d += timedelta(days=1)
+
+    since_sgt = timeutils.stamp().utc
+    result = _text_archive_health(journal, since_sgt)
+
+    assert result["oldest_gap"] is None
+
+
+def test_text_archive_health_rendered_in_markdown_brief(orchestrator):
+    _insert_text_doc(orchestrator.journal, timeutils.stamp().utc, "acc-render")
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert brief["text_archive_health"] is not None
+    assert "Text archive" in md
+    assert "oldest gap" in md
+
+
+def test_text_archive_health_section_omitted_when_never_archived(orchestrator):
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert brief["text_archive_health"] is None
+    assert "## Text archive" not in md
 
 
 def test_digest_position_health_mirrors_tqs_shadow_shape(orchestrator):

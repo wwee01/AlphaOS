@@ -96,6 +96,67 @@ def _regime_header(journal) -> Optional[dict]:
     }
 
 
+def _text_archive_health(journal, since_sgt: str) -> Optional[dict]:
+    """Docs fetched since local midnight, lifetime total, fetch errors summed
+    across this window's completed pull run(s), and the oldest probable-
+    trading-day gap in seen_at coverage since the archive's own first
+    document -- a silent gap is TEXT-0's one unforgivable defect (its own
+    module docstring: "EDGAR is never truly quiet"), so any weekday since the
+    archive started with zero seen_at rows counts as a gap, same threshold
+    the zero-doc job alert already uses. None when nothing has ever been
+    archived yet (TEXT_ARCHIVE_ENABLED off, or on but not yet run) -- omitted
+    rather than reporting a fabricated "oldest gap: none"; see render_markdown."""
+    import json
+    from datetime import date as _date
+    from datetime import timedelta
+
+    from alphaos.text_archive.service import is_probable_trading_day
+
+    total = journal.count_rows("text_documents")
+    if total == 0:
+        return None
+
+    docs_last_night = journal.count_rows("text_documents", "seen_at >= ?", (since_sgt,))
+
+    fetch_errors_last_night = 0
+    run_rows = journal.query(
+        "SELECT result_summary_json FROM job_runs WHERE job_type = 'text_archive_pull' "
+        "AND status = 'completed' AND finished_at_utc >= ?",
+        (since_sgt,),
+    )
+    for row in run_rows:
+        raw = row.get("result_summary_json")
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        pull_result = parsed.get("pull_result") or {}
+        fetch_errors_last_night += pull_result.get("fetch_errors") or 0
+
+    earliest_row = journal.one("SELECT MIN(seen_at) AS d FROM text_documents")
+    seen_dates = {
+        r["d"] for r in journal.query("SELECT DISTINCT substr(seen_at, 1, 10) AS d FROM text_documents")
+    }
+    oldest_gap = None
+    if earliest_row and earliest_row.get("d"):
+        d = _date.fromisoformat(earliest_row["d"][:10])
+        yesterday = timeutils.market_date() - timedelta(days=1)
+        while d <= yesterday:
+            if is_probable_trading_day(d) and d.isoformat() not in seen_dates:
+                oldest_gap = d.isoformat()
+                break
+            d += timedelta(days=1)
+
+    return {
+        "docs_last_night": docs_last_night,
+        "total": total,
+        "fetch_errors_last_night": fetch_errors_last_night,
+        "oldest_gap": oldest_gap,
+    }
+
+
 def _fused_jobs(journal, settings) -> list[dict]:
     """Every job_type currently self-halted, independent of due-ness (a
     fused job stays fused outside its own due window too -- see
@@ -317,6 +378,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     fused_jobs = _fused_jobs(journal, settings)
     needs_you = _needs_you(journal, digest, fused_jobs)
     todays_activity = _todays_activity(journal, since_sgt)
+    text_archive_health = _text_archive_health(journal, since_sgt)
     best_candidate = _best_candidate_today(journal, since_sgt)
     what_learned = _what_learned(journal, since_sgt)
     moonshot_gap = _moonshot_gap(journal, settings, now)
@@ -340,6 +402,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "needs_you": needs_you,
         "positions_health": positions_health,
         "todays_activity": todays_activity,
+        "text_archive_health": text_archive_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -406,6 +469,17 @@ def render_markdown(brief: dict) -> str:
         f"Blocked: {ta['blocked_today']}  ·  Rejected: {ta['rejected_today']}",
         "",
     ]
+
+    tah = brief.get("text_archive_health")
+    if tah:
+        gap = tah["oldest_gap"] or "none"
+        lines += [
+            "## Text archive",
+            f"- Text archive: +{tah['docs_last_night']} docs last night · "
+            f"{tah['total']:,} total · {tah['fetch_errors_last_night']} fetch errors · "
+            f"oldest gap: {gap}",
+            "",
+        ]
 
     bc = brief["best_candidate"]
     lines += ["## Best candidate today"]

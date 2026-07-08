@@ -9,6 +9,7 @@ throwaway paths.
 from __future__ import annotations
 
 import gzip
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -21,11 +22,21 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "backup_ledger.sh"
 
 
-def _run_backup(db_path: Path, dest_dir: Path) -> subprocess.CompletedProcess:
+def _run_backup(db_path: Path, dest_dir: Path, text_archive_dir: Path | None = None) -> subprocess.CompletedProcess:
+    # text_archive_dir defaults to a sibling path that does NOT exist --
+    # without an explicit override, the script falls back to its own real
+    # default ($REPO_DIR/data/text_archive). That's harmless only because
+    # that real directory happens not to exist on this machine today; once
+    # TEXT_ARCHIVE_ENABLED is ever turned on in production, every test using
+    # this helper would silently start reading/mirroring real archive data.
+    # Pinning an explicit non-existent default keeps every test hermetic
+    # regardless of the real repo's data/ state, now and later.
+    archive_dir = text_archive_dir if text_archive_dir is not None else dest_dir.parent / "no_text_archive_by_default"
     env = {
         **os.environ,
         "ALPHAOS_BACKUP_DB_PATH": str(db_path),
         "ALPHAOS_BACKUP_DEST_DIR": str(dest_dir),
+        "ALPHAOS_BACKUP_TEXT_ARCHIVE_DIR": str(archive_dir),
         "ALPHAOS_BACKUP_TEST_MODE": "1",
     }
     return subprocess.run(
@@ -187,3 +198,113 @@ def test_script_is_safe_to_run_twice_in_a_row_same_day(tmp_path):
 def test_sqlite3_cli_is_available():
     """Documents the one non-Python system dependency this script has."""
     assert shutil.which("sqlite3") is not None
+
+
+# =============================================================================
+# TEXT-0: text archive mirror + sha256 backup verification
+# =============================================================================
+def _write_source_filing(text_archive_dir: Path, db_path: Path, rel_path: str, content: bytes) -> None:
+    """Writes a real gzip of ``content`` under ``text_archive_dir/rel_path``
+    and a matching ``text_documents`` row (sha256 of the RAW/uncompressed
+    bytes, exactly as ``pull_new_filings`` computes it) into a real sqlite db
+    -- mirrors production's on-disk + DB-row shape closely enough for the
+    backup script's own verification query (``storage_path LIKE '%' || rel``)
+    to match it."""
+    full_path = text_archive_dir / rel_path
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(full_path, "wb") as f:
+        f.write(content)
+    sha256 = hashlib.sha256(content).hexdigest()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS text_documents ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, storage_path TEXT, sha256 TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO text_documents (storage_path, sha256) VALUES (?, ?)",
+        (f"data/text_archive/{rel_path}", sha256),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_backup_succeeds_when_text_archive_dir_does_not_exist(tmp_path):
+    """The archive is best-effort and interim -- its ABSENCE (e.g. before an
+    operator ever turns TEXT_ARCHIVE_ENABLED on) must never affect the DB
+    backup, which is the part exit-review called CRITICAL."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    _make_real_sqlite_db(db, "x")
+
+    result = _run_backup(db, dest, text_archive_dir=tmp_path / "does_not_exist")
+
+    assert result.returncode == 0, result.stderr
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()
+
+
+def test_text_archive_mirror_and_sha256_verification_passes_on_a_match(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    text_archive_src = tmp_path / "text_archive"
+    _make_real_sqlite_db(db, "x")
+    _write_source_filing(text_archive_src, db, "2026/07/0000320193-26-000001.gz", b"raw filing body")
+
+    result = _run_backup(db, dest, text_archive_dir=text_archive_src)
+
+    assert result.returncode == 0, result.stderr
+    assert (dest / "text_archive" / "2026" / "07" / "0000320193-26-000001.gz").exists()
+    assert "0 mismatches" in result.stdout
+
+
+def test_text_archive_sha256_mismatch_fails_loud_not_silently(tmp_path):
+    """Regression test for a self-caught bug: an earlier version of the
+    verification snippet called load_settings() for db_path, silently
+    ignoring ALPHAOS_BACKUP_DB_PATH and always checking the real production
+    DB -- so a genuine sha256 mismatch was never detected and the step always
+    reported "0 mismatches" regardless of the truth. This plants a
+    deliberately WRONG sha256 in the DB row and asserts the backup step
+    actually notices and fails loud (stderr), without hard-failing the
+    overall backup run (the DB backup, the CRITICAL part, already succeeded
+    by this point in the script)."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    text_archive_src = tmp_path / "text_archive"
+    _make_real_sqlite_db(db, "x")
+    _write_source_filing(text_archive_src, db, "2026/07/0000320193-26-000002.gz", b"raw filing body 2")
+
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "UPDATE text_documents SET sha256 = ? WHERE storage_path LIKE ?",
+        ("f" * 64, "%0000320193-26-000002.gz"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = _run_backup(db, dest, text_archive_dir=text_archive_src)
+
+    combined = result.stdout + result.stderr
+    assert "VERIFICATION FAILED" in combined
+    assert "sha256 mismatch" in combined
+    assert result.returncode == 0  # best-effort: does not fail the overall run
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()  # DB backup unaffected
+
+
+def test_text_archive_mirror_is_incremental_not_a_daily_rotation(tmp_path):
+    """Unlike the DB's daily-rotation snapshots, the archive mirror only ever
+    copies what rsync sees as new/changed -- a second run with no new files
+    must not re-verify or re-copy anything already present."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    text_archive_src = tmp_path / "text_archive"
+    _make_real_sqlite_db(db, "x")
+    _write_source_filing(text_archive_src, db, "2026/07/0000320193-26-000003.gz", b"body three")
+
+    r1 = _run_backup(db, dest, text_archive_dir=text_archive_src)
+    r2 = _run_backup(db, dest, text_archive_dir=text_archive_src)
+
+    assert r1.returncode == 0 and r2.returncode == 0
+    assert "1 file(s) synced" in r1.stdout
+    assert "0 file(s) synced" in r2.stdout

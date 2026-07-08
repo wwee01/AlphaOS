@@ -28,6 +28,7 @@ _JOB_FUNCS = {
     cadence.JobType.OUTCOMES_UPDATE: jobs.run_outcomes_job,
     cadence.JobType.DAILY_DIGEST: jobs.run_daily_digest_job,
     cadence.JobType.BENCHMARK_SPINE: jobs.run_benchmark_spine_job,
+    cadence.JobType.TEXT_ARCHIVE_PULL: jobs.run_text_archive_pull_job,
 }
 
 
@@ -174,8 +175,9 @@ class JobRunner:
     # ------------------------------------------------------------- cadence
     def run_due_jobs(self) -> list:
         """Run every job type that is currently due, in a fixed order (scan,
-        monitor, outcomes_update, daily_digest). Job types that are not due get
-        a ``not_due`` entry WITHOUT any job_runs row being inserted.
+        monitor, outcomes_update, daily_digest, benchmark_spine,
+        text_archive_pull). Job types that are not due get a ``not_due``
+        entry WITHOUT any job_runs row being inserted.
 
         PR9: a due job type that is currently FUSED (too many consecutive
         failures -- see ``cadence.is_fused``) is also skipped, with no
@@ -190,6 +192,7 @@ class JobRunner:
             cadence.JobType.OUTCOMES_UPDATE,
             cadence.JobType.DAILY_DIGEST,
             cadence.JobType.BENCHMARK_SPINE,
+            cadence.JobType.TEXT_ARCHIVE_PULL,
         ):
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
             if not due:
@@ -282,6 +285,7 @@ class JobRunner:
             cadence.JobType.OUTCOMES_UPDATE,
             cadence.JobType.DAILY_DIGEST,
             cadence.JobType.BENCHMARK_SPINE,
+            cadence.JobType.TEXT_ARCHIVE_PULL,
         ):
             recent_by_job_type[job_type] = self.journal.query(
                 "SELECT * FROM job_runs WHERE job_type = ? ORDER BY id DESC LIMIT ?",

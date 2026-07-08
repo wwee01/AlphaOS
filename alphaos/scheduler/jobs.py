@@ -112,3 +112,46 @@ def run_benchmark_spine_job(orch, runner) -> dict:
 
     result = capture_benchmark_spine(orch.journal, orch.settings)
     return {"status": "completed", "benchmark_spine_result": result}
+
+
+def run_text_archive_pull_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
+    filing pull (TEXT-0). No gating needed -- collect only, never read by
+    any gate/eval/labeller/risk/execution path (same rationale as
+    run_outcomes_job/run_benchmark_spine_job). Zero new docs on what looks
+    like a real trading day pages an alert (EDGAR is never truly quiet on a
+    trading day -- silence means the fetcher is broken); a weekend never
+    does (this codebase has no market-holiday table anywhere yet, so an
+    actual holiday can still page -- a pre-existing, accepted limitation,
+    not one unique to this job)."""
+    from alphaos.text_archive.service import (
+        is_probable_trading_day, pull_new_filings, refresh_cik_map,
+    )
+    from alphaos.util import alerts, timeutils
+
+    if not orch.settings.text_archive_enabled:
+        return {"status": "skipped", "reason": "TEXT_ARCHIVE_ENABLED is false"}
+
+    cik_map_result = refresh_cik_map(orch.journal, orch.settings)
+    pull_result = pull_new_filings(orch.journal, orch.settings)
+
+    if (
+        pull_result.get("docs_fetched") == 0
+        and pull_result.get("docs_already_archived") == 0
+        and not pull_result.get("error")
+        and is_probable_trading_day(timeutils.market_date())
+    ):
+        alerts.send_alert(
+            orch.settings,
+            title="AlphaOS text archive: zero documents fetched",
+            message=(
+                f"text_archive_pull fetched 0 new docs across {pull_result.get('ciks_checked', 0)} "
+                "CIKs on a probable trading day -- EDGAR is never truly quiet; this usually means "
+                "the fetcher is broken (contact email missing, CIK map empty, or a network/auth issue), "
+                "not that nothing happened."
+            ),
+            priority="high",
+            journal=orch.journal,
+        )
+
+    return {"status": "completed", "cik_map_result": cik_map_result, "pull_result": pull_result}
