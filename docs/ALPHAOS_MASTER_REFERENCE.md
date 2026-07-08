@@ -1,8 +1,10 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.5 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.6 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.5, 2026-07-09 overnight autonomous session continued:
+chief risk officer.** *(v1.6, 2026-07-09 overnight autonomous session continued:
+EVAL-1 struck as merged in §5 (item 14); §9 gains the labeller-vs-evaluator scope
+decision + the per-item-isolation-must-wrap-the-whole-chain lesson. v1.5, 2026-07-09:
 TEXT-0 struck as merged in §5 (item 13c); §9 gains the TEXT_ARCHIVE_ENABLED-default
 + once-daily-lock-key decision rows. v1.4, 2026-07-09: REG-1 struck
 as merged in §5 (item 13b); §9 gains the stale-regime-refusal + REGIME_ENABLED-default
@@ -562,9 +564,48 @@ item specs under their canonical names in the specs doc):**
     for the fixes (incl. the daily-brief health line's own coverage gap the
     audit flagged). Suite 1107/3/0, ruff + mypy clean. Spec: same archived
     file, TEXT-0 + deltas.
-14. 🔴 **EVAL-1** — offline eval harness + raw-completion retention (incl.
-    failures) + the operator-adjudicated ground-truth golden set. Before any
-    prompt/model change, before PR12-era temptation.
+14. ✅ **EVAL-1** — offline eval harness, merged `28578e5` 2026-07-09
+    (branch commits `a271000`+`53ac99b`+`af4ae1f`, overnight autonomous
+    session continued). Replays the frozen golden corpus through the
+    CURRENT `PlaybookClassifier.classify()` -- the exact production
+    labeller call, never a reimplementation ("one replay engine, one
+    truth"). **Scope call, made explicitly and logged for review, not
+    relitigated here**: replays the LABELLER path, not the primary trade
+    evaluator -- `packet_json`/`CandidatePacket` is definitionally "the
+    ONLY thing sent to the AI category labeller" per its own docstring,
+    and the evaluator's own `snapshot` input is never journaled anywhere,
+    so it couldn't be replayed from stored data even if scope had gone the
+    other way. Corpus: git-committed JSON fixtures + `MANIFEST.json`
+    (sha256 per file), mirroring CANARY's own spec'd layout; additive,
+    idempotent writes that never clobber an operator's hand-adjudicated
+    `ground_truth_label` (which always starts `None` -- never fabricated,
+    an operator fills it in by hand with hindsight). New `eval_runs`/
+    `eval_results` tables; every result stored including fail-safe ones.
+    Report: parse rate, label agreement vs ground truth (honest N/A until
+    adjudicated), categorical stability across repeats. `cost_guard` now
+    also counts real eval-replay calls (closing the same undercount bug
+    class already fixed once for the labeller/polarity sites). CLI:
+    `eval_corpus_build` / `eval` / `eval_report`; daily brief gains an
+    "Eval harness" section. **Two independent Opus audits**, both
+    **APPROVE WITH NOTES**: correctness found one MEDIUM -- a per-packet
+    isolation fix I'd *just* made (self-caught, before either audit even
+    started) still had a gap, wrapping packet reconstruction but not the
+    `classify()` call itself, so a wrong-*type* (not missing) hand-edited
+    fixture field could still escape and abort the whole run; scope/safety
+    independently corroborated the same gap via a docstring-accuracy
+    finding and confirmed every other standing law holds (ground truth
+    never fabricated at any of 3 checkpoints, replay never touches the
+    real `candidate_labels` ledger, zero decision surface proven both
+    structurally and via a byte-identical mock-scan A/B, live cost cap
+    refuses before spending anything). Also fixed: a reproduced (but not
+    production-reachable) path-traversal write in the corpus builder,
+    hardened to the same standard TEXT-0 already set for external-input-
+    into-a-path; a cost-cap pre-flight magnitude check (EVAL-1's overshoot
+    potential is `packets x repeats`, operator-tunable far beyond a scan's
+    bounded shortlist); a latent seed-selection dedup gap; `--repeats<=0`
+    validation; a weak test strengthened after mutation-testing showed it
+    would pass a wrong implementation. +36 tests. Suite 1138/3/0, ruff +
+    mypy clean. Spec: same archived file, EVAL-1 section.
 15. 🔴 **PORT-1** — `effective_n()` one-floor law + BH-FDR (cumulative family) +
     `preregistrations` table (one-shot evaluation) + researcher-MED ride-alongs.
     Hard prereq of PR12 and of EXP-1's first aggregate.
@@ -743,6 +784,8 @@ belongs in these documents, not in any session's memory.
 | `REGIME_ENABLED` defaults true (unlike EXP-0's `shadow_tier_enabled=False`) | REG-1 is pure computation from data already being captured (`benchmark_bars`), shadow/measurement only, with no human-reviewed artifact to wait for (unlike EXP-0's committed universe file) — both Opus audits independently agreed this default is safe, and the scope/safety audit specifically proved a poisoned/wrong regime label produces zero decision impact by direct comparison of scan output with regime enabled vs. disabled. | If a future regime-conditional report or gate is ever built that DOES trust `candidate_packets.regime` as more than descriptive, re-examine whether the default should gate behind a review step the way EXP-0's does |
 | `TEXT_ARCHIVE_ENABLED` defaults **false**, unlike REG-1's true | Unlike REG-1 (pure computation over already-captured data), TEXT-0 makes real outbound HTTP requests to sec.gov under the operator's own identifying contact email the moment it runs — a genuinely new external side effect, not just a new computation over existing data. Stays opt-in until an operator deliberately configures `SEC_EDGAR_CONTACT_EMAIL` and flips the flag, mirroring EXP-0's "ship the mechanism, operator arms it" pattern rather than REG-1's "safe by construction, default on" one. | If a future PR adds a similarly real-outbound-request feature, default to false and require the same explicit two-step arming (contact/identity config + enable flag), not REG-1's precedent |
 | `default_lock_key`'s once-daily jobs (daily_digest, benchmark_spine, text_archive_pull) MUST share the same stable-per-SGT-day branch | 2026-07-09, scope/safety Opus audit reproduced: TEXT-0 was built without adding it to that branch, so `_once_daily_due`'s "already ran today" dedup (which keys purely off `default_lock_key`) never matched — the job re-dispatched, and re-fetched from SEC, on every scheduler tick all day instead of once. Fixed by adding it to the existing tuple. | Any FUTURE once-daily job type must be added to this exact tuple in `cadence.default_lock_key` — falling through to the generic per-instant key is the failure mode, and it is silent (the job still "works," it just runs far more often than intended) |
+| EVAL-1 replays the playbook LABELLER, not the primary trade evaluator | `CandidatePacket`/`packet_json` is, by its own docstring, "the ONLY thing sent to the AI category labeller" — the primary evaluator (`OpenAIClient.evaluate()`) takes a raw `ScanContext` plus a separate `snapshot` dict that is never journaled anywhere, so it structurally cannot be replayed from stored data regardless of scope choice. The spec's "label agreement"/"categorical stability" language also matches the labeller's fixed categorical taxonomy far better than the evaluator's PROPOSE/WATCH/REJECT + continuous entry/stop/target fields. | Extending replay to the primary evaluator is a natural v2, but requires the evaluator to start persisting its `snapshot` input first — not a small addition, a prerequisite |
+| A per-item isolation guard must wrap the ENTIRE per-item body, not just the step that seemed riskiest | 2026-07-09: EVAL-1's own per-packet isolation (added to fix a TEXT-0-class bug) wrapped only `_reconstruct_packet()`; a wrong-*type* (not missing) fixture field sailed through reconstruction (Python dataclasses don't enforce field types at construction) and only raised once `classify()` tried to use it — escaping the guard anyway. Caught by the very next Opus audit, minutes after the narrower fix was committed. Widened to wrap reconstruction AND the classify() call together. | Any future "isolate one bad item in a loop" fix must wrap the WHOLE per-item processing chain, not just the first step that can obviously fail — a downstream step can just as easily be the one that actually raises on malformed input |
 
 ---
 
