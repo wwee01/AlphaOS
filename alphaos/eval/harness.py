@@ -52,6 +52,10 @@ def run_eval(journal, settings, corpus_dir: Optional[str] = None, repeats: int =
         "n_results": 0, "n_fail_safe": 0, "n_corpus_errors": 0,
     }
 
+    if repeats < 1:
+        result["error"] = f"repeats must be >= 1, got {repeats!r}"
+        return result
+
     manifest, packets = load_corpus(corpus_dir)
     result["n_packets"] = len(packets)
     if not packets:
@@ -63,6 +67,24 @@ def run_eval(journal, settings, corpus_dir: Optional[str] = None, repeats: int =
         within_budget, detail = cost_guard.check_scan_budget(settings, journal)
         if not within_budget:
             result["error"] = f"AI cost cap reached, refusing to start a live eval run: {detail}"
+            return result
+        # A scheduled scan's own single-invocation overshoot is bounded by
+        # its natural shortlist size; this replay's is packets x repeats,
+        # directly operator-tunable into the thousands -- a pre-flight
+        # magnitude check (not just "any room at all") keeps one `eval`
+        # call from blowing far past the cap in a single run, the way a
+        # small scan's check-once-per-scan precedent never has to worry
+        # about at this scale.
+        planned_calls = len(packets) * repeats
+        used = cost_guard.calls_in_last_30_days(journal)
+        cap = settings.scheduler_ai_cost_cap_calls_per_30d
+        if used + planned_calls > cap:
+            result["error"] = (
+                f"this run would make {planned_calls} real AI calls ({len(packets)} packets x "
+                f"{repeats} repeats), which would push trailing-30-day usage to {used + planned_calls} "
+                f"over the {cap} cap ({used} already used) -- refusing to start; lower --repeats or "
+                "the corpus size, or wait for cap headroom"
+            )
             return result
 
     classifier = PlaybookClassifier(settings, journal)
@@ -80,45 +102,53 @@ def run_eval(journal, settings, corpus_dir: Optional[str] = None, repeats: int =
     try:
         for fixture in packets:
             # Isolated per-packet: a malformed/hand-edited fixture (e.g. an
-            # operator typo that drops a required field) must count as ONE
-            # corpus error and move on to the next packet, never abort the
-            # whole run and lose every remaining packet's results -- same
+            # operator typo that drops a required field, or changes a
+            # field's TYPE rather than removing it) must count as ONE
+            # error and move on to the next packet, never abort the whole
+            # run and lose every remaining packet's results -- same
             # isolation principle as every other per-item loop in this
-            # codebase (TEXT-0's fetch loop, etc).
+            # codebase (TEXT-0's fetch loop, etc). Deliberately wraps BOTH
+            # reconstruction AND classify(): PlaybookClassifier.classify()
+            # is documented "never raises", but its MOCK path's own
+            # unguarded float()/list() coercions can still raise on a
+            # wrong-TYPE field that reconstructs fine (Python dataclasses
+            # don't enforce field types at construction) and only fails
+            # once classify() tries to use it -- audit-caught (correctness
+            # pass) as an escape that defeated an earlier, narrower version
+            # of this same guard.
             try:
                 packet = _reconstruct_packet(fixture)
-            except (KeyError, TypeError) as exc:
+                for repeat_index in range(repeats):
+                    classification = classifier.classify(packet)
+                    journal.insert("eval_results", {
+                        "result_id": new_id("evalres"),
+                        "run_id": run_id,
+                        "packet_id": fixture["packet_id"],
+                        "symbol": fixture.get("symbol"),
+                        "repeat_index": repeat_index,
+                        "primary_label": classification.primary_label,
+                        "label_decision": classification.label_decision,
+                        "label_confidence": classification.confidence,
+                        "validation_status": classification.validation_status,
+                        "label_source": classification.label_source,
+                        "raw_json": classification.raw or {},
+                        "model": classification.model,
+                        "is_mock": 1 if classification.is_mock else 0,
+                        "model_provider": classification.model_provider,
+                        "prompt_hash": classification.prompt_hash,
+                        "system_prompt_hash": classification.system_prompt_hash,
+                    })
+                    result["n_results"] += 1
+                    if classification.label_source == LabelSource.FAIL_SAFE.value:
+                        result["n_fail_safe"] += 1
+            except Exception as exc:  # noqa: BLE001 - one bad fixture must never abort the whole run
                 result["n_corpus_errors"] += 1
                 journal.log_system_event(
                     Severity.ERROR, "eval",
-                    f"could not reconstruct packet {fixture.get('packet_id', '?')!r} "
+                    f"could not process packet {fixture.get('packet_id', '?')!r} "
                     f"from its corpus fixture: {exc} -- skipped.",
                 )
                 continue
-
-            for repeat_index in range(repeats):
-                classification = classifier.classify(packet)
-                journal.insert("eval_results", {
-                    "result_id": new_id("evalres"),
-                    "run_id": run_id,
-                    "packet_id": fixture["packet_id"],
-                    "symbol": fixture.get("symbol"),
-                    "repeat_index": repeat_index,
-                    "primary_label": classification.primary_label,
-                    "label_decision": classification.label_decision,
-                    "label_confidence": classification.confidence,
-                    "validation_status": classification.validation_status,
-                    "label_source": classification.label_source,
-                    "raw_json": classification.raw or {},
-                    "model": classification.model,
-                    "is_mock": 1 if classification.is_mock else 0,
-                    "model_provider": classification.model_provider,
-                    "prompt_hash": classification.prompt_hash,
-                    "system_prompt_hash": classification.system_prompt_hash,
-                })
-                result["n_results"] += 1
-                if classification.label_source == LabelSource.FAIL_SAFE.value:
-                    result["n_fail_safe"] += 1
     finally:
         finished = timeutils.stamp()
         journal.conn.execute(

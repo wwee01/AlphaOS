@@ -14,9 +14,22 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from typing import Optional
 
 DEFAULT_CORPUS_DIR = "data/eval"
+
+# packet_id values are always alphanumeric-plus-underscore (see
+# alphaos.util.ids.new_id, e.g. "pkt_a1b2c3d4e5f6"). Enforced before any
+# packet_id is used to build a filesystem path -- defense in depth, matching
+# the standard this codebase already established for TEXT-0's accession_no
+# (alphaos/text_archive/service.py's _ACCESSION_RE): even a value that's
+# ALWAYS internally-generated on the one wired production call path is
+# still worth validating at the point it becomes a path, since a corpus
+# fixture is operator-hand-editable and load_corpus's output could in
+# principle be fed back into a future write path this module doesn't
+# control today.
+_PACKET_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # PR9.1's prompt-leak fix merged 2026-07-06 14:43:48 SGT (commit b70ff2e);
 # candidate_packets/candidate_labels rows before this may carry a leaked
@@ -70,11 +83,26 @@ def write_corpus(corpus_dir: str, new_packets: list, as_of_date: str) -> tuple:
     deliberate action, never an automatic one) -- then regenerates
     MANIFEST.json fresh from whatever's actually on disk, so the manifest
     can never silently drift from the real file listing. Returns
-    ``(manifest_dict, [filenames_actually_written])``."""
+    ``(manifest_dict, [filenames_actually_written])``.
+
+    Raises ``ValueError`` (rather than skip-and-continue, unlike the
+    replay harness's own per-packet isolation) on a malformed
+    ``packet_id``: every wired caller feeds this function internally
+    generated, always-well-formed ids (see ``select_seed_packets`` ->
+    ``alphaos.util.ids.new_id``), so a malformed one here means an actual
+    upstream invariant was violated -- worth failing loud on a manually
+    invoked CLI command, not silently dropping one packet from an
+    otherwise-successful corpus build."""
     os.makedirs(corpus_dir, exist_ok=True)
     written = []
     for packet in new_packets:
-        filename = f"{packet['packet_id']}.json"
+        packet_id = packet["packet_id"]
+        if not _PACKET_ID_RE.match(packet_id):
+            raise ValueError(
+                f"refusing to write a corpus fixture with a malformed packet_id {packet_id!r} "
+                "(must be alphanumeric/underscore only)"
+            )
+        filename = f"{packet_id}.json"
         path = os.path.join(corpus_dir, filename)
         if os.path.exists(path):
             continue
@@ -109,6 +137,15 @@ def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT) -> list:
         "cp.created_at_utc, cl.primary_label, cl.label_decision "
         "FROM candidate_packets cp JOIN candidate_labels cl ON cl.packet_id = cp.packet_id "
         "WHERE cl.is_mock = 0 AND cp.created_at_utc >= ? "
+        # candidate_labels has no uniqueness constraint on packet_id -- today's
+        # write path (_freeze_label) always produces exactly one real label per
+        # packet, but nothing STRUCTURALLY guarantees that stays true (a future
+        # re-label/backfill could add a second row). Pin to the most recent
+        # (highest id) real label per packet so a packet can never be selected
+        # twice, rather than relying on an ungoverned GROUP BY's arbitrary-row
+        # semantics.
+        "AND cl.id = (SELECT MAX(cl2.id) FROM candidate_labels cl2 "
+        "WHERE cl2.packet_id = cp.packet_id AND cl2.is_mock = 0) "
         "ORDER BY cp.created_at_utc ASC",
         (CLEAN_SINCE_UTC,),
     )

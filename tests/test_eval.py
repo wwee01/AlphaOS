@@ -126,6 +126,40 @@ def test_select_seed_packets_shapes_a_reconstructable_fixture(journal):
     assert "packet_id" in fixture and "candidate_id" in fixture
 
 
+def test_select_seed_packets_never_selects_the_same_packet_twice(journal):
+    """Regression guard: candidate_labels has no uniqueness constraint on
+    packet_id -- if a packet ever gains a SECOND real label row (not
+    reachable via today's write path, but not schema-prevented either), the
+    naive join would return it twice, consuming two corpus slots. Pinned to
+    the most recent real label per packet instead."""
+    from alphaos.util.ids import new_id
+
+    packet_id, candidate_id = new_id("pkt"), new_id("cand")
+    packet_json = {"symbol": "AAPL", "last_price": 100.0}
+    journal.conn.execute(
+        "INSERT INTO candidate_packets (packet_id, candidate_id, symbol, packet_json, "
+        "created_at_utc, created_at_sgt) VALUES (?, ?, 'AAPL', ?, ?, ?)",
+        (packet_id, candidate_id, json.dumps(packet_json),
+         "2026-07-08T00:00:00+00:00", "2026-07-08T00:00:00+00:00"),
+    )
+    # Two real label rows for the SAME packet_id (a hypothetical future
+    # re-label/backfill scenario).
+    for label, created_at in [("Momentum", "2026-07-08T00:00:00+00:00"),
+                              ("Breakout", "2026-07-08T01:00:00+00:00")]:
+        journal.conn.execute(
+            "INSERT INTO candidate_labels (label_id, candidate_id, packet_id, symbol, "
+            "primary_label, is_mock, created_at_utc, created_at_sgt) "
+            "VALUES (?, ?, ?, 'AAPL', ?, 0, ?, ?)",
+            (new_id("lbl"), candidate_id, packet_id, label, created_at, created_at),
+        )
+    journal.conn.commit()
+
+    seeds = select_seed_packets(journal)
+
+    assert len(seeds) == 1  # not 2
+    assert seeds[0]["provenance"]["historical_primary_label"] == "Breakout"  # the most recent one
+
+
 def test_write_corpus_is_additive_and_idempotent(tmp_path):
     corpus_dir = str(tmp_path / "corpus")
     packets = [
@@ -152,6 +186,22 @@ def test_write_corpus_is_additive_and_idempotent(tmp_path):
     assert written3 == ["pkt_c.json"]
     assert manifest3["version"] == 2
     assert len(manifest3["packets"]) == 3
+
+
+def test_write_corpus_rejects_a_path_traversal_packet_id(tmp_path):
+    """Regression guard (scope/safety audit F-1, reproduced): a malformed
+    packet_id must never be allowed to shape a filesystem path, even though
+    every WIRED caller today only ever supplies internally-generated,
+    always-well-formed ids -- defense in depth, matching the standard
+    TEXT-0 already established for external-input-into-a-path (accession_no)."""
+    corpus_dir = str(tmp_path / "corpus")
+    evil = "../../../../../../../../tmp/eval_corpus_escape/PWNED"
+
+    with pytest.raises(ValueError, match="malformed packet_id"):
+        write_corpus(corpus_dir, [{"packet_id": evil, "symbol": "AAPL", "ground_truth_label": None}],
+                     as_of_date="2026-07-09")
+
+    assert not os.path.exists("/tmp/eval_corpus_escape")
 
 
 def test_write_corpus_never_overwrites_an_operator_adjudicated_fixture(tmp_path):
@@ -241,6 +291,88 @@ def test_run_eval_isolates_a_malformed_fixture_and_processes_the_rest(tmp_path, 
     assert result["n_results"] == 1  # the second, well-formed packet still processed
     run_row = journal.one("SELECT * FROM eval_runs WHERE run_id = ?", (result["run_id"],))
     assert run_row["finished_at_utc"] is not None
+
+
+def test_run_eval_isolates_a_wrong_type_field_that_only_fails_inside_classify(tmp_path, journal):
+    """Regression guard for a MEDIUM the correctness audit reproduced: a
+    fixture with a WRONG-TYPE field (not a missing one) reconstructs a
+    CandidatePacket FINE -- Python dataclasses don't enforce field types at
+    construction -- and only raises once PlaybookClassifier's own mock path
+    tries to coerce it (float(momentum_score)). An earlier, narrower version
+    of the isolation guard wrapped only _reconstruct_packet and let this
+    escape, aborting the whole run. Must now be isolated the same as a
+    missing-field fixture."""
+    settings = make_settings()
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_real_labelled_packet(journal, symbol="AAPL")
+    _seed_real_labelled_packet(journal, symbol="MSFT")
+    seeds = select_seed_packets(journal)
+    write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
+
+    broken_file = os.path.join(corpus_dir, f"{seeds[0]['packet_id']}.json")
+    with open(broken_file, encoding="utf-8") as f:
+        broken = json.load(f)
+    broken["momentum_score"] = "not-a-number"  # wrong TYPE, not missing -- reconstructs fine
+    with open(broken_file, "w", encoding="utf-8") as f:
+        json.dump(broken, f)
+
+    result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=1)
+
+    assert "error" not in result  # the run itself must not crash/error out
+    assert result["n_corpus_errors"] == 1
+    assert result["n_results"] == 1  # the second, well-formed packet still processed
+    run_row = journal.one("SELECT * FROM eval_runs WHERE run_id = ?", (result["run_id"],))
+    assert run_row["finished_at_utc"] is not None
+
+
+def test_run_eval_rejects_non_positive_repeats(tmp_path, journal):
+    settings = make_settings()
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_real_labelled_packet(journal, symbol="AAPL")
+    seeds = select_seed_packets(journal)
+    write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
+
+    for bad_repeats in (0, -1, -5):
+        result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=bad_repeats)
+        assert "error" in result
+        assert "repeats" in result["error"].lower()
+        assert result["n_results"] == 0
+
+
+def test_run_eval_refuses_when_planned_calls_would_overshoot_the_cap(tmp_path, journal):
+    """Regression guard: the cap is checked once at the START, so a large
+    corpus x repeats could otherwise blow far past the cap in a single run
+    even with a little headroom left. A pre-flight magnitude check must
+    refuse the whole run up front rather than partially overshoot."""
+    from alphaos.util.ids import new_id
+
+    settings = make_settings(
+        ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-test-key-not-real",
+        SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+    )
+    corpus_dir = str(tmp_path / "corpus")
+    for i in range(3):
+        _seed_real_labelled_packet(journal, symbol=f"SYM{i}")
+    seeds = select_seed_packets(journal)
+    write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
+
+    # 43 already used -- only 7 of headroom left under the cap of 50.
+    for _ in range(43):
+        journal.conn.execute(
+            "INSERT INTO openai_evaluations (eval_id, candidate_id, symbol, model, direction, "
+            "decision, reasoning_summary, is_mock, created_at_utc, created_at_sgt) "
+            "VALUES (?, ?, 'AAPL', 'gpt-4o-mini', 'long', 'reject', 'x', 0, ?, ?)",
+            (new_id("eval"), new_id("cand"), "2026-07-09T00:00:00+00:00", "2026-07-09T00:00:00+00:00"),
+        )
+    journal.conn.commit()
+
+    # 3 packets x repeats=50 = 150 planned calls -- way over the 7 remaining.
+    result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=50)
+
+    assert "error" in result
+    assert "150" in result["error"]
+    assert journal.count_rows("eval_runs") == 0
+    assert journal.count_rows("eval_results") == 0
 
 
 def test_run_eval_stores_one_result_per_packet_per_repeat(tmp_path, journal):
@@ -380,9 +512,14 @@ def test_eval_report_label_agreement_once_ground_truth_is_adjudicated(tmp_path, 
 
 
 def test_eval_report_categorical_stability_with_a_real_disagreement(tmp_path, journal, monkeypatch):
-    """Direct construction of a KNOWN disagreement: 2 of 4 repeats return a
-    different label -- stability must compute to exactly 0.5, not silently
-    round or misattribute across packets."""
+    """Direct construction of a KNOWN disagreement: 3 of 5 repeats return
+    the majority label -- stability must compute to exactly 0.6.
+    Deliberately chosen so neither the FIRST ('Breakout') nor the LAST
+    ('Dip Buy') repeat is the true mode ('Momentum') -- audit-caught: an
+    earlier sequence's mode happened to equal BOTH the correct answer AND
+    a naive "just count matches to the first/last repeat" shortcut, so it
+    would have passed even against a wrong implementation. This sequence
+    gives 0.6 correctly and 0.2 under either positional-shortcut bug."""
     from alphaos.ai.playbook_classifier import PlaybookClassification
 
     settings = make_settings()
@@ -391,7 +528,7 @@ def test_eval_report_categorical_stability_with_a_real_disagreement(tmp_path, jo
     seeds = select_seed_packets(journal)
     write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
 
-    labels_in_order = ["Momentum", "Momentum", "Breakout", "Momentum"]
+    labels_in_order = ["Breakout", "Momentum", "Momentum", "Momentum", "Dip Buy"]
     call_count = {"n": 0}
 
     def _fake_classify(self, packet):
@@ -410,10 +547,10 @@ def test_eval_report_categorical_stability_with_a_real_disagreement(tmp_path, jo
         "alphaos.ai.playbook_classifier.PlaybookClassifier.classify", _fake_classify,
     )
 
-    result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=4)
+    result = run_eval(journal, settings, corpus_dir=corpus_dir, repeats=5)
     rep = build_eval_report(journal, run_id=result["run_id"], corpus_dir=corpus_dir)
 
-    assert rep["categorical_stability"] == 0.75  # 3/4 agree with the mode ("Momentum")
+    assert rep["categorical_stability"] == 0.6  # 3/5 agree with the true mode ("Momentum")
 
 
 # ================================================== daily brief integration
