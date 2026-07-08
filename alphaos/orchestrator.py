@@ -1255,6 +1255,42 @@ class Orchestrator:
         provider = make_bars_provider(self.settings, self.journal)
         return backfill_regime_days(self.journal, self.settings, bars_provider=provider)
 
+    def eval_corpus_build(self, corpus_dir: Optional[str] = None, limit: int = 30) -> dict:
+        """EVAL-1 one-off: select up to ``limit`` real, clean (post-PR9.1)
+        candidate_packets rows and write them into the frozen golden corpus
+        (additive -- never overwrites an existing fixture). Does NOT
+        adjudicate ground truth; every newly-written packet's
+        ``ground_truth_label`` starts null until an operator hand-edits the
+        fixture file. See alphaos/eval/corpus.py."""
+        from alphaos.eval.corpus import DEFAULT_CORPUS_DIR, select_seed_packets, write_corpus
+
+        root = corpus_dir or DEFAULT_CORPUS_DIR
+        seeds = select_seed_packets(self.journal, limit=limit)
+        manifest, written = write_corpus(root, seeds, as_of_date=timeutils.market_date().isoformat())
+        return {
+            "corpus_dir": root, "candidates_considered": len(seeds),
+            "packets_written": len(written), "corpus_version": manifest["version"],
+            "corpus_size": len(manifest["packets"]),
+        }
+
+    def run_eval(self, corpus_dir: Optional[str] = None, repeats: int = 1) -> dict:
+        """EVAL-1: replay the frozen golden corpus through the CURRENT
+        playbook classifier -- the exact same production call the labeller
+        uses at scan time, never a reimplementation. Stores every result
+        including fail-safe ones. Zero decision surface. See
+        alphaos/eval/harness.py."""
+        from alphaos.eval.harness import run_eval
+
+        return run_eval(self.journal, self.settings, corpus_dir=corpus_dir, repeats=repeats)
+
+    def eval_report(self, run_id: Optional[str] = None) -> dict:
+        """EVAL-1: the latest (or a specific) eval run's report -- parse
+        rate, label agreement vs ground truth, categorical stability across
+        repeats. PURE READ."""
+        from alphaos.reports.eval_report import build_eval_report
+
+        return build_eval_report(self.journal, run_id=run_id)
+
     def outcomes_update(self, limit: int = 500) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/

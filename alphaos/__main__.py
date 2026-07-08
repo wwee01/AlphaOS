@@ -128,6 +128,44 @@ def cmd_regime_arming_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
+    """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
+    into the frozen golden corpus (additive; never overwrites an existing
+    fixture). Does NOT adjudicate ground truth -- the operator reviews the
+    written fixture files and fills in ground_truth_label by hand, then
+    commits the corpus directory like a card."""
+    res = orch.eval_corpus_build(corpus_dir=corpus_dir, limit=limit)
+    _print({"eval_corpus_build": res})
+    print(
+        f"\n{res['packets_written']} new packet(s) written to {res['corpus_dir']} "
+        f"(corpus now {res['corpus_size']} packet(s), version {res['corpus_version']}). "
+        "Review the fixtures, fill in ground_truth_label by hand where you can, then "
+        "git add/commit the corpus directory -- it is never auto-committed."
+    )
+    return 0
+
+
+def cmd_eval(orch: Orchestrator, corpus_dir: str, repeats: int) -> int:
+    """EVAL-1: replay the frozen golden corpus through the CURRENT playbook
+    classifier (the exact production call, never a reimplementation).
+    Stores every result including fail-safe ones. Zero decision surface."""
+    res = orch.run_eval(corpus_dir=corpus_dir, repeats=repeats)
+    _print({"eval_run": res})
+    return 0 if "error" not in res else 1
+
+
+def cmd_eval_report(orch: Orchestrator) -> int:
+    """EVAL-1: the latest eval run's report -- parse rate, label agreement
+    vs ground truth, categorical stability across repeats. PURE READ."""
+    from alphaos.reports.eval_report import render_markdown
+
+    rep = orch.eval_report()
+    print(render_markdown(rep))
+    print()
+    _print({"eval_report": rep})
+    return 0
+
+
 def cmd_universe_build(orch: Orchestrator) -> int:
     """EXP-0: screen the tradable universe down to the shadow-tier ADV/price
     band and write the result to the committed universe file (NOT git-add'd
@@ -447,6 +485,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("regime_arming_report",
                    help="REG-1: shadow arming-map scorer (armed_always vs armed_per_map paired "
                         "replay ΔR per card; nothing armed for real)")
+    ecb = sub.add_parser("eval_corpus_build",
+                         help="EVAL-1: select real, clean candidate_packets rows into the frozen "
+                              "golden corpus (additive; ground_truth_label starts null, never "
+                              "auto-committed)")
+    ecb.add_argument("--corpus-dir", default=None, help="defaults to data/eval")
+    ecb.add_argument("--limit", type=int, default=30, help="max NEW packets to select (default 30)")
+    ev = sub.add_parser("eval",
+                        help="EVAL-1: replay the frozen golden corpus through the current playbook "
+                             "classifier; stores every result incl. fail-safe ones")
+    ev.add_argument("--corpus-dir", default=None, help="defaults to data/eval")
+    ev.add_argument("--repeats", type=int, default=1,
+                    help="replay each packet this many times, for categorical-stability measurement")
+    sub.add_parser("eval_report",
+                   help="EVAL-1: the latest eval run's report (parse rate, label agreement vs "
+                        "ground truth, categorical stability)")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -532,6 +585,12 @@ def main(argv=None) -> int:
             return cmd_backfill_regime_days(orch)
         if args.command == "regime_arming_report":
             return cmd_regime_arming_report(orch)
+        if args.command == "eval_corpus_build":
+            return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
+        if args.command == "eval":
+            return cmd_eval(orch, args.corpus_dir, args.repeats)
+        if args.command == "eval_report":
+            return cmd_eval_report(orch)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":
