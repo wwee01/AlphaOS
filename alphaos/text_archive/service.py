@@ -14,6 +14,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import re
 import sqlite3
 from datetime import date as _date
 from typing import Any, Optional
@@ -27,6 +28,12 @@ from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 DEFAULT_STORAGE_ROOT = "data/text_archive"
+
+# SEC's own accession-number format, always NNNNNNNNNN-NN-NNNNNN. Enforced
+# before any value from SEC's own (external, even if "trusted") JSON response
+# is used to build a filesystem path -- defense in depth against a malformed
+# accessionNumber (e.g. containing "../") writing outside storage_root.
+_ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 
 
 def _universe_tickers(settings) -> set:
@@ -134,6 +141,20 @@ def pull_new_filings(journal, settings, edgar_provider=None, storage_root: Optio
             filing_dates = recent.get("filingDate") or []
             primary_docs = recent.get("primaryDocument") or []
 
+            # "Visible, never silent": SEC's parallel arrays are contractually
+            # equal-length, but if a malformed payload ever has MORE forms
+            # than accessions, the loop below (bounded by len(accessions), the
+            # only array that can key a fetch/store) would otherwise drop the
+            # extra entries with no trace anywhere.
+            max_len = max(len(forms), len(accessions), len(filing_dates), len(primary_docs))
+            if max_len > len(accessions):
+                journal.log_system_event(
+                    Severity.WARNING, "text_archive",
+                    f"CIK {row['cik']}: submissions payload has {max_len} entries in some "
+                    f"array(s) but only {len(accessions)} accession numbers -- "
+                    f"{max_len - len(accessions)} entrie(s) dropped (no accession to key them by).",
+                )
+
             for i in range(len(accessions)):
                 form = forms[i] if i < len(forms) else None
                 accession_raw = accessions[i] if i < len(accessions) else None
@@ -141,6 +162,15 @@ def pull_new_filings(journal, settings, edgar_provider=None, storage_root: Optio
                     continue
                 if not is_catalog_form(form):
                     result["skipped_forms"][form] = result["skipped_forms"].get(form, 0) + 1
+                    continue
+                if not _ACCESSION_RE.match(accession_raw):
+                    # Malformed accession number (defense in depth: never let
+                    # an external value shape a filesystem path unchecked).
+                    result["fetch_errors"] += 1
+                    journal.log_system_event(
+                        Severity.ERROR, "text_archive",
+                        f"CIK {row['cik']}: malformed accession number {accession_raw!r} -- skipped.",
+                    )
                     continue
 
                 already = journal.one(
@@ -164,51 +194,75 @@ def pull_new_filings(journal, settings, edgar_provider=None, storage_root: Optio
 
                 sha256 = hashlib.sha256(content).hexdigest()
                 storage_path = _storage_path(root, seen_at, accession_raw)
-                os.makedirs(os.path.dirname(storage_path), exist_ok=True)
-                with gzip.open(storage_path, "wb") as f:
-                    f.write(content)
+                try:
+                    # Isolated per-accession: a truncated/torn write or a
+                    # read-back that RAISES (gzip.BadGzipFile/EOFError/OSError
+                    # -- disk full, interrupted process, FS hiccup) must be
+                    # ONE fetch_errors entry and move on to the next
+                    # accession, never abort the whole run (which would
+                    # silently skip every remaining CIK/accession and orphan
+                    # the partial file) -- same isolation the hash-mismatch
+                    # branch below already gets.
+                    os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+                    with gzip.open(storage_path, "wb") as f:
+                        f.write(content)
 
-                # "sha256 verified on write" (spec's own MANIFEST semantics):
-                # read the just-written gzip back and confirm it round-trips
-                # byte-identical BEFORE trusting it enough to journal a row --
-                # a torn/corrupt write must never be silently indexed as if
-                # it were a good copy.
-                with gzip.open(storage_path, "rb") as f:
-                    roundtrip = f.read()
-                if hashlib.sha256(roundtrip).hexdigest() != sha256:
-                    os.remove(storage_path)
+                    # "sha256 verified on write" (spec's own MANIFEST
+                    # semantics): read the just-written gzip back and confirm
+                    # it round-trips byte-identical BEFORE trusting it enough
+                    # to journal a row -- a torn/corrupt write must never be
+                    # silently indexed as if it were a good copy.
+                    with gzip.open(storage_path, "rb") as f:
+                        roundtrip = f.read()
+                    if hashlib.sha256(roundtrip).hexdigest() != sha256:
+                        os.remove(storage_path)
+                        result["fetch_errors"] += 1
+                        journal.log_system_event(
+                            Severity.ERROR, "text_archive",
+                            f"gzip round-trip mismatch for accession {accession_raw} "
+                            "-- file removed, not archived.",
+                        )
+                        continue
+
+                    try:
+                        journal.insert("text_documents", {
+                            "document_id": new_id("txtdoc"),
+                            "cik": row["cik"],
+                            "ticker_at_time": row["ticker"],
+                            "form_type": form,
+                            "edgar_forms_version": EDGAR_FORMS_V1,
+                            "accession_no": accession_raw,
+                            "published_at": filing_dates[i] if i < len(filing_dates) else None,
+                            "seen_at": seen_at,
+                            "source_url": (
+                                f"https://www.sec.gov/Archives/edgar/data/{int(row['cik'])}/"
+                                f"{accession_no_dashes}/{primary_document}"
+                            ),
+                            "sha256": sha256,
+                            "byte_size": len(content),
+                            "storage_path": storage_path,
+                            "source": "edgar",
+                            "fetch_run_id": fetch_run_id,
+                        })
+                        result["docs_fetched"] += 1
+                    except sqlite3.IntegrityError:
+                        # A concurrent/duplicate insert raced us -- the file we
+                        # just wrote is a harmless duplicate of what's already
+                        # archived.
+                        result["docs_already_archived"] += 1
+                except (OSError, EOFError, gzip.BadGzipFile) as exc:
+                    if os.path.exists(storage_path):
+                        try:
+                            os.remove(storage_path)
+                        except OSError:
+                            pass
                     result["fetch_errors"] += 1
                     journal.log_system_event(
                         Severity.ERROR, "text_archive",
-                        f"gzip round-trip mismatch for accession {accession_raw} -- file removed, not archived.",
+                        f"write/read-back failed for accession {accession_raw}: {exc} "
+                        "-- file removed if present, not archived.",
                     )
                     continue
-
-                try:
-                    journal.insert("text_documents", {
-                        "document_id": new_id("txtdoc"),
-                        "cik": row["cik"],
-                        "ticker_at_time": row["ticker"],
-                        "form_type": form,
-                        "edgar_forms_version": EDGAR_FORMS_V1,
-                        "accession_no": accession_raw,
-                        "published_at": filing_dates[i] if i < len(filing_dates) else None,
-                        "seen_at": seen_at,
-                        "source_url": (
-                            f"https://www.sec.gov/Archives/edgar/data/{int(row['cik'])}/"
-                            f"{accession_no_dashes}/{primary_document}"
-                        ),
-                        "sha256": sha256,
-                        "byte_size": len(content),
-                        "storage_path": storage_path,
-                        "source": "edgar",
-                        "fetch_run_id": fetch_run_id,
-                    })
-                    result["docs_fetched"] += 1
-                except sqlite3.IntegrityError:
-                    # A concurrent/duplicate insert raced us -- the file we just
-                    # wrote is a harmless duplicate of what's already archived.
-                    result["docs_already_archived"] += 1
 
         journal.log_system_event(
             Severity.INFO, "text_archive",

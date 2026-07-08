@@ -114,18 +114,21 @@ class SecEdgarProvider:
         return self._get_json(SUBMISSIONS_URL_TMPL.format(cik10=cik10))
 
     def get_document(self, cik: str, accession_no_dashes: str, primary_document: str) -> Optional[bytes]:
-        """Raw bytes of one filing document. Returns None on any error."""
+        """Raw bytes of one filing document. Returns None on any error --
+        including a non-numeric ``cik`` (a malformed cik_map row must be one
+        isolated failure, never an uncaught exception that aborts the whole
+        caller's run)."""
         self.rate_limiter.wait()
-        cik_bare = str(int(cik))  # SEC's Archives path wants no leading zeros
-        url = DOCUMENT_URL_TMPL.format(
-            cik_bare=cik_bare, accession_no_dashes=accession_no_dashes, primary_document=primary_document,
-        )
         try:  # pragma: no cover - live network path (gated test only)
+            cik_bare = str(int(cik))  # SEC's Archives path wants no leading zeros
+            url = DOCUMENT_URL_TMPL.format(
+                cik_bare=cik_bare, accession_no_dashes=accession_no_dashes, primary_document=primary_document,
+            )
             req = urllib.request.Request(url, headers={"User-Agent": self._user_agent})
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
                 return resp.read()
-        except urllib.error.URLError as exc:
-            self._log(Severity.WARNING, f"SEC EDGAR document fetch failed for {url}: {exc}")
+        except (urllib.error.URLError, ValueError) as exc:
+            self._log(Severity.WARNING, f"SEC EDGAR document fetch failed for cik={cik!r}: {exc}")
             return None
 
     def _log(self, sev, msg: str) -> None:

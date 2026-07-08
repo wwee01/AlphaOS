@@ -101,7 +101,7 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
         interval = max(1, int(settings.scheduler_outcomes_interval_minutes))
         return f"{JobType.OUTCOMES_UPDATE}:{_rounded_down_key(market_dt_et, interval)}"
 
-    if job_type in (JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE):
+    if job_type in (JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE, JobType.TEXT_ARCHIVE_PULL):
         st = timeutils.stamp(now)
         return f"{job_type}:{st.local_sgt[:10]}"
 

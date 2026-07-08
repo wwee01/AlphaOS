@@ -137,6 +137,7 @@ def run_text_archive_pull_job(orch, runner) -> dict:
 
     if (
         pull_result.get("docs_fetched") == 0
+        and pull_result.get("docs_already_archived") == 0
         and not pull_result.get("error")
         and is_probable_trading_day(timeutils.market_date())
     ):

@@ -21,9 +21,9 @@ writes under the real repo's data/text_archive/.
 
 from __future__ import annotations
 
-import gzip
 import hashlib as real_hashlib
 import json
+import os
 from datetime import date
 
 import pytest
@@ -356,6 +356,100 @@ def test_pull_new_filings_counts_a_missing_primary_document_as_an_error(tmp_path
     assert result["docs_fetched"] == 0
 
 
+def test_pull_new_filings_rejects_a_malformed_accession_number(tmp_path, journal):
+    """Regression guard (scope/safety audit finding): a path-traversal-shaped
+    accessionNumber must never reach the filesystem -- rejected as a fetch
+    error, and nothing is written anywhere, including outside storage_root."""
+    settings = make_settings()
+    journal.insert("cik_map", {
+        "ticker": "AAPL", "cik": "320193",
+        "first_seen_at_utc": "2026-01-01T00:00:00+00:00", "last_confirmed_at_utc": "2026-01-01T00:00:00+00:00",
+    })
+    evil_accession = "../../../../../../../../tmp/text_archive_escape/evil-accession"
+    provider = _FakeEdgarProvider(
+        submissions_by_cik={"320193": _submissions_payload([
+            ("8-K", evil_accession, "2026-07-01", "primary.htm"),
+        ])},
+        documents={("320193", evil_accession.replace("-", ""), "primary.htm"): b"malicious content"},
+    )
+
+    result = pull_new_filings(journal, settings, edgar_provider=provider, storage_root=str(tmp_path))
+
+    assert result["fetch_errors"] == 1
+    assert result["docs_fetched"] == 0
+    assert journal.one("SELECT * FROM text_documents WHERE accession_no = ?", (evil_accession,)) is None
+    assert list(tmp_path.rglob("*.gz")) == []
+    assert not os.path.exists("/tmp/text_archive_escape")
+
+
+def test_pull_new_filings_logs_a_warning_when_forms_array_is_longer_than_accessions(tmp_path, journal):
+    """Regression guard: a malformed submissions payload where some array is
+    longer than accessionNumber must be VISIBLE (a system_event), never a
+    silent drop -- 'visible, never silent' is this module's own law."""
+    settings = make_settings()
+    journal.insert("cik_map", {
+        "ticker": "AAPL", "cik": "320193",
+        "first_seen_at_utc": "2026-01-01T00:00:00+00:00", "last_confirmed_at_utc": "2026-01-01T00:00:00+00:00",
+    })
+    payload = _submissions_payload([("8-K", "0000320193-26-000010", "2026-07-01", "primary.htm")])
+    payload["filings"]["recent"]["form"].append("10-K")  # forms longer than accessionNumber
+
+    provider = _FakeEdgarProvider(
+        submissions_by_cik={"320193": payload},
+        documents={("320193", "000032019326000010", "primary.htm"): b"body"},
+    )
+
+    pull_new_filings(journal, settings, edgar_provider=provider, storage_root=str(tmp_path))
+
+    warning = journal.one(
+        "SELECT * FROM system_events WHERE category = 'text_archive' AND severity = 'warning' "
+        "AND message LIKE '%dropped%'"
+    )
+    assert warning is not None
+
+
+def test_pull_new_filings_isolates_a_write_failure_to_one_accession_and_continues(tmp_path, journal, monkeypatch):
+    """Regression guard (correctness audit MEDIUM finding): a gzip write or
+    read-back that RAISES (not just a hash mismatch) for one accession must
+    count as one fetch_error and let the run continue to the next accession
+    -- never abort the whole run or leave an orphaned file behind."""
+    from alphaos.text_archive import service as service_mod
+
+    settings = make_settings()
+    journal.insert("cik_map", {
+        "ticker": "AAPL", "cik": "320193",
+        "first_seen_at_utc": "2026-01-01T00:00:00+00:00", "last_confirmed_at_utc": "2026-01-01T00:00:00+00:00",
+    })
+    provider = _FakeEdgarProvider(
+        submissions_by_cik={"320193": _submissions_payload([
+            ("8-K", "0000320193-26-000011", "2026-07-01", "primary1.htm"),
+            ("8-K", "0000320193-26-000012", "2026-07-02", "primary2.htm"),
+        ])},
+        documents={
+            ("320193", "000032019326000011", "primary1.htm"): b"first body",
+            ("320193", "000032019326000012", "primary2.htm"): b"second body",
+        },
+    )
+
+    real_gzip_open = service_mod.gzip.open
+    call_count = {"n": 0}
+
+    def _flaky_gzip_open(path, mode="rb", *a, **k):
+        call_count["n"] += 1
+        if call_count["n"] == 1:  # the FIRST accession's write -- fail it
+            raise OSError("simulated disk error mid-write")
+        return real_gzip_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(service_mod.gzip, "open", _flaky_gzip_open)
+
+    result = pull_new_filings(journal, settings, edgar_provider=provider, storage_root=str(tmp_path))
+
+    assert result["fetch_errors"] == 1
+    assert result["docs_fetched"] == 1  # the second accession still succeeded
+    assert journal.one("SELECT * FROM text_documents WHERE accession_no = '0000320193-26-000011'") is None
+    assert journal.one("SELECT * FROM text_documents WHERE accession_no = '0000320193-26-000012'") is not None
+
+
 def test_pull_new_filings_counts_a_submissions_outage_as_an_error_and_continues(tmp_path, journal):
     settings = make_settings()
     journal.insert("cik_map", {
@@ -490,7 +584,7 @@ def test_run_text_archive_pull_job_pages_on_zero_docs_on_a_trading_day(journal, 
     )
     monkeypatch.setattr(
         "alphaos.text_archive.service.pull_new_filings",
-        lambda *a, **k: {"docs_fetched": 0, "ciks_checked": 3, "fetch_errors": 0},
+        lambda *a, **k: {"docs_fetched": 0, "docs_already_archived": 0, "ciks_checked": 3, "fetch_errors": 0},
     )
     sent = []
     monkeypatch.setattr(
@@ -508,6 +602,33 @@ def test_run_text_archive_pull_job_pages_on_zero_docs_on_a_trading_day(journal, 
     assert "zero documents" in sent[0]["title"].lower()
 
 
+def test_run_text_archive_pull_job_stays_silent_when_everything_was_already_archived(journal, monkeypatch):
+    """Regression guard (scope/safety audit finding): zero NEW docs on a
+    trading day must NOT page if everything found was already archived --
+    that means the fetcher worked, not that it's broken."""
+    from alphaos.orchestrator import Orchestrator
+    from alphaos.scheduler import jobs as jobs_mod
+    from alphaos.util import timeutils
+
+    settings = make_settings(ALPHAOS_MODE="paper", TEXT_ARCHIVE_ENABLED="true",
+                              SEC_EDGAR_CONTACT_EMAIL="ops@example.com")
+    orch = Orchestrator(settings=settings, journal=journal)
+    monkeypatch.setattr(timeutils, "market_date", lambda: date(2026, 7, 9))  # Thursday
+    monkeypatch.setattr(
+        "alphaos.text_archive.service.refresh_cik_map", lambda *a, **k: {"mapped": 0}
+    )
+    monkeypatch.setattr(
+        "alphaos.text_archive.service.pull_new_filings",
+        lambda *a, **k: {"docs_fetched": 0, "docs_already_archived": 5, "ciks_checked": 3, "fetch_errors": 0},
+    )
+    sent = []
+    monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: sent.append(k))
+
+    jobs_mod.run_text_archive_pull_job(orch, runner=None)
+
+    assert sent == []
+
+
 def test_run_text_archive_pull_job_stays_silent_on_a_weekend_zero_doc_day(journal, monkeypatch):
     from alphaos.orchestrator import Orchestrator
     from alphaos.scheduler import jobs as jobs_mod
@@ -522,7 +643,7 @@ def test_run_text_archive_pull_job_stays_silent_on_a_weekend_zero_doc_day(journa
     )
     monkeypatch.setattr(
         "alphaos.text_archive.service.pull_new_filings",
-        lambda *a, **k: {"docs_fetched": 0, "ciks_checked": 3, "fetch_errors": 0},
+        lambda *a, **k: {"docs_fetched": 0, "docs_already_archived": 0, "ciks_checked": 3, "fetch_errors": 0},
     )
     sent = []
     monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: sent.append(k))
@@ -546,7 +667,8 @@ def test_run_text_archive_pull_job_does_not_double_page_when_an_error_is_already
     )
     monkeypatch.setattr(
         "alphaos.text_archive.service.pull_new_filings",
-        lambda *a, **k: {"docs_fetched": 0, "ciks_checked": 0, "error": "provider outage"},
+        lambda *a, **k: {"docs_fetched": 0, "docs_already_archived": 0, "ciks_checked": 0,
+                         "error": "provider outage"},
     )
     sent = []
     monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: sent.append(k))

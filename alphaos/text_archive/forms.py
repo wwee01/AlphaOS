@@ -20,6 +20,8 @@ the form-type grammar.
 
 from __future__ import annotations
 
+from typing import Optional
+
 EDGAR_FORMS_V1 = "edgar_forms_v1"
 
 # Exact-match form-type strings (as SEC's submissions API actually emits
@@ -56,11 +58,14 @@ _PREFIX_FORMS_V1 = (
 )
 
 
-def is_catalog_form(form: str) -> bool:
+def is_catalog_form(form: Optional[str]) -> bool:
     """True if ``form`` (SEC's own form-type string, e.g. "8-K", "424B3")
     is in the v1 catalog. Unknown/uncataloged forms return False -- callers
     must count these in a ``skipped_forms`` tally (visible, never silent) per
-    the spec's own test requirement, not just drop them unaccounted-for."""
+    the spec's own test requirement, not just drop them unaccounted-for.
+    ``form`` is Optional because a ragged/malformed submissions payload can
+    leave a given index without a matching entry in SEC's own ``form`` array
+    (see ``pull_new_filings``'s per-array length guards)."""
     if not form:
         return False
     if form in _EXACT_FORMS_V1:
