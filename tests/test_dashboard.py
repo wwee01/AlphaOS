@@ -239,44 +239,62 @@ def test_is_loopback_request_true_for_real_loopback(monkeypatch):
     assert streamlit_app._is_loopback_request() is True
 
 
-def test_is_loopback_request_false_for_lan_ip(monkeypatch):
-    """The primary signal: the ACTUAL connecting client's IP, regardless of
-    what the server believes its own bind address is."""
-    fake = _fake_st()
-    fake.context.ip_address = "192.168.0.42"
-    monkeypatch.setattr(streamlit_app, "st", fake)
-    assert streamlit_app._is_loopback_request() is False
-
-
 def test_is_loopback_request_false_for_non_loopback_bind_address(monkeypatch):
-    """The secondary signal: even if a client somehow appears to connect from
-    127.0.0.1 (e.g. through a misconfigured proxy), a non-loopback SERVER bind
-    address alone is enough to refuse -- defense in depth, not a single point
-    of failure."""
+    """The AUTHORITATIVE signal: the server's own bind address. Non-loopback
+    (or unreadable) refuses outright -- regardless of what this specific
+    connection's ip_address claims. A misconfigured 0.0.0.0 bind should be
+    impossible to miss, not silently 'still works for me' while quietly
+    reachable from the LAN too."""
     fake = _fake_st()
     fake.get_option.return_value = "0.0.0.0"
     monkeypatch.setattr(streamlit_app, "st", fake)
     assert streamlit_app._is_loopback_request() is False
 
 
-def test_is_loopback_request_false_when_ip_unknown(monkeypatch):
-    """Unknown reads as NOT loopback -- unknown-never-safe, not unknown-means-fine."""
+def test_is_loopback_request_false_when_bind_address_unknown(monkeypatch):
+    """Unknown-never-safe for the AUTHORITATIVE signal: a None/unreadable bind
+    address must refuse, not default to permissive."""
     fake = _fake_st()
-    fake.context.ip_address = None
+    fake.get_option.return_value = None
     monkeypatch.setattr(streamlit_app, "st", fake)
     assert streamlit_app._is_loopback_request() is False
 
 
-def test_is_loopback_request_false_when_st_context_missing(monkeypatch):
-    """Audit finding 2 / hardening: a Streamlit older than the pinned floor
-    lacks st.context entirely. The guard must fail CLOSED (refuse) rather than
-    raise AttributeError. Uses a spec'd mock with no `context` attribute."""
+def test_is_loopback_request_false_when_ip_positively_contradicts_safe_bind(monkeypatch):
+    """The secondary signal only matters when it's actually populated AND
+    disagrees with an otherwise-safe bind -- a real LAN IP claimed for a
+    connection to a loopback-bound server can't happen honestly (the OS
+    wouldn't have allowed it), so treat it as a red flag rather than trust it."""
+    fake = _fake_st()
+    fake.context.ip_address = "192.168.0.42"
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is False
+
+
+def test_is_loopback_request_true_when_ip_unknown_but_bind_is_loopback(monkeypatch):
+    """Root-caused 2026-07-08: a genuine local Safari connection had
+    st.context.ip_address read as None (empirically unreliable in this
+    Streamlit/Tornado deployment) while server.address correctly reported
+    127.0.0.1 -- and the operator was locked out of their own dashboard. The
+    AUTHORITATIVE bind-address signal must NOT be vetoed by the absence of a
+    redundant, unreliable secondary one. This is a regression test for that
+    exact incident -- it must stay True."""
+    fake = _fake_st()
+    fake.context.ip_address = None
+    monkeypatch.setattr(streamlit_app, "st", fake)
+    assert streamlit_app._is_loopback_request() is True
+
+
+def test_is_loopback_request_true_when_st_context_missing_but_bind_is_loopback(monkeypatch):
+    """Same fix, the st.context-entirely-absent variant (e.g. a Streamlit
+    older than the pinned floor): getattr fails closed to ip=None rather than
+    raising, and a None secondary signal must not veto a safe bind."""
     from unittest.mock import MagicMock
 
     fake = MagicMock(spec=["get_option"])  # deliberately no `context` attribute
     fake.get_option.return_value = "127.0.0.1"
     monkeypatch.setattr(streamlit_app, "st", fake)
-    assert streamlit_app._is_loopback_request() is False
+    assert streamlit_app._is_loopback_request() is True
 
 
 class _StreamlitStopped(Exception):

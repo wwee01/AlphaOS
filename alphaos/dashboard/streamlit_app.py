@@ -60,46 +60,54 @@ _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
 
 
 def _is_loopback_request() -> bool:
-    """OPS-A: true only if THIS request is genuinely local. Checks two
-    independent signals:
+    """OPS-A: true only if THIS request is genuinely local.
 
-    1. ``st.context.ip_address`` -- the actual connecting client's IP, as
-       Streamlit itself observes it. This is the real signal: it catches a
-       misconfigured bind (e.g. `--server.address 0.0.0.0`) regardless of
-       what the server was told its own address is, and it's what a phone on
-       the same wifi would actually have to satisfy to load the page.
-    2. ``st.get_option("server.address")`` -- the server's own configured
-       bind address, as a second, independent layer (defense in depth: the
-       config/CLI flag is meant to prevent the bind in the first place; this
-       verifies it actually took effect).
+    ``st.get_option("server.address")`` -- the server's own configured bind
+    address -- is the AUTHORITATIVE signal: if it reports a loopback value,
+    that is structurally sufficient on its own. The OS kernel itself refuses
+    a non-loopback TCP connection to a loopback-bound socket before Streamlit
+    (or Python) ever sees it, so a positively-loopback bind can't be
+    contradicted by a real direct connection.
 
-    Either signal being missing or non-loopback fails CLOSED, not open --
-    same unknown-never-safe posture the rest of this codebase uses elsewhere
-    (position_health.py's degenerate-risk-basis handling, etc.). This
-    project's own operating doctrine is that remote access is an SSH tunnel,
-    never a LAN bind or reverse proxy (module docstring), so there is no
-    legitimate scenario where an unreadable signal should be treated as
-    fine.
+    ``st.context.ip_address`` (the actual connecting client's IP) is checked
+    as a SECOND, defense-in-depth signal, but only actionable when it is
+    actually populated with a value that positively disagrees with a
+    loopback bind -- which should never happen for a genuine direct
+    connection, so if it ever does, something is wrong enough to refuse.
+    Its absence (``None``) must NOT veto an otherwise-safe bind: empirically,
+    ``ip_address`` returns ``None`` even for a real, local Safari connection
+    in this deployment (root-caused 2026-07-08 -- a genuine operator was
+    locked out of their own dashboard by treating a merely-unpopulated
+    secondary signal as equivalent to "unsafe"). Unknown-never-safe still
+    applies to the AUTHORITATIVE signal (an unreadable/non-loopback bind
+    address refuses outright); it does not extend to a redundant, empirically
+    unreliable secondary check once the primary signal has already proven
+    the connection safe.
 
     KNOWN RESIDUAL RISK (accepted, not a defect in this control): a reverse
-    proxy in front of Streamlit would make ``ip_address`` report the proxy's
-    loopback IP, wrongly passing this check while a remote user is connected.
-    That is exactly why reverse proxies are forbidden here and an SSH tunnel
-    -- whose forwarded connection legitimately originates from loopback on
-    this host (the operator already authenticated via SSH) -- is the only
-    sanctioned remote path.
+    proxy in front of Streamlit would make Streamlit's own bind genuinely
+    loopback (safe by this check) while actually being reachable more widely
+    via the proxy in front of it. That is exactly why reverse proxies are
+    forbidden here and an SSH tunnel -- whose forwarded connection
+    legitimately originates from loopback on this host (the operator already
+    authenticated via SSH) -- is the only sanctioned remote path.
 
     ``st.context`` is read via getattr so a Streamlit older than the pinned
     floor (``pyproject`` requires ``streamlit>=1.42``, where ``st.context.
     ip_address`` exists) fails CLOSED cleanly (refuse) rather than raising
     AttributeError -- belt-and-suspenders below the floor the pin already
     guarantees."""
+    bind_addr = st.get_option("server.address")
+    if bind_addr not in _LOOPBACK_ADDRESSES:
+        # The bind itself is unsafe, unknown, or unreadable -- refuse
+        # outright. This does NOT depend on what this specific connection's
+        # ip_address claims: a misconfigured non-loopback bind should be
+        # impossible to miss (even from the console), not silently "still
+        # works for me" while quietly reachable from the LAN too.
+        return False
     ctx = getattr(st, "context", None)
     ip = getattr(ctx, "ip_address", None) if ctx is not None else None
-    if ip not in _LOOPBACK_ADDRESSES:
-        return False
-    bind_addr = st.get_option("server.address")
-    if bind_addr is not None and bind_addr not in _LOOPBACK_ADDRESSES:
+    if ip is not None and ip not in _LOOPBACK_ADDRESSES:
         return False
     return True
 
