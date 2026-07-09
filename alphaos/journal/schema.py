@@ -1906,6 +1906,52 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR12: the hypothesis_proposals registry -- one row per seeded
+        # hypothesis, mapping a fixed human-assigned hypothesis_id (e.g.
+        # "H-TQS-1") onto a preregistrations row (PORT-1). `status` is a
+        # MECHANICAL lifecycle marker only (proposed -> testing -> resolved);
+        # it is never a semantic verdict -- the fresh verdict always comes
+        # from alphaos.stats.fdr.compute_verdicts() over the full evaluated
+        # preregistrations family (see alphaos/hypotheses/resolver.py's own
+        # module docstring for why MET/FAILED/WITHDRAWN are operator-only and
+        # never set by the resolver). last_verdict/last_q_value/last_reason
+        # are a CACHE of that function's most recent output for this row --
+        # read-optimization for the report only, never treated as
+        # authoritative by any other code path (same non-authoritative-cache
+        # posture preregistrations' own now-removed verdict column would have
+        # had; see that table's comment above).
+        #
+        # H-AI-1 is special-cased throughout alphaos/hypotheses/: it has
+        # metric_fn_name NULL and prereg_id links to BASELINE's own existing
+        # preregistrations row (found by text match, cmd_baseline_register()'s
+        # own hypothesis+metric strings) -- resolver.py never calls
+        # evaluate_hypothesis() for this row, only mirrors whatever verdict
+        # that row already carries once BASELINE's own (not yet built)
+        # evaluation step sets it.
+        "hypothesis_proposals",
+        """
+        CREATE TABLE IF NOT EXISTS hypothesis_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hypothesis_id TEXT NOT NULL UNIQUE,
+            risk_class TEXT NOT NULL,
+            claim TEXT NOT NULL,
+            metric_description TEXT,
+            success_floor REAL,
+            metric_fn_name TEXT,
+            card_id TEXT,
+            prereg_id TEXT,
+            status TEXT NOT NULL DEFAULT 'proposed',
+            analysis_not_before TEXT NOT NULL,
+            resolved_at_utc TEXT,
+            last_verdict TEXT,
+            last_q_value REAL,
+            last_reason TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2072,6 +2118,11 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_replay_status "
     "ON shadow_baseline_decisions(replay_status)",
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_symbol ON shadow_baseline_decisions(symbol)",
+    # PR12: hypothesis_id is the primary lookup key (propose_hypothesis()'s
+    # own idempotency check); status/analysis_not_before back the resolver's
+    # daily "what's due" scan.
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_proposals_status ON hypothesis_proposals(status)",
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_proposals_prereg ON hypothesis_proposals(prereg_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

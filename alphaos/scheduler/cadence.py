@@ -34,6 +34,9 @@ class JobType(StrEnum):
     TEXT_ARCHIVE_PULL = "text_archive_pull"
     # INSTR-1: once-daily ATR(14) capture (the core-book universe only).
     ATR_UPDATE = "atr_update"
+    # PR12: once-daily hypothesis-registry resolver (reads already-journaled
+    # tables only -- no external calls, so no cost_guard wiring needed).
+    HYPOTHESIS_RESOLVE = "hypothesis_resolve"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -105,6 +108,7 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
 
     if job_type in (
         JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE, JobType.TEXT_ARCHIVE_PULL, JobType.ATR_UPDATE,
+        JobType.HYPOTHESIS_RESOLVE,
     ):
         st = timeutils.stamp(now)
         return f"{job_type}:{st.local_sgt[:10]}"
@@ -144,6 +148,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _text_archive_pull_due(settings, journal, now)
         if job_type == JobType.ATR_UPDATE:
             return _atr_update_due(settings, journal, now)
+        if job_type == JobType.HYPOTHESIS_RESOLVE:
+            return _hypothesis_resolve_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -275,4 +281,10 @@ def _text_archive_pull_due(settings, journal, now: Optional[datetime]) -> tuple[
 def _atr_update_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     return _once_daily_due(
         JobType.ATR_UPDATE, settings.scheduler_atr_update_time, settings, journal, now,
+    )
+
+
+def _hypothesis_resolve_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(
+        JobType.HYPOTHESIS_RESOLVE, settings.scheduler_hypothesis_resolve_time, settings, journal, now,
     )

@@ -1279,6 +1279,31 @@ class Orchestrator:
 
         return build_baseline_report(self.journal, self.settings, limit=limit)
 
+    def hypothesis_seed(self) -> list:
+        """PR12: idempotently register every SEEDED_HYPOTHESES entry. Safe
+        to call repeatedly (a no-op past the first call per hypothesis_id)."""
+        from alphaos.hypotheses import seed_all
+
+        return seed_all(self.journal)
+
+    def hypothesis_resolve(self) -> dict:
+        """PR12: one resolver pass -- evaluate any hypothesis_proposals row
+        that has cleared its own calendar + sample-size floor, then refresh
+        last_verdict/last_q_value for the whole evaluated family. PURE
+        WRITE-ONLY to hypothesis_proposals/preregistrations; never read by
+        any gate/eval/labeller/risk/execution path."""
+        from alphaos.hypotheses import resolve_due_hypotheses
+
+        return resolve_due_hypotheses(self.journal)
+
+    def hypothesis_report(self) -> dict:
+        """PR12: the registry status report -- every seeded hypothesis's
+        risk class, claim, mechanical status, and (once evaluated) fresh
+        verdict/q-value. PURE READ. See alphaos/reports/hypothesis_report.py."""
+        from alphaos.reports.hypothesis_report import build_hypothesis_report
+
+        return build_hypothesis_report(self.journal)
+
     def backfill_regime_days(self) -> dict:
         """REG-1 one-off: extend benchmark_bars SPY history, classify the
         full available series into regime_days, and stamp any pre-existing
