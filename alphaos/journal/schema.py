@@ -1869,6 +1869,13 @@ SCHEMA: list[tuple[str, str]] = [
         # alphaos.baseline.tracker.resolve_pending_baseline_decisions() via
         # the ONE replay engine (alphaos.learning.outcomes_engine.
         # replay_bracket -- never a second replay implementation).
+        #
+        # entry_fill_status (spec item 4, added 2026-07-09): 'assumed_filled'
+        # for every 'propose' row (a real last_price is required to reach
+        # 'propose' at all -- see tracker.py), NULL for no_action/unavailable
+        # (no entry attempt to characterize). No live signal produces
+        # 'needs_review' yet -- the column exists for a future version that
+        # might, without a further migration.
         "shadow_baseline_decisions",
         """
         CREATE TABLE IF NOT EXISTS shadow_baseline_decisions (
@@ -1886,6 +1893,7 @@ SCHEMA: list[tuple[str, str]] = [
             target REAL,
             max_holding_days INTEGER,
             setup_card_id TEXT,
+            entry_fill_status TEXT,
             input_sha TEXT NOT NULL,
             decision_at_utc TEXT NOT NULL,
             replay_status TEXT NOT NULL DEFAULT 'pending',

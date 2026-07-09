@@ -71,20 +71,47 @@ def record_shadow_baseline_decisions(
         decided_at = decision_at_utc or stamp.utc
 
         for rule_version, apply_rule in RULE_FUNCTIONS.items():
-            out = apply_rule(
-                row, atr_14=atr_14, min_reward_risk=settings.min_reward_risk,
-                max_holding_days_default=max_holding_days_default,
-            )
+            # Each rule isolated in its OWN try/except (2026-07-09
+            # correctness-audit NIT-2): a field only ONE rule reads (e.g. a
+            # poisoned interest_score, read only by threshold_v1) must not
+            # suppress the OTHER rule's row too -- matches harness.py's own
+            # lesson about per-item isolation not propagating automatically
+            # just because two things share a data path.
+            try:
+                out = apply_rule(
+                    row, atr_14=atr_14, min_reward_risk=settings.min_reward_risk,
+                    max_holding_days_default=max_holding_days_default,
+                )
+            except Exception as exc:  # noqa: BLE001 - one rule's failure must never block the other
+                journal.log_system_event(
+                    Severity.WARNING, "baseline",
+                    f"{symbol}/{rule_version}: apply_rule failed: {exc}",
+                )
+                continue
+
             decision = out["decision"]
             # A directly-observed fact (no position ever opened), matching
             # Attribution v2's own 0-is-a-fact convention -- NOT a substitute
             # for missing data (that's the 'unavailable' branch below).
+            # entry_fill_status (spec item 4, added 2026-07-09 scope/safety-
+            # audit finding LOW-1): 'assumed_filled' for every 'propose' row
+            # -- by construction, _build_bracket() only reaches 'propose'
+            # when a real last_price was available (a missing/unusable price
+            # already resolves to 'unavailable' below), so there is no live
+            # signal in v1 that would ever produce 'needs_review'. The
+            # column exists now so a future version (e.g. one that also
+            # considers snapshot staleness/quality) can populate it without
+            # a migration; None for no_action/unavailable rows, which never
+            # represent an entry attempt at all.
             if decision == "no_action":
                 replay_status, replay_result, replay_r = "complete", "no_action", 0.0
+                entry_fill_status = None
             elif decision == "unavailable":
                 replay_status, replay_result, replay_r = "unavailable", None, None
+                entry_fill_status = None
             else:
                 replay_status, replay_result, replay_r = "pending", None, None
+                entry_fill_status = "assumed_filled"
 
             try:
                 journal.insert("shadow_baseline_decisions", {
@@ -101,6 +128,7 @@ def record_shadow_baseline_decisions(
                     "target": out.get("target"),
                     "max_holding_days": out.get("max_holding_days"),
                     "setup_card_id": setup_card_id,
+                    "entry_fill_status": entry_fill_status,
                     "input_sha": out["input_sha"],
                     "decision_at_utc": decided_at,
                     "replay_status": replay_status,

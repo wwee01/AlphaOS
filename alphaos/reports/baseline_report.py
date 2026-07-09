@@ -4,6 +4,23 @@ outcome (``candidate_outcomes.replay_r``, already computed by the ONE
 replay engine, never a second implementation here). Descriptive only until
 ``ANALYSIS_NOT_BEFORE_DATE`` -- see the module's pre-registration block.
 Never read by any gate/eval/risk/execution path (shadow law).
+
+KIV, explicitly deferred, NOT a safety gap (2026-07-09 scope/safety audit
+finding LOW-1): spec item 5 asks for the one-sided test to be reported as
+``q`` (PORT-1 BH-FDR), not raw ``p``. This report intentionally does NOT do
+that -- ``alphaos.stats.fdr.compute_verdicts()`` computes q FRESH over the
+full family of EVALUATED preregistrations (``evaluated_at_utc IS NOT
+NULL``), and BASELINE's own hypothesis has not been evaluated yet (that is
+an operator-invoked, one-shot action via ``evaluate_hypothesis()``, not
+before ``ANALYSIS_NOT_BEFORE_DATE``). Computing a q-value against a family
+that doesn't yet include this hypothesis would be statistically incoherent,
+not just premature. This report's own ``one_sided_p_below_zero`` field
+(inside ``day_block_bootstrap()``'s output) is a live, always-recomputed
+bootstrap diagnostic -- never the formal test, never stored, never
+mistaken for a q-value. Once an operator runs the (not-yet-built) formal
+evaluation CLI after the analysis date, ITS output should report q via
+compute_verdicts(); wiring that up is future work, tracked here so it isn't
+silently forgotten.
 """
 
 from __future__ import annotations
@@ -20,18 +37,33 @@ from alphaos.util import timeutils
 # Matches Attribution v2's own paired-R-comparison floor exactly (same
 # question shape: does a deviation/comparison add value in R) -- reusing an
 # established codebase bar rather than inventing a third arbitrary number.
-FLOOR_EFFECTIVE_N = 30
+#
+# Named FLOOR_DAY_BLOCKS (2026-07-09 correctness-audit NIT-1, was
+# FLOOR_EFFECTIVE_N): this gates day_block_bootstrap()'s own n_day_blocks
+# count, a DIFFERENT axis from PORT-1's effective_n() (symbol + holding-
+# window clustering) -- the old name implied the latter.
+FLOOR_DAY_BLOCKS = 30
 FLOOR_SPAN_DAYS = 28.0
 
 ANALYSIS_NOT_BEFORE_DATE = "2026-09-07"  # matches REG-1's own checkpoint (60 days from build)
 
+# The "gross, gap-free upper bound" sentence is VERBATIM from the spec
+# (audit C1): the replay engine idealizes fills at the exact stop/target
+# level with no slippage/gap risk modeled -- every ΔR number here is an
+# upper bound on what a real, cost-and-gap-aware fill would have achieved,
+# not a final answer. Stop-hit rows are earmarked for a future COST-1
+# gap-haircut re-statement, applied identically to every arm (never
+# BASELINE-specific), once that PR exists.
 BASELINE_CAVEAT = (
     "BASELINE measures CONDITIONAL added-R: does the AI beat a frozen "
     "deterministic rule, GIVEN a candidate reached the AI evaluator? It "
     "does NOT claim the AI adds value vs. no scanning at all, and it never "
     "gates or influences any real decision (shadow law). ai_delta_r pairs "
     "only where BOTH the AI path and the rule's own replay have resolved; "
-    "below the floor, only counts are shown -- no mean/CI."
+    "below the floor, only counts are shown -- no mean/CI. Every ΔR number "
+    "is a gross, gap-free upper bound: replay idealizes fills at the exact "
+    "stop/target level with no slippage or gap risk modeled -- until COST-1 "
+    "lands, treat these as ceilings, not realized outcomes."
 )
 
 
@@ -70,7 +102,7 @@ def compute_baseline_report(rows: list[dict]) -> dict:
 
         boot = day_block_bootstrap(paired, "delta_r", n_resamples=10000)
         n_day_blocks = boot["n_day_blocks"]
-        meets_floor = n_day_blocks >= FLOOR_EFFECTIVE_N and (span or 0) >= FLOOR_SPAN_DAYS
+        meets_floor = n_day_blocks >= FLOOR_DAY_BLOCKS and (span or 0) >= FLOOR_SPAN_DAYS
 
         if not meets_floor or boot["status"] != "ok":
             rule_reports[rule_version] = {
@@ -90,7 +122,7 @@ def compute_baseline_report(rows: list[dict]) -> dict:
 
     return {
         "rules": rule_reports,
-        "floor_effective_n": FLOOR_EFFECTIVE_N,
+        "floor_day_blocks": FLOOR_DAY_BLOCKS,
         "floor_span_days": FLOOR_SPAN_DAYS,
         "analysis_not_before": ANALYSIS_NOT_BEFORE_DATE,
         "caveat": BASELINE_CAVEAT,
@@ -145,7 +177,7 @@ def render_markdown(rep: dict) -> str:
             )
         else:
             lines.append(
-                f"- {rule_version}: below floor ({rep['floor_effective_n']}+ day-blocks AND "
+                f"- {rule_version}: below floor ({rep['floor_day_blocks']}+ day-blocks AND "
                 f"{rep['floor_span_days']}+ day span needed) -- counts only: "
                 f"n_paired={r['n_paired']}, day_blocks={r['n_day_blocks']}, span={r['span_days']}d"
             )

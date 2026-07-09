@@ -37,7 +37,7 @@ from alphaos.baseline.tracker import (
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.reports.baseline_report import (
-    FLOOR_EFFECTIVE_N,
+    FLOOR_DAY_BLOCKS,
     FLOOR_SPAN_DAYS,
     compute_baseline_report,
     render_markdown,
@@ -307,7 +307,7 @@ def test_compute_baseline_report_empty_input():
     rep = compute_baseline_report([])
     assert rep["rules"][THRESHOLD_V1]["status"] == "below_sample_floor"
     assert rep["rules"][PROPOSE_ALL_V1]["status"] == "below_sample_floor"
-    assert rep["floor_effective_n"] == FLOOR_EFFECTIVE_N
+    assert rep["floor_day_blocks"] == FLOOR_DAY_BLOCKS
     assert rep["floor_span_days"] == FLOOR_SPAN_DAYS
 
 
@@ -480,6 +480,70 @@ def test_record_shadow_baseline_decisions_stamps_setup_card_id_from_candidate():
     rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
     for r in rows:
         assert r["setup_card_id"] == "catalyst_momentum_v2"
+    j.close()
+
+
+def test_record_shadow_baseline_decisions_entry_fill_status_assumed_filled_for_propose():
+    """Spec item 4 (2026-07-09 audit finding LOW-1): a propose row is always
+    entry_fill_status='assumed_filled' (a real last_price is required to
+    reach 'propose' at all); no_action/unavailable rows get None (no entry
+    attempt to characterize)."""
+    j = JournalStore(":memory:")
+    cand = _make_cand(j, interest_score=0.1)  # below threshold -> no_action for threshold_v1
+    j.insert("atr_history", {
+        "atr_id": "atr1", "symbol": "AAPL", "market_date": "2026-01-01",
+        "atr_14": 2.0, "rules_version": "atr_rules_v1", "n_bars_fetched": 15,
+    })
+    record_shadow_baseline_decisions(j, make_settings(), cand)
+    threshold_row = j.one(
+        "SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1' AND rule_version = ?",
+        (THRESHOLD_V1,),
+    )
+    assert threshold_row["decision"] == "no_action"
+    assert threshold_row["entry_fill_status"] is None
+    propose_all_row = j.one(
+        "SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1' AND rule_version = ?",
+        (PROPOSE_ALL_V1,),
+    )
+    assert propose_all_row["decision"] == "propose"
+    assert propose_all_row["entry_fill_status"] == "assumed_filled"
+    j.close()
+
+
+def test_record_shadow_baseline_decisions_entry_fill_status_none_when_unavailable():
+    j = JournalStore(":memory:")
+    cand = _make_cand(j)  # no atr_history seeded -> both rules unavailable
+    record_shadow_baseline_decisions(j, make_settings(), cand)
+    rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
+    for r in rows:
+        assert r["decision"] == "unavailable"
+        assert r["entry_fill_status"] is None
+    j.close()
+
+
+def test_record_shadow_baseline_decisions_one_rule_failure_does_not_block_the_other(monkeypatch):
+    """2026-07-09 correctness-audit NIT-2: a poisoned field only ONE rule
+    reads must not suppress the OTHER rule's row. Simulated by monkeypatching
+    ONE entry of RULE_FUNCTIONS to raise; the other rule's row must still be
+    written."""
+    import alphaos.baseline.tracker as tracker_mod
+
+    def _exploding_rule(row, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(tracker_mod.RULE_FUNCTIONS, THRESHOLD_V1, _exploding_rule)
+
+    j = JournalStore(":memory:")
+    cand = _make_cand(j)
+    j.insert("atr_history", {
+        "atr_id": "atr1", "symbol": "AAPL", "market_date": "2026-01-01",
+        "atr_14": 2.0, "rules_version": "atr_rules_v1", "n_bars_fetched": 15,
+    })
+    record_shadow_baseline_decisions(j, make_settings(), cand)  # must not raise
+
+    rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
+    assert len(rows) == 1  # only propose_all_v1's row -- threshold_v1's own failure was isolated
+    assert rows[0]["rule_version"] == PROPOSE_ALL_V1
     j.close()
 
 

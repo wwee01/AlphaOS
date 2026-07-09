@@ -146,7 +146,7 @@ def cmd_baseline_register(orch: Orchestrator) -> int:
     invoked, idempotent (refuses a duplicate rather than creating a second
     row for the same hypothesis, since register_hypothesis() itself is NOT
     idempotent -- every call creates a new row)."""
-    from alphaos.reports.baseline_report import FLOOR_EFFECTIVE_N, FLOOR_SPAN_DAYS
+    from alphaos.reports.baseline_report import FLOOR_DAY_BLOCKS, FLOOR_SPAN_DAYS
     from alphaos.stats.preregistration import register_hypothesis
 
     hypothesis = (
@@ -165,7 +165,11 @@ def cmd_baseline_register(orch: Orchestrator) -> int:
 
     prereg_id = register_hypothesis(
         orch.journal, hypothesis, metric,
-        floor_effective_n=FLOOR_EFFECTIVE_N, floor_span_days=FLOOR_SPAN_DAYS,
+        # register_hypothesis()'s own parameter is named floor_effective_n
+        # (PORT-1's generic vocabulary for this bar, regardless of counting
+        # axis) -- BASELINE_report's own constant is FLOOR_DAY_BLOCKS since
+        # it counts day-blocks, not PORT-1's symbol-clustered effective_n.
+        floor_effective_n=FLOOR_DAY_BLOCKS, floor_span_days=FLOOR_SPAN_DAYS,
         analysis_not_before="2026-09-07",
         params={"rule_version": "threshold_v1", "target_delta_r": 0.05},
     )
