@@ -332,12 +332,20 @@ class Settings:
     # is informational, not a paid live API call; a real provider can replace
     # the mock behind the same factory later without touching call sites.
     earnings_proximity_enabled: bool
-    earnings_proximity_provider: str          # mock | static | disabled
+    earnings_proximity_provider: str          # mock | static | disabled | alpha_vantage
     earnings_proximity_warning_days: int      # "near-term" warning window (calendar days)
     earnings_proximity_default_hold_days: int  # fallback when max_holding_days isn't known yet
     earnings_proximity_max_symbols_per_scan: int
     earnings_proximity_timeout_seconds: float  # reserved for a future live provider; mock ignores it
     earnings_proximity_fail_open_as_unavailable: bool
+
+    # EARN-1: the live earnings-calendar provider (vendor: Alpha Vantage,
+    # cost floor per the spec's own "vendor choice at build time" -- see
+    # alphaos-pr-implementation-specs.md's EARN-1 section). Free tier is
+    # 25 requests/day; the once-daily capture job needs exactly 1.
+    alpha_vantage_api_key: str
+    scheduler_earnings_calendar_pull_time: str  # "HH:MM" SGT, once-daily cadence
+    earnings_calendar_staleness_days: int  # cache older than this -> STALE, never trusted blindly
 
     # --- proposal TTL / stale-approval guard (Roadmap PR6) ---
     # Safety guard, not a toggle-able feature: a proposal is only approvable
@@ -525,6 +533,10 @@ class Settings:
     @property
     def has_benzinga_key(self) -> bool:
         return bool(self.benzinga_api_key)
+
+    @property
+    def has_alpha_vantage_key(self) -> bool:
+        return bool(self.alpha_vantage_api_key)
 
     @property
     def has_alpaca_keys(self) -> bool:
@@ -936,6 +948,17 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_atr_update_time = _get(src, "SCHEDULER_ATR_UPDATE_TIME", "06:30")
     _parse_hhmm(scheduler_atr_update_time, "SCHEDULER_ATR_UPDATE_TIME")
 
+    # EARN-1: once-daily earnings-calendar capture cadence.
+    scheduler_earnings_calendar_pull_time = _get(src, "SCHEDULER_EARNINGS_CALENDAR_PULL_TIME", "06:45")
+    _parse_hhmm(scheduler_earnings_calendar_pull_time, "SCHEDULER_EARNINGS_CALENDAR_PULL_TIME")
+    earnings_calendar_staleness_days = _get_int(src, "EARNINGS_CALENDAR_STALENESS_DAYS", 3)
+    if not (1 <= earnings_calendar_staleness_days <= 30):
+        raise SettingsError(
+            f"EARNINGS_CALENDAR_STALENESS_DAYS={earnings_calendar_staleness_days!r} must be "
+            f"between 1 and 30 -- a live per-symbol lookup must fail toward STALE rather than "
+            f"silently trust an arbitrarily old capture."
+        )
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1010,6 +1033,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         news_provider=_get(src, "NEWS_PROVIDER", "disabled").lower(),
         massive_api_key=_get(src, "MASSIVE_API_KEY"),
         benzinga_api_key=_get(src, "BENZINGA_API_KEY"),
+        alpha_vantage_api_key=_get(src, "ALPHA_VANTAGE_API_KEY"),
         alpaca_api_key=_get(src, "ALPACA_API_KEY"),
         alpaca_secret_key=_get(src, "ALPACA_SECRET_KEY"),
         alpaca_paper=_get_bool(src, "ALPACA_PAPER", True),
@@ -1129,6 +1153,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         sec_edgar_contact_email=_get(src, "SEC_EDGAR_CONTACT_EMAIL", ""),
         scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         scheduler_atr_update_time=scheduler_atr_update_time,
+        scheduler_earnings_calendar_pull_time=scheduler_earnings_calendar_pull_time,
+        earnings_calendar_staleness_days=earnings_calendar_staleness_days,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,

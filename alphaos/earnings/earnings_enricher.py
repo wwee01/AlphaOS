@@ -158,7 +158,7 @@ class EarningsProximityEnricher:
     def __init__(self, settings, journal=None, provider: Optional[EarningsProximityProvider] = None):
         self.settings = settings
         self.journal = journal
-        self._provider = provider if provider is not None else make_earnings_provider(settings)
+        self._provider = provider if provider is not None else make_earnings_provider(settings, journal)
 
     def _empty(self, symbol: str, status: str, enrichment_status: str, source: str,
                error: Optional[str] = None) -> EarningsProximityContext:
