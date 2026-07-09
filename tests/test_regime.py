@@ -494,6 +494,17 @@ def test_is_armed_per_map_unknown_regime_never_armed():
     assert _is_armed_per_map("catalyst_momentum_v1", None) is False
 
 
+def test_is_armed_per_map_covers_catalyst_momentum_v2_too():
+    """INSTR-1 regression: catalyst_momentum_v2 (the new default card as of
+    2026-07-09) must NOT silently fall through to an empty policy set --
+    it shares v1's same pre-registered "momentum cards -> TREND_UP only"
+    policy, added as a new dict entry, not a revision of v1's own."""
+    assert _is_armed_per_map("catalyst_momentum_v2", "TREND_UP") is True
+    assert _is_armed_per_map("catalyst_momentum_v2", "TREND_DN") is False
+    assert _is_armed_per_map("catalyst_momentum_v2", "CHOP") is False
+    assert _is_armed_per_map("catalyst_momentum_v2", "CRISIS") is False
+
+
 def test_count_distinct_episodes_same_day_dupes_and_adjacent_days_are_one_episode():
     assert _count_distinct_episodes(["2026-01-05", "2026-01-05"]) == 1
     assert _count_distinct_episodes(["2026-01-05", "2026-01-06", "2026-01-07"]) == 1

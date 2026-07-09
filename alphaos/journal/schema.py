@@ -1771,6 +1771,31 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # INSTR-1 part 2: ATR(14) capture, the daily write side of ATR-scaled
+        # stops (alphaos/reports/atr_service.py). One row per (symbol,
+        # market_date, rules_version) -- a v2 rules recompute would add new
+        # rows under a new version rather than mutating v1 rows, same
+        # pattern as regime_days. Read ONLY by OpenAIClient's live-only stop
+        # override (alphaos/ai/openai_client.py) -- never by any
+        # gate/risk/execution path directly. Scoped to the core-book
+        # universe (the shadow tier never reaches the evaluator/proposal
+        # path, so it has no use for this data -- see module docstring).
+        "atr_history",
+        """
+        CREATE TABLE IF NOT EXISTS atr_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            atr_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            atr_14 REAL NOT NULL,
+            rules_version TEXT NOT NULL,
+            n_bars_fetched INTEGER,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         # PORT-1: the pre-registration registry (ported from NightDesk's
         # Thesis Research Layer -- see
         # docs/roadmap/ported/nightdesk-stats-contract.md). One row per
@@ -1972,6 +1997,11 @@ INDEXES: list[str] = [
     # PORT-1: compute_verdicts()'s family is "every evaluated preregistration"
     # -- this is the index that lookup leans on.
     "CREATE INDEX IF NOT EXISTS idx_preregistrations_evaluated ON preregistrations(evaluated_at_utc)",
+    # INSTR-1: idempotent-insert idiom, same role as idx_regime_days_date_version
+    # -- a same-day re-run is a no-op, never a duplicate row.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_atr_history_symbol_date_version "
+    "ON atr_history(symbol, market_date, rules_version)",
+    "CREATE INDEX IF NOT EXISTS idx_atr_history_symbol ON atr_history(symbol)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

@@ -21,6 +21,7 @@ import urllib.request
 
 from alphaos.config.settings import ALPACA_DATA_BASE_URL
 from alphaos.constants import Severity
+from alphaos.data.intraday_volume_curve import compute_rel_volume_v2
 from alphaos.data.providers.base import MarketDataProvider
 from alphaos.util import timeutils
 
@@ -127,7 +128,17 @@ class AlpacaDataProvider(MarketDataProvider):
         spread = (ask - bid) if (bid is not None and ask is not None) else None
         spread_pct = (spread / last) if (spread is not None and last) else None
         change_pct = ((last - prev_close) / prev_close) if (last and prev_close) else None
-        rel_volume = (volume / prev_volume) if (volume and prev_volume) else None
+        # INSTR-1: cumulative-to-now volume vs. what fraction of a normal day's
+        # volume TYPICALLY trades by this time of day -- not the old
+        # cumulative-vs-yesterday's-FULL-day comparison (structurally reads
+        # 0.1-0.3 every morning; see intraday_volume_curve.py's own
+        # docstring). Uses THIS snapshot's own received-at instant, never
+        # wall-clock "now" at processing time, so a batch fetched at 10:00am
+        # is scored as of 10:00am even if mapped moments later.
+        received_dt = timeutils.parse_iso(received)
+        rel_volume = (
+            compute_rel_volume_v2(volume, prev_volume, received_dt) if received_dt is not None else None
+        )
 
         return {
             "symbol": symbol,

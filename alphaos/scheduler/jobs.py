@@ -114,6 +114,17 @@ def run_benchmark_spine_job(orch, runner) -> dict:
     return {"status": "completed", "benchmark_spine_result": result}
 
 
+def run_atr_update_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``atr_service.update_atr_history()`` (INSTR-1
+    part 2). No gating needed -- write-only capture, same rationale as
+    run_benchmark_spine_job; the ONLY reader is OpenAIClient's live-only
+    stop override, never a gate/risk/execution path directly."""
+    from alphaos.reports.atr_service import update_atr_history
+
+    result = update_atr_history(orch.journal, orch.settings)
+    return {"status": "completed", "atr_update_result": result}
+
+
 def run_text_archive_pull_job(orch, runner) -> dict:
     """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
     filing pull (TEXT-0). No gating needed -- collect only, never read by

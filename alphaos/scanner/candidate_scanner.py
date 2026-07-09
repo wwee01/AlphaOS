@@ -40,10 +40,11 @@ DEFAULT_UNIVERSE = [
     "GOOGL", "META", "NFLX", "AVGO", "JPM", "XLK", "XLE", "XLF", "SMH", "COST",
 ]
 
-# EXP-0: every shadow-tier candidate row stamps this until INSTR-1 lands (then
-# 'instr1') -- pre-INSTR-1 interest ranks are known-biased (dead intraday
-# rel_volume) and must never be silently mixed with post-fix rows in analysis.
-CURRENT_INSTRUMENT_VERSION = "pre_instr1"
+# EXP-0/INSTR-1 (flipped 2026-07-09): every shadow-tier candidate row stamps
+# this. Pre-INSTR-1 interest ranks are known-biased (dead intraday
+# rel_volume) and must never be silently mixed with post-fix rows in
+# analysis -- segment on this field, never assume it's uniform.
+CURRENT_INSTRUMENT_VERSION = "instr1"
 
 
 @dataclass

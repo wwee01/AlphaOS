@@ -8,11 +8,19 @@ rows are append-only per version: a content change WITHOUT a version bump is
 refused loudly at startup (Prime Directive 7 -- a silently mutated card is
 exactly the failure mode that exists to prevent).
 
-v1 ships with exactly ONE card (``DEFAULT_CARD_ID``) -- a faithful
-transcription of the pre-card pipeline's existing behavior. This module
-changes NO decision behavior; it makes existing behavior addressable. No
-card-promotion machinery yet (PR13); every stamping call site just uses
+v1 shipped with exactly ONE card (``catalyst_momentum_v1``) -- a faithful
+transcription of the pre-card pipeline's existing behavior, changing NO
+decision behavior; it made existing behavior addressable. No card-promotion
+machinery yet (PR13); every stamping call site just uses
 ``get_default_card()``.
+
+INSTR-1 (2026-07-09) swapped ``DEFAULT_CARD_ID`` to ``catalyst_momentum_v2``
+-- a real behavior change (ATR-scaled stops), the first since PR10 shipped.
+``catalyst_momentum_v1``'s own file stays in this directory, unchanged
+(append-only per Prime Directive 7): every pre-INSTR-1 candidate/proposal
+row still joins to its real, original card, and this registry's own
+content-hash check would refuse to start if v1's file were ever edited in
+place instead of superseded by a new card_id.
 
 Cards are read fresh from disk on every call -- a handful of tiny YAML files
 read a few times per scan is not a hot path, and caching would only buy
@@ -32,7 +40,9 @@ from alphaos.config.settings import SettingsError
 from alphaos.lineage.hashing import stable_hash
 
 CARDS_DIR = Path(__file__).parent
-DEFAULT_CARD_ID = "catalyst_momentum_v1"
+# INSTR-1 (2026-07-09): superseded catalyst_momentum_v1 -- see module
+# docstring. v1's file remains registered, unchanged, for historical rows.
+DEFAULT_CARD_ID = "catalyst_momentum_v2"
 
 _REQUIRED_FIELDS = ("card_id", "version", "name", "state", "invalidation_rule")
 
@@ -63,9 +73,12 @@ def load_card_files(cards_dir: Optional[Path] = None) -> list[dict]:
 
 
 def get_default_card(cards_dir: Optional[Path] = None) -> dict:
-    """The v1 single active card (``DEFAULT_CARD_ID``). Every stamping call
-    site uses this -- v1 has exactly one card, so "the card that produced
-    this candidate/proposal" and "the default card" are the same thing."""
+    """The single ACTIVE card (``DEFAULT_CARD_ID``). Every stamping call site
+    uses this -- there is still no per-candidate card SELECTION (PR13), only
+    ever one default at a time, so "the card that produced this candidate/
+    proposal" and "the default card" are the same thing. Superseded cards
+    (e.g. ``catalyst_momentum_v1`` after INSTR-1) stay registered/loadable
+    for historical-row provenance but are never returned here again."""
     for card in load_card_files(cards_dir):
         if card["card_id"] == DEFAULT_CARD_ID:
             return card

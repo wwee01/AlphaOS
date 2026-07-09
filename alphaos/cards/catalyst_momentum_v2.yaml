@@ -1,0 +1,32 @@
+card_id: catalyst_momentum_v2
+version: 1
+name: "Catalyst Momentum (long) v2 -- honest instruments"
+state: live_eligible
+direction: long
+holding_class: swing
+regimes: [any]
+required_evidence:
+  - interest_score >= settings.interest_min_score
+  - freshness gates pass
+  - risk gates pass
+  - "ATR(14) available for the symbol (else rejected, never a silent fallback -- NO_ATR_DATA)"
+entry_rule: "as produced by evaluator within freshness/drift gates"
+stop_rule: "Stop = entry -/+ k*ATR(14), k=2.0 pre-registered (ATR_STOP_MULTIPLIER_V1); risk engine still validates"
+target_rule: "evaluator target; min RR enforced by risk engine against the ATR-scaled stop"
+invalidation_rule: "catalyst refuted, or thesis condition broken, before stop"
+max_holding_days_default: 3
+expected_tqs_profile:
+  interest_strength: ">= 0.5"
+notes: >
+  INSTR-1 (2026-07-09): two honest-instrument fixes, versioned together.
+  (1) stop_rule changes from a fixed-percentage stop to k*ATR(14) -- a fixed
+  3% stop is ~4 daily sigma on SPY and under 1 sigma on TSLA, so "1R"
+  previously meant different trades depending only on which symbol got
+  scanned. (2) the scanner's rel_volume signal (upstream of this card, not a
+  card field) switched from today-cumulative/yesterday-full-day (structurally
+  read 0.1-0.3 every morning) to a time-of-day-curve-normalized comparison.
+  Neither change retunes any other threshold or adds a gate -- see
+  alphaos-pr-implementation-specs.md's INSTR-1 section for the full spec and
+  non-goals. v1 stays registered, unchanged, for every pre-existing row's
+  provenance; this card supersedes it as the default going forward, never
+  retro-scored onto v1's own historical rows.

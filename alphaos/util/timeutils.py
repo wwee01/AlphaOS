@@ -51,6 +51,15 @@ def to_iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def to_et(dt: datetime) -> datetime:
+    """``dt`` converted to America/New_York (assumes UTC if naive) -- the
+    single definition of "market time" every session/curve computation
+    should share, matching ``market_session()``'s own conversion."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_UTC)
+    return dt.astimezone(_ET)
+
+
 def stamp(dt: Optional[datetime] = None) -> Stamp:
     """Build a three-timezone Stamp for ``dt`` (defaults to now)."""
     if dt is None:

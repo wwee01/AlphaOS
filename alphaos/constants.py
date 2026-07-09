@@ -226,6 +226,10 @@ class TargetSource(StrEnum):
     MANUAL = "manual"
     BROKER = "broker"
     BASELINE = "baseline"
+    # INSTR-1: the live evaluator's stop was overridden by k*ATR(14) --
+    # target_price_source stays OPENAI (the AI still sets the target); only
+    # stop_price_source becomes this.
+    ATR_V1 = "atr_v1"
 
 
 class ScanType(StrEnum):
@@ -341,6 +345,7 @@ class ReasonCode(StrEnum):
     INVALID_STOP = "INVALID_STOP"
     OPENAI_REJECT = "OPENAI_REJECT"
     REWARD_RISK_TOO_LOW = "REWARD_RISK_TOO_LOW"
+    NO_ATR_DATA = "NO_ATR_DATA"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     MARGIN_APPROVAL_REQUIRED = "MARGIN_APPROVAL_REQUIRED"
     DAYTRADE_GATED = "DAYTRADE_GATED"
