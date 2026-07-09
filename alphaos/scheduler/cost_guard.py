@@ -38,7 +38,10 @@ def calls_in_last_30_days(journal) -> int:
     EVAL-1's ``eval_results`` reuses the SAME ``PlaybookClassifier.classify()``
     call as ``candidate_labels`` (a genuinely separate invocation, not a
     duplicate of an existing row), so omitting it here would repeat the exact
-    2026-07-06 exit-review undercount finding a third time.
+    2026-07-06 exit-review undercount finding a third time. CANARY's
+    ``canary_results`` reuses the same call again (a weekly replay, same
+    rationale) -- omitting it would make this a fourth recurrence of the
+    identical bug class.
     """
     since = timeutils.to_iso(timeutils.now_utc() - timedelta(days=_TRAILING_DAYS))
     evaluations = journal.count_rows(
@@ -53,7 +56,15 @@ def calls_in_last_30_days(journal) -> int:
     eval_replays = journal.count_rows(
         "eval_results", "is_mock = 0 AND created_at_utc >= ?", (since,),
     )
-    return evaluations + labels + polarity + eval_replays
+    # canary_results has no per-row is_mock column (a run is either fully
+    # mock or fully live, never mixed -- see canary_runs.is_mock) so the
+    # mock filter joins through the owning run instead of a local column.
+    canary_replays = journal.count_rows(
+        "canary_results",
+        "created_at_utc >= ? AND run_id IN (SELECT run_id FROM canary_runs WHERE is_mock = 0)",
+        (since,),
+    )
+    return evaluations + labels + polarity + eval_replays + canary_replays
 
 
 def check_scan_budget(settings, journal) -> tuple[bool, str]:

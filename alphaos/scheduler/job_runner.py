@@ -30,6 +30,7 @@ _JOB_FUNCS = {
     cadence.JobType.BENCHMARK_SPINE: jobs.run_benchmark_spine_job,
     cadence.JobType.TEXT_ARCHIVE_PULL: jobs.run_text_archive_pull_job,
     cadence.JobType.ATR_UPDATE: jobs.run_atr_update_job,
+    cadence.JobType.CANARY_RUN: jobs.run_canary_run_job,
 }
 
 
@@ -195,6 +196,7 @@ class JobRunner:
             cadence.JobType.BENCHMARK_SPINE,
             cadence.JobType.TEXT_ARCHIVE_PULL,
             cadence.JobType.ATR_UPDATE,
+            cadence.JobType.CANARY_RUN,
         ):
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
             if not due:
@@ -289,6 +291,7 @@ class JobRunner:
             cadence.JobType.BENCHMARK_SPINE,
             cadence.JobType.TEXT_ARCHIVE_PULL,
             cadence.JobType.ATR_UPDATE,
+            cadence.JobType.CANARY_RUN,
         ):
             recent_by_job_type[job_type] = self.journal.query(
                 "SELECT * FROM job_runs WHERE job_type = ? ORDER BY id DESC LIMIT ?",
