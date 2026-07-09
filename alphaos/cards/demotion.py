@@ -67,7 +67,15 @@ def _write_snapshot(journal, card_id: str, card_version: int, state: str, score:
 def _consecutive_breach_streak(journal, card_id: str, card_version: int, limit: int) -> list[dict]:
     """The most recent `limit` snapshots for (card_id, version), most-recent
     first -- callers count the leading breach=1 streak themselves (mirrors
-    cadence.is_fused()'s own query-then-count-in-Python shape exactly)."""
+    cadence.is_fused()'s own query-then-count-in-Python shape exactly).
+
+    Ordering by `id DESC` (not `evaluation_date DESC`) assumes snapshot ids
+    are monotonic with evaluation_date -- true today because both real call
+    sites (the scheduler job and the orchestrator method) always evaluate
+    at the real current time, and no backfill/re-insert path exists. A
+    future feature that ever inserts a snapshot for a PAST date would need
+    to order by `evaluation_date DESC` instead, or this streak check would
+    silently read the wrong 2 rows."""
     return journal.query(
         "SELECT snapshot_id, breach FROM card_scoreboard_snapshots "
         "WHERE card_id = ? AND card_version = ? ORDER BY id DESC LIMIT ?",
@@ -97,13 +105,6 @@ def _maybe_demote(journal, settings, card_id: str, card_version: int) -> Optiona
         f"{MIN_CONSECUTIVE_BREACHES_TO_DEMOTE} consecutive daily scoreboard "
         f"snapshots with a reliably-negative expectancy (CI fully below zero)"
     )
-    sent = alerts.send_alert(
-        settings,
-        title=f"AlphaOS card demoted: {card_id} v{card_version}",
-        message=f"{card_id} v{card_version} demoted -- {reason}.",
-        priority="high",
-        journal=journal,
-    )
     now = timeutils.stamp()
     demotion_id = new_id("carddemo")
     try:
@@ -114,7 +115,7 @@ def _maybe_demote(journal, settings, card_id: str, card_version: int) -> Optiona
             "reason": reason,
             "triggering_snapshot_id_1": recent[0]["snapshot_id"],
             "triggering_snapshot_id_2": recent[1]["snapshot_id"],
-            "alert_sent": sent,
+            "alert_sent": False,
             "demoted_at_utc": now.utc,
             "demoted_at_sgt": now.local_sgt,
         })
@@ -123,6 +124,26 @@ def _maybe_demote(journal, settings, card_id: str, card_version: int) -> Optiona
         # version) -- idx_card_demotions_card_version already caught it and
         # someone else's demotion row is authoritative; never demote twice.
         return None
+
+    # Correctness-audit LOW: alert AFTER the insert wins, never before --
+    # a concurrent evaluator (e.g. a manual CLI run overlapping the daily
+    # scheduler job, which bypasses the job_runs lock) could otherwise both
+    # pass the already_demoted check and both page, even though only one
+    # insert can ever win. Only the row that actually landed pages, matching
+    # job_runner.py's own _alert_job_failure ordering (record durably, then
+    # alert -- never the reverse).
+    sent = alerts.send_alert(
+        settings,
+        title=f"AlphaOS card demoted: {card_id} v{card_version}",
+        message=f"{card_id} v{card_version} demoted -- {reason}.",
+        priority="high",
+        journal=journal,
+    )
+    if sent:
+        journal.conn.execute(
+            "UPDATE card_demotions SET alert_sent = ? WHERE demotion_id = ?", (True, demotion_id),
+        )
+        journal.conn.commit()
     return journal.one("SELECT * FROM card_demotions WHERE demotion_id = ?", (demotion_id,))
 
 

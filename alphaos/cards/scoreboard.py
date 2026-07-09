@@ -113,18 +113,40 @@ def compute_card_scoreboard(journal, card_id: str, card_version: int) -> dict:
     }
 
 
+def demoted_cards(journal) -> list[dict]:
+    """Every (card_id, version) ever demoted, most recent first -- scope/
+    safety-audit MEDIUM: `live_eligible_cards()` permanently excludes a
+    demoted version, so without this a demoted card would silently vanish
+    from the scoreboard with no standing surface reflecting it (the alert
+    is a one-time push notification, easy to miss). Mirrors
+    ``alphaos.reports.daily_brief.SURVIVORSHIP_DENOMINATOR_CAVEAT``'s own
+    law: "any report claiming system-level edge must print the FULL
+    preregistration family (promoted + demoted + withdrawn), never just a
+    promoted subset -- otherwise a reader sees only the survivors and
+    mistakes selection for edge." Same principle, applied to cards."""
+    return journal.query(
+        "SELECT card_id, card_version, reason, demoted_at_utc FROM card_demotions "
+        "ORDER BY id DESC"
+    )
+
+
 def build_card_scoreboard_report(journal) -> dict:
     """Every live_eligible, not-yet-demoted card's current scoreboard, PURE
     READ (does not consult or write ``card_scoreboard_snapshots`` -- that
     table is the demotion mechanism's own persisted history; this report
     always recomputes from the live ledger, same "always fresh" posture as
-    every other report in this codebase)."""
+    every other report in this codebase). Also surfaces the full historical
+    demoted roster (see ``demoted_cards()``'s own docstring) -- a demoted
+    card is never just silently absent from this report."""
     cards = live_eligible_cards(journal)
     scored = [compute_card_scoreboard(journal, c["card_id"], c["card_version"]) for c in cards]
+    demoted = demoted_cards(journal)
     return {
         "n_cards": len(scored),
         "n_breaching": sum(1 for s in scored if s["breach"]),
         "cards": scored,
+        "demoted": demoted,
+        "n_demoted": len(demoted),
         "floor_effective_n": MIN_RESOLVED,
         "floor_span_days": MIN_SPAN_DAYS,
     }
@@ -136,7 +158,7 @@ def render_markdown(rep: dict) -> str:
         "only automated action, never promotion)",
         f"{rep['n_cards']} live_eligible card(s) scored, {rep['n_breaching']} "
         f"currently breaching (floor: {rep['floor_effective_n']}+ effective_n, "
-        f"{rep['floor_span_days']}+ day span)",
+        f"{rep['floor_span_days']}+ day span), {rep['n_demoted']} demoted historically",
         "",
     ]
     for s in rep["cards"]:
@@ -153,4 +175,8 @@ def render_markdown(rep: dict) -> str:
             f"[{s['ci_low']:+.4f}, {s['ci_high']:+.4f}] "
             f"(effective_n={s['effective_n']}, span={s['span_days']}d){marker}"
         )
+    if rep["demoted"]:
+        lines += ["", "### Demoted (terminal -- only a new version can re-enter live_eligible)"]
+        for d in rep["demoted"]:
+            lines.append(f"- {d['card_id']} v{d['card_version']}: demoted {d['demoted_at_utc']} -- {d['reason']}")
     return "\n".join(lines)

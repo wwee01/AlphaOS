@@ -179,6 +179,26 @@ def test_build_card_scoreboard_report_and_render_markdown(journal):
     assert "BREACH" in markdown
 
 
+def test_report_surfaces_a_demoted_card_rather_than_silently_omitting_it(journal):
+    """Scope/safety-audit MEDIUM: a demoted card must never simply vanish
+    from the only report an operator would routinely browse -- the alert is
+    a one-time push, easy to miss."""
+    journal.insert("card_demotions", {
+        "demotion_id": "demo1", "card_id": "card_z", "card_version": 3,
+        "reason": "2 consecutive breach snapshots", "triggering_snapshot_id_1": "s1",
+        "triggering_snapshot_id_2": "s2", "alert_sent": True,
+        "demoted_at_utc": "2026-03-05T00:00:00+00:00", "demoted_at_sgt": "2026-03-05T08:00:00+08:00",
+    })
+
+    rep = card_scoreboard.build_card_scoreboard_report(journal)
+    markdown = card_scoreboard.render_markdown(rep)
+
+    assert rep["n_demoted"] == 1
+    assert rep["demoted"][0]["card_id"] == "card_z"
+    assert "card_z" in markdown
+    assert "Demoted" in markdown
+
+
 # ------------------------------------------------------------------ demotion
 def test_daily_evaluation_writes_one_snapshot_per_card_and_is_idempotent_same_day(journal, settings):
     _insert_card(journal, "card_a", 1)
@@ -225,6 +245,26 @@ def test_two_consecutive_breach_days_demotes_and_alerts(journal, settings, monke
     demotions = journal.query("SELECT * FROM card_demotions WHERE card_id = ?", ("card_a",))
     assert len(demotions) == 1
     assert demotions[0]["alert_sent"] == 1
+
+
+def test_demotion_row_is_written_even_when_the_alert_fails(journal, settings, monkeypatch):
+    """Correctness-audit LOW: the insert happens BEFORE the alert attempt --
+    a failed/unreachable alert must never lose the durable demotion record,
+    and alert_sent must correctly persist as False (not silently omitted or
+    left as some default that looks like success)."""
+    _insert_card(journal, "card_a", 1)
+    _seed_clustered_candidates(journal, "card_a", 1, n=35, values=[0.1, -0.6])
+    monkeypatch.setattr(card_demotion.alerts, "send_alert", lambda *a, **k: False)
+
+    day1 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    day2 = datetime(2026, 3, 2, tzinfo=timezone.utc)
+    card_demotion.run_daily_card_evaluation(journal, settings, now=day1)
+    result2 = card_demotion.run_daily_card_evaluation(journal, settings, now=day2)
+
+    assert result2["demoted"] == [{"card_id": "card_a", "card_version": 1}]
+    demotions = journal.query("SELECT * FROM card_demotions WHERE card_id = ?", ("card_a",))
+    assert len(demotions) == 1
+    assert demotions[0]["alert_sent"] == 0
 
 
 def test_a_non_breach_day_resets_the_streak(journal, settings, monkeypatch):
