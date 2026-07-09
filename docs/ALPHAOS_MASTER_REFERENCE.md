@@ -678,11 +678,21 @@ item specs under their canonical names in the specs doc):**
     done**: no operator has run `baseline_register` against the real
     production DB yet, so the pre-registration hasn't been created there;
     the shadow ledger starts accumulating forward-only from merge time.
-18. 🔴 **EARN-1** — real earnings provider behind the PR5 factory (defines
-    "catalyst" for the niche; hard gate for card v2).
-19. 🔴 **EXP-1** — shadow small/mid catalyst universe (300–500 names, $5–50M ADV),
-    cost-tiered scanning (deterministic pre-rank → AI top-K), regime tag v0,
-    effective-N floors from day one. The payload. CANARY must be live first.
+18. 🟡 **EARN-1** — real earnings provider behind the PR5 factory (defines
+    "catalyst" for the niche; hard gate for card v2). Built + audit-fixed
+    2026-07-09/10 (branch `feat/earn-1-alpha-vantage-provider` @ `2d5a0a2`,
+    vendor Alpha Vantage, two independent Opus audits both APPROVE/APPROVE
+    WITH NOTES) — **committed, not yet merged**, holding for explicit
+    operator merge instruction.
+19. 🟡 **EXP-1** — shadow small/mid catalyst universe (300–500 names, $5–50M ADV),
+    cost-tiered scanning (deterministic pre-rank → AI top-K), effective-N
+    floors from day one. The payload. CANARY must be LIVE first (built +
+    audit-fixed, not yet live — see item 21). **Full build-ready spec
+    written 2026-07-10** (seven-lens Fable synthesis: founder/PM, quant
+    researcher, software engineer, ML engineer, quant trader, infra/devops,
+    CRO — see `docs/roadmap/alphaos-pr-implementation-specs.md`'s EXP-1
+    section) ahead of the CANARY gate clearing, so the eventual build
+    session starts from a real spec, not a blank page. **Not yet built.**
 20. 🔴 **PR12** (registry-first, 8 seeded hypotheses) → **PR13** (scoreboard +
     demotion slice first, then promotion + PR13.5 diff→version) → cards v2–v3 →
     **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
@@ -701,15 +711,27 @@ item specs under their canonical names in the specs doc):**
     evidence clears the calibrated-cost bar at effective-N floor.**
 
 **Lane B — parallel, any session's slack:**
-21. 🔴 **TASK-R** retro-relabel (run once; feeds the CANARY/EVAL-1 corpora) ·
-    🔴 **CANARY** model-drift canary (live before EXP-1) · 🔴 **OPS-B**
-    off-ecosystem backup + `env.enc` — **priority rises the day TEXT-0's archive
-    starts growing** (a 4–8 GB/yr moat on one disk recreates the CRITICAL PR9.5
-    closed) · 🔴 **BRIEF-FIX-1** (audit C4: floor-gate the brief's per-event ΔR)
-    — **more urgent post-reconciliation: the one live reporting-law violation
-    must not sit open while REG-1/TEXT-0 add two new report surfaces; ride
-    along in this window** · 🔴 the operator's quarterly restore drill
-    (user-only; blocks L3).
+21. ✅ **TASK-R** retro-relabel — run 2026-07-10 against the real 7-packet
+    contaminated baseline (a date-frame discrepancy between the spec's
+    US-market/UTC date and the CLI's SGT filter was found and resolved via
+    Fable consult; see specs doc's TASK-R erratum). Feeds CANARY's/EVAL-1's
+    future corpus-building. · 🟡 **CANARY** model-drift canary — built +
+    audit-fixed 2026-07-10 (branch `feat/canary-model-drift` @ `f44ac93`,
+    two independent Opus audits both APPROVE WITH NOTES) — **committed, not
+    yet merged**, holding for explicit operator merge instruction; **not
+    yet LIVE** (needs corpus population + 2 consecutive real weekly runs
+    after merge — this is what still gates EXP-1) · 🟡 **OPS-B**
+    off-ecosystem backup + `env.enc` — built + audit-fixed 2026-07-10
+    (branch `feat/ops-b-offsite-backup` @ `e1eb3be`, two independent Opus
+    audits both APPROVE WITH NOTES; correctness audit caught + fixed a real
+    HIGH — the offsite DB copy shipped as plaintext, now properly
+    encrypted) — **committed, not yet merged**, holding for explicit
+    operator merge instruction · 🟡 **BRIEF-FIX-1** (audit C4: floor-gate
+    the brief's per-event ΔR) — built + audit-fixed 2026-07-10 (branch
+    `feat/brief-fix-1-reporting-law` @ `2f057b9`, two independent Opus
+    audits both APPROVE WITH NOTES) — **committed, not yet merged**,
+    holding for explicit operator merge instruction · 🔴 the operator's
+    quarterly restore drill (user-only; blocks L3).
 
 ---
 

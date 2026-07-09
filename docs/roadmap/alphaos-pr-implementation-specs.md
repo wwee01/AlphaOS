@@ -1027,42 +1027,293 @@ delta; zero proposals from the shadow tier.
 
 ## EXP-1 — Shadow small/mid catalyst universe (the payload)
 
-**Lane A8 — the partners' verdict V1: the single highest-leverage change for
-finding tradeable alpha, pulled forward from Phase 3, shipped only behind
-EVAL-1/PORT-1/INSTR-1/EARN-1 (+ CANARY live).** Learnable trade flow is the
-named binding constraint (master reference §1: the megacap book cannot validate
-its own hypothesis on a useful timeline); a ~10× shadow universe is a ~10×
-learning-velocity multiplier at zero decision risk (PD#2 — shadow symbols are
-scanned/scored/attributed, never tradeable; tradeability is earned per-card
-later). **EXP-0 (above) already started the deterministic capture; EXP-1 is
-the AI-labelling layer on top of it** — by the time EXP-1 lands, the tier has
-weeks of instrument-versioned interest/freshness history to pick its top-K from.
+**Type:** AI-labelling layer on EXP-0's deterministic shadow capture — one new
+scheduler job + selection logic + operator-surface guards. Shadow-only, zero
+decision surface: labels are archive, never action. **Lane A8 — the partners'
+verdict V1, shipped only behind EVAL-1/PORT-1/INSTR-1/EARN-1 (+ CANARY live).**
+Learnable trade flow is the named binding constraint (master reference §1); a
+~10× shadow universe is a ~10× learning-velocity multiplier at zero decision
+risk (PD#2). Success metric (founder, pinned): **effective-N of labelled,
+outcome-resolved, instr1-versioned shadow candidates per week per dollar** —
+never row counts.
 
-Skeleton (full spec at build time):
-1. Universe: EXP-0's committed tier file (300–500 liquid small/mid names,
-   $5–50M ADV band — the capacity niche institutions can't enter, master plan
-   §7), `tier='watchlist'` + `shadow_tier=1` rows already flowing.
-2. **Cost-tiered scanning (CRO condition):** deterministic pre-rank
-   (interest-score family, honest rel_volume from INSTR-1) over the whole
-   shadow tier → **AI labelling only for the top-K per window** (K in config;
-   budget arithmetic in the spec vs the 2000/30d hard cap using PR9.5's
-   true-up accounting). Naive full-universe labelling would be 15–25× current
-   spend — refused by design, not by hope.
-3. Spread/liquidity instrumentation for the band (the 1bps slippage + $2M
-   floor assumptions are megacap-calibrated fantasy here — record honest
-   spread/ADV fields on every shadow candidate for COST-1 to consume).
-4. ~~Regime tag v0~~ **DELETED 2026-07-08 (reconciliation ruling): EXP-1 does
-   NOT build its own classifier — it consumes REG-1's `regime_days` by
-   date-join** (REG-1 lands at A2.5, long before this). Two frozen classifiers
-   would be two truths — one-replay-engine law. What survives from the
-   original item: cross-regime aggregates carry a `regime_mixed=true` caveat;
-   per-regime claims need per-regime effective-N floors (now a PORT-1
-   requirement — same-regime consecutive days cluster as one observation).
-5. Every aggregate over the new universe floor-gates through `effective_n()`
-   from day one (correlated small-caps on the same catalyst day inflate row
-   counts worst of all).
-6. Fuse coverage, `is_mock`/shadow-tier exclusion from all live aggregates,
-   BASELINE arms cover shadow candidates from their first day.
+**FULL SPEC (2026-07-10, seven-lens Fable synthesis; supersedes the 2026-07-08
+skeleton — written ahead of the CANARY gate so the build session starts from a
+real spec, not a blank page).** The CRO's frame is adopted outright: **EXP-1 is
+the arming event for EXP-0's previously-latent near-miss class.** The
+2026-07-09 EXP-0 audits found `_override_open_trade` inserting its own
+`trade_proposals` row with no shadow-tier guard — "harmless today" only because
+nothing plants a shadow-tier AI eval yet, *which EXP-1 adds*. The real risks
+are (a) 300–500 newly real, AI-labelled names leaking into operator surfaces
+and (b) a shared cost budget sized for a 20-name universe; the chokepoints are
+necessary, never sufficient. Mechanisms 7–9 and 13 exist for exactly this; #9
+is a deliverable, not a footnote.
+
+1. **Universe & regime — settled, not reopened.** EXP-0's committed file is the
+   universe; EXP-1 never touches its size — `SHADOW_LABEL_TOP_K` is the only
+   dial (founder-owned). Graduated note (trader): $20–50M ADV =
+   plausibly-tradeable-someday, $5–20M = measurement-only — a query over stored
+   ADV, not a new screen. The 2026-07-08 regime ruling stands: no own
+   classifier; REG-1's `regime_days` by date-join; `regime_mixed=true` caveat;
+   per-regime effective-N floors (PORT-1). Stamp-vs-join law: point-in-time
+   facts stamp at scan time (precedent: `regime` on `candidate_packets`);
+   derived stats join at report time (precedent: `attribution.py` ×
+   `regime_days`); no third pattern.
+2. **Selection: top-K + explore, versioned — not pure top-K.** The pre-rank
+   exists (`scan_shadow_tier` → the core `InterestScanner.score()`;
+   `_rank_candidates()` reused unchanged). Per window: rank gate-passers; skip
+   symbols already labelled today (join `candidate_labels` on symbol +
+   `market_date`), backfill from rank K+1 — three windows never triple-pay for
+   persistent names; fewer than K → label all, zero → zero calls. Founder,
+   researcher, and ML lens independently converged that pure top-K truncates
+   the archive at an endogenous threshold, leaving below-cut forever
+   unestimable — so `K_explore = max(1, round(SHADOW_EXPLORE_FRACTION×K))`
+   (default 0.2; at K=5 that is 4+1; the researcher's 2–5/window applies at
+   larger K; founder ratifies the fraction at flip) drawn from below the cut,
+   seeded deterministic (`sha256("{market_date}:{window}:sel_shadow_v1")`,
+   §H.1); remainder literal top-K; tie-break `rel_volume` desc then symbol
+   hash (ties are guaranteed pre-#3). Stamp `selection_arm` ('top_k'|'explore')
+   and `selection_version='sel_shadow_v1'` on every labelled row — retuning
+   K/fraction/formula without a version bump is selection p-hacking. Free
+   ride-along (researcher): below-cut misses already have full deterministic
+   capture — a `replay_r`-based pre-rank recall report costs ZERO AI calls.
+3. **Recalibrate the pre-rank, never redesign it (`interest_score_shadow_v1`).**
+   The scale constants are megacap-sized — change-scale 0.06, rel-vol scale 2.0
+   (`interest_scanner.py:109–110`), `day_range ≥ 0.02` (making
+   `tradeable_volatility` an always-true constant at this band), momentum caps
+   8%/3× (`candidate_scanner.py:252`) — so scores saturate and top-K
+   degenerates into undocumented tie-breaking exactly where selection happens.
+   New tier-scoped versioned constants `interest_score_shadow_v1` (§H.8: never
+   env-tunable, never retro-scored; core constants untouched); the literals
+   come from a MANDATED build-time saturation audit of EXP-0's own accumulated
+   instr1 captures — the data answers 0.12-vs-0.15, this spec doesn't guess.
+   The same audit rules on rel_volume_v2 at this band: near-zero
+   same-time-of-day denominators on sparse IEX prints (explosive ratios) and
+   catalyst-inflated bases suppressing day-2 continuation; the megacap
+   curve-shape error cancels within-window but biases the ≥1.3 breakout hint
+   and cross-window reads. No formula fork, no prompt involvement.
+4. **Own job type — labelling never rides inside SCAN.** Two infra arguments
+   are decisive: (a) K sequential OpenAI calls (1–7 min) inside the sequential
+   `run_due_jobs` SCAN slot would delay MONITOR — the protection watchdog — on
+   every labelling tick; (b) the per-job-type consecutive-failure fuse: three
+   labelling failures must fuse labelling, never the core book's scan. New
+   `JobType.SHADOW_LABEL`, own per-window lock key (`cadence.py` idiom),
+   ordered LAST in the tick (SCAN's core labels always land first — a budget
+   squeeze hits research, never the live book), reading the durable pre-rank
+   rows SCAN already wrote; rides the existing 300s tick — NO new LaunchAgent
+   (the §H.13 tax is not paid twice). Idempotent: the per-(symbol, day) dedupe
+   makes a manual `alphaos scheduler_run_job shadow_label` rerun spend nothing
+   — an asserted, tested property (CRO), never an assumption.
+5. **Label path: existing machinery, labeller-ONLY (founder ruling).** New
+   `_label_shadow_shortlist()` loops selections through the EXISTING
+   `_label_candidate(cand, snapshot, scan_batch_id, enrich=False, l30_mode=None,
+   earnings_mode=None)` — packet + label only; enrichment/L30/earnings for the
+   tier would smuggle the refused 15–25× spend back through a definitional
+   loophole. ZERO `PlaybookClassifier` changes; `LABEL_SYSTEM_PROMPT` stays
+   frozen (`system_prompt_hash` is CANARY-pinned; a tier fork doubles the
+   drift/eval surface — per-tier confidence behavior is measured in EVAL-1
+   first, which is exactly why EVAL-1 gates EXP-1). Packet fields ADDITIVE only
+   (`shadow_tier`, `adv_usd`, `exchange` — already in the universe file),
+   PROMPT_KEYS-compatible with `reconstruct_from_stored`; thin-liquidity
+   evidence (`spread_pct`/`dollar_volume`/`liquidity_ok`/`missing_data_flags`)
+   already reaches the model. No confidence-calibration instruction pre-baked.
+6. **Tables: shared, one additive column — the cost-accounting design, not a
+   storage choice (engineer, infra, CRO converged).** Shadow labels land in
+   `candidate_packets`/`candidate_labels`; one additive column
+   `candidate_labels.shadow_tier INTEGER DEFAULT 0` stamped at insert
+   (denormalization precedent: `symbol`/`scan_batch_id`; `candidates` carries
+   it since EXP-0). Rows land `is_mock=0` with PR9.5's token columns → counted
+   by `cost_guard.calls_in_last_30_days()` UNMODIFIED, and
+   `check_scan_budget`'s job-level pre-flight is inherited free. A separate
+   table would be the 4th occurrence of the documented undercount bug class, a
+   5th cost-guard term, and duplicated relabel/validation logic. Live-aggregate
+   exclusion becomes a grep-able `WHERE shadow_tier=0`, not a fragile join.
+7. **Budget arithmetic pinned + three cost layers.** Naive full-universe ≈ 400
+   symbols × 3 windows × 21 trading days ≈ 25,200 calls/mo ≈ 12.6× the ENTIRE
+   `SCHEDULER_AI_COST_CAP_CALLS_PER_30D=2000` pool — the skeleton's "refused by
+   design", now with the number. Launch K=5: ≤315/mo hard worst case (full
+   churn), ~105 typical with dedupe; K=10 → ≤630 = 31% of the pool, colliding
+   with the evaluator + polarity + CANARY + EVAL-1 replays. Layers: (a) new
+   `SHADOW_AI_CAP_CALLS_PER_30D=500` — 25% of the shared pool, counted from
+   `candidate_labels WHERE shadow_tier=1`, checked ONLY at the SHADOW_LABEL
+   step; on breach skip shadow with a digest line, core untouched; shadow still
+   counts inside the global 2000 underneath. This resolves the CRO's named
+   priority-inversion risk by explicit headroom reservation (≥75% of the pool
+   for live-decision calls); infra proposed 600, the CRO's ≤25% wins — the
+   pool's first duty is the live evaluator, and the delta is immaterial at
+   launch K. (b) EVAL-1's pre-flight pattern: compute `planned_calls` before
+   the FIRST call; a would-breach of sub-cap OR global refuses the whole window
+   with zero client invocations. (c) `SHADOW_AI_CAP_CALLS_PER_DAY` (default
+   3×K), independent of both 30-day caps; settings-validation range on
+   `SHADOW_LABEL_TOP_K` (1–25, mirroring the cost cap's own 50–100000 pattern).
+   Raising K is founder-only and requires K×21 ≤ 25% of remaining global
+   headroom at flip time (founder + engineer convergence).
+8. **Feed-coverage gate + freshness law — hard gates, never report caveats (ML,
+   infra, CRO independently pinned the same 0.80).** Labelling arms only while
+   the trailing 14-day median `feed_coverage` ≥
+   `SHADOW_LABEL_MIN_FEED_COVERAGE=0.80` (defensible 0.7–0.9; 0.80 keeps
+   ~240/300 names eligible), checked at RUN time on every tick — never once at
+   build and assumed. Structural law independent of the aggregate: only
+   `freshness_status='usable'` packets are selection-eligible; a stale/degraded
+   snapshot gets NO API call ever (saves money AND prevents a
+   fabricated-confidence label on bad data) — the row keeps its deterministic
+   capture plus `label_skipped_reason='stale'`. Stamp `feed_coverage_at_scan`
+   on every label row: IEX sparsity concentrates at the band's bottom, so the
+   fresh subset skews toward larger names — that selection bias must be
+   measurable in the archive, not merely avoided. The SIP upgrade (~$99/mo)
+   stays evidence-gated on this number; operator decides (EXP-0 #5 stands).
+9. **The arming event — operator-surface exclusion (its own deliverable).**
+   With real labels at tier scale, a shadow candidate is indistinguishable from
+   an actionable one in any surface that doesn't explicitly filter. (a) The
+   orchestrator scan-loop shadow-tier guard is UNTOUCHED — the engineer names
+   weakening it while wiring the new loop the single biggest build-session
+   risk; extend EXP-0's grep + behavior-probe pattern to the labelling loop
+   itself. (b) Re-run the EXP-0 audit reproductions WITH a planted
+   labelled+evaluated shadow candidate — the originals necessarily pre-dated
+   such data existing (`_override_open_trade`: found + fixed 2026-07-09,
+   `OverrideBlockedReason.SHADOW_TIER_EXCLUDED`; the standing lesson — never
+   trust a "single chokepoint" comment without re-walking the call graph —
+   applies to this PR most of all). (c) `alphaos approve` independently refuses
+   a `shadow_tier=1` proposal even if one somehow exists — defense in depth
+   beyond creation-time guards. (d) `armed_watch`, the dashboard candidates
+   view, and the daily brief either fully exclude shadow rows or stamp them
+   NON-ACTIONABLE/SHADOW; any surface that ever names a shadow symbol prints
+   its illiquidity INLINE as concrete numbers ("180 bps spread, $7M ADV, quote
+   41 min stale") — never boilerplate, which goes banner-blind (trader).
+   (e) Shadow-to-eyeball leakage (founder): digest/brief stay floor-gated
+   counts-only, NO shadow symbol names in v1 — the trap is the operator
+   manually trading a surfaced small-cap, contaminating the shadow ledger.
+   (f) `alphaos relabel` and `eval_corpus_build` date-sweep `candidate_packets`
+   and would silently ingest hundreds of shadow packets/day: both default to
+   `shadow_tier=0` with an explicit `--include-shadow` flag, and `relabel`
+   gains the same pre-flight magnitude check — its binary headroom check
+   becomes a real cost hole the day shadow volume exists.
+10. **Liquidity instrumentation — record, never gate (COST-1's feedstock).**
+    Persist per shadow candidate row: `bid_size`/`ask_size` (the snapshot
+    mapper drops Alpaca's size fields today — the highest-value missing field;
+    spread without depth is half the fill story); `quote_age_seconds` persisted
+    per-row (computed today, then collapsed into a binary status; a free-IEX
+    "latest quote" can be minutes old); `spread_pct_mid` + a last-vs-mid-bps
+    proxy (`spread_pct` divides by possibly-stale `last_price`);
+    `adv_20d_dollar` as-of-dated, rolled nightly (`dollar_volume` is
+    intraday-cumulative — truncated garbage for sizing);
+    `volume_today_pct_of_adv`; the scan-window label; `data_feed` ('iex' now —
+    a future 'sip' flip is a calibration regime break, exactly as
+    `instrument_version` is for the formula); crossed/locked-quote flag (record
+    and count — the frequency is itself a band measurement, never silently
+    drop). Stamp `liquidity_instrumentation_version='liq_v1'` on every row.
+    INVARIANT: the core tradeability gate (`MIN_DOLLAR_VOLUME` $2M
+    today-cumulative, `MAX_SPREAD_PCT` 1%) NEVER filters shadow capture or
+    selection eligibility — the $2M cumulative floor alone fails roughly half
+    the band before noon; gating would censor exactly the tail COST-1 needs.
+    Store the verdict as a `core_gate_verdict` flag. Promotion law, pinned now:
+    no shadow card ever earns tradeability from rows lacking these fields; any
+    future promotion proposal carries a DERIVED capacity estimate (ADV ×
+    participation-rate cap, sanity-checked against median quoted depth) —
+    never an asserted one.
+11. **Statistics + pre-registration.** The dominant inflation mode at 300–500
+    names is cross-sectional same-day clustering, which `effective_n()` does
+    NOT handle (it dedupes serial same-symbol overlap only): 40 biotechs on one
+    sector day = 40 "independent" clusters — TASK-R's own XLF relabel was
+    literally "Sector Sympathy Move". Laws: every tier-wide mean claim uses
+    BASELINE's day-block bootstrap (already built) AND prints a
+    top-day-share-of-rows concentration diagnostic beside `effective_n`; add a
+    nullable `sector_cluster_key` column NOW as pure parameterization (no
+    sector metadata exists anywhere in the codebase yet; resolution is UNIV-D's
+    via TEXT-0's SIC data — the researcher wants the key, the ML lens proves
+    capping can't be built honestly yet; both right: take the one-ALTER column,
+    defer everything else). Exactly TWO `preregistrations` rows, no framework:
+    `H-INT-SHADOW-1` (twin of H-INT-1: shadow top-decile interest > median on
+    3d `replay_r`; floors effective-N ≥ 20 clusters AND a day-block floor, span
+    ≥ 60d, `instrument_version='instr1'` rows only, never pooled with core) —
+    evaluate FIRST, it is self-referential: if FALSE, the ranking top-K
+    multiplies is noise and this feature's cost design collapses. Optional
+    `H-AI-SHADOW-1`: BASELINE-paired ΔR at this band (sparse-news AI value
+    could go either way; BASELINE's arms cover shadow from day one). Any R from
+    shadow data prints "gross-of-cost, unexecutable at this size" verbatim
+    until COST-1 calibrates the band. Ad-hoc per-sector/per-regime significance
+    slices must first become preregistration rows — otherwise it is the
+    false-discovery machine PORT-1 exists to prevent.
+12. **Monitoring & corpora.** Labeller health segmented `shadow_tier=1`:
+    parse/fail-safe rate, `validation_status` mix, confidence histogram, label
+    entropy (watch an Other/Unclassified collapse), day-over-day top-K churn;
+    per-tier cost breakdown vs sub-cap AND global cap (PR9.5's token columns
+    exist — add the tier dimension to the existing report); a DB-size digest
+    line and ONE storage checkpoint — revisit packet-JSON compression when the
+    DB crosses ~2GB (EXP-1's own increment is ~5MB/mo; OPS-B's offsite copy
+    feels growth first). CANARY's golden corpus is 100% megacap today: after
+    ~2 clean instr1 weeks, seed a 10–15-packet operator-adjudicated shadow
+    slice as an explicit `corpus_version` bump; CANARY's Tier-1
+    refuse-to-aggregate law extends to shadow-tier aggregates explicitly
+    (`response_model`/`system_fingerprint` capture makes model shifts
+    attributable inside the shadow archive too). EVAL-1's ground truth stays
+    megacap-weighted for now — small/mids are harder to adjudicate confidently.
+13. **Flags, auto-suspend, degrade law, go-live order.** New
+    `SHADOW_LABELLING_ENABLED` (default false), SEPARATE from
+    `SHADOW_TIER_ENABLED`: flipping it off stops all shadow AI spend instantly;
+    EXP-0's deterministic capture runs untouched; existing label rows remain
+    valid append-only history. Auto-suspend (Autonomy-Ladder pattern — every
+    entry criterion pairs with a rollback trigger; force the flag off + ntfy
+    page): (a) trailing coverage median < 0.80 for 3 consecutive trading days;
+    (b) any CANARY Tier-1 event — shadow labels flow through the exact
+    `PlaybookClassifier` CANARY watches; weeks of drifted shadow labels are as
+    real a loss here as on the core book. Kill switch → zero shadow calls
+    (inherited, asserted by test). Degrade law (infra — a PRE-EXISTING hole
+    EXP-1 makes likelier to fire): on global cost-cap breach the scan job
+    degrades to DETERMINISTIC-CAPTURE-ONLY — scanning and `universe_days`
+    writes continue, only AI labelling (core AND shadow) skips; the current
+    full-skip punches survivorship holes in "prune nothing, this IS the
+    dataset" and is reclassified a bug by this spec. Per-chunk isolation on the
+    shadow tier's batch snapshot calls (one failed 100-symbol call never blanks
+    the window); alert on "tier enabled, 0 candidates on a trading day"
+    (TEXT-0's never-truly-quiet pattern). Go-live order: universe committed
+    [done] → `SHADOW_TIER_ENABLED=true` → ≥2–4 weeks instr1 accumulation →
+    coverage clears 0.80 (or the operator buys SIP on evidence) → CANARY LIVE
+    (2 consecutive real weekly runs — the long pole; start its corpus selection
+    now so the fortnight burns in parallel) → build this spec (build-time
+    input: the #3 saturation audit → `interest_score_shadow_v1` literals) →
+    flip `SHADOW_LABELLING_ENABLED=true` at K=5. Founder-only at flip: K, the
+    monthly ceiling, the explore fraction.
+
+**Never:** proposals, overrides, approvals, executions, or enrichment from
+shadow rows (verified behaviorally with planted data — grep alone is not
+evidence); a separate label/packet table (the undercount bug class's 4th
+occurrence); a prompt fork or tier model upgrade without EVAL-1 evidence; core
+tradeability gates filtering shadow capture or selection; shadow symbol names
+in the digest/brief (v1 is counts-only); pooling across core/shadow,
+`instrument_version`, `selection_version`, or a CANARY Tier-1 boundary; a
+full-skip that halts deterministic capture on any cost breach; universe-size
+changes (K is the only dial); a half-built sector cap (UNIV-D owns it); a new
+LaunchAgent or scheduler-cadence change.
+
+**Tests:** planted labelled+evaluated shadow candidate → all five enumerated
+proposal-creation paths + `override` + `approve` refuse, each by attempting the
+action; synthetic `shadow_tier=1` label rows → `calls_in_last_30_days()`
+includes them; planned-calls > headroom → whole-window refusal with zero client
+invocations; `scheduler_run_job` twice on the same window → zero duplicate
+spend; §H.6 A/B — core-book artifacts byte-identical with labelling on vs off;
+kill switch engaged → zero shadow calls; stale snapshot → no API call, row
+stamped `label_skipped_reason`; planted "armed" shadow candidate →
+`armed_watch`, dashboard, and daily brief each exclude or stamp NON-ACTIONABLE;
+simulated CANARY Tier-1 → auto-suspend fires; global-cap-breach fixture →
+`universe_days` writes continue (survivorship regression); sub-cap breach →
+shadow skipped, core labels proceed; dedupe/backfill from rank K+1; <K labels
+all, zero labels none; explore draw deterministic across reruns and
+PYTHONHASHSEED; live aggregates exclude `shadow_tier=1`, and every NEW
+aggregate floor-gates through `effective_n()` + day-block bootstrap from day
+one; `relabel`/`eval_corpus_build` default-exclude shadow packets; additive
+column migration on an old DB.
+
+**Acceptance:** two consecutive unattended weeks at K=5 with labelling enabled;
+zero shadow proposals across them (structural tests green AND a live-DB probe);
+per-tier digest cost line with spend ≤ sub-cap and true-up matching the
+`candidate_labels` row count; the effective-N/week multiple vs the core book
+computed and printed — verdict V1's 3–5× becomes a measured number, and a miss
+is a founder finding, never a silent pass; `H-INT-SHADOW-1` registered BEFORE
+the first tier-wide aggregate renders; the test list above executed as a real
+T3 audit pass with findings logged; an auto-suspend drill on a COPY of the DB
+(forced coverage drop + forced Tier-1) → labelling suspends, page received,
+deterministic capture unaffected — drill logged in `docs/incidents/`.
 
 ---
 
