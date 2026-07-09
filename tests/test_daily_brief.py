@@ -13,6 +13,7 @@ from alphaos.reports.daily_brief import (
     EXPIRING_SOON_SECONDS,
     MIN_TRADES_FOR_MOONSHOT_ESTIMATE,
     MOONSHOT_TARGET_MONTHLY_PCT,
+    _atr_health,
     _fused_jobs,
     _moonshot_gap,
     _one_action,
@@ -580,6 +581,105 @@ def test_text_archive_health_section_omitted_when_never_archived(orchestrator):
 
     assert brief["text_archive_health"] is None
     assert "## Text archive" not in md
+
+
+def _insert_atr(journal, symbol: str, market_date: str, rules_version: str = "atr_rules_v1") -> None:
+    journal.insert("atr_history", {
+        "atr_id": new_id("atr"), "symbol": symbol, "market_date": market_date,
+        "atr_14": 1.23, "rules_version": rules_version, "n_bars_fetched": 15,
+    })
+
+
+def test_atr_health_none_when_never_captured(journal):
+    assert _atr_health(journal) is None
+
+
+def test_atr_health_full_coverage_reports_no_missing_symbols(journal):
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    today = timeutils.market_date().isoformat()
+    for symbol in DEFAULT_UNIVERSE:
+        _insert_atr(journal, symbol, today)
+
+    result = _atr_health(journal)
+
+    assert result["as_of_date"] == today
+    assert result["n_covered"] == len(DEFAULT_UNIVERSE)
+    assert result["n_universe"] == len(DEFAULT_UNIVERSE)
+    assert result["missing_symbols"] == []
+
+
+def test_atr_health_partial_coverage_lists_missing_symbols(journal):
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    today = timeutils.market_date().isoformat()
+    covered = DEFAULT_UNIVERSE[:5]
+    for symbol in covered:
+        _insert_atr(journal, symbol, today)
+
+    result = _atr_health(journal)
+
+    assert result["n_covered"] == 5
+    assert result["n_universe"] == len(DEFAULT_UNIVERSE)
+    assert set(result["missing_symbols"]) == set(DEFAULT_UNIVERSE) - set(covered)
+
+
+def test_atr_health_uses_only_the_latest_capture_date(journal):
+    """An older, fully-covered date must not mask a gap on the latest date --
+    the health line is 'are we covered AS OF NOW', not 'were we ever
+    covered'. A symbol covered only on the older, superseded date is a real,
+    reportable gap."""
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    older = (timeutils.market_date() - timedelta(days=1)).isoformat()
+    newer = timeutils.market_date().isoformat()
+    for symbol in DEFAULT_UNIVERSE:
+        _insert_atr(journal, symbol, older)
+    for symbol in DEFAULT_UNIVERSE[:3]:  # only a subset re-covered on the latest date
+        _insert_atr(journal, symbol, newer)
+
+    result = _atr_health(journal)
+
+    assert result["as_of_date"] == newer
+    assert result["n_covered"] == 3
+    assert set(result["missing_symbols"]) == set(DEFAULT_UNIVERSE[3:])
+
+
+def test_atr_health_ignores_rows_from_a_different_rules_version(journal):
+    """A future atr_rules_v2 row must never silently count as v1 coverage --
+    versioned-formula-constants law (§H.8): cross-version rows never mix."""
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    today = timeutils.market_date().isoformat()
+    for symbol in DEFAULT_UNIVERSE:
+        _insert_atr(journal, symbol, today, rules_version="atr_rules_v2_hypothetical")
+
+    result = _atr_health(journal)
+
+    assert result is None  # zero v1 rows -> never-captured state, not fabricated coverage
+
+
+def test_atr_health_rendered_in_markdown_brief_with_a_gap(orchestrator):
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    today = timeutils.market_date().isoformat()
+    _insert_atr(orchestrator.journal, DEFAULT_UNIVERSE[0], today)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert brief["atr_health"] is not None
+    assert "ATR coverage" in md
+    assert "GAP" in md
+    assert DEFAULT_UNIVERSE[1] in md  # a missing symbol is actually named
+
+
+def test_atr_health_section_omitted_when_never_captured(orchestrator):
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert brief["atr_health"] is None
+    assert "## ATR coverage" not in md
 
 
 def test_digest_position_health_mirrors_tqs_shadow_shape(orchestrator):

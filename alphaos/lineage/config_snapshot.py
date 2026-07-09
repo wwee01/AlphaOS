@@ -124,6 +124,16 @@ TEXT_ARCHIVE_CONFIG_FIELDS = (
     "text_archive_enabled", "sec_edgar_contact_email", "scheduler_text_archive_pull_time",
 )
 
+# BASELINE: the two frozen rules' own formulas (threshold_v1's interest_score
+# cutoff, the ATR stop multiplier, the reward:risk target ratio) are CODE
+# CONSTANTS / already-hashed settings fields (min_reward_risk is already in
+# RISK_CONFIG_FIELDS; the ATR multiplier travels via ATR_RULES_V1 on every
+# atr_history row) -- same rationale as TQS/attribution/REGIME/TEXT-0. The
+# real setting is the on/off switch.
+BASELINE_CONFIG_FIELDS = (
+    "baseline_enabled",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -159,4 +169,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "shadow_tier_config_hash": _subset_hash(full, SHADOW_TIER_CONFIG_FIELDS),
         "regime_config_hash": _subset_hash(full, REGIME_CONFIG_FIELDS),
         "text_archive_config_hash": _subset_hash(full, TEXT_ARCHIVE_CONFIG_FIELDS),
+        "baseline_config_hash": _subset_hash(full, BASELINE_CONFIG_FIELDS),
     }

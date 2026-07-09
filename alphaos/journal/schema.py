@@ -1430,6 +1430,7 @@ SCHEMA: list[tuple[str, str]] = [
             shadow_tier_config_hash TEXT,
             regime_config_hash TEXT,
             text_archive_config_hash TEXT,
+            baseline_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1847,6 +1848,56 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # BASELINE: the deterministic shadow baseline -- one row per
+        # (candidate, rule_version) for every candidate that reaches the
+        # primary AI evaluator (2:1 with openai_evaluations rows, two rules).
+        # Written by the orchestrator in the SAME tick, strictly AFTER the
+        # live decision fully resolves (never influences it -- shadow law,
+        # see alphaos.baseline.tracker). NOT the legacy `baseline_outcomes`
+        # table (the old no-news hypothetical-P&L tracker,
+        # journal/schema.py's own candidates-era table) -- distinct on
+        # purpose, never conflate them.
+        #
+        # replay_status: 'complete' immediately for a 'no_action' decision
+        # (replay_r=0.0 is a DIRECTLY OBSERVED fact -- no position was ever
+        # opened, matching Attribution v2's own 0-is-a-fact convention, never
+        # a substitute for missing data); 'unavailable' immediately for an
+        # 'unavailable' decision (a bracket genuinely could not be
+        # constructed -- unknown != zero, replay_r stays NULL forever);
+        # 'pending' for a 'propose' decision, resolved later by
+        # alphaos.baseline.tracker.resolve_pending_baseline_decisions() via
+        # the ONE replay engine (alphaos.learning.outcomes_engine.
+        # replay_bracket -- never a second replay implementation).
+        "shadow_baseline_decisions",
+        """
+        CREATE TABLE IF NOT EXISTS shadow_baseline_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            baseline_decision_id TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            scan_batch_id TEXT,
+            rule_version TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            decision_reason TEXT,
+            direction TEXT,
+            entry REAL,
+            stop REAL,
+            target REAL,
+            max_holding_days INTEGER,
+            setup_card_id TEXT,
+            input_sha TEXT NOT NULL,
+            decision_at_utc TEXT NOT NULL,
+            replay_status TEXT NOT NULL DEFAULT 'pending',
+            replay_result TEXT,
+            replay_r REAL,
+            replay_exit_reason TEXT,
+            lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2002,6 +2053,17 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_atr_history_symbol_date_version "
     "ON atr_history(symbol, market_date, rules_version)",
     "CREATE INDEX IF NOT EXISTS idx_atr_history_symbol ON atr_history(symbol)",
+    # BASELINE: candidate_id/rule_version are both always populated (never
+    # null), so a plain UNIQUE index is NULL-safe here -- unlike attribution_
+    # records' proposal_id/override_id, no partial-index trick needed (house
+    # pattern #2). One row per (candidate, rule) -- a re-run of the same scan
+    # tick is structurally impossible (the write happens exactly once, inline
+    # in run_scan_once), but the index is the real backstop regardless.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_baseline_decisions_candidate_rule "
+    "ON shadow_baseline_decisions(candidate_id, rule_version)",
+    "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_replay_status "
+    "ON shadow_baseline_decisions(replay_status)",
+    "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_symbol ON shadow_baseline_decisions(symbol)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

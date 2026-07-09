@@ -168,6 +168,58 @@ def _text_archive_health(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
+def _atr_health(journal) -> Optional[dict]:
+    """INSTR-1's deferred KIV, added 2026-07-09 (operator-directed follow-up,
+    Fable strategy review): a persistent per-symbol ATR gap silently and
+    permanently rejects every future PROPOSE for that symbol (NO_ATR_DATA)
+    with no trace beyond a system_events row and a reason code -- this
+    surfaces it where an operator actually looks. Coverage is checked
+    against the CORE-BOOK universe only (DEFAULT_UNIVERSE), matching the ATR
+    job's own scope (the shadow tier never reaches the evaluator, so has no
+    use for ATR data -- see atr_service.py's module docstring). None when
+    the job has never written a row yet (ATR capture not yet run) -- omitted
+    rather than fabricating a reassuring 0/0, same pattern as
+    text_archive_health/eval_health above."""
+    from alphaos.data.atr import ATR_RULES_V1
+    from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
+
+    latest = journal.one(
+        "SELECT MAX(market_date) AS d FROM atr_history WHERE rules_version = ?",
+        (ATR_RULES_V1,),
+    )
+    as_of_date = latest.get("d") if latest else None
+    if not as_of_date:
+        return None
+
+    covered_rows = journal.query(
+        "SELECT DISTINCT symbol FROM atr_history WHERE market_date = ? AND rules_version = ?",
+        (as_of_date, ATR_RULES_V1),
+    )
+    covered = {r["symbol"] for r in covered_rows}
+    universe = set(DEFAULT_UNIVERSE)
+    missing = sorted(universe - covered)
+
+    return {
+        "as_of_date": as_of_date,
+        "n_covered": len(universe & covered),
+        "n_universe": len(universe),
+        "missing_symbols": missing,
+    }
+
+
+def _baseline_health(journal, settings) -> Optional[dict]:
+    """BASELINE's own report, or None if zero shadow rows have EVER resolved
+    yet (BASELINE has no scheduler job of its own -- it rides the existing
+    outcomes_update cadence; a brand-new deploy or one still catching up on
+    its first forward window legitimately has nothing to show). Omitted
+    rather than fabricating a reassuring empty summary, same pattern as
+    text_archive_health/eval_health above."""
+    from alphaos.reports.baseline_report import build_baseline_report
+
+    rep = build_baseline_report(journal, settings)
+    return None if rep["n_shadow_resolved"] == 0 else rep
+
+
 def _eval_health(journal) -> Optional[dict]:
     """The latest eval-harness run's summary, or None if no operator has
     ever run `alphaos eval` yet -- an expected, honest empty state (EVAL-1
@@ -428,6 +480,8 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
 
     regime_arming = build_regime_arming_report(journal, settings)
     eval_health = _eval_health(journal)
+    atr_health = _atr_health(journal)
+    baseline_health = _baseline_health(journal, settings)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -441,6 +495,8 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "todays_activity": todays_activity,
         "text_archive_health": text_archive_health,
         "eval_health": eval_health,
+        "atr_health": atr_health,
+        "baseline_health": baseline_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -519,6 +575,19 @@ def render_markdown(brief: dict) -> str:
             "",
         ]
 
+    ah = brief.get("atr_health")
+    if ah:
+        lines += ["## ATR coverage (core book)"]
+        if ah["missing_symbols"]:
+            lines.append(
+                f"- As of {ah['as_of_date']}: {ah['n_covered']}/{ah['n_universe']} covered · "
+                f"GAP: {', '.join(ah['missing_symbols'])} will fail-safe-reject any PROPOSE "
+                f"(NO_ATR_DATA) until covered"
+            )
+        else:
+            lines.append(f"- As of {ah['as_of_date']}: {ah['n_covered']}/{ah['n_universe']} covered")
+        lines.append("")
+
     eh = brief.get("eval_health")
     if eh:
         from alphaos.reports.eval_report import render_markdown as _render_eval
@@ -542,6 +611,12 @@ def render_markdown(brief: dict) -> str:
     from alphaos.reports.regime_arming_scorer import render_markdown as _render_regime_arming
 
     lines += [_render_regime_arming(brief["regime_arming"]), ""]
+
+    bh = brief.get("baseline_health")
+    if bh:
+        from alphaos.reports.baseline_report import render_markdown as _render_baseline
+
+        lines += [_render_baseline(bh), ""]
 
     mg = brief["moonshot_gap"]
     lines += ["## Moonshot gap (10% MoM target)"]
