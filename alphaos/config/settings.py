@@ -442,6 +442,10 @@ class Settings:
     # PR13 slice 1: "HH:MM" SGT, once-daily cadence, after outcomes_update
     # has had a chance to resolve the day's candidates.
     scheduler_card_demotion_check_time: str
+    # PR12: "HH:MM" SGT, once-daily cadence (mirrors atr_update) -- the
+    # hypothesis resolver reads already-journaled tables only, so there is
+    # no reason to run it more than once a day.
+    scheduler_hypothesis_resolve_time: str
 
     # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
     # instrument) --- Defaults ON, same rationale as regime_enabled: pure
@@ -943,6 +947,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_card_demotion_check_time = _get(src, "SCHEDULER_CARD_DEMOTION_CHECK_TIME", "06:50")
     _parse_hhmm(scheduler_card_demotion_check_time, "SCHEDULER_CARD_DEMOTION_CHECK_TIME")
 
+    # PR12: once-daily hypothesis-resolver cadence, after atr_update.
+    scheduler_hypothesis_resolve_time = _get(src, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME", "06:45")
+    _parse_hhmm(scheduler_hypothesis_resolve_time, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1137,6 +1145,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         scheduler_atr_update_time=scheduler_atr_update_time,
         scheduler_card_demotion_check_time=scheduler_card_demotion_check_time,
+        scheduler_hypothesis_resolve_time=scheduler_hypothesis_resolve_time,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,

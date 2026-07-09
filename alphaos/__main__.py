@@ -197,6 +197,35 @@ def cmd_card_demotion_check(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_hypothesis_seed(orch: Orchestrator) -> int:
+    """PR12: idempotently register every SEEDED_HYPOTHESES entry. Safe to
+    run repeatedly -- a no-op past the first call per hypothesis_id."""
+    seeded = orch.hypothesis_seed()
+    _print({"hypothesis_seed": {"count": len(seeded), "hypothesis_ids": [h["hypothesis_id"] for h in seeded]}})
+    return 0
+
+
+def cmd_hypothesis_resolve(orch: Orchestrator) -> int:
+    """PR12: one resolver pass -- evaluate any hypothesis_proposals row past
+    its own calendar + sample-size floor, then refresh last_verdict/
+    last_q_value for the whole evaluated family. PURE WRITE-ONLY to
+    hypothesis_proposals/preregistrations; nothing gated for real."""
+    result = orch.hypothesis_resolve()
+    _print({"hypothesis_resolve": result})
+    return 0
+
+
+def cmd_hypothesis_report(orch: Orchestrator) -> int:
+    """PR12: the registry status report -- PURE READ."""
+    from alphaos.reports.hypothesis_report import render_markdown
+
+    rep = orch.hypothesis_report()
+    print(render_markdown(rep))
+    print()
+    _print({"hypothesis_report": rep})
+    return 0
+
+
 def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
@@ -595,6 +624,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("card_demotion_check",
                    help="PR13 slice 1: one daily pass -- snapshot every live_eligible card, "
                         "demote (+ alert) any card with >= 2 consecutive breach snapshots")
+    sub.add_parser("hypothesis_seed",
+                   help="PR12: idempotently register the 8 seeded hypotheses "
+                        "(hypothesis_proposals + preregistrations rows)")
+    sub.add_parser("hypothesis_resolve",
+                   help="PR12: one resolver pass -- evaluate any hypothesis past its own "
+                        "calendar + sample-size floor, refresh cached verdicts for the family")
+    sub.add_parser("hypothesis_report",
+                   help="PR12: hypothesis registry status report (risk class, claim, "
+                        "mechanical status, cached verdict/q-value; nothing gated for real)")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -709,6 +747,12 @@ def main(argv=None) -> int:
             return cmd_card_scoreboard(orch)
         if args.command == "card_demotion_check":
             return cmd_card_demotion_check(orch)
+        if args.command == "hypothesis_seed":
+            return cmd_hypothesis_seed(orch)
+        if args.command == "hypothesis_resolve":
+            return cmd_hypothesis_resolve(orch)
+        if args.command == "hypothesis_report":
+            return cmd_hypothesis_report(orch)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":
