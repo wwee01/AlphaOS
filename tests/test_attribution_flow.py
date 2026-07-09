@@ -940,6 +940,38 @@ def test_no_remaining_len_rows_floor_check_in_attribution_report():
     assert "eff_n" in meets_floor_line or "effective_n" in meets_floor_line
 
 
+def test_build_attribution_report_joins_real_max_holding_days_for_effective_n():
+    """2026-07-09 follow-up: attribution_records has no max_holding_days
+    column of its own; build_attribution_report() must join the originating
+    trade_proposals row so effective_n() sees the REAL holding window instead
+    of silently degrading every row to same-day-only. Two attribution rows,
+    same symbol, decision dates 7 days apart, each proposal's own
+    max_holding_days=10 -- their [decision_date, +10d] windows genuinely
+    overlap, so a correct join clusters them as effective_n=1. Before this
+    join existed, this would have (wrongly) reported effective_n=2."""
+    from alphaos.reports.attribution import build_attribution_report
+
+    o = _orch()
+    cid1 = _cand(o.journal, symbol="AAPL")
+    _proposal(o.journal, cid1, status="approved", symbol="AAPL", max_holding_days=10)
+    _attribution_row(
+        o.journal, cid1, symbol="AAPL", resolved_status="resolved", delta_r=1.0,
+        decision_at_utc="2026-01-01T00:00:00+00:00", resolved_at_utc="2026-01-02T00:00:00+00:00",
+    )
+    cid2 = _cand(o.journal, symbol="AAPL")
+    _proposal(o.journal, cid2, status="approved", symbol="AAPL", max_holding_days=10)
+    _attribution_row(
+        o.journal, cid2, symbol="AAPL", resolved_status="resolved", delta_r=1.0,
+        decision_at_utc="2026-01-08T00:00:00+00:00", resolved_at_utc="2026-01-09T00:00:00+00:00",
+    )
+
+    rep = build_attribution_report(o.journal, o.settings)
+    agg = rep["v2"]["aggregate_delta_r_by_type_and_agent"]["propose_user_rejected"]["system"]
+    assert agg["resolved_count"] == 2
+    assert agg["effective_n"] == 1
+    o.close()
+
+
 def test_report_excludes_mock_rows_from_aggregate_and_counts_them():
     from alphaos.reports.attribution import compute_attribution_v2
 

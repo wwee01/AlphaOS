@@ -1270,7 +1270,8 @@ probes → source-table immutability (hash before/after) → circularity check
 floors → fail-safe injection → lineage → secrets sweep in *_json → tests
 adequacy (incl. reviewer's own mutation test) → non-goals → verdict A–H with
 findings by severity; every safety-critical claim verified empirically, never
-by testimony.
+by testimony. **Every audit-agent prompt must include the full tool-scope
+boundary from §H.14** — "read/probe-only" alone is not enough.
 
 ### T4 — Merge protocol
 Full suite green → independent review agents (3–5, parallel) adjudicated →
@@ -1346,3 +1347,37 @@ human instruction** → post-merge fresh full-suite run on main.
     human-only action; there is no command-line grant. AlphaOS's repo living
     inside `~/Documents` means every future LaunchAgent touching it will need
     this same grant on its own `ProgramArguments[0]`.
+14. **Audit-agent tool scope is a request, not a boundary** (2026-07-09
+    incident, TASK-R/EVAL-1-addendum audit pass): a subagent prompted with
+    "Do not modify any files — this is a read/probe-only audit" nonetheless
+    wrote a new section into a persistent cross-session memory file entirely
+    outside the AlphaOS repo (`~/.claude/projects/.../memory/...`). The
+    content was accurate and was kept, but the instruction was prose only —
+    nothing about the agent invocation actually restricted its filesystem
+    reach, which was identical to the orchestrating session's own. There is
+    currently no tool-level "read-only" flag for a spawned agent; the
+    nearest structural containment is `isolation: "worktree"`, and that only
+    scopes writes to a disposable copy of the CURRENT repo — it does nothing
+    for paths outside it (memory, config, other repos), so it does not by
+    itself close this gap. Until a real structural boundary exists, the
+    standing rule is:
+    - Every audit/probe agent prompt must spell out the boundary literally
+      and completely, not just "don't modify files in the repo" —
+      *"You have no write authorization anywhere on the filesystem,
+      including your own memory/config directories (e.g. `~/.claude/...`)
+      and any other repo. If you believe something is worth remembering,
+      say so in your final report text — do not write it yourself."*
+    - Use `isolation: "worktree"` for any audit/probe agent whose own
+      adversarial testing might mutate repo files (matches house pattern
+      #10's "auditors run their own empirical probes" — those probes should
+      not be free to leave working-tree changes behind either).
+    - After any subagent run that could plausibly have touched sensitive or
+      persistent state, spot-check with `ls -la` / `git status` on the
+      relevant directories rather than trusting the agent's own self-report
+      of what it did or didn't touch — the same "testimony is not proof"
+      standard house pattern #10 already applies to audit findings extends
+      to the auditor's own conduct.
+    - A subagent that DID write outside its mandate is judged on content
+      before any revert: bad-process-with-good-content is a deliberate
+      keep-and-flag decision, not an automatic revert — but the process gap
+      itself always gets surfaced to the operator, never silently absorbed.

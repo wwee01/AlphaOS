@@ -32,8 +32,10 @@ from alphaos.regime.service import backfill_regime_days, ensure_regime_for_today
 from alphaos.reports.daily_brief import build_daily_brief, render_markdown
 from alphaos.reports.regime_arming_scorer import (
     MIN_DISTINCT_REGIME_EPISODES,
+    MIN_EFFECTIVE_N_PER_REGIME,
     REGIME_ARMING_MAP_V1,
     _count_distinct_episodes,
+    _effective_n_for_rows,
     _is_armed_per_map,
     build_regime_arming_report,
     compute_regime_arming_scores,
@@ -521,8 +523,10 @@ def test_count_distinct_episodes_empty_is_zero():
 
 def test_compute_regime_arming_scores_delta_r_withheld_below_floor():
     rows = [
-        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0, "market_date": "2026-01-05"},
-        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.5, "market_date": "2026-01-06"},
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0,
+         "market_date": "2026-01-05", "symbol": "AAPL"},
+        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.5,
+         "market_date": "2026-01-06", "symbol": "AAPL"},
     ]
     result = compute_regime_arming_scores(rows)
     card = result["cards"][0]
@@ -534,10 +538,15 @@ def test_compute_regime_arming_scores_delta_r_withheld_below_floor():
 
 def test_compute_regime_arming_scores_delta_r_present_when_floor_met():
     rows = [
-        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0, "market_date": "2026-01-05"},
-        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.4, "market_date": "2026-02-05"},  # 2nd episode
-        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.5, "market_date": "2026-01-06"},
-        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.3, "market_date": "2026-01-07"},
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0,
+         "market_date": "2026-01-05", "symbol": "AAPL"},
+        # 2nd episode AND a different symbol -> also a 2nd effective_n cluster
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.4,
+         "market_date": "2026-02-05", "symbol": "MSFT"},
+        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.5,
+         "market_date": "2026-01-06", "symbol": "AAPL"},
+        {"card_id": "catalyst_momentum_v1", "regime": "CHOP", "replay_r": -0.3,
+         "market_date": "2026-01-07", "symbol": "AAPL"},
     ]
     result = compute_regime_arming_scores(rows)
     card = result["cards"][0]
@@ -549,6 +558,43 @@ def test_compute_regime_arming_scores_delta_r_present_when_floor_met():
     assert card["delta_r"] == pytest.approx(card["mean_r_armed_per_map"] - card["mean_r_armed_always"])
 
 
+def test_compute_regime_arming_scores_episode_floor_met_but_effective_n_floor_not():
+    """Two distinct TREND_UP episodes (dates a month apart) but BOTH on the
+    SAME symbol with a holding window long enough to bridge them -- (a) is
+    satisfied, (b) is not, so floor_met must still be False. This is exactly
+    the case the 2026-07-09 reconciliation added effective_n() to catch."""
+    rows = [
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0,
+         "market_date": "2026-01-05", "symbol": "AAPL", "max_holding_days": 40},
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.4,
+         "market_date": "2026-02-05", "symbol": "AAPL", "max_holding_days": 40},
+    ]
+    result = compute_regime_arming_scores(rows)
+    card = result["cards"][0]
+    assert card["distinct_episodes_by_regime"]["TREND_UP"] == 2  # (a) met
+    assert card["effective_n_by_regime"]["TREND_UP"] == 1  # (b) NOT met -- one bridged cluster
+    assert card["floor_met"] is False
+    assert card["delta_r"] is None
+
+
+def test_compute_regime_arming_scores_effective_n_floor_met_but_episode_floor_not():
+    """Two different symbols traded the SAME single day -- (b) is satisfied
+    (2 independent clusters) but (a) is not (only 1 regime-day of evidence,
+    a single-day snapshot of market conditions). floor_met must be False."""
+    rows = [
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 1.0,
+         "market_date": "2026-01-05", "symbol": "AAPL"},
+        {"card_id": "catalyst_momentum_v1", "regime": "TREND_UP", "replay_r": 0.6,
+         "market_date": "2026-01-05", "symbol": "MSFT"},
+    ]
+    result = compute_regime_arming_scores(rows)
+    card = result["cards"][0]
+    assert card["distinct_episodes_by_regime"]["TREND_UP"] == 1  # (a) NOT met
+    assert card["effective_n_by_regime"]["TREND_UP"] == 2  # (b) met
+    assert card["floor_met"] is False
+    assert card["delta_r"] is None
+
+
 def test_compute_regime_arming_scores_empty_input():
     result = compute_regime_arming_scores([])
     assert result["cards"] == []
@@ -556,6 +602,27 @@ def test_compute_regime_arming_scores_empty_input():
 
 def test_compute_regime_arming_scores_min_episode_constant_is_2():
     assert MIN_DISTINCT_REGIME_EPISODES == 2
+    assert MIN_EFFECTIVE_N_PER_REGIME == 2
+
+
+def test_effective_n_for_rows_same_symbol_overlapping_window_is_one_cluster():
+    rows = [
+        {"symbol": "AAPL", "market_date": "2026-01-05", "max_holding_days": 10},
+        {"symbol": "AAPL", "market_date": "2026-01-10", "max_holding_days": 10},
+    ]
+    assert _effective_n_for_rows(rows) == 1
+
+
+def test_effective_n_for_rows_different_symbols_are_separate_clusters():
+    rows = [
+        {"symbol": "AAPL", "market_date": "2026-01-05"},
+        {"symbol": "MSFT", "market_date": "2026-01-05"},
+    ]
+    assert _effective_n_for_rows(rows) == 2
+
+
+def test_effective_n_for_rows_empty_is_zero():
+    assert _effective_n_for_rows([]) == 0
 
 
 def test_build_regime_arming_report_end_to_end(journal, settings):

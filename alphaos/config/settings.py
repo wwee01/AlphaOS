@@ -440,6 +440,14 @@ class Settings:
     # ATR(14) only changes once a day (built from completed daily bars).
     scheduler_atr_update_time: str
 
+    # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
+    # instrument) --- Defaults ON, same rationale as regime_enabled: pure
+    # computation over already-typed ScanContext fields already produced by
+    # every scan, no human-review gate needed, and every week without it is
+    # unrecoverable paired evidence (it can only ever accrue forward, never
+    # be backfilled for candidates scanned before this shipped).
+    baseline_enabled: bool
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -1121,6 +1129,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         sec_edgar_contact_email=_get(src, "SEC_EDGAR_CONTACT_EMAIL", ""),
         scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         scheduler_atr_update_time=scheduler_atr_update_time,
+        baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,

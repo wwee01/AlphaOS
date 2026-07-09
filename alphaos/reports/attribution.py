@@ -221,15 +221,24 @@ def _floor_gated_v2_aggregate(rows: list[dict], delta_key: str,
     events never masquerades as that many independent bets (audit A1: on a
     one-beta-cluster universe, 30 raw rows can be as few as 3-5 independent
     observations -- exactly the false-edge risk PORT-1 exists to close).
-    ``attribution_records`` doesn't carry ``max_holding_days``, so clustering
-    here degrades to same-day-only (see ``effective_n()``'s own docstring) --
-    still catches the dominant real case of same-day correlated events, just
-    not a rarer multi-day-holding-period overlap. Both ``resolved_count`` AND
-    ``effective_n`` are always returned so row inflation stays visible."""
+    ``attribution_records`` doesn't carry ``max_holding_days`` directly, but
+    ``build_attribution_report()`` threads it in via a join against the
+    originating ``trade_proposals`` row (2026-07-09 follow-up -- previously
+    always absent here, so clustering silently degraded to same-day-only for
+    every row; multi-day swing positions are the dominant case in this
+    system, not the rare one, so that gap mattered). Still degrades
+    gracefully to same-day-only for rows with no proposal (e.g. some
+    ``user_override_trade`` rows -- see ``effective_n()``'s own docstring).
+    Both ``resolved_count`` AND ``effective_n`` are always returned so row
+    inflation stays visible."""
     n = len(rows)
     span = _span_days(rows)
     en = _effective_n([
-        {"symbol": r.get("symbol"), "decision_date": (r.get("decision_at_utc") or "")[:10]}
+        {
+            "symbol": r.get("symbol"),
+            "decision_date": (r.get("decision_at_utc") or "")[:10],
+            "max_holding_days": r.get("max_holding_days"),
+        }
         for r in rows
     ])
     eff_n = en["effective_n"]
@@ -344,7 +353,10 @@ def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
     attribution_records = journal.query(
         "SELECT ar.attribution_type, ar.agent, ar.resolved_status, ar.delta_r, "
         "ar.execution_delta_r, ar.is_mock, ar.resolved_at_utc, ar.symbol, "
-        "ar.decision_at_utc, c.card_id "
+        "ar.decision_at_utc, c.card_id, "
+        "(SELECT tp.max_holding_days FROM trade_proposals tp "
+        " WHERE tp.candidate_id = ar.candidate_id ORDER BY tp.id DESC LIMIT 1) "
+        " AS max_holding_days "
         "FROM attribution_records ar LEFT JOIN candidates c ON c.candidate_id = ar.candidate_id "
         "ORDER BY ar.id DESC LIMIT ?",
         (limit,),

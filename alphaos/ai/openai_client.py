@@ -32,21 +32,23 @@ from alphaos.constants import (
     TargetSource,
     TradeDirection,
 )
-from alphaos.data.atr import ATR_RULES_V1
+from alphaos.data.atr import (  # noqa: F401 -- ATR_STOP_MULTIPLIER_V1 re-exported, see below
+    ATR_RULES_V1,
+    ATR_STOP_MULTIPLIER_V1,
+    atr_stop_price,
+)
 from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
 HTTP_TIMEOUT = 30
 PROPOSE_MOMENTUM_THRESHOLD = 0.40
 
-# INSTR-1: Stop = k x ATR(14). Pre-registered here as a versioned code
-# constant (never env-tunable, never retro-scored -- PD#7), same discipline
-# as REGIME's threshold constants. k=2.0 is a standard, widely-cited
-# volatility-based stop distance (not a back-tested optimum -- backtesting
-# it before any real live data exists would itself be premature/circular).
-# A future k (or ATR period) change is its own pre-registered
-# catalyst_momentum_v3, never an edit to this constant in place.
-ATR_STOP_MULTIPLIER_V1 = 2.0
+# ATR_STOP_MULTIPLIER_V1 now lives in alphaos/data/atr.py (2026-07-09,
+# relocated when BASELINE became a second consumer of this pure sizing-
+# formula constant) -- re-exported here so this module's own existing
+# ATR_STOP_MULTIPLIER_V1 reference below, and any external `from
+# alphaos.ai.openai_client import ATR_STOP_MULTIPLIER_V1`, keep working
+# unchanged.
 
 
 @dataclass
@@ -273,8 +275,7 @@ class OpenAIClient:
             )
 
         entry = float(evaluation.entry)
-        distance = ATR_STOP_MULTIPLIER_V1 * float(atr)
-        new_stop = (entry + distance) if evaluation.direction == TradeDirection.SHORT.value else (entry - distance)
+        new_stop = atr_stop_price(entry, atr, evaluation.direction)
 
         risk_per_share = abs(entry - new_stop)
         new_expected_r = (

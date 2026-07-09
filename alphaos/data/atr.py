@@ -21,9 +21,41 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.constants import TradeDirection
+
 ATR_RULES_V1 = "atr_rules_v1"
 
 ATR_PERIOD = 14
+
+# INSTR-1: Stop = k x ATR(14). Pre-registered here as a versioned code
+# constant (never env-tunable, never retro-scored -- PD#7), same discipline
+# as REGIME's threshold constants. k=2.0 is a standard, widely-cited
+# volatility-based stop distance (not a back-tested optimum -- backtesting
+# it before any real live data exists would itself be premature/circular).
+# A future k (or ATR period) change is its own pre-registered
+# catalyst_momentum_v3, never an edit to this constant in place.
+#
+# Originally defined in alphaos/ai/openai_client.py (the live evaluator's own
+# stop-override site); relocated here 2026-07-09 when BASELINE became a
+# second consumer -- this constant is a pure sizing-formula value, not
+# something specific to the OpenAI client, so it belongs beside its sibling
+# ATR constants. openai_client.py re-exports it for backward compatibility.
+ATR_STOP_MULTIPLIER_V1 = 2.0
+
+
+def atr_stop_price(
+    entry: float, atr: float, direction: Optional[str], multiplier: float = ATR_STOP_MULTIPLIER_V1,
+) -> float:
+    """Stop = entry -/+ k*ATR(14), direction-aware (a short's stop sits
+    ABOVE entry, widened upward; a long's sits BELOW, widened downward).
+
+    The ONE stop-sizing formula -- shared by the live evaluator's own
+    override (``alphaos.ai.openai_client._apply_atr_stop``) and BASELINE's
+    deterministic rules (``alphaos.baseline.rules``), so the two can never
+    silently drift apart (INSTR-1/BASELINE "one sizing formula law";
+    extracted here 2026-07-09 when BASELINE became the second consumer)."""
+    distance = multiplier * float(atr)
+    return (entry + distance) if direction == TradeDirection.SHORT.value else (entry - distance)
 
 
 def true_range(high: float, low: float, prev_close: Optional[float]) -> float:

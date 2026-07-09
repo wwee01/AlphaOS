@@ -128,6 +128,56 @@ def cmd_regime_arming_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_baseline_report(orch: Orchestrator) -> int:
+    """BASELINE: does the AI add R report. PURE READ -- pure ledger math
+    over existing shadow rows; nothing gated for real."""
+    from alphaos.reports.baseline_report import render_markdown
+
+    rep = orch.baseline_report()
+    print(render_markdown(rep))
+    print()
+    _print({"baseline_report": rep})
+    return 0
+
+
+def cmd_baseline_register(orch: Orchestrator) -> int:
+    """BASELINE spec item 6: register the pre-registration block (=
+    preregistrations row #1, per Prime Directive #4) -- one-off, operator-
+    invoked, idempotent (refuses a duplicate rather than creating a second
+    row for the same hypothesis, since register_hypothesis() itself is NOT
+    idempotent -- every call creates a new row)."""
+    from alphaos.reports.baseline_report import FLOOR_DAY_BLOCKS, FLOOR_SPAN_DAYS
+    from alphaos.stats.preregistration import register_hypothesis
+
+    hypothesis = (
+        "AI adds >= +0.05R mean paired ai_delta_r over threshold_v1 on "
+        "proposed candidates, conditional on labeller reach"
+    )
+    metric = "mean_ai_delta_r = mean(candidate_outcomes.replay_r - shadow_baseline_decisions.replay_r), threshold_v1"
+    existing = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (hypothesis, metric),
+    )
+    if existing:
+        print(f"Already registered: {existing['prereg_id']} (at {existing['registered_at_utc']}) -- no-op.")
+        _print({"baseline_register": {"status": "already_registered", **existing}})
+        return 0
+
+    prereg_id = register_hypothesis(
+        orch.journal, hypothesis, metric,
+        # register_hypothesis()'s own parameter is named floor_effective_n
+        # (PORT-1's generic vocabulary for this bar, regardless of counting
+        # axis) -- BASELINE_report's own constant is FLOOR_DAY_BLOCKS since
+        # it counts day-blocks, not PORT-1's symbol-clustered effective_n.
+        floor_effective_n=FLOOR_DAY_BLOCKS, floor_span_days=FLOOR_SPAN_DAYS,
+        analysis_not_before="2026-09-07",
+        params={"rule_version": "threshold_v1", "target_delta_r": 0.05},
+    )
+    print(f"Registered: {prereg_id}")
+    _print({"baseline_register": {"status": "registered", "prereg_id": prereg_id}})
+    return 0
+
+
 def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
@@ -514,6 +564,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("regime_arming_report",
                    help="REG-1: shadow arming-map scorer (armed_always vs armed_per_map paired "
                         "replay ΔR per card; nothing armed for real)")
+    sub.add_parser("baseline_report",
+                   help="BASELINE: does the AI add R over threshold_v1/propose_all_v1 (paired "
+                        "ai_delta_r, day-block bootstrap CI; nothing gated for real)")
+    sub.add_parser("baseline_register",
+                   help="BASELINE: one-off, idempotent -- register the pre-registration block "
+                        "(preregistrations row #1)")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -620,6 +676,10 @@ def main(argv=None) -> int:
             return cmd_backfill_regime_days(orch)
         if args.command == "regime_arming_report":
             return cmd_regime_arming_report(orch)
+        if args.command == "baseline_report":
+            return cmd_baseline_report(orch)
+        if args.command == "baseline_register":
+            return cmd_baseline_register(orch)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":

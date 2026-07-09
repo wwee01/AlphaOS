@@ -408,15 +408,33 @@ class Orchestrator:
             evaluation = self.openai.evaluate(
                 cand, snapshot, freshness_status="usable",  # scanner only keeps usable snapshots
             )
+            eval_lineage_id = lineage.get_or_create_lineage_id(self.journal, self.settings)
             self.journal.insert("openai_evaluations", {
                 **evaluation.to_row(),
-                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+                "lineage_id": eval_lineage_id,
             })
             self._record_baselines(cand, evaluation)
 
             decision = evaluation.decision
             if classification is not None:
                 decision = self._resolve_decision(cand, evaluation, classification, scan_batch_id, summary)
+
+            # BASELINE: the deterministic shadow baseline (the "does the AI
+            # add R?" instrument) -- written strictly AFTER the live decision
+            # fully resolves (never influences it, shadow law), for EVERY
+            # candidate that reached the primary AI evaluator (the SAME
+            # population openai_evaluations is written for, above -- 2:1
+            # shadow_baseline_decisions rows per evaluation, acceptance
+            # criterion). NOT the legacy `_record_baselines`/`baseline_outcomes`
+            # call two lines up -- that is the old no-news hypothetical-P&L
+            # tracker, an unrelated mechanism; never conflate the two.
+            if self.settings.baseline_enabled:
+                from alphaos.baseline.tracker import record_shadow_baseline_decisions
+
+                record_shadow_baseline_decisions(
+                    self.journal, self.settings, cand,
+                    scan_batch_id=scan_batch_id, lineage_id=eval_lineage_id,
+                )
 
             if decision == Decision.REJECT.value:
                 if (classification is not None
@@ -1252,6 +1270,15 @@ class Orchestrator:
 
         return build_regime_arming_report(self.journal, self.settings, limit=limit)
 
+    def baseline_report(self, limit: int = 5000) -> dict:
+        """BASELINE: does the AI add R over either frozen deterministic
+        rule, given a candidate reached the labeller? PURE READ, pure ledger
+        math over existing shadow rows; nothing gated for real. See
+        alphaos/reports/baseline_report.py's pre-registration block."""
+        from alphaos.reports.baseline_report import build_baseline_report
+
+        return build_baseline_report(self.journal, self.settings, limit=limit)
+
     def backfill_regime_days(self) -> dict:
         """REG-1 one-off: extend benchmark_bars SPY history, classify the
         full available series into regime_days, and stamp any pre-existing
@@ -1333,6 +1360,19 @@ class Orchestrator:
             discovered = attribution.discover_events(self.journal, self.settings, limit=limit)
             resolved = attribution.resolve_pending(self.journal, self.settings, limit=limit)
             result["attribution"] = {"discovered": discovered, "resolved": resolved}
+
+        # BASELINE: extends this SAME counterfactual outcomes job (spec item
+        # 4) -- reuses the SAME bars_provider already constructed above
+        # (zero new provider/client code) and the ONE replay engine
+        # (alphaos.learning.outcomes_engine.replay_bracket). Order relative
+        # to attribution doesn't matter for correctness (independent
+        # tables), but this reads more naturally grouped with the outcome-
+        # ledger resolution it shares a provider with.
+        if self.settings.baseline_enabled:
+            from alphaos.baseline.tracker import resolve_pending_baseline_decisions
+
+            result["baseline"] = resolve_pending_baseline_decisions(
+                self.journal, bars_provider=provider, limit=limit)
         return result
 
     def outcomes_report(self, limit: int = 2000) -> dict:
