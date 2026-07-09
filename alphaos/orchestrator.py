@@ -520,7 +520,7 @@ class Orchestrator:
         )
         if not risk.approved or risk.sizing is None:
             proposal = self.swing.build_proposal(evaluation, risk.sizing or _zero_sizing(evaluation))
-            self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+            self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
             proposal.scan_batch_id = scan_batch_id
             proposal.playbook_name = PLAYBOOK_V1
             proposal.setup_classification = "momentum_continuation"
@@ -543,7 +543,7 @@ class Orchestrator:
             return False
 
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
-        self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+        self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
         proposal.scan_batch_id = scan_batch_id
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "momentum_continuation"
@@ -995,7 +995,7 @@ class Orchestrator:
 
         # Gates passed -> create a PENDING_APPROVAL proposal (NOT executed).
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
-        self._tag_target_profile(proposal, from_config=evaluation.is_mock)
+        self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "user_override"
         card = cards.get_default_card()
@@ -2177,18 +2177,28 @@ class Orchestrator:
         )
         return risk_check_id
 
-    def _tag_target_profile(self, proposal, *, from_config: bool) -> None:
-        """Record target-profile evidence on a proposal. Tracking only: it does
-        not change the stop/target levels or any behavior. Every system-generated
-        trade uses configured_standard; the source reflects config (mock baseline)
-        vs the live OpenAI engine."""
+    def _tag_target_profile(self, proposal, *, from_config: bool, evaluation=None) -> None:
+        """Record target-profile evidence on a proposal. Tracking only for the
+        target_profile/reward:risk/stop_loss_pct fields: does not change
+        target levels or behavior. Every system-generated trade uses
+        configured_standard; the source reflects config (mock baseline) vs
+        the live OpenAI engine.
+
+        ``stop_price_source`` is the one exception (INSTR-1): when
+        ``evaluation.stop_source`` is set (only ever true on the live PROPOSE
+        path _apply_atr_stop() actually overrode -- never mock, never a
+        watch/reject evaluation later force-approved via user override), it
+        wins over the generic config/openai label, since the stop itself was
+        genuinely computed differently. ``target_price_source`` is untouched
+        either way -- the AI still sets the target."""
         proposal.target_profile = TargetProfile.CONFIGURED_STANDARD.value
         proposal.target_reward_risk = self.settings.target_reward_risk
         proposal.min_reward_risk = self.settings.min_reward_risk
         proposal.stop_loss_pct = self.settings.stop_loss_pct
         src = TargetSource.CONFIG.value if from_config else TargetSource.OPENAI.value
         proposal.target_price_source = src
-        proposal.stop_price_source = src
+        stop_source = getattr(evaluation, "stop_source", None) if evaluation is not None else None
+        proposal.stop_price_source = stop_source or src
 
     def _reject_candidate(self, cand: "ScanContext", stage, evaluation,
                           reason: Optional[str] = None) -> None:

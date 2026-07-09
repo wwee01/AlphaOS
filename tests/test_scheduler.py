@@ -1144,6 +1144,27 @@ def test_scheduler_status_report_includes_text_archive_pull(orchestrator):
     assert "text_archive_pull" in report["recent_by_job_type"]
 
 
+def test_run_due_jobs_includes_atr_update(orchestrator, monkeypatch):
+    """INSTR-1: the exact regression class TEXT-0 self-caught -- wired into
+    cadence.is_due but NOT into JobRunner's hardcoded dispatch tuple would
+    mean this job silently NEVER runs in production."""
+    monkeypatch.setattr(cadence, "is_due", lambda job_type, settings, journal, now=None: (True, "forced for test"))
+
+    results = JobRunner(orchestrator).run_due_jobs()
+
+    by_type = {r["job_type"]: r for r in results}
+    assert cadence.JobType.ATR_UPDATE in by_type
+    # Mock mode -- make_bars_provider() returns None, so the job completes
+    # with zero rows written, never an error.
+    assert by_type[cadence.JobType.ATR_UPDATE]["status"] == "completed"
+
+
+def test_scheduler_status_report_includes_atr_update(orchestrator):
+    report = JobRunner(orchestrator).status_report()
+
+    assert "atr_update" in report["recent_by_job_type"]
+
+
 def test_text_archive_pull_config_hash_changes_with_its_own_setting():
     """Unlike benchmark_spine's cadence time (folded into scheduler_config_
     hash), scheduler_text_archive_pull_time lives in its own

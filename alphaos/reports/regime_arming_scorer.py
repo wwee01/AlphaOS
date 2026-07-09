@@ -36,8 +36,19 @@ from typing import Optional
 # Pre-registered v1 candidate map (versioned like a card -- a change here is
 # a new REGIME_ARMING_MAP_V2, never a silent edit to v1's meaning once real
 # analysis has started). momentum cards -> TREND_UP only.
+#
+# INSTR-1 (2026-07-09) added catalyst_momentum_v2 to this SAME v1 policy
+# map, not a new REGIME_ARMING_MAP_V2 -- this is an ADDITION covering a new
+# card_id with the identical pre-registered policy, not a revision of what
+# v1's own entry means (no real regime-conditioned analysis has run against
+# v1 yet either -- ANALYSIS_NOT_BEFORE_DATE is still in the future). ATR-
+# scaled stops change HOW a stop distance is sized, not whether a momentum
+# setup's underlying signal quality varies by regime -- the same "momentum
+# cards -> TREND_UP only" policy question this map answers is unaffected by
+# that change, so it applies unchanged to the new card_id.
 REGIME_ARMING_MAP_V1 = {
     "catalyst_momentum_v1": {"TREND_UP"},
+    "catalyst_momentum_v2": {"TREND_UP"},
 }
 REGIME_ARMING_MAP_VERSION = "regime_arming_map_v1"
 

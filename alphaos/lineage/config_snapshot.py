@@ -57,6 +57,8 @@ SCHEDULER_CONFIG_FIELDS = (
     "scheduler_max_consecutive_failures", "scheduler_heartbeat_stale_minutes",
     # PR9.5: benchmark spine capture time.
     "scheduler_benchmark_spine_time",
+    # INSTR-1: ATR(14) capture time.
+    "scheduler_atr_update_time",
 )
 
 EARNINGS_CONFIG_FIELDS = (

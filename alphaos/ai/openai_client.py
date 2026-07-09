@@ -29,13 +29,24 @@ from alphaos.constants import (
     NEWS_STATUS_DISABLED_V1,
     ReasonCode,
     Severity,
+    TargetSource,
     TradeDirection,
 )
+from alphaos.data.atr import ATR_RULES_V1
 from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
 HTTP_TIMEOUT = 30
 PROPOSE_MOMENTUM_THRESHOLD = 0.40
+
+# INSTR-1: Stop = k x ATR(14). Pre-registered here as a versioned code
+# constant (never env-tunable, never retro-scored -- PD#7), same discipline
+# as REGIME's threshold constants. k=2.0 is a standard, widely-cited
+# volatility-based stop distance (not a back-tested optimum -- backtesting
+# it before any real live data exists would itself be premature/circular).
+# A future k (or ATR period) change is its own pre-registered
+# catalyst_momentum_v3, never an edit to this constant in place.
+ATR_STOP_MULTIPLIER_V1 = 2.0
 
 
 @dataclass
@@ -77,6 +88,14 @@ class OpenAIEvaluation:
     # only way a future eval harness could ever replay the primary
     # evaluator, since the snapshot was previously never persisted anywhere.
     snapshot: Optional[dict] = None
+    # INSTR-1: set to TargetSource.ATR_V1 by _apply_atr_stop() when the
+    # live evaluator's own stop was overridden with k*ATR(14). Transient --
+    # NOT persisted in to_row() (openai_evaluations has no matching column);
+    # the orchestrator reads this to set the FINAL trade_proposals row's own
+    # already-existing stop_price_source column, the more relevant place for
+    # this provenance to live (a candidate's raw evaluation vs the actual
+    # proposed/executed trade).
+    stop_source: Optional[str] = None
 
     def to_row(self) -> dict:
         return {
@@ -152,6 +171,15 @@ class OpenAIClient:
         else:
             try:
                 evaluation = self._live_eval(candidate, snapshot, freshness_status)
+                # INSTR-1: LIVE path only -- the mock baseline's stop is
+                # already a clean, deterministic, config-driven formula
+                # (stop_loss_pct) that hundreds of existing tests depend on
+                # producing PROPOSE decisions without any atr_history
+                # fixture; overriding it here would need every one of those
+                # tests to seed ATR data or start silently rejecting
+                # everything. "mock != real" (same discipline EARN-1 will
+                # apply to its own live-only provider).
+                evaluation = self._apply_atr_stop(evaluation, candidate)
             except Exception as exc:  # pragma: no cover - live path
                 if self.journal is not None:
                     self.journal.log_system_event(
@@ -199,6 +227,65 @@ class OpenAIClient:
                 [ReasonCode.REWARD_RISK_TOO_LOW.value],
                 freshness_status=evaluation.data_freshness_status,
             )
+        return evaluation
+
+    def _apply_atr_stop(self, evaluation: OpenAIEvaluation,
+                        candidate: "Union[dict, ScanContext]") -> OpenAIEvaluation:
+        """INSTR-1: overrides the live evaluator's own stop with
+        entry +/- k*ATR(14) -- a fixed percentage stop means wildly
+        different things for a low-vol name vs a high-vol one; this makes
+        "1R" mean a comparable thing regardless of which symbol got
+        scanned. The AI-proposed TARGET is left untouched (only the stop
+        changes); expected_r is recomputed from the NEW stop against that
+        same target, so _enforce_min_reward_risk (which runs immediately
+        after this, in evaluate()) correctly re-checks reward:risk against
+        the real, ATR-widened-or-narrowed risk -- never the AI's own
+        now-stale number.
+
+        No ATR data for this symbol (never yet captured, or a newly-listed
+        name) is NOT a silent fallback to the AI's own stop -- that would
+        quietly ship the OLD, unfixed behavior under a version number that
+        claims to be fixed. Fails safe to reject instead, matching this
+        codebase's own "block, never wave through" exit-first invariant.
+        """
+        if evaluation.decision != Decision.PROPOSE.value or evaluation.entry is None:
+            return evaluation
+
+        atr = None
+        if self.journal is not None:
+            atr = self.journal.scalar(
+                "SELECT atr_14 FROM atr_history WHERE symbol = ? AND rules_version = ? "
+                "ORDER BY market_date DESC LIMIT 1",
+                (evaluation.symbol, ATR_RULES_V1),
+            )
+        if atr is None or atr <= 0:
+            if self.journal is not None:
+                self.journal.log_system_event(
+                    Severity.INFO, "openai",
+                    f"{evaluation.symbol}: no ATR(14) data available; rejecting -- "
+                    "catalyst_momentum_v2 stops require it.",
+                )
+            return self._rejection(
+                candidate,
+                f"No ATR(14) data available for {evaluation.symbol}; cannot compute a v2 stop.",
+                [ReasonCode.NO_ATR_DATA.value],
+                freshness_status=evaluation.data_freshness_status,
+            )
+
+        entry = float(evaluation.entry)
+        distance = ATR_STOP_MULTIPLIER_V1 * float(atr)
+        new_stop = (entry + distance) if evaluation.direction == TradeDirection.SHORT.value else (entry - distance)
+
+        risk_per_share = abs(entry - new_stop)
+        new_expected_r = (
+            round(abs(evaluation.target - entry) / risk_per_share, 2)
+            if (evaluation.target is not None and risk_per_share)
+            else evaluation.expected_r
+        )
+
+        evaluation.stop = round(new_stop, 2)
+        evaluation.expected_r = new_expected_r
+        evaluation.stop_source = TargetSource.ATR_V1.value
         return evaluation
 
     # ------------------------------------------------------------------- mock

@@ -473,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "switch / protection / cost cap / locking)")
     srj.add_argument("job_type", choices=[
         "scan", "monitor", "outcomes_update", "daily_digest", "benchmark_spine", "text_archive_pull",
+        "atr_update",
     ])
     sub.add_parser("scheduler_health",
                    help="dead-man's-switch check: exit 0 if a job completed recently enough during "
