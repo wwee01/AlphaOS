@@ -606,11 +606,57 @@ item specs under their canonical names in the specs doc):**
     validation; a weak test strengthened after mutation-testing showed it
     would pass a wrong implementation. +36 tests. Suite 1138/3/0, ruff +
     mypy clean. Spec: same archived file, EVAL-1 section.
-15. 🔴 **PORT-1** — `effective_n()` one-floor law + BH-FDR (cumulative family) +
-    `preregistrations` table (one-shot evaluation) + researcher-MED ride-alongs.
-    Hard prereq of PR12 and of EXP-1's first aggregate.
-16. 🔴 **INSTR-1** — time-of-day-normalized 20d rel_volume + ATR-scaled stops (as
-    `catalyst_momentum_v2`). Honest instruments before niche data is archived.
+15. ✅ **PORT-1** — merged `18b563e` 2026-07-09 (branch `685ea60`+`08cdb04`,
+    overnight session continued). New `alphaos/stats/` package: `effective_n()`
+    (symbol + overlapping-holding-window clustering, dedup to one obs per
+    `(symbol, decision_date)`), clustered bootstrap CI + one-sided p, BH-FDR
+    step-up + running-minimum q-values + Bonferroni cross-check,
+    `compute_verdicts()` (the ONE always-fresh three-way verdict function --
+    never cached, never recomputed over an ad-hoc slice), `preregistrations`
+    table (evidence frozen exactly once via a DB-level `WHERE evaluated_at_utc
+    IS NULL` guard). Ported from NightDesk's real repo (not the compressed
+    spec) via `docs/roadmap/ported/nightdesk-stats-contract.md`. **Deliberate,
+    documented divergence from the compressed spec's "q_value stored,
+    immutable" wording**: NightDesk's own battle-tested implementation stores
+    NO verdict at all, always recomputed fresh so a hypothesis can be
+    correctly demoted as the family grows -- adopted as the real precedent,
+    evidence immutability kept exactly as specified. Switched `attribution.py`'s
+    floor from `len(rows)` to `effective_n()` (closes audit A1's false-edge
+    risk). `daily_brief.py` gains the survivorship-denominator caveat. **Two
+    Opus audits**: correctness found+fixed one HIGH (`r.get(...) or 1.0`
+    silently corrupted a legitimate `p=0.0` -- the strongest possible
+    bootstrap result -- into 1.0, since 0.0 is falsy in Python) and one
+    MEDIUM (`benjamini_hochberg`/`bh_q_values` could disagree at an exact
+    float64 boundary tie, verified via brute-force exact-fraction sweep);
+    scope/safety confirmed zero decision surface empirically (table has zero
+    production writers -- PR12 is the future writer) and one LOW doc-fix.
+    +50 tests. Suite green, ruff/mypy clean. **Unblocks BASELINE and EXP-1.**
+16. ✅ **INSTR-1** — merged `7219a08` 2026-07-09 (branch `a656c17`+`55a1288`,
+    overnight session continued). Class A/B (real trade-decision math, not
+    shadow). Part 1: `alphaos/data/intraday_volume_curve.py` -- curve-
+    normalized rel_volume (cumulative-to-now ÷ previous-full-day-volume ×
+    a market-typical time-of-day curve, a single versioned code constant, no
+    new data pipeline) replaces the structurally-dead cumulative-vs-
+    yesterday-full-day formula. Part 2: `Stop = entry ∓ k×ATR(14)`, `k=2.0`
+    pre-registered, as new default card `catalyst_momentum_v2` (v1 stays
+    registered, byte-identical, per PD#7). **Corrected a false premise found
+    while building**: the prior mapping's "daily bars already available" was
+    wrong -- built a disciplined once-daily scheduler job
+    (`alphaos/reports/atr_service.py`, new `atr_history` table) reusing the
+    existing `get_daily_bars()`, core-book universe only. Live-path-only
+    override (mock untouched); missing ATR data fails safe to reject
+    (`NO_ATR_DATA`), never a silent fallback. **Found+fixed a real
+    integration gap**: REG-1's regime arming-map was keyed by literal
+    card_id string and would have silently treated v2 as never-armed in any
+    regime. **Two Opus audits**: correctness APPROVE (zero bugs, 112
+    independent adversarial checks incl. DST correctness and hand-derived
+    ATR/stop-sign math); scope/safety APPROVE WITH NOTES (one MEDIUM --
+    ATR-capture failures were invisible to the operator and the rejection
+    reason got flattened downstream -- fixed pre-merge; a dedicated ATR-
+    coverage brief line explicitly deferred as KIV, not a safety gap).
+    +42 tests. Suite green, ruff/mypy clean. **This was the last item in
+    the operator's last explicit instruction — the full REG-1→TEXT-0→
+    EVAL-1→PORT-1→INSTR-1 chain is now done.**
 17. 🔴 **BASELINE** — deterministic shadow baseline, three arms (AI / threshold /
     propose-all), day-block-bootstrap CI; preregistrations row #1. Every week
     without it is unrecoverable paired evidence — as early as possible.
