@@ -1291,6 +1291,14 @@ class Orchestrator:
 
         return build_eval_report(self.journal, run_id=run_id)
 
+    def relabel_candidates(self, date_from: str, date_to: str, dry_run: bool = False) -> dict:
+        """TASK-R one-off: retro-relabel candidate_packets rows in
+        [date_from, date_to] through the CURRENT labeller. Never touches
+        an original row; see alphaos/relabel.py."""
+        from alphaos.relabel import relabel_candidates
+
+        return relabel_candidates(self.journal, self.settings, date_from, date_to, dry_run=dry_run)
+
     def outcomes_update(self, limit: int = 500) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/

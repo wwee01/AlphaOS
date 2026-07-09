@@ -287,6 +287,15 @@ SCHEMA: list[tuple[str, str]] = [
             prompt_tokens INTEGER,
             completion_tokens INTEGER,
             total_tokens INTEGER,
+            -- EVAL-1 addendum: the market-snapshot input to this evaluation,
+            -- stamped on every path (mock/live/rejection) by
+            -- OpenAIClient.evaluate(). Previously the primary evaluator was
+            -- the one AI call in this codebase whose input could never be
+            -- replayed after the fact (unlike the labeller's packet_json,
+            -- which EVAL-1 already replays) -- this starts that record
+            -- accruing going forward. NULL on every row before this column
+            -- existed; never backfilled (the data didn't exist).
+            snapshot_json TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1055,6 +1064,12 @@ SCHEMA: list[tuple[str, str]] = [
             prompt_tokens INTEGER,
             completion_tokens INTEGER,
             total_tokens INTEGER,
+            -- TASK-R: retro-relabel. NULL on every normal (scan-time) row;
+            -- set only on a NEW row produced by `alphaos relabel`, pointing
+            -- back to the label_id of the row it is a clean replay of. The
+            -- original row is NEVER modified (append-only law) -- this is
+            -- purely a forward pointer from the new row to the old one.
+            relabel_of TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )

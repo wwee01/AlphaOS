@@ -166,6 +166,34 @@ def cmd_eval_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_relabel(orch: Orchestrator, date_from: str, date_to: str, dry_run: bool) -> int:
+    """TASK-R one-off: replay stored packet_json for candidate_packets rows
+    in [date_from, date_to] through the CURRENT labeller. --dry-run prints
+    composed prompts with zero network calls; the live run persists new
+    candidate_labels rows (relabel_of set, originals never touched) and
+    prints an old-vs-new label diff table."""
+    res = orch.relabel_candidates(date_from, date_to, dry_run=dry_run)
+    if "error" in res:
+        _print({"relabel": res})
+        return 1
+
+    if dry_run:
+        print(f"DRY RUN -- {res['n_packets']} packet(s) in [{date_from}, {date_to}], zero network calls:\n")
+        for p in res["prompts"]:
+            print(f"--- {p['symbol']} ({p['packet_id']}) ---")
+            print(p["prompt"])
+            print()
+    else:
+        print(f"Relabelled {res['n_relabelled']}/{res['n_packets']} packet(s) in [{date_from}, {date_to}]:\n")
+        print(f"{'symbol':<8} {'old label':<20} {'new label':<20} {'old dec':<10} {'new dec':<10}")
+        for d in res["diffs"]:
+            print(f"{d['symbol']:<8} {str(d['old_label']):<20} {str(d['new_label']):<20} "
+                  f"{str(d['old_decision']):<10} {str(d['new_decision']):<10}")
+        print()
+    _print({"relabel": {k: v for k, v in res.items() if k not in ("prompts",)}})
+    return 0
+
+
 def cmd_universe_build(orch: Orchestrator) -> int:
     """EXP-0: screen the tradable universe down to the shadow-tier ADV/price
     band and write the result to the committed universe file (NOT git-add'd
@@ -500,6 +528,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("eval_report",
                    help="EVAL-1: the latest eval run's report (parse rate, label agreement vs "
                         "ground truth, categorical stability)")
+    rl = sub.add_parser("relabel",
+                        help="TASK-R one-off: retro-relabel candidate_packets in a date range through "
+                             "the current labeller; never touches an original row")
+    rl.add_argument("--from", dest="date_from", required=True, help="SGT calendar date, YYYY-MM-DD")
+    rl.add_argument("--to", dest="date_to", required=True, help="SGT calendar date, YYYY-MM-DD")
+    rl.add_argument("--dry-run", action="store_true", help="print composed prompts, zero network calls")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -591,6 +625,8 @@ def main(argv=None) -> int:
             return cmd_eval(orch, args.corpus_dir, args.repeats)
         if args.command == "eval_report":
             return cmd_eval_report(orch)
+        if args.command == "relabel":
+            return cmd_relabel(orch, args.date_from, args.date_to, args.dry_run)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":

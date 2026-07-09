@@ -72,6 +72,11 @@ class OpenAIEvaluation:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    # EVAL-1 addendum: the market-snapshot input to THIS evaluation, stamped
+    # by OpenAIClient.evaluate() on every path (mock/live/rejection) -- the
+    # only way a future eval harness could ever replay the primary
+    # evaluator, since the snapshot was previously never persisted anywhere.
+    snapshot: Optional[dict] = None
 
     def to_row(self) -> dict:
         return {
@@ -111,6 +116,7 @@ class OpenAIEvaluation:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
+            "snapshot_json": self.snapshot or {},
         }
 
 
@@ -153,9 +159,21 @@ class OpenAIClient:
                         f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
                         {"error": str(exc)},
                     )
-                return self._rejection(candidate, "OpenAI call failed; rejected for safety.",
-                                       [ReasonCode.OPENAI_REJECT.value])
-        return self._enforce_min_reward_risk(evaluation, candidate)
+                evaluation = self._rejection(candidate, "OpenAI call failed; rejected for safety.",
+                                             [ReasonCode.OPENAI_REJECT.value])
+        evaluation = self._enforce_min_reward_risk(evaluation, candidate)
+        # EVAL-1 addendum: journal the snapshot input alongside every real
+        # evaluation (all paths, including rejections/fail-safes -- those
+        # are precisely the examples a future replay harness needs most,
+        # same "retention starts here" law EVAL-1 already applies to the
+        # labeller). Stamped LAST, after _enforce_min_reward_risk -- that
+        # guard can swap in a brand-new rejection object of its own, which
+        # would otherwise miss the stamp if this ran before it. The primary
+        # evaluator's own snapshot input was previously never persisted
+        # anywhere, making it the one AI call in this codebase that could
+        # never be replayed after the fact.
+        evaluation.snapshot = snapshot
+        return evaluation
 
     def _enforce_min_reward_risk(self, evaluation: OpenAIEvaluation,
                                  candidate: "Union[dict, ScanContext]") -> OpenAIEvaluation:
