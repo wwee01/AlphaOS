@@ -19,11 +19,50 @@ arm's mean as a fixed reference, then center each of the OTHER arm's own
 observations against that fixed reference, producing one delta per row.
 This is a real design choice, not the only possible one -- see each
 function's own docstring for which arm was frozen as the reference and why.
+
+CORRECTNESS-AUDIT FIX (HIGH-1/HIGH-2): ``candidate_outcomes`` is one row per
+``(candidate_id, candidate_type)`` (schema.py's own
+``idx_candoutcomes_candidate_type``), not one row per candidate -- every
+candidate gets exactly one "AlphaOS-side" row (``candidate_type`` in
+``outcomes_tracker._ALPHAOS_SIDE_TYPES`` -- mutually exclusive by that
+module's own priority classification) PLUS, when a human later overrides
+the decision, a SEPARATE ``'user_override'`` row seeded in parallel
+(outcomes_tracker.py's own module comment: "seeded separately, in
+parallel"). A bare ``JOIN candidate_outcomes ON candidate_id`` therefore
+silently double-counts exactly those candidates -- corrupting every
+reference-arm mean below, and in the original ``h_ttl_1_rows`` letting the
+SAME row land in both the expired and approved arms whenever a candidate's
+trade_proposals history has more than one row (a normal re-propose-after-
+expiry lifecycle). Every join in this file now pins to a single row per
+candidate_id via a `col.id = (SELECT ... ORDER BY id DESC LIMIT 1)`
+subquery -- "most recent wins", the SAME convention baseline_report.py and
+regime_arming_scorer.py already use for their own candidate_outcomes/
+trade_proposals joins -- applied uniformly here rather than trusting
+today's absence of a *known* duplicate-producing code path for the other
+joined tables (candidate_catalysts/last30days_polarity have no DB-level
+uniqueness constraint on candidate_id either).
 """
 
 from __future__ import annotations
 
 from typing import Optional
+
+# "Most recent, non-user_override candidate_outcomes row for this
+# candidate_id" -- see module docstring. `{ref}` is always a fixed internal
+# column reference this module controls (e.g. "t.candidate_id"), never
+# user input.
+_LATEST_OUTCOME = (
+    "co.id = (SELECT co2.id FROM candidate_outcomes co2 "
+    "WHERE co2.candidate_id = {ref} AND co2.candidate_type != 'user_override' "
+    "ORDER BY co2.id DESC LIMIT 1)"
+)
+# "Most recent trade_proposals row for this candidate_id" -- used both for
+# the plain max_holding_days LEFT JOIN (5 functions) and, in h_ttl_1_rows,
+# as the driving table's own dedup.
+_LATEST_PROPOSAL = (
+    "tp.id = (SELECT tp2.id FROM trade_proposals tp2 "
+    "WHERE tp2.candidate_id = {ref} ORDER BY tp2.id DESC LIMIT 1)"
+)
 
 
 def _mean(values: list[float]) -> Optional[float]:
@@ -62,10 +101,12 @@ def h_tqs_1_rows(journal) -> tuple[list[dict], str]:
         "SELECT t.symbol, t.candidate_id, t.tqs_score, co.forward_3d_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM tqs_scores t "
-        "JOIN candidate_outcomes co ON co.candidate_id = t.candidate_id "
-        "LEFT JOIN trade_proposals tp ON tp.candidate_id = t.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="t.candidate_id") + " "
+        "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="t.candidate_id") + " "
         "WHERE t.source_type = 'candidate' AND t.is_mock = 0 "
-        "AND t.data_quality_status = 'ok' AND co.forward_3d_r IS NOT NULL"
+        "AND t.data_quality_status = 'ok' AND co.forward_3d_r IS NOT NULL "
+        "AND t.id = (SELECT t2.id FROM tqs_scores t2 WHERE t2.candidate_id = t.candidate_id "
+        "AND t2.source_type = 'candidate' ORDER BY t2.id DESC LIMIT 1)"
     )
     scores = [r["tqs_score"] for r in rows if r["tqs_score"] is not None]
     if len(scores) < 4:
@@ -96,10 +137,12 @@ def h_cat_1_rows(journal) -> tuple[list[dict], str]:
         "SELECT cc.symbol, cc.candidate_id, cc.catalyst_status, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM candidate_catalysts cc "
-        "JOIN candidate_outcomes co ON co.candidate_id = cc.candidate_id "
-        "LEFT JOIN trade_proposals tp ON tp.candidate_id = cc.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="cc.candidate_id") + " "
+        "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="cc.candidate_id") + " "
         "WHERE cc.catalyst_status IN ('confirmed', 'none_found') "
-        "AND co.replay_r IS NOT NULL"
+        "AND co.replay_r IS NOT NULL "
+        "AND cc.id = (SELECT cc2.id FROM candidate_catalysts cc2 "
+        "WHERE cc2.candidate_id = cc.candidate_id ORDER BY cc2.id DESC LIMIT 1)"
     )
     none_found_mean = _mean([r["replay_r"] for r in rows if r["catalyst_status"] == "none_found"])
     if none_found_mean is None:
@@ -120,13 +163,15 @@ def h_int_1_rows(journal) -> tuple[list[dict], str]:
     """Interest-score top decile vs the population median, on replay_r --
     the population median (not a bottom-decile mean) is the frozen
     reference, matching the spec's own literal "top decile > median"
-    wording."""
+    wording. `candidates.candidate_id` is DB-level UNIQUE (schema.py), so
+    this driving table needs no dedup of its own -- only the
+    candidate_outcomes/trade_proposals joins do."""
     rows = journal.query(
         "SELECT c.symbol, c.candidate_id, c.interest_score, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM candidates c "
-        "JOIN candidate_outcomes co ON co.candidate_id = c.candidate_id "
-        "LEFT JOIN trade_proposals tp ON tp.candidate_id = c.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="c.candidate_id") + " "
+        "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="c.candidate_id") + " "
         "WHERE c.interest_score IS NOT NULL AND co.replay_r IS NOT NULL"
     )
     scores = [r["interest_score"] for r in rows]
@@ -153,14 +198,15 @@ def h_win_1_rows(journal) -> tuple[list[dict], str]:
     windows, on replay_r. Afternoon is the frozen reference (the rel_volume
     formula's own denominator is a full-PRIOR-day baseline, structurally
     least distorted late in the session) -- each morning row's replay_r is
-    centered against it."""
+    centered against it. `candidates.candidate_id` is DB-level UNIQUE, so
+    only the candidate_outcomes/trade_proposals joins need dedup."""
     rows = journal.query(
         "SELECT c.symbol, c.candidate_id, sb.started_at_sgt, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM candidates c "
         "JOIN scan_batches sb ON sb.scan_batch_id = c.scan_batch_id "
-        "JOIN candidate_outcomes co ON co.candidate_id = c.candidate_id "
-        "LEFT JOIN trade_proposals tp ON tp.candidate_id = c.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="c.candidate_id") + " "
+        "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="c.candidate_id") + " "
         "WHERE sb.market_session = 'regular' AND co.replay_r IS NOT NULL "
         "AND sb.started_at_sgt IS NOT NULL"
     )
@@ -198,14 +244,21 @@ def h_ttl_1_rows(journal) -> tuple[list[dict], str]:
     approved) argues FOR "approval adds value"; a delta indistinguishable
     from zero argues AGAINST it (approval isn't the bottleneck) -- per the
     hypothesis's own "either direction is informative" framing, this
-    function does not pick a side, it only produces the comparable rows."""
+    function does not pick a side, it only produces the comparable rows.
+
+    A candidate can carry MULTIPLE trade_proposals rows (re-propose after
+    expiry, a normal PR6 lifecycle) -- this pins to each candidate's single
+    MOST RECENT proposal (the "final" outcome superseding an earlier
+    expiry), never both, so the same candidate_outcomes row can never land
+    in both arms (correctness-audit HIGH-1's cross-arm-leakage finding)."""
     rows = journal.query(
         "SELECT tp.status, co.symbol, co.candidate_id, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM trade_proposals tp "
-        "JOIN candidate_outcomes co ON co.candidate_id = tp.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="tp.candidate_id") + " "
         "WHERE tp.status IN ('expired', 'approved', 'submitted', 'filled') "
-        "AND co.replay_r IS NOT NULL"
+        "AND co.replay_r IS NOT NULL "
+        "AND " + _LATEST_PROPOSAL.format(ref="tp.candidate_id")
     )
     approved_mean = _mean([r["replay_r"] for r in rows if r["status"] in ("approved", "submitted", "filled")])
     if approved_mean is None:
@@ -226,7 +279,8 @@ def h_rej_1_rows(journal) -> tuple[list[dict], str]:
     """Operator rejections' own already-computed delta_r -- maps directly
     onto the existing attribution machinery, no centering needed (this is
     exactly the same shape as BASELINE's own H-AI-1, just a different
-    attribution_type slice)."""
+    attribution_type slice). attribution_records carries no candidate_id
+    fan-out risk here -- read directly, one row per resolved rejection."""
     rows = journal.query(
         "SELECT symbol, delta_r, decision_at_utc "
         "FROM attribution_records "
@@ -255,10 +309,12 @@ def h_pol_1_rows(journal) -> tuple[list[dict], str]:
         "SELECT p.symbol, p.candidate_id, p.direction_alignment, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM last30days_polarity p "
-        "JOIN candidate_outcomes co ON co.candidate_id = p.candidate_id "
-        "LEFT JOIN trade_proposals tp ON tp.candidate_id = p.candidate_id "
+        "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="p.candidate_id") + " "
+        "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="p.candidate_id") + " "
         "WHERE p.direction_alignment IN ('aligned', 'divergent') "
-        "AND co.replay_r IS NOT NULL"
+        "AND co.replay_r IS NOT NULL "
+        "AND p.id = (SELECT p2.id FROM last30days_polarity p2 "
+        "WHERE p2.candidate_id = p.candidate_id ORDER BY p2.id DESC LIMIT 1)"
     )
     aligned_mean = _mean([r["replay_r"] for r in rows if r["direction_alignment"] == "aligned"])
     if aligned_mean is None:

@@ -119,6 +119,58 @@ def test_h_ai_1_stays_unlinked_when_baseline_not_yet_registered(journal):
     assert row["status"] == HypothesisStatus.PROPOSED.value
 
 
+def test_h_ai_1_links_to_the_real_cmd_baseline_register_output(orchestrator):
+    """Scope/safety-audit suggestion: the previous two tests only prove
+    self-consistency (registry.py's own constants matching themselves).
+    This calls the REAL `alphaos baseline_register` CLI command -- if
+    anyone ever edits BASELINE's hypothesis/metric wording in __main__.py
+    without updating registry.py's copy, H-AI-1 silently reverts to
+    'proposed' with prereg_id=None and no error. Exercising the actual
+    integration point is the only way to catch that drift."""
+    from alphaos.__main__ import cmd_baseline_register
+
+    exit_code = cmd_baseline_register(orchestrator)
+    assert exit_code == 0
+    baseline_row = orchestrator.journal.one(
+        "SELECT prereg_id FROM preregistrations ORDER BY id DESC LIMIT 1"
+    )
+
+    spec = next(h for h in SEEDED_HYPOTHESES if h["hypothesis_id"] == "H-AI-1")
+    row = hyp_registry.propose_hypothesis(orchestrator.journal, spec)
+
+    assert row["prereg_id"] == baseline_row["prereg_id"]
+    assert row["status"] == HypothesisStatus.TESTING.value
+
+
+def test_propose_hypothesis_survives_a_concurrent_duplicate_insert_race(journal, monkeypatch):
+    """Correctness-audit LOW-1: simulate the narrow check-then-insert race
+    by having a second 'concurrent' seeder win the insert first. The DB-level
+    UNIQUE constraint on hypothesis_id must be caught and treated like an
+    already-registered row, never an uncaught IntegrityError."""
+    spec = next(h for h in SEEDED_HYPOTHESES if h["hypothesis_id"] == "H-TQS-1")
+    winner = hyp_registry.propose_hypothesis(journal, spec)  # the "concurrent winner"
+
+    real_one = journal.one
+    call_count = {"n": 0}
+
+    def _one_that_misses_once(sql, params=()):
+        # First SELECT (the idempotency pre-check) reports "not yet registered"
+        # even though it actually is, forcing the insert below to race into
+        # the real UNIQUE constraint -- exactly the race window LOW-1 names.
+        call_count["n"] += 1
+        if call_count["n"] == 1 and "WHERE hypothesis_id = ?" in sql:
+            return None
+        return real_one(sql, params)
+
+    monkeypatch.setattr(journal, "one", _one_that_misses_once)
+
+    result = hyp_registry.propose_hypothesis(journal, spec)  # must not raise
+
+    assert result["hypothesis_id"] == "H-TQS-1"
+    assert result["id"] == winner["id"]
+    assert journal.count_rows("hypothesis_proposals", "hypothesis_id = ?", ("H-TQS-1",)) == 1
+
+
 def test_seed_all_seeds_exactly_8_rows_and_is_idempotent(journal):
     first = hyp_registry.seed_all(journal)
     assert len(first) == 8
@@ -190,6 +242,64 @@ def test_h_cat_1_rows_excludes_unavailable_and_error_status(journal):
     assert value_key == "centered_delta"
     assert len(rows) == 1  # only the 'confirmed' row is returned
     assert rows[0]["centered_delta"] == pytest.approx(0.0)  # 0.5 (own) - 0.5 (none_found mean)
+
+
+def test_h_cat_1_rows_ignores_a_parallel_user_override_outcome_row(journal):
+    """Correctness-audit HIGH-1/HIGH-2 regression: candidate_outcomes is one
+    row per (candidate_id, candidate_type) -- a candidate that was later
+    overridden by a human carries a SECOND, separate 'user_override' row
+    (outcomes_tracker.py's own "seeded separately, in parallel" comment). A
+    bare join would double-count that candidate and pull the wildly
+    different user_override replay_r into the mean/output. The dedup must
+    only ever see the real 'candidate' row."""
+    journal.insert("candidate_catalysts", {
+        "catalyst_id": "cat-c1", "candidate_id": "c1", "symbol": "AAPL", "catalyst_status": "confirmed",
+    })
+    _insert_outcome(journal, "c1", "AAPL", "2026-01-01", replay_r=0.5)  # the real row
+    _insert_outcome(  # the parallel override row -- must be invisible to this query
+        journal, "c1", "AAPL", "2026-01-01", replay_r=99.0,
+        outcome_id="out-c1-override", candidate_type="user_override",
+    )
+    journal.insert("candidate_catalysts", {
+        "catalyst_id": "cat-c2", "candidate_id": "c2", "symbol": "MSFT", "catalyst_status": "none_found",
+    })
+    _insert_outcome(journal, "c2", "MSFT", "2026-01-01", replay_r=0.5)
+
+    rows, value_key = hyp_queries.h_cat_1_rows(journal)
+
+    assert value_key == "centered_delta"
+    assert len(rows) == 1  # c1 must appear exactly once, never twice
+    assert rows[0]["centered_delta"] == pytest.approx(0.0)  # 0.5 (real row) - 0.5 (none_found mean) -- NOT 99.0-derived
+
+
+def test_h_ttl_1_rows_uses_only_the_most_recent_proposal_per_candidate(journal):
+    """Correctness-audit HIGH-1 regression: a candidate can carry more than
+    one trade_proposals row (re-propose after expiry, a normal lifecycle).
+    The SAME candidate_outcomes row must never land in both the expired arm
+    AND the approved reference mean -- only the candidate's single MOST
+    RECENT proposal counts."""
+    journal.insert("trade_proposals", {  # older, expired proposal for c1
+        "proposal_id": "p1-old", "candidate_id": "c1", "symbol": "AAPL", "status": "expired",
+    })
+    journal.insert("trade_proposals", {  # later re-proposal for the SAME candidate, approved
+        "proposal_id": "p1-new", "candidate_id": "c1", "symbol": "AAPL", "status": "approved",
+    })
+    _insert_outcome(journal, "c1", "AAPL", "2026-01-01", replay_r=0.5)
+    journal.insert("trade_proposals", {  # a genuinely expired candidate, never re-proposed
+        "proposal_id": "p2", "candidate_id": "c2", "symbol": "MSFT", "status": "expired",
+    })
+    _insert_outcome(journal, "c2", "MSFT", "2026-01-02", replay_r=-0.3)
+
+    rows, value_key = hyp_queries.h_ttl_1_rows(journal)
+
+    assert value_key == "centered_delta"
+    # c1's MOST RECENT proposal is 'approved' -- it must contribute to the
+    # reference mean, and must NOT also appear as an expired-arm row (which
+    # would mean the same replay_r was centered against a mean containing
+    # itself). Only c2 (genuinely, finally expired) should be in the output.
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "MSFT"
+    assert rows[0]["centered_delta"] == pytest.approx(-0.3 - 0.5)  # own (-0.3) - approved_mean (0.5, from c1 only)
 
 
 def test_h_rej_1_rows_passes_through_delta_r_unchanged(journal):

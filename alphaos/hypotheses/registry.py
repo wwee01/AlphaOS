@@ -16,6 +16,7 @@ path for the same claim.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -64,11 +65,11 @@ def _default_analysis_not_before(risk_class: str, now: Optional[datetime] = None
 
 
 def propose_hypothesis(journal, spec: dict, now: Optional[datetime] = None) -> dict:
-    """Idempotently create ONE ``hypothesis_proposals`` row from a
-    ``SEEDED_HYPOTHESES``-shaped ``spec`` dict. No-ops (returns the existing
-    row) if ``hypothesis_id`` is already registered -- matches
-    ``cmd_baseline_register()``'s own idiom; ``register_hypothesis()``
-    itself is NOT idempotent, so the guard must live in this wrapper.
+    """Create ONE ``hypothesis_proposals`` row from a ``SEEDED_HYPOTHESES``-
+    shaped ``spec`` dict, adding the idempotency ``register_hypothesis()``
+    itself deliberately lacks (matches ``cmd_baseline_register()``'s own
+    idiom: check-then-register, never register blindly). No-ops (returns
+    the existing row) if ``hypothesis_id`` is already registered.
 
     H-AI-1 (``spec['metric_fn_name'] is None``): looks up BASELINE's own
     ``prereg_id`` by text match instead of calling ``register_hypothesis()``.
@@ -77,6 +78,17 @@ def propose_hypothesis(journal, spec: dict, now: Optional[datetime] = None) -> d
     ``prereg_id`` rather than treating that as an error (BASELINE's own
     registration is outside this module's control and may simply not have
     run yet).
+
+    Correctness-audit LOW-1: the check-then-insert above has a narrow race
+    window between two truly-concurrent callers (not reachable under this
+    codebase's real single-nightly-scheduler-job model, since JobRunner's
+    own lock_key already serializes same-job-type runs -- see
+    job_runner.py's own ``acquire()`` docstring for the identical class of
+    race). ``hypothesis_id``'s DB-level UNIQUE constraint is the real
+    backstop: on an IntegrityError from that race, re-SELECT and return the
+    winner's row rather than raising -- the same "partial index/unique
+    constraint catches the loser, treat it as already-locked" idiom
+    ``JobRunner.acquire()`` uses for its own lock_key race.
     """
     existing = journal.one(
         "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?",
@@ -102,20 +114,33 @@ def propose_hypothesis(journal, spec: dict, now: Optional[datetime] = None) -> d
             params={"metric_fn_name": spec["metric_fn_name"], "card_id": spec.get("card_id")},
         )
 
-    journal.insert("hypothesis_proposals", {
-        "hypothesis_id": spec["hypothesis_id"],
-        "risk_class": risk_class,
-        "claim": spec["claim"],
-        "metric_description": spec["metric"],
-        "success_floor": spec["success_floor"],
-        "metric_fn_name": spec["metric_fn_name"],
-        "card_id": spec.get("card_id"),
-        "prereg_id": prereg_id,
-        "status": (
-            HypothesisStatus.TESTING.value if prereg_id else HypothesisStatus.PROPOSED.value
-        ),
-        "analysis_not_before": analysis_not_before,
-    })
+    try:
+        journal.insert("hypothesis_proposals", {
+            "hypothesis_id": spec["hypothesis_id"],
+            "risk_class": risk_class,
+            "claim": spec["claim"],
+            "metric_description": spec["metric"],
+            "success_floor": spec["success_floor"],
+            "metric_fn_name": spec["metric_fn_name"],
+            "card_id": spec.get("card_id"),
+            "prereg_id": prereg_id,
+            "status": (
+                HypothesisStatus.TESTING.value if prereg_id else HypothesisStatus.PROPOSED.value
+            ),
+            "analysis_not_before": analysis_not_before,
+        })
+    except sqlite3.IntegrityError:
+        # Lost a race against a concurrent seeder for this hypothesis_id --
+        # the prereg_id/preregistrations row registered just above is now
+        # orphaned (harmless: it is simply never linked from any
+        # hypothesis_proposals row), and the winner's row is authoritative.
+        winner = journal.one(
+            "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?",
+            (spec["hypothesis_id"],),
+        )
+        if winner is not None:
+            return winner
+        raise  # genuinely unexpected -- re-raise rather than return None
     return journal.one(
         "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?",
         (spec["hypothesis_id"],),

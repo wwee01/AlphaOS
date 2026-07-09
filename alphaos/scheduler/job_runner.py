@@ -178,8 +178,9 @@ class JobRunner:
     def run_due_jobs(self) -> list:
         """Run every job type that is currently due, in a fixed order (scan,
         monitor, outcomes_update, daily_digest, benchmark_spine,
-        text_archive_pull). Job types that are not due get a ``not_due``
-        entry WITHOUT any job_runs row being inserted.
+        text_archive_pull, atr_update, hypothesis_resolve). Job types that
+        are not due get a ``not_due`` entry WITHOUT any job_runs row being
+        inserted.
 
         PR9: a due job type that is currently FUSED (too many consecutive
         failures -- see ``cadence.is_fused``) is also skipped, with no
