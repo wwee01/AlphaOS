@@ -100,7 +100,16 @@ SEEDED_HYPOTHESES: list[dict] = [
                   "against mean(replay_r | catalyst_status='none_found')",
         "success_floor": 0.2,
         "metric_fn_name": "h_cat_1_rows",
-        "card_id": "catalyst_momentum_v2",
+        # Correction (2026-07-10, self-caught during PR13 slice 2 research):
+        # the "Cards v2-v5" section of the specs doc explicitly says
+        # "Promotion gated on H-CAT-1 resolving TRUE" for v3
+        # catalyst_continuation_pullback_v1 (a not-yet-built shadow card) --
+        # NOT catalyst_momentum_v2 (the existing, already-live default
+        # card). This field is documentation-only in PR12 itself (nothing
+        # here acts on it), but PR13 slice 2 will read it to decide which
+        # card to promote, so the wrong value would have silently pointed
+        # promotion at an unrelated, already-live card.
+        "card_id": "catalyst_continuation_pullback_v1",
     },
     {
         "hypothesis_id": "H-INT-1",
