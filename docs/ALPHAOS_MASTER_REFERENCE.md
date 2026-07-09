@@ -703,8 +703,22 @@ item specs under their canonical names in the specs doc):**
     + regression tests verified to fail pre-fix/pass post-fix), scope/safety
     **APPROVE WITH NOTES** (zero BLOCKER/HIGH/MEDIUM). 31 tests, full suite
     green (1392 passed), ruff/mypy clean. **COMMITTED, NOT YET MERGED**,
-    holding for explicit operator merge instruction. → **PR13** (scoreboard +
-    demotion slice first, then promotion + PR13.5 diff→version) → cards v2–v3 →
+    holding for explicit operator merge instruction. → **PR13 slice 1** 🟡
+    (scoreboard + auto-demotion) — built + audit-fixed 2026-07-10, branch
+    `feat/pr13-scoreboard-demotion` @ `d809575` (build `1a6add1` +
+    audit-fixup `d809575`). Two independent Opus audits, both **APPROVE
+    WITH NOTES**, zero BLOCKER/HIGH from either: correctness found one LOW
+    (demotion alert fired before the DB insert, a narrow CLI-vs-scheduler
+    race could double-page — fixed by reordering to insert-then-alert) and
+    a NIT; scope/safety found one MEDIUM (a demoted card vanished silently
+    from the scoreboard report with no standing marker — fixed, now shows
+    a "Demoted (terminal)" section) and confirmed all other hard invariants
+    (Prime Directive 7 never touched, zero promotion scope creep, zero
+    decision-surface leakage, floor reused verbatim from `attribution.py`,
+    complete scheduler wiring). 22 tests, full suite green (1383 passed),
+    ruff/mypy clean. **COMMITTED, NOT YET MERGED**, holding for explicit
+    operator merge instruction. → **PR13 slice 2** (promotion + PR13.5
+    diff→version, not yet built) → cards v2–v3 →
     **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
     renamed 2026-07-08 late since REG-1, its measurement half, now lands at
     13b; evidence-gated on REG-1's shadow arming-map scorer reaching its
