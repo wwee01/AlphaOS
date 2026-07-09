@@ -24,6 +24,7 @@ from alphaos.constants import (
     OverrideOutcomeStatus,
 )
 from alphaos.reports.metrics import compute_metrics
+from alphaos.stats.effective_n import effective_n as _effective_n
 from alphaos.util import timeutils
 
 # Below this many *resolved* overrides, attribution is anecdotal, not statistical.
@@ -213,18 +214,34 @@ def _floor_gated_v2_aggregate(rows: list[dict], delta_key: str,
                               min_resolved: int = MIN_RESOLVED_FOR_V2_AGGREGATE) -> dict:
     """``rows`` must already be resolved, non-mock, non-demo rows for ONE
     slice (a type+agent pair, or an execution-gap slice). Returns counts
-    always; mean/sum ``delta_key`` ONLY when both the resolved count AND the
-    calendar span between the first and last resolved event meet the floor --
-    a burst of same-day events never masquerades as weeks of evidence."""
+    always; mean/sum ``delta_key`` ONLY when both the EFFECTIVE (correlation-
+    adjusted, PORT-1) count AND the calendar span between the first and last
+    resolved event meet the floor -- a burst of same-day events never
+    masquerades as weeks of evidence, and a cluster of same-day correlated
+    events never masquerades as that many independent bets (audit A1: on a
+    one-beta-cluster universe, 30 raw rows can be as few as 3-5 independent
+    observations -- exactly the false-edge risk PORT-1 exists to close).
+    ``attribution_records`` doesn't carry ``max_holding_days``, so clustering
+    here degrades to same-day-only (see ``effective_n()``'s own docstring) --
+    still catches the dominant real case of same-day correlated events, just
+    not a rarer multi-day-holding-period overlap. Both ``resolved_count`` AND
+    ``effective_n`` are always returned so row inflation stays visible."""
     n = len(rows)
     span = _span_days(rows)
-    meets_floor = n >= min_resolved and (span or 0) >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE
+    en = _effective_n([
+        {"symbol": r.get("symbol"), "decision_date": (r.get("decision_at_utc") or "")[:10]}
+        for r in rows
+    ])
+    eff_n = en["effective_n"]
+    meets_floor = eff_n >= min_resolved and (span or 0) >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE
     deltas = [r[delta_key] for r in rows if r.get(delta_key) is not None]
     if not meets_floor:
-        return {"resolved_count": n, "span_days": round(span, 1) if span is not None else None,
+        return {"resolved_count": n, "effective_n": eff_n,
+                "span_days": round(span, 1) if span is not None else None,
                 "mean_delta_r": None, "sum_delta_r": None, "status": "below_sample_floor"}
     return {
-        "resolved_count": n, "span_days": round(span, 1) if span is not None else None,
+        "resolved_count": n, "effective_n": eff_n,
+        "span_days": round(span, 1) if span is not None else None,
         "mean_delta_r": round(sum(deltas) / len(deltas), 4) if deltas else None,
         "sum_delta_r": round(sum(deltas), 4) if deltas else None,
         "status": "ok",
@@ -326,7 +343,8 @@ def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
     # coarser "who outperformed" question over a different table).
     attribution_records = journal.query(
         "SELECT ar.attribution_type, ar.agent, ar.resolved_status, ar.delta_r, "
-        "ar.execution_delta_r, ar.is_mock, ar.resolved_at_utc, c.card_id "
+        "ar.execution_delta_r, ar.is_mock, ar.resolved_at_utc, ar.symbol, "
+        "ar.decision_at_utc, c.card_id "
         "FROM attribution_records ar LEFT JOIN candidates c ON c.candidate_id = ar.candidate_id "
         "ORDER BY ar.id DESC LIMIT ?",
         (limit,),
@@ -416,14 +434,14 @@ def render_markdown(rep: dict) -> str:
             for agent, agg in by_agent.items():
                 if agg["status"] == "ok":
                     lines.append(
-                        f"- {t} / {agent}: n={agg['resolved_count']} "
+                        f"- {t} / {agent}: n={agg['resolved_count']} (effective_n={agg['effective_n']}) "
                         f"(span {agg['span_days']}d) mean ΔR={agg['mean_delta_r']} "
                         f"sum ΔR={agg['sum_delta_r']}"
                     )
                 else:
                     lines.append(
-                        f"- {t} / {agent}: n={agg['resolved_count']} — below_sample_floor "
-                        f"(needs ≥{v2['sample_floor_resolved']} resolved over "
+                        f"- {t} / {agent}: n={agg['resolved_count']} (effective_n={agg['effective_n']}) "
+                        f"— below_sample_floor (needs ≥{v2['sample_floor_resolved']} effective over "
                         f"≥{v2['sample_floor_span_days']}d)"
                     )
         if not v2["aggregate_delta_r_by_type_and_agent"]:
@@ -432,13 +450,13 @@ def render_markdown(rep: dict) -> str:
         for card_id, agg in v2["aggregate_delta_r_by_card"].items():
             if agg["status"] == "ok":
                 lines.append(
-                    f"- {card_id}: n={agg['resolved_count']} (span {agg['span_days']}d) "
-                    f"mean ΔR={agg['mean_delta_r']} sum ΔR={agg['sum_delta_r']}"
+                    f"- {card_id}: n={agg['resolved_count']} (effective_n={agg['effective_n']}) "
+                    f"(span {agg['span_days']}d) mean ΔR={agg['mean_delta_r']} sum ΔR={agg['sum_delta_r']}"
                 )
             else:
                 lines.append(
-                    f"- {card_id}: n={agg['resolved_count']} — below_sample_floor "
-                    f"(needs ≥{v2['sample_floor_subslice_resolved']} resolved)"
+                    f"- {card_id}: n={agg['resolved_count']} (effective_n={agg['effective_n']}) "
+                    f"— below_sample_floor (needs ≥{v2['sample_floor_subslice_resolved']} effective)"
                 )
         if not v2["aggregate_delta_r_by_card"]:
             lines.append("- (none)")
@@ -446,10 +464,10 @@ def render_markdown(rep: dict) -> str:
         lines += ["", "## Execution gap (propose_approved_executed)"]
         if eg["status"] == "ok":
             lines.append(
-                f"- n={eg['resolved_count']} (span {eg['span_days']}d) "
+                f"- n={eg['resolved_count']} (effective_n={eg['effective_n']}) (span {eg['span_days']}d) "
                 f"mean execution ΔR={eg['mean_delta_r']} sum={eg['sum_delta_r']}"
             )
         else:
-            lines.append(f"- n={eg['resolved_count']} — below_sample_floor")
+            lines.append(f"- n={eg['resolved_count']} (effective_n={eg['effective_n']}) — below_sample_floor")
         lines += ["", f"> ⚠️ {v2['caveat']}"]
     return "\n".join(lines)

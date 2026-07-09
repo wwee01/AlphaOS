@@ -268,6 +268,75 @@ def test_moonshot_gap_negative_expectancy(journal):
     assert gap["binding_constraint"] == "expectancy"
 
 
+# --------------------------------------------- PORT-1 survivorship denominator
+def test_moonshot_gap_survivorship_caveat_present_on_empty_registry(journal):
+    """An honest 0/0/0 -- the mechanism exists, nothing has registered a
+    hypothesis yet (PR12 is the future writer), never omitted."""
+    settings = make_settings()
+    gap = _moonshot_gap(journal, settings)
+
+    assert gap["preregistration_family"] == {
+        "hypotheses_registered": 0, "hypotheses_tested": 0, "promoted": 0,
+    }
+    assert "hypotheses" in gap["survivorship_caveat"].lower() or "system-level" in gap["survivorship_caveat"].lower()
+
+
+def test_moonshot_gap_survivorship_caveat_present_on_ok_status_too(journal):
+    """The caveat is about the PREREGISTRATION family, not about whether the
+    trade-count floor was met -- must appear on the "ok" branch as well."""
+    settings = make_settings(MAX_RISK_PER_TRADE_PCT="0.01")
+    now = timeutils.now_utc()
+    for r in [0.2, 0.3, 0.4, 0.5, 0.6]:
+        pos_id = new_id("pos")
+        journal.insert("positions", {"position_id": pos_id, "symbol": "AAPL", "is_demo": 0})
+        journal.insert("trade_outcomes", {
+            "outcome_id": new_id("out"), "position_id": pos_id, "symbol": "AAPL", "realized_r": r,
+        })
+
+    gap = _moonshot_gap(journal, settings, now=now)
+
+    assert gap["status"] == "ok"
+    assert gap["preregistration_family"] == {
+        "hypotheses_registered": 0, "hypotheses_tested": 0, "promoted": 0,
+    }
+    assert gap["survivorship_caveat"]
+
+
+def test_moonshot_gap_survivorship_counts_full_family_not_just_promoted(journal):
+    """The count is over promoted + demoted + withdrawn -- never just the
+    promoted subset (contract doc port spec item 5)."""
+    from alphaos.stats.preregistration import evaluate_hypothesis, register_hypothesis
+
+    settings = make_settings()
+    rejected_id = register_hypothesis(
+        journal, hypothesis="rejected one", metric="delta_r",
+        floor_effective_n=2, floor_span_days=1, analysis_not_before="2026-09-01",
+    )
+    evaluate_hypothesis(
+        journal, rejected_id,
+        [{"symbol": "AAPL", "decision_date": "2026-01-01", "delta_r": -5.0},
+         {"symbol": "MSFT", "decision_date": "2026-01-02", "delta_r": -5.0}],
+        value_key="delta_r", seed=1,
+    )
+    register_hypothesis(  # never evaluated -- must NOT count toward hypotheses_tested
+        journal, hypothesis="still pending", metric="delta_r",
+        floor_effective_n=2, floor_span_days=1, analysis_not_before="2026-09-01",
+    )
+
+    gap = _moonshot_gap(journal, settings)
+
+    assert gap["preregistration_family"] == {
+        "hypotheses_registered": 2, "hypotheses_tested": 1, "promoted": 0,
+    }
+
+
+def test_render_markdown_includes_survivorship_caveat_line(orchestrator):
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+    assert "hypotheses_tested=" in md
+    assert "promoted=" in md
+
+
 # ------------------------------------------------------- floors/caveats present
 def test_market_condition_caveat_always_present(orchestrator):
     brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)

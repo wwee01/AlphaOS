@@ -866,8 +866,9 @@ def test_report_below_sample_floor_shows_counts_only():
 
     records = [
         {"attribution_type": "propose_user_rejected", "agent": "user", "resolved_status": "resolved",
-        "delta_r": 1.0, "execution_delta_r": None, "is_mock": 0, "resolved_at_utc": "2026-01-01T00:00:00+00:00"}
-        for _ in range(5)
+        "delta_r": 1.0, "execution_delta_r": None, "is_mock": 0, "resolved_at_utc": "2026-01-01T00:00:00+00:00",
+        "symbol": f"SYM{i:02d}", "decision_at_utc": "2026-01-01T00:00:00+00:00"}
+        for i in range(5)
     ]
     rep = compute_attribution_v2(records)
     agg = rep["aggregate_delta_r_by_type_and_agent"]["propose_user_rejected"]["user"]
@@ -875,19 +876,25 @@ def test_report_below_sample_floor_shows_counts_only():
     assert agg["mean_delta_r"] is None
     assert agg["sum_delta_r"] is None
     assert agg["resolved_count"] == 5
+    assert agg["effective_n"] == 5
 
 
 def test_report_meets_sample_floor_shows_aggregate():
     from alphaos.reports.attribution import compute_attribution_v2
 
     # Jan 1 -> Jan 29 is a 28-day span (29 - 1 = 28), meeting the >=28 floor;
-    # 29 distinct days + 1 extra same-day record hits the >=30 resolved floor
-    # too, without changing the min/max span.
+    # 29 distinct days + 1 extra same-day record hits the >=30 RAW resolved
+    # floor too, without changing the min/max span. Each row gets its OWN
+    # symbol (PORT-1) so all 30 also land in 30 separate effective_n
+    # clusters -- a real 30-independent-observation fixture, not just 30
+    # rows sharing one symbol (which is exactly what PORT-1 exists to stop
+    # counting as 30 independent bets).
     timestamps = [f"2026-01-{d:02d}T00:00:00+00:00" for d in range(1, 30)] + ["2026-01-29T12:00:00+00:00"]
     records = [
         {"attribution_type": "propose_user_rejected", "agent": "user", "resolved_status": "resolved",
-        "delta_r": 1.0, "execution_delta_r": None, "is_mock": 0, "resolved_at_utc": ts}
-        for ts in timestamps
+        "delta_r": 1.0, "execution_delta_r": None, "is_mock": 0, "resolved_at_utc": ts,
+        "symbol": f"SYM{i:02d}", "decision_at_utc": ts}
+        for i, ts in enumerate(timestamps)
     ]
     assert len(records) == 30
     rep = compute_attribution_v2(records)
@@ -896,7 +903,41 @@ def test_report_meets_sample_floor_shows_aggregate():
     assert agg["mean_delta_r"] == 1.0
     assert agg["sum_delta_r"] == 30.0
     assert agg["resolved_count"] == 30
+    assert agg["effective_n"] == 30
     assert agg["span_days"] == 28.5
+
+
+def test_report_floor_gates_on_effective_n_not_raw_row_count():
+    """PORT-1's whole point (audit A1): 30 rows on ONE symbol/day are 1
+    independent observation, not 30 -- must stay below_sample_floor even
+    though the raw count alone would have cleared the old floor."""
+    from alphaos.reports.attribution import compute_attribution_v2
+
+    records = [
+        {"attribution_type": "propose_user_rejected", "agent": "user", "resolved_status": "resolved",
+        "delta_r": 1.0, "execution_delta_r": None, "is_mock": 0,
+        "resolved_at_utc": f"2026-02-{(i % 28) + 1:02d}T00:00:00+00:00",
+        "symbol": "AAPL", "decision_at_utc": "2026-02-01T00:00:00+00:00"}
+        for i in range(40)
+    ]
+    rep = compute_attribution_v2(records)
+    agg = rep["aggregate_delta_r_by_type_and_agent"]["propose_user_rejected"]["user"]
+    assert agg["resolved_count"] == 40
+    assert agg["effective_n"] == 1  # one symbol, one decision_date -> one cluster
+    assert agg["status"] == "below_sample_floor"
+    assert agg["mean_delta_r"] is None
+
+
+def test_no_remaining_len_rows_floor_check_in_attribution_report():
+    """PORT-1 spec's own required test: grep guard that the floor comparison
+    itself was actually switched to effective_n, not just that a new field
+    got added alongside an unchanged len(rows) gate."""
+    import alphaos.reports.attribution as attr_mod
+
+    src = pathlib.Path(attr_mod.__file__).read_text(encoding="utf-8")
+    meets_floor_line = next(line for line in src.splitlines() if "meets_floor = " in line)
+    assert "len(" not in meets_floor_line
+    assert "eff_n" in meets_floor_line or "effective_n" in meets_floor_line
 
 
 def test_report_excludes_mock_rows_from_aggregate_and_counts_them():

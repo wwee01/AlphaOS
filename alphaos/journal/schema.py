@@ -1770,6 +1770,58 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PORT-1: the pre-registration registry (ported from NightDesk's
+        # Thesis Research Layer -- see
+        # docs/roadmap/ported/nightdesk-stats-contract.md). One row per
+        # pre-specified hypothesis; every variant being compared gets its
+        # OWN row, never a shared/reused one (failures are never deleted --
+        # removing a row would retroactively shrink N for every hypothesis
+        # evaluated after it). `evaluated_at_utc` and the evidence columns
+        # (effective_n through evidence_status) are written EXACTLY ONCE by
+        # alphaos.stats.preregistration.evaluate_hypothesis() -- immutable
+        # thereafter, the anti-optional-stopping guard. Deliberately NO
+        # verdict/q_value column: the verdict is NEVER stored as
+        # authoritative (a documented departure from this table's own
+        # originally-compressed spec wording, resolved in the contract doc
+        # Sec 4) -- every consumer calls alphaos.stats.fdr.compute_verdicts()
+        # fresh over the full evaluated family instead.
+        # operator_approved_for_forward_test/operator_decision_at_utc/
+        # operator_notes are written ONLY by a human-facing path (none exists
+        # yet) -- the lab recommends, it never enrolls itself.
+        "preregistrations",
+        """
+        CREATE TABLE IF NOT EXISTS preregistrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prereg_id TEXT NOT NULL UNIQUE,
+            hypothesis TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            params_json TEXT,
+            floor_effective_n INTEGER NOT NULL,
+            floor_span_days REAL NOT NULL,
+            analysis_not_before TEXT NOT NULL,
+            strong_prior_pre_documented INTEGER NOT NULL DEFAULT 0,
+            strong_prior_reasoning TEXT,
+            registered_at_utc TEXT NOT NULL,
+            registered_at_sgt TEXT NOT NULL,
+            evaluated_at_utc TEXT,
+            effective_n INTEGER,
+            n_raw INTEGER,
+            span_days REAL,
+            point_estimate REAL,
+            ci_low REAL,
+            ci_high REAL,
+            ci_level REAL,
+            one_sided_p_below_zero REAL,
+            evidence_status TEXT,
+            operator_approved_for_forward_test INTEGER NOT NULL DEFAULT 0,
+            operator_decision_at_utc TEXT,
+            operator_notes TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -1917,6 +1969,9 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_eval_runs_started ON eval_runs(started_at_utc)",
     "CREATE INDEX IF NOT EXISTS idx_eval_results_run ON eval_results(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_eval_results_packet ON eval_results(packet_id)",
+    # PORT-1: compute_verdicts()'s family is "every evaluated preregistration"
+    # -- this is the index that lookup leans on.
+    "CREATE INDEX IF NOT EXISTS idx_preregistrations_evaluated ON preregistrations(evaluated_at_utc)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
