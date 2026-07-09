@@ -439,6 +439,9 @@ class Settings:
     # INSTR-1: "HH:MM" SGT, once-daily cadence (mirrors benchmark_spine) --
     # ATR(14) only changes once a day (built from completed daily bars).
     scheduler_atr_update_time: str
+    # PR13 slice 1: "HH:MM" SGT, once-daily cadence, after outcomes_update
+    # has had a chance to resolve the day's candidates.
+    scheduler_card_demotion_check_time: str
 
     # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
     # instrument) --- Defaults ON, same rationale as regime_enabled: pure
@@ -936,6 +939,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_atr_update_time = _get(src, "SCHEDULER_ATR_UPDATE_TIME", "06:30")
     _parse_hhmm(scheduler_atr_update_time, "SCHEDULER_ATR_UPDATE_TIME")
 
+    # PR13 slice 1: once-daily card-scoreboard/demotion cadence.
+    scheduler_card_demotion_check_time = _get(src, "SCHEDULER_CARD_DEMOTION_CHECK_TIME", "06:50")
+    _parse_hhmm(scheduler_card_demotion_check_time, "SCHEDULER_CARD_DEMOTION_CHECK_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1129,6 +1136,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         sec_edgar_contact_email=_get(src, "SEC_EDGAR_CONTACT_EMAIL", ""),
         scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         scheduler_atr_update_time=scheduler_atr_update_time,
+        scheduler_card_demotion_check_time=scheduler_card_demotion_check_time,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,

@@ -1906,6 +1906,77 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR13 slice 1: one rolling scoreboard snapshot per (card_id,
+        # card_version, evaluation_date) -- a DAILY re-evaluation, never
+        # one-shot-frozen like a PORT-1 preregistration (a card's own health
+        # is an operational monitor, re-checked every day, not a scientific
+        # hypothesis -- see alphaos/cards/scoreboard.py's own module
+        # docstring for why this deliberately does NOT go through
+        # register_hypothesis()/evaluate_hypothesis()). `breach` is TRUE
+        # only when the card clears its own MIN_RESOLVED_FOR_V2_AGGREGATE/
+        # MIN_SPAN_DAYS_FOR_V2_AGGREGATE floor (reused verbatim from
+        # attribution.py -- one-floor law) AND the clustered-bootstrap CI is
+        # reliably below zero (ci_high < 0) -- never a raw negative mean,
+        # which could easily be noise. `state` is a SNAPSHOT of
+        # setup_cards.state at evaluation time, purely for report
+        # convenience -- never itself mutated by this table (Prime
+        # Directive 7: only an operator-committed YAML version bump changes
+        # a card's own state).
+        "card_scoreboard_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS card_scoreboard_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL UNIQUE,
+            card_id TEXT NOT NULL,
+            card_version INTEGER NOT NULL,
+            evaluation_date TEXT NOT NULL,
+            state TEXT,
+            expectancy_r REAL,
+            ci_low REAL,
+            ci_high REAL,
+            effective_n INTEGER NOT NULL,
+            n_raw INTEGER NOT NULL,
+            span_days REAL,
+            clears_floor INTEGER NOT NULL DEFAULT 0,
+            breach INTEGER NOT NULL DEFAULT 0,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # PR13 slice 1: one demotion EVENT per (card_id, card_version),
+        # EVER -- the anti-double-jeopardy law (spec audit B3): a demoted
+        # card version is terminal, re-entry to live_eligible requires a NEW
+        # version. The UNIQUE index below is the real backstop (a second
+        # demotion attempt for the same card_id+version is a DB-level no-op,
+        # not just an application-level check). Fires only after >= 2
+        # CONSECUTIVE breach snapshots (audit A2 -- a sequential-test crumb
+        # against single-night noise), computed by re-querying
+        # card_scoreboard_snapshots history (the SAME "no separate counter
+        # column, count the streak from history" idiom
+        # alphaos.scheduler.cadence.is_fused() already uses for job_runs).
+        # Slice 2 (promotion, PR13/PR13.5) is explicitly out of scope here --
+        # this table only ever demotes, never promotes or un-demotes.
+        "card_demotions",
+        """
+        CREATE TABLE IF NOT EXISTS card_demotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            demotion_id TEXT NOT NULL UNIQUE,
+            card_id TEXT NOT NULL,
+            card_version INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            triggering_snapshot_id_1 TEXT NOT NULL,
+            triggering_snapshot_id_2 TEXT NOT NULL,
+            alert_sent INTEGER NOT NULL DEFAULT 0,
+            demoted_at_utc TEXT NOT NULL,
+            demoted_at_sgt TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2072,6 +2143,18 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_replay_status "
     "ON shadow_baseline_decisions(replay_status)",
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_symbol ON shadow_baseline_decisions(symbol)",
+    # PR13 slice 1: one snapshot per (card, version, day) -- idempotent
+    # re-run idiom (same as idx_universe_days_symbol_date/idx_regime_days_
+    # date_version: attempt an insert every daily tick, let the DB reject a
+    # same-day repeat). idx_card_demotions_card_version is the anti-double-
+    # jeopardy backstop -- a demotion is terminal, enforced at the DB level,
+    # not just in application code.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_scoreboard_snapshots_card_date "
+    "ON card_scoreboard_snapshots(card_id, card_version, evaluation_date)",
+    "CREATE INDEX IF NOT EXISTS idx_card_scoreboard_snapshots_lookup "
+    "ON card_scoreboard_snapshots(card_id, card_version, id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_demotions_card_version "
+    "ON card_demotions(card_id, card_version)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

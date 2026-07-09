@@ -178,6 +178,25 @@ def cmd_baseline_register(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_card_scoreboard(orch: Orchestrator) -> int:
+    """PR13 slice 1: per-card scoreboard -- PURE READ."""
+    from alphaos.cards.scoreboard import render_markdown
+
+    rep = orch.card_scoreboard_report()
+    print(render_markdown(rep))
+    print()
+    _print({"card_scoreboard": rep})
+    return 0
+
+
+def cmd_card_demotion_check(orch: Orchestrator) -> int:
+    """PR13 slice 1: one daily pass -- snapshot every live_eligible card,
+    demote (+ alert) any card with >= 2 consecutive breach snapshots."""
+    result = orch.card_demotion_check()
+    _print({"card_demotion_check": result})
+    return 0
+
+
 def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
@@ -570,6 +589,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("baseline_register",
                    help="BASELINE: one-off, idempotent -- register the pre-registration block "
                         "(preregistrations row #1)")
+    sub.add_parser("card_scoreboard",
+                   help="PR13 slice 1: per-card expectancy/effective-N/span vs floor "
+                        "(shadow measurement; nothing gated for real)")
+    sub.add_parser("card_demotion_check",
+                   help="PR13 slice 1: one daily pass -- snapshot every live_eligible card, "
+                        "demote (+ alert) any card with >= 2 consecutive breach snapshots")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -680,6 +705,10 @@ def main(argv=None) -> int:
             return cmd_baseline_report(orch)
         if args.command == "baseline_register":
             return cmd_baseline_register(orch)
+        if args.command == "card_scoreboard":
+            return cmd_card_scoreboard(orch)
+        if args.command == "card_demotion_check":
+            return cmd_card_demotion_check(orch)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":

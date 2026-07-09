@@ -1279,6 +1279,23 @@ class Orchestrator:
 
         return build_baseline_report(self.journal, self.settings, limit=limit)
 
+    def card_scoreboard_report(self) -> dict:
+        """PR13 slice 1: every live_eligible, not-yet-demoted card's current
+        scoreboard. PURE READ -- never consults or writes
+        card_scoreboard_snapshots; always recomputed fresh from the ledger."""
+        from alphaos.cards.scoreboard import build_card_scoreboard_report
+
+        return build_card_scoreboard_report(self.journal)
+
+    def card_demotion_check(self) -> dict:
+        """PR13 slice 1: one daily pass -- snapshot every live_eligible card's
+        scoreboard, demote (+ alert) any card with >= 2 consecutive breach
+        snapshots. Writes only card_scoreboard_snapshots/card_demotions;
+        never touches setup_cards or card YAML (Prime Directive 7)."""
+        from alphaos.cards.demotion import run_daily_card_evaluation
+
+        return run_daily_card_evaluation(self.journal, self.settings)
+
     def backfill_regime_days(self) -> dict:
         """REG-1 one-off: extend benchmark_bars SPY history, classify the
         full available series into regime_days, and stamp any pre-existing

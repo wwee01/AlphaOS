@@ -220,6 +220,17 @@ def _baseline_health(journal, settings) -> Optional[dict]:
     return None if rep["n_shadow_resolved"] == 0 else rep
 
 
+def _card_scoreboard_health(journal) -> Optional[dict]:
+    """PR13 slice 1's own scoreboard report, or None if zero live_eligible
+    cards exist yet (should not happen in practice -- setup_cards always has
+    at least the default card -- but matches the "omit, don't fabricate"
+    idiom used for every other section here)."""
+    from alphaos.cards.scoreboard import build_card_scoreboard_report
+
+    rep = build_card_scoreboard_report(journal)
+    return None if rep["n_cards"] == 0 else rep
+
+
 def _eval_health(journal) -> Optional[dict]:
     """The latest eval-harness run's summary, or None if no operator has
     ever run `alphaos eval` yet -- an expected, honest empty state (EVAL-1
@@ -482,6 +493,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     eval_health = _eval_health(journal)
     atr_health = _atr_health(journal)
     baseline_health = _baseline_health(journal, settings)
+    card_scoreboard_health = _card_scoreboard_health(journal)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -497,6 +509,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "eval_health": eval_health,
         "atr_health": atr_health,
         "baseline_health": baseline_health,
+        "card_scoreboard_health": card_scoreboard_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -617,6 +630,12 @@ def render_markdown(brief: dict) -> str:
         from alphaos.reports.baseline_report import render_markdown as _render_baseline
 
         lines += [_render_baseline(bh), ""]
+
+    csh = brief.get("card_scoreboard_health")
+    if csh:
+        from alphaos.cards.scoreboard import render_markdown as _render_card_scoreboard
+
+        lines += [_render_card_scoreboard(csh), ""]
 
     mg = brief["moonshot_gap"]
     lines += ["## Moonshot gap (10% MoM target)"]
