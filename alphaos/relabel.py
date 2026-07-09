@@ -60,7 +60,7 @@ def relabel_candidates(
 
     result: dict[str, Any] = {
         "date_from": date_from, "date_to": date_to, "dry_run": dry_run,
-        "n_packets": 0, "n_relabelled": 0, "prompts": [], "diffs": [],
+        "n_packets": 0, "n_relabelled": 0, "n_corpus_errors": 0, "prompts": [], "diffs": [],
     }
 
     rows = _packets_in_range(journal, date_from, date_to)
@@ -82,43 +82,66 @@ def relabel_candidates(
         classifier = PlaybookClassifier(settings, journal)
 
     for row in rows:
-        raw_packet_json = row["packet_json"]
-        packet_json = json.loads(raw_packet_json) if isinstance(raw_packet_json, str) else (raw_packet_json or {})
-        packet = reconstruct_from_stored(row["packet_id"], row["candidate_id"], row["interest_rank"], packet_json)
-        original = _latest_label_for_packet(journal, row["packet_id"])
+        # Isolated per-packet: a malformed/truncated packet_json (never
+        # produced by the system itself -- to_prompt_dict() always emits
+        # every required field -- but this table is queried, not
+        # hand-edited like EVAL-1's corpus fixtures, so this is genuinely
+        # defensive rather than an expected path) must count as ONE error
+        # and move on to the next packet, never abort the whole run and
+        # lose every remaining packet's results. Mirrors EVAL-1's harness,
+        # which shares this exact reconstruction helper and already learned
+        # this lesson the hard way (see its own docstring).
+        try:
+            raw_packet_json = row["packet_json"]
+            packet_json = (
+                json.loads(raw_packet_json) if isinstance(raw_packet_json, str) else (raw_packet_json or {})
+            )
+            packet = reconstruct_from_stored(
+                row["packet_id"], row["candidate_id"], row["interest_rank"], packet_json,
+            )
+            original = _latest_label_for_packet(journal, row["packet_id"])
 
-        if dry_run:
-            prompt = pt.build_label_user_prompt(packet.to_prompt_dict(), sorted(OFFICIAL_LABELS))
-            result["prompts"].append({"packet_id": row["packet_id"], "symbol": row["symbol"], "prompt": prompt})
+            if dry_run:
+                prompt = pt.build_label_user_prompt(packet.to_prompt_dict(), sorted(OFFICIAL_LABELS))
+                result["prompts"].append(
+                    {"packet_id": row["packet_id"], "symbol": row["symbol"], "prompt": prompt}
+                )
+                continue
+
+            assert classifier is not None  # only None when dry_run, and that branch always continues above
+            classification = classifier.classify(packet)
+            frozen_at = timeutils.stamp().utc
+            new_row = classification.to_row(row["packet_id"], row["scan_batch_id"], frozen_at)
+            new_row["relabel_of"] = original["label_id"] if original else None
+            journal.insert("candidate_labels", new_row)
+            result["n_relabelled"] += 1
+
+            prompt_sha256 = hashlib.sha256(
+                pt.build_label_user_prompt(packet.to_prompt_dict(), sorted(OFFICIAL_LABELS)).encode("utf-8")
+            ).hexdigest()
+            journal.log_system_event(
+                Severity.INFO, "relabel",
+                f"relabelled {row['symbol']} (packet {row['packet_id']}): "
+                f"{(original or {}).get('primary_label')!r} -> {classification.primary_label!r}",
+                {
+                    "original_id": (original or {}).get("label_id"),
+                    "new_id": new_row["label_id"],
+                    "prompt_sha256": prompt_sha256,
+                },
+            )
+            result["diffs"].append({
+                "symbol": row["symbol"],
+                "old_label": (original or {}).get("primary_label"),
+                "new_label": classification.primary_label,
+                "old_decision": (original or {}).get("label_decision"),
+                "new_decision": classification.label_decision,
+            })
+        except Exception as exc:  # noqa: BLE001 - one bad row must never abort the whole run
+            result["n_corpus_errors"] += 1
+            journal.log_system_event(
+                Severity.ERROR, "relabel",
+                f"could not relabel packet {row.get('packet_id', '?')!r}: {exc} -- skipped.",
+            )
             continue
-
-        assert classifier is not None  # only None when dry_run, and that branch always continues above
-        classification = classifier.classify(packet)
-        frozen_at = timeutils.stamp().utc
-        new_row = classification.to_row(row["packet_id"], row["scan_batch_id"], frozen_at)
-        new_row["relabel_of"] = original["label_id"] if original else None
-        journal.insert("candidate_labels", new_row)
-        result["n_relabelled"] += 1
-
-        prompt_sha256 = hashlib.sha256(
-            pt.build_label_user_prompt(packet.to_prompt_dict(), sorted(OFFICIAL_LABELS)).encode("utf-8")
-        ).hexdigest()
-        journal.log_system_event(
-            Severity.INFO, "relabel",
-            f"relabelled {row['symbol']} (packet {row['packet_id']}): "
-            f"{(original or {}).get('primary_label')!r} -> {classification.primary_label!r}",
-            {
-                "original_id": (original or {}).get("label_id"),
-                "new_id": new_row["label_id"],
-                "prompt_sha256": prompt_sha256,
-            },
-        )
-        result["diffs"].append({
-            "symbol": row["symbol"],
-            "old_label": (original or {}).get("primary_label"),
-            "new_label": classification.primary_label,
-            "old_decision": (original or {}).get("label_decision"),
-            "new_decision": classification.label_decision,
-        })
 
     return result

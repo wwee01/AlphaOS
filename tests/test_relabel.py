@@ -87,6 +87,87 @@ def test_empty_range_is_a_safe_noop(journal):
     assert result["prompts"] == []
 
 
+def test_latest_label_for_packet_picks_the_most_recent_of_several(journal):
+    """Regression guard (audit-flagged coverage gap): a packet with MULTIPLE
+    prior labels must relabel against the most recently inserted one, not
+    an arbitrary/earliest one."""
+    from alphaos.relabel import _latest_label_for_packet
+    from alphaos.util.ids import new_id
+
+    packet_id, candidate_id = new_id("pkt"), new_id("cand")
+    label_ids = []
+    for i, label in enumerate(["Other/Unclassified", "Breakout", "Momentum"]):
+        lbl_id = new_id("lbl")
+        label_ids.append(lbl_id)
+        journal.conn.execute(
+            "INSERT INTO candidate_labels (label_id, candidate_id, packet_id, symbol, "
+            "primary_label, is_mock, created_at_utc, created_at_sgt) "
+            "VALUES (?, ?, ?, 'AAPL', ?, 0, ?, ?)",
+            (lbl_id, candidate_id, packet_id, label, f"2026-07-0{i+1}T00:00:00+00:00",
+             f"2026-07-0{i+1}T08:00:00+08:00"),
+        )
+    journal.conn.commit()
+
+    latest = _latest_label_for_packet(journal, packet_id)
+
+    assert latest["label_id"] == label_ids[-1]  # the LAST-inserted row (Momentum), not the first
+    assert latest["primary_label"] == "Momentum"
+
+
+def test_live_run_relabels_against_the_most_recent_of_several_originals(journal):
+    """End-to-end version of the above, through the real relabel_of wiring."""
+    from alphaos.util.ids import new_id
+
+    packet_id, candidate_id = _seed_packet(journal, symbol="AAPL", primary_label="Other/Unclassified")
+    for label in ["Breakout", "Momentum"]:
+        journal.conn.execute(
+            "INSERT INTO candidate_labels (label_id, candidate_id, packet_id, symbol, "
+            "primary_label, is_mock, created_at_utc, created_at_sgt) "
+            "VALUES (?, ?, ?, 'AAPL', ?, 0, ?, ?)",
+            (new_id("lbl"), candidate_id, packet_id, label,
+             "2026-07-01T00:00:00+00:00", "2026-07-01T08:00:00+08:00"),
+        )
+    journal.conn.commit()
+    most_recent = journal.one(
+        "SELECT * FROM candidate_labels WHERE packet_id = ? ORDER BY id DESC LIMIT 1", (packet_id,),
+    )
+    settings = make_settings()
+
+    result = relabel_candidates(journal, settings, "2026-07-01", "2026-07-01", dry_run=False)
+
+    assert result["n_relabelled"] == 1
+    new_row = journal.one("SELECT * FROM candidate_labels WHERE relabel_of IS NOT NULL")
+    assert new_row["relabel_of"] == most_recent["label_id"]
+
+
+# ============================================================ isolation
+def test_relabel_isolates_a_malformed_packet_json_and_processes_the_rest(journal):
+    """Regression guard (audit-flagged MEDIUM-severity-shaped gap, LOW in
+    practice since production packet_json is always complete): a row with a
+    truncated/malformed packet_json must count as one n_corpus_errors entry
+    and let the run continue to the remaining packets -- never abort the
+    whole run and silently lose already-committed results' siblings,
+    contradicting this function's own "Never raises" docstring. Mirrors
+    EVAL-1's harness, which shares this exact reconstruction helper."""
+    _seed_packet(journal, symbol="GOOD1")
+    packet_id_bad, candidate_id_bad = new_id("pkt"), new_id("cand")
+    ts = "2026-07-01T12:00:00+08:00"
+    journal.conn.execute(
+        "INSERT INTO candidate_packets (packet_id, candidate_id, symbol, scan_batch_id, "
+        "packet_json, created_at_utc, created_at_sgt) VALUES (?, ?, 'BAD', 'batch_test', ?, ?, ?)",
+        (packet_id_bad, candidate_id_bad, json.dumps({"symbol": "BAD"}), ts, ts),  # missing required fields
+    )
+    journal.conn.commit()
+    _seed_packet(journal, symbol="GOOD2")
+    settings = make_settings()
+
+    result = relabel_candidates(journal, settings, "2026-07-01", "2026-07-01", dry_run=False)
+
+    assert "error" not in result  # the run itself must not crash/error out
+    assert result["n_corpus_errors"] == 1
+    assert result["n_relabelled"] == 2  # both good packets still processed
+
+
 # =============================================================== dry run
 def test_dry_run_makes_zero_network_calls(journal, monkeypatch):
     """Belt-and-suspenders: force PlaybookClassifier construction to raise
