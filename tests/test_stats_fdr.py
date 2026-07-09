@@ -38,6 +38,34 @@ def test_q_value_le_q_agrees_with_boolean_discovery():
     assert [q <= 0.10 for q in q_values] == discovery
 
 
+def test_q_value_and_boolean_discovery_agree_at_an_exact_boundary_tie():
+    """Correctness-audit regression: benjamini_hochberg() and bh_q_values()
+    used to be independently factored (p <= (k/n)*q vs (n/k)*p <= q), which
+    round to opposite sides of an exact float64 tie -- silently violating
+    the documented equivalence and producing a self-contradictory verdict
+    row (q_value <= q but verdict says inconclusive). Both must now be
+    derived from the same running-minimum computation."""
+    p = [0.469, 0.417, 0.006, 0.24, 0.01, 0.81]
+    q = 0.03
+    discovery = benjamini_hochberg(p, q=q)
+    q_values = bh_q_values(p)
+    assert [qv <= q for qv in q_values] == discovery
+
+
+def test_q_value_boolean_agreement_holds_across_many_vectors_and_thresholds():
+    """Broader sweep for the same equivalence claim, not just one vector."""
+    import random
+
+    rng = random.Random(20260709)
+    for _ in range(200):
+        n = rng.randint(1, 15)
+        p = [round(rng.random(), 3) for _ in range(n)]
+        q_values = bh_q_values(p)
+        for q_threshold in (0.01, 0.05, 0.10, 0.20):
+            discovery = benjamini_hochberg(p, q=q_threshold)
+            assert [qv <= q_threshold for qv in q_values] == discovery, (p, q_threshold)
+
+
 def test_bh_preserves_input_order_not_sorted_order():
     unsorted_p = [0.90, 0.01, 0.50]
     discovery = benjamini_hochberg(unsorted_p, q=0.10)
@@ -125,6 +153,33 @@ def test_verdict_rejected_wins_over_strong_prior():
 
 def test_compute_verdicts_empty_family():
     assert compute_verdicts([]) == []
+
+
+def test_verdict_p_equals_zero_is_the_strongest_result_not_the_weakest():
+    """Correctness-audit regression: `r.get(...) or 1.0` silently rewrote a
+    LEGITIMATE p=0.0 (zero resample means fell at/below zero -- the
+    strongest possible positive edge, a routine bootstrap output) into 1.0
+    ("certainly null"), exactly inverting the mechanism PORT-1 exists to
+    implement. Must be a forward-test-candidate with q_value=0.0, not
+    inconclusive with q_value=1.0."""
+    out = compute_verdicts([_row("h1", 0.0, ci_low=0.5, ci_high=2.0, trustworthy=True)])
+    assert out[0]["verdict"] == "forward-test-candidate"
+    assert out[0]["q_value"] == 0.0
+
+
+def test_verdict_p_equals_zero_does_not_contaminate_the_rest_of_the_family():
+    """The same bug also poisoned every OTHER hypothesis's q-value via the
+    shared running minimum, since the corrupted p=1.0 was sorted into the
+    family alongside real p-values."""
+    family = [
+        _row("a", 0.0, ci_low=0.1, ci_high=1.0, trustworthy=True),
+        _row("b", 0.5, ci_low=-1.0, ci_high=1.0, trustworthy=True),
+        _row("c", 0.5, ci_low=-1.0, ci_high=1.0, trustworthy=True),
+    ]
+    by_id = {r["prereg_id"]: r for r in compute_verdicts(family)}
+    assert by_id["a"]["q_value"] == 0.0
+    assert by_id["b"]["q_value"] == 0.5
+    assert by_id["c"]["q_value"] == 0.5
 
 
 # -------------------------------------------------------- family stability

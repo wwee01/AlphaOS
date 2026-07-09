@@ -155,13 +155,16 @@ recomputed."
   everywhere else (one shared function, every caller uses it, never a
   local reimplementation) — applied here to the verdict, not just to
   effective-N.
-- Practically: a `q_value` *column* still exists on the table for
-  operational convenience (so an operator can see the value a report
-  used without re-running anything), but it is explicitly labeled a
-  **cache of the last computed value, not authoritative** — the
-  authoritative path is always "call the shared verdict function," and
-  the column is refreshed as a side effect of that call, never written
-  independently.
+- **As actually built (scope/safety audit correction, 2026-07-09): there is
+  NO `q_value`/verdict column on the `preregistrations` table at all** —
+  not even as a non-authoritative cache. An earlier draft of this doc
+  floated one "for operational convenience," but nothing populates or
+  reads a cache column tonight (`compute_verdicts()` has no caller wiring
+  it back to storage, and PR12 — the future writer of real hypotheses — is
+  still a skeleton), so it would have been a dead, unused column. Adding
+  one later is a cheap additive migration exactly when a real consumer
+  needs it; until then, "no stored verdict, full stop" is both the
+  design intent and the literal schema.
 
 ## 5. Sample-size discipline: effective-N and clustering
 

@@ -32,33 +32,16 @@ DEFAULT_FDR_Q = 0.10
 DEFAULT_BONFERRONI_ALPHA = 0.05
 
 
-def benjamini_hochberg(p_values: list[float], q: float = DEFAULT_FDR_Q) -> list[bool]:
-    """Standard BH step-up procedure. Returns a same-length list of booleans
-    (True = discovery at level ``q``), in the SAME order as ``p_values``."""
-    n = len(p_values)
-    if n == 0:
-        return []
-    indexed = sorted(range(n), key=lambda i: p_values[i])
-    sorted_p = [p_values[i] for i in indexed]
-
-    largest_k = 0
-    for k in range(1, n + 1):
-        if sorted_p[k - 1] <= (k / n) * q:
-            largest_k = k
-
-    discovery = [False] * n
-    for rank, orig_idx in enumerate(indexed, start=1):
-        discovery[orig_idx] = rank <= largest_k
-    return discovery
-
-
-def bh_q_values(p_values: list[float]) -> list[float]:
-    """Per-hypothesis q-value (contract doc Sec 3's running-minimum form) --
-    same order as ``p_values``. ``q_value <= q`` iff the hypothesis is a
-    BH-FDR discovery at level ``q`` -- mathematically equivalent to
-    ``benjamini_hochberg()`` above (same discoveries at any threshold),
-    exposed as a directly comparable per-hypothesis number instead of a
-    boolean-at-one-threshold."""
+def _bh_q_values_raw(p_values: list[float]) -> list[float]:
+    """Full-precision running-minimum q-values (contract doc Sec 3), same
+    order as ``p_values``, UNROUNDED. Internal shared helper -- both
+    ``benjamini_hochberg()`` and ``bh_q_values()`` are defined in terms of
+    this ONE computation so they can never disagree at a boundary tie.
+    (Correctness-audit finding: the two used to be independently factored
+    -- ``p <= (k/n)*q`` vs ``(n/k)*p <= q`` -- which round to opposite sides
+    of an exact tie in float64, silently violating the documented "same
+    discoveries at any threshold" equivalence. Rounding is applied only at
+    ``bh_q_values()``'s public return, never before a ``<=`` comparison.)"""
     n = len(p_values)
     if n == 0:
         return []
@@ -73,8 +56,27 @@ def bh_q_values(p_values: list[float]) -> list[float]:
 
     q_values = [0.0] * n
     for rank_pos, orig_idx in enumerate(indexed):
-        q_values[orig_idx] = round(running_min[rank_pos], 6)
+        q_values[orig_idx] = running_min[rank_pos]
     return q_values
+
+
+def benjamini_hochberg(p_values: list[float], q: float = DEFAULT_FDR_Q) -> list[bool]:
+    """Standard BH step-up procedure. Returns a same-length list of booleans
+    (True = discovery at level ``q``), in the SAME order as ``p_values``.
+    Defined as ``q_value <= q`` over the exact same running-minimum
+    computation ``bh_q_values()`` exposes -- see ``_bh_q_values_raw()``."""
+    return [qv <= q for qv in _bh_q_values_raw(p_values)]
+
+
+def bh_q_values(p_values: list[float]) -> list[float]:
+    """Per-hypothesis q-value (contract doc Sec 3's running-minimum form) --
+    same order as ``p_values``. ``q_value <= q`` iff the hypothesis is a
+    BH-FDR discovery at level ``q`` -- mathematically equivalent to
+    ``benjamini_hochberg()`` above (same discoveries at any threshold,
+    including exact boundary ties, since both share ``_bh_q_values_raw()``),
+    exposed as a directly comparable per-hypothesis number instead of a
+    boolean-at-one-threshold."""
+    return [round(qv, 6) for qv in _bh_q_values_raw(p_values)]
 
 
 def bonferroni_significant(p_values: list[float], alpha: float = DEFAULT_BONFERRONI_ALPHA) -> list[bool]:
@@ -121,7 +123,16 @@ def compute_verdicts(
     if n == 0:
         return []
 
-    p_values = [float(r.get("one_sided_p_below_zero") or 1.0) for r in evaluated]
+    # NOT `r.get(...) or 1.0` -- 0.0 is a legitimate, routine bootstrap
+    # result (zero resample means fell at/below zero: the STRONGEST
+    # possible positive edge) and is falsy in Python, so `or` would rewrite
+    # it to 1.0 ("certainly null") -- exactly backwards, and it would also
+    # contaminate every other hypothesis's q-value via the shared running
+    # minimum. Correctness-audit finding.
+    p_values = [
+        float(r["one_sided_p_below_zero"]) if r.get("one_sided_p_below_zero") is not None else 1.0
+        for r in evaluated
+    ]
     q_values = bh_q_values(p_values)
     bh_discovery = benjamini_hochberg(p_values, q=fdr_q)
     bonf = bonferroni_significant(p_values, alpha=bonferroni_alpha)
