@@ -370,6 +370,55 @@ def test_what_learned_excludes_mock_rows(journal):
     assert learned["count"] == 0  # mock row correctly excluded
 
 
+def _insert_resolved_attribution_row(journal, symbol="AAPL", delta_r=0.34):
+    journal.insert("attribution_records", {
+        "attribution_id": new_id("attr"), "attribution_type": "propose_blocked",
+        "attribution_version": "v2", "agent": "alphaos", "source_id": new_id("s"),
+        "symbol": symbol, "resolved_status": "resolved", "delta_r": delta_r,
+        "data_quality_status": "ok", "is_mock": 0,
+    })
+    journal.conn.execute(
+        "UPDATE attribution_records SET resolved_at_utc = ? WHERE symbol = ?",
+        (timeutils.to_iso(timeutils.now_utc()), symbol),
+    )
+    journal.conn.commit()
+
+
+def test_learned_sentence_never_renders_a_per_event_delta_r_figure(journal):
+    """audit C4: a single resolved event's ΔR is not a verdict -- the
+    rendered brief must never show a bare per-event number, even for exactly
+    one resolved row (the smallest possible sample, and the case most likely
+    to be mistaken for a meaningful result)."""
+    from alphaos.reports.daily_brief import _what_learned
+
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=1))
+    _insert_resolved_attribution_row(journal, symbol="AAPL", delta_r=0.34)
+
+    learned = _what_learned(journal, since)
+
+    assert learned["count"] == 1
+    assert len(learned["sentences"]) == 1
+    assert "AAPL" in learned["sentences"][0]
+    assert "0.34" not in learned["sentences"][0]
+    assert "ΔR" not in learned["sentences"][0]
+    assert learned["caveat"]  # still present, unconditionally
+
+
+def test_render_markdown_omits_delta_r_figure_and_keeps_caveat(orchestrator):
+    """End-to-end: even with a real resolved row flowing all the way through
+    build_daily_brief -> render_markdown, no per-event ΔR number reaches the
+    rendered text, and the standing caveat is still there."""
+    _insert_resolved_attribution_row(orchestrator.journal, symbol="TSLA", delta_r=-1.2)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert "TSLA" in md
+    assert "ΔR=" not in md
+    assert "-1.2" not in md
+    assert "This is NOT a per-event verdict" in md  # ATTRIBUTION_V2_CAVEAT text
+
+
 # ------------------------------------------------------------------ no-read
 def test_no_decision_path_reads_brief_or_health_modules():
     import pathlib
