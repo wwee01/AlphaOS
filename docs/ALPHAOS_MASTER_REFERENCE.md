@@ -693,7 +693,17 @@ item specs under their canonical names in the specs doc):**
     CRO — see `docs/roadmap/alphaos-pr-implementation-specs.md`'s EXP-1
     section) ahead of the CANARY gate clearing, so the eventual build
     session starts from a real spec, not a blank page. **Not yet built.**
-20. 🔴 **PR12** (registry-first, 8 seeded hypotheses) → **PR13** (scoreboard +
+20. 🟡 **PR12** (registry-first, 8 seeded hypotheses) — built + audit-fixed
+    2026-07-10, branch `feat/pr12-hypothesis-engine` @ `0a96a86` (build
+    `fec2945` + audit-fixup `0a96a86`). Two independent Opus audits:
+    correctness **REQUEST CHANGES** → fixed (a real HIGH: `candidate_outcomes`
+    fan-out via parallel `user_override` rows corrupted every reference-arm
+    mean; `h_ttl_1_rows` additionally leaked the same row into both arms via
+    re-propose-after-expiry — both fixed with a uniform per-candidate dedup
+    + regression tests verified to fail pre-fix/pass post-fix), scope/safety
+    **APPROVE WITH NOTES** (zero BLOCKER/HIGH/MEDIUM). 31 tests, full suite
+    green (1392 passed), ruff/mypy clean. **COMMITTED, NOT YET MERGED**,
+    holding for explicit operator merge instruction. → **PR13** (scoreboard +
     demotion slice first, then promotion + PR13.5 diff→version) → cards v2–v3 →
     **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
     renamed 2026-07-08 late since REG-1, its measurement half, now lands at
