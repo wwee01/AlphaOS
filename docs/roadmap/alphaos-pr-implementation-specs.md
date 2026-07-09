@@ -621,6 +621,30 @@ before/after; cost-guard accounting includes relabel calls.
 **Acceptance:** dry-run inspected, then live; 7 new rows with `relabel_of`
 populated; CLI prints an old-vs-new label diff table; no original row modified.
 
+**Erratum (run 2026-07-10, autonomous session, Fable-reviewed):** the
+`--from`/`--to` CLI flags filter on SGT calendar date, but this spec's own
+title/date ("2026-07-01") named the incident by its US-market/UTC timestamp —
+the batch's real `created_at_utc` is `2026-07-01T16:01`, which is
+`2026-07-02` SGT (UTC+8 tips it past midnight). The literal command
+`--from 2026-07-01 --to 2026-07-01` is therefore a safe no-op against the real
+DB (0 rows) — it was actually run as `--from 2026-07-01 --to 2026-07-02` (a
+range that strictly contains the spec's literal date under either frame),
+confirmed to select exactly the 7 intended rows three ways: count (7),
+packet ids (1–7, the ledger's absolute first rows), and cross-referenced
+against `docs/incidents/2026-07-02-meta-protection-mismatch.md`'s
+`2026-07-01T16:03Z` META entry (2 minutes after these packets, same session).
+**Relabelled packet ids for CANARY/EVAL-1 corpus reference** (id, symbol):
+`pkt_84638a966027` AAPL · `pkt_955ec73bcb48` MSFT · `pkt_bfa4f8b056ec` AMD ·
+`pkt_1e45b7a4ae79` META · `pkt_c89fefa96dea` NFLX · `pkt_55aaa4229bf4` XLF ·
+`pkt_c9c760252a20` SMH. Result: 7/7 relabelled, 0 corpus errors, only one
+substantive label change (XLF: News Reaction → Sector Sympathy Move; every
+other symbol's label + decision reproduced identically, itself evidence the
+original labels were largely sound outside the one no-news-leak-affected
+case). **Standing lesson:** a spec that pins a calendar date to a US-market-
+session event, for a CLI that filters on SGT calendar date, will read as
+off-by-one — future specs of this shape should pin packet/batch ids or UTC
+timestamps instead of (or alongside) a bare date.
+
 ---
 
 ## CANARY — Model-Drift Canary
