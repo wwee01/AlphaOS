@@ -22,7 +22,18 @@ from alphaos.reports.relative_performance import (
 )
 from alphaos.scheduler import cadence
 from alphaos.scheduler.digest import _start_of_today_sgt_utc, build_daily_digest
+from alphaos.stats.fdr import preregistration_family_summary
 from alphaos.util import timeutils
+
+# PORT-1's survivorship-denominator caveat (contract doc port spec item 5):
+# any report claiming system-level edge must print the FULL preregistration
+# family (promoted + demoted + withdrawn), never just a promoted subset --
+# otherwise a reader sees only the survivors and mistakes selection for edge.
+SURVIVORSHIP_DENOMINATOR_CAVEAT = (
+    "This is a trade-level estimate, not a system-level edge claim -- it says "
+    "nothing about how many hypotheses were tested to find any strategy/card "
+    "currently running. See hypotheses_tested/promoted below for that context."
+)
 
 # A pending approval this close to expiry surfaces as the one action item --
 # roughly a third of the default 1800s TTL, chosen so there's still enough
@@ -282,6 +293,14 @@ def _moonshot_gap(journal, settings, now=None) -> dict:
     r_values = [r["realized_r"] for r in rows if r.get("realized_r") is not None]
     n = len(r_values)
 
+    # PORT-1 survivorship-denominator caveat -- computed over the FULL
+    # preregistrations family regardless of this section's own trade-count
+    # floor below; an empty/never-populated registry honestly reports
+    # hypotheses_tested=0 (the mechanism, not yet armed by any writer --
+    # PR12 is the future writer) rather than omitting the line.
+    prereg_rows = journal.query("SELECT evaluated_at_utc, operator_approved_for_forward_test FROM preregistrations")
+    prereg_family = preregistration_family_summary(prereg_rows)
+
     if n < MIN_TRADES_FOR_MOONSHOT_ESTIMATE:
         return {
             "status": "below_sample_floor",
@@ -293,6 +312,8 @@ def _moonshot_gap(journal, settings, now=None) -> dict:
                 f"only {n} resolved real trade(s) this month "
                 f"(< {MIN_TRADES_FOR_MOONSHOT_ESTIMATE}); implied-% arithmetic withheld until the floor is met"
             ),
+            "preregistration_family": prereg_family,
+            "survivorship_caveat": SURVIVORSHIP_DENOMINATOR_CAVEAT,
         }
 
     expectancy_r = sum(r_values) / n
@@ -322,6 +343,8 @@ def _moonshot_gap(journal, settings, now=None) -> dict:
         "required_trades_per_month_at_current_expectancy": required_trades,
         "binding_constraint": binding_constraint,
         "data_progress": f"{n}/{MIN_TRADES_FOR_MOONSHOT_ESTIMATE} resolved real trades this month",
+        "preregistration_family": prereg_family,
+        "survivorship_caveat": SURVIVORSHIP_DENOMINATOR_CAVEAT,
     }
 
 
@@ -532,6 +555,12 @@ def render_markdown(brief: dict) -> str:
     else:
         lines.append(f"- {mg['note']}")
     lines.append(f"- Data progress: {mg['data_progress']}")
+    pf = mg["preregistration_family"]
+    lines.append(
+        f"- hypotheses_tested={pf['hypotheses_tested']}, promoted={pf['promoted']} "
+        f"(of {pf['hypotheses_registered']} registered)"
+    )
+    lines.append(f"> ⚠️ {mg['survivorship_caveat']}")
 
     return "\n".join(lines)
 

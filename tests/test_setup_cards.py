@@ -393,10 +393,15 @@ def test_attribution_by_card_slice_present_and_floor_gated(journal, settings):
     # which min_resolved override is passed), so the count floor alone isn't
     # enough -- the resolved_at_utc spread must ALSO clear the span floor.
     base = date(2026, 1, 1)
+    # Each row gets its OWN symbol (PORT-1) so all MIN_RESOLVED_FOR_V2_SUBSLICE
+    # rows also land in that many separate effective_n clusters -- a real
+    # independent-observation fixture, not just N rows on one symbol.
     plenty = [
         {"attribution_type": "propose_blocked", "agent": "alphaos", "resolved_status": "resolved",
          "delta_r": 1.0, "is_mock": 0, "card_id": "catalyst_momentum_v1",
-         "resolved_at_utc": (base + timedelta(days=i * 2)).isoformat() + "T00:00:00+00:00"}
+         "resolved_at_utc": (base + timedelta(days=i * 2)).isoformat() + "T00:00:00+00:00",
+         "symbol": f"SYM{i:02d}",
+         "decision_at_utc": (base + timedelta(days=i * 2)).isoformat() + "T00:00:00+00:00"}
         for i in range(MIN_RESOLVED_FOR_V2_SUBSLICE)
     ]
     assert (MIN_RESOLVED_FOR_V2_SUBSLICE - 1) * 2 >= MIN_SPAN_DAYS_FOR_V2_AGGREGATE  # sanity on the fixture itself
@@ -405,6 +410,7 @@ def test_attribution_by_card_slice_present_and_floor_gated(journal, settings):
     assert slice_["status"] == "ok"
     assert slice_["mean_delta_r"] == 1.0
     assert slice_["resolved_count"] == MIN_RESOLVED_FOR_V2_SUBSLICE
+    assert slice_["effective_n"] == MIN_RESOLVED_FOR_V2_SUBSLICE
 
 
 def test_attribution_by_card_excludes_mock_and_unresolved_rows(journal, settings):
