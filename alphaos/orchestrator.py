@@ -425,6 +425,15 @@ class Orchestrator:
                     # Label-driven reject (e.g. fail-safe / Other-Unclassified).
                     self._reject_candidate(cand, "ai_label", evaluation,
                                            reason=ReasonCode.LABEL_UNCLASSIFIED.value)
+                elif ReasonCode.NO_ATR_DATA.value in (evaluation.risk_flags or []):
+                    # INSTR-1 (scope/safety audit finding): _reject_candidate's own
+                    # no-reason default always falls back to the generic
+                    # OPENAI_REJECT code, which would make a persistent per-symbol
+                    # ATR gap indistinguishable from an ordinary model rejection in
+                    # every reason-code-bucketed report -- an operator needs to be
+                    # able to tell "ATR data is missing for this symbol" apart from
+                    # "the model itself rejected it."
+                    self._reject_candidate(cand, "openai", evaluation, reason=ReasonCode.NO_ATR_DATA.value)
                 else:
                     self._reject_candidate(cand, "openai", evaluation)
                 summary.rejected += 1

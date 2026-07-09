@@ -9,6 +9,7 @@ from __future__ import annotations
 from alphaos.ai.openai_client import ATR_STOP_MULTIPLIER_V1, OpenAIClient, OpenAIEvaluation
 from alphaos.constants import Decision, ReasonCode, TargetSource, TradeDirection
 from alphaos.data.atr import ATR_RULES_V1
+from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from conftest import make_proposal, make_settings
 
@@ -16,7 +17,7 @@ from conftest import make_proposal, make_settings
 def _seed_atr(journal, symbol, atr_14, market_date="2026-07-08"):
     journal.insert("atr_history", {
         "atr_id": f"atr_{symbol}_{market_date}", "symbol": symbol, "market_date": market_date,
-        "atr_14": atr_14, "rules_version": ATR_RULES_V1, "n_bars_used": 15,
+        "atr_14": atr_14, "rules_version": ATR_RULES_V1, "n_bars_fetched": 15,
     })
 
 
@@ -216,3 +217,37 @@ def test_tag_target_profile_falls_back_to_config_openai_split_without_atr(journa
     mock_proposal = make_proposal()
     orch._tag_target_profile(mock_proposal, from_config=True)  # no evaluation at all (seed_demo's own call shape)
     assert mock_proposal.stop_price_source == TargetSource.CONFIG.value
+
+
+# --------------------------------- scope/safety audit: reject reason-code fix
+def test_no_atr_data_rejection_gets_its_own_reason_code_not_the_generic_one(monkeypatch):
+    """Scope/safety audit finding: _reject_candidate's own no-reason default
+    always falls back to the generic OPENAI_REJECT code, which would make a
+    persistent per-symbol ATR gap indistinguishable from an ordinary model
+    rejection in every reason-code-bucketed report. Runs a REAL
+    run_scan_once() (mock mode -- only openai.evaluate() itself is
+    monkeypatched, matching this codebase's own established pattern for
+    testing decision branches, e.g. test_armed_watch.py) and confirms the
+    resulting rejected_candidates row carries NO_ATR_DATA, not OPENAI_REJECT."""
+    orch = Orchestrator(
+        settings=make_settings(INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6"),
+        journal=JournalStore(":memory:"),
+    )
+    _orig = orch.openai.evaluate
+
+    def no_atr_eval(cand, snap, freshness_status="usable"):
+        ev = _orig(cand, snap, freshness_status)
+        ev.decision = Decision.REJECT.value
+        ev.risk_flags = [ReasonCode.NO_ATR_DATA.value]
+        ev.reasoning_summary = "No ATR(14) data available; cannot compute a v2 stop."
+        return ev
+
+    monkeypatch.setattr(orch.openai, "evaluate", no_atr_eval)
+
+    summary = orch.run_scan_once()
+
+    assert summary.rejected > 0
+    rows = orch.journal.query("SELECT reason_code FROM rejected_candidates")
+    assert rows, "expected at least one rejected_candidates row"
+    assert all(r["reason_code"] == ReasonCode.NO_ATR_DATA.value for r in rows)
+    assert not any(r["reason_code"] == ReasonCode.OPENAI_REJECT.value for r in rows)

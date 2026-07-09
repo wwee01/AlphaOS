@@ -64,7 +64,7 @@ def test_load_card_files_raises_on_invalid_version(tmp_path):
         cards.load_card_files(tmp_path)
 
 
-def test_get_default_card_returns_the_v1_card():
+def test_get_default_card_returns_whichever_card_id_is_current():
     card = cards.get_default_card()
     assert card["card_id"] == cards.DEFAULT_CARD_ID
 

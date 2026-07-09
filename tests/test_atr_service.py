@@ -74,6 +74,29 @@ def test_mixed_symbols_isolates_a_thin_history_from_the_rest(journal):
     assert [r["symbol"] for r in rows] == ["AAPL"]
 
 
+def test_insufficient_bars_logs_a_system_event_not_silent(journal):
+    """Scope/safety audit finding: an exception-raising provider already
+    logged a WARNING; a thin/sparse-feed result (compute_atr -> None)
+    previously logged NOTHING at all, so a persistent per-symbol gap was
+    completely invisible in system_events. Every future PROPOSE for that
+    symbol then fail-safe-rejects forever with zero operator-visible trace
+    of WHY. This test is what makes that visible."""
+    settings = make_settings()
+
+    class _ThinProvider:
+        def get_daily_bars(self, symbol, start, end, limit=200):
+            return _uniform_bars(3)  # far short of ATR_PERIOD + 1
+
+    update_atr_history(
+        journal, settings, symbols=["THIN"], now=_now(date(2026, 3, 2)), bars_provider=_ThinProvider(),
+    )
+
+    events = journal.query("SELECT * FROM system_events WHERE category = 'atr_update'")
+    assert len(events) == 1
+    assert "THIN" in events[0]["message"]
+    assert "insufficient" in events[0]["message"].lower()
+
+
 def test_one_symbols_provider_exception_does_not_abort_the_run(journal):
     settings = make_settings()
 

@@ -1789,7 +1789,7 @@ SCHEMA: list[tuple[str, str]] = [
             market_date TEXT NOT NULL,
             atr_14 REAL NOT NULL,
             rules_version TEXT NOT NULL,
-            n_bars_used INTEGER,
+            n_bars_fetched INTEGER,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )

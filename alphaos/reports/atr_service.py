@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from alphaos.constants import Severity
-from alphaos.data.atr import ATR_RULES_V1, compute_atr
+from alphaos.data.atr import ATR_PERIOD, ATR_RULES_V1, compute_atr
 from alphaos.data.providers.alpaca_bars import make_bars_provider
 from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
 from alphaos.util import timeutils
@@ -57,6 +57,19 @@ def _update_atr_for_symbol(journal, provider, symbol: str, market_dt: date) -> b
         {"high": b.get("high"), "low": b.get("low"), "close": b.get("close")} for b in (bars or [])
     ])
     if atr is None:
+        # Scope/safety audit finding: an exception-raising provider already
+        # logs a WARNING below (the caller's except block); an insufficient-
+        # bars result (a thin/sparse feed on this symbol -- the free IEX
+        # tier's own sparsity, per EXP-0's spec) previously logged NOTHING
+        # at all, so a persistent per-symbol gap was completely invisible.
+        # Every future PROPOSE for this symbol will now fail-safe-reject
+        # (NO_ATR_DATA) -- this line is what makes that visible in
+        # system_events rather than silently accumulating forever.
+        journal.log_system_event(
+            Severity.INFO, "atr_update",
+            f"{symbol}: insufficient daily-bar history for ATR({ATR_PERIOD}) -- "
+            f"{len(bars or [])} bars fetched, none written.",
+        )
         return False
 
     journal.insert("atr_history", {
@@ -65,7 +78,7 @@ def _update_atr_for_symbol(journal, provider, symbol: str, market_dt: date) -> b
         "market_date": market_dt.isoformat(),
         "atr_14": round(atr, 4),
         "rules_version": ATR_RULES_V1,
-        "n_bars_used": len(bars or []),
+        "n_bars_fetched": len(bars or []),
     })
     return True
 

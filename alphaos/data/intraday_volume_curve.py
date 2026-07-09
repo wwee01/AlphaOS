@@ -101,9 +101,15 @@ def compute_rel_volume_v2(
     """Cumulative-to-now volume, divided by (the previous FULL trading day's
     volume times the expected cumulative fraction by this time of day).
 
-    Returns ``None`` (never a fabricated number) when: either volume input
-    is missing/non-positive, ``now`` is before the open (no reading yet),
-    or the resulting denominator would be non-positive.
+    Returns ``None`` (never a fabricated number) when: ``volume_so_far`` is
+    missing, ``prev_day_full_volume`` is missing/non-positive, ``now`` is
+    before the open (no reading yet), or the resulting denominator would be
+    non-positive. Note the asymmetry is intentional: ``volume_so_far`` is
+    cumulative traded volume (Alpaca's own ``dailyBar.v``), physically never
+    negative, and ``0`` at/near the open is a genuinely valid reading (the
+    session has barely started) -- correctly returns ``0.0``, not ``None``,
+    unlike the old formula which treated ``0`` as falsy and silently
+    produced ``None`` too (correctness-audit LOW-1).
     """
     if volume_so_far is None or prev_day_full_volume is None or prev_day_full_volume <= 0:
         return None
