@@ -15,23 +15,18 @@ from typing import Any, Optional
 from alphaos import lineage
 from alphaos.constants import LabelSource, Severity
 from alphaos.eval.corpus import DEFAULT_CORPUS_DIR, load_corpus
-from alphaos.scanner.candidate_packet import PROMPT_KEYS, CandidatePacket
+from alphaos.scanner.candidate_packet import reconstruct_from_stored
 from alphaos.scheduler import cost_guard
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 
-def _reconstruct_packet(fixture: dict) -> CandidatePacket:
-    """Rebuilds a CandidatePacket from a frozen corpus fixture -- the exact
-    inverse of ``CandidatePacket.to_row()``'s ``packet_json`` (all
-    ``PROMPT_KEYS`` fields) plus the ``packet_id``/``candidate_id``/
-    ``interest_rank`` columns stored alongside it."""
-    kwargs = {k: fixture[k] for k in PROMPT_KEYS if k in fixture}
-    return CandidatePacket(
-        packet_id=fixture["packet_id"],
-        candidate_id=fixture["candidate_id"],
-        interest_rank=fixture.get("interest_rank"),
-        **kwargs,
+def _reconstruct_packet(fixture: dict):
+    """A corpus fixture is already shaped as packet_id/candidate_id/
+    interest_rank + the flattened packet_json fields at its top level, so
+    the fixture dict itself doubles as the ``packet_json`` argument."""
+    return reconstruct_from_stored(
+        fixture["packet_id"], fixture["candidate_id"], fixture.get("interest_rank"), fixture,
     )
 
 

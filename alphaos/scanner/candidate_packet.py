@@ -212,3 +212,18 @@ def build_packet(cand: "Union[dict, ScanContext]", snapshot: dict, signals: Inte
         momentum_score=cand.get("momentum_score"),
         missing_data_flags=list(signals.missing_data_flags),
     )
+
+
+def reconstruct_from_stored(
+    packet_id: str, candidate_id: str, interest_rank: Optional[int], packet_json: dict,
+) -> CandidatePacket:
+    """Rebuilds a CandidatePacket from journaled/frozen data -- the exact
+    inverse of ``to_row()``'s ``packet_json`` (all ``PROMPT_KEYS`` fields)
+    plus the ``packet_id``/``candidate_id``/``interest_rank`` fields stored
+    alongside it in whichever table/file actually holds them. Shared by
+    EVAL-1's corpus replay and TASK-R's retro-relabel -- one reconstruction
+    path, one truth, never two independently-drifting implementations."""
+    kwargs = {k: packet_json[k] for k in PROMPT_KEYS if k in packet_json}
+    return CandidatePacket(
+        packet_id=packet_id, candidate_id=candidate_id, interest_rank=interest_rank, **kwargs,
+    )
