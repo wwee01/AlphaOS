@@ -18,6 +18,7 @@ env/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/backup_status.json
 *.db
 *.sqlite
 *.sqlite3

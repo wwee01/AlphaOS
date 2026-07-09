@@ -168,6 +168,16 @@ def _text_archive_health(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
+def _backup_health() -> Optional[dict]:
+    """OPS-B: the nightly/offsite backup's last-known status -- filesystem-
+    based (the backup lives entirely outside the SQLite ledger by design),
+    so this reads no journal argument at all, unlike every sibling _health
+    function here. None when the backup job has never run yet."""
+    from alphaos.reports.backup_health import build_backup_health
+
+    return build_backup_health()
+
+
 def _atr_health(journal) -> Optional[dict]:
     """INSTR-1's deferred KIV, added 2026-07-09 (operator-directed follow-up,
     Fable strategy review): a persistent per-symbol ATR gap silently and
@@ -482,6 +492,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     eval_health = _eval_health(journal)
     atr_health = _atr_health(journal)
     baseline_health = _baseline_health(journal, settings)
+    backup_health = _backup_health()
 
     return {
         "date_sgt": since_sgt[:10],
@@ -497,6 +508,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "eval_health": eval_health,
         "atr_health": atr_health,
         "baseline_health": baseline_health,
+        "backup_health": backup_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -587,6 +599,12 @@ def render_markdown(brief: dict) -> str:
         else:
             lines.append(f"- As of {ah['as_of_date']}: {ah['n_covered']}/{ah['n_universe']} covered")
         lines.append("")
+
+    bkh = brief.get("backup_health")
+    if bkh:
+        from alphaos.reports.backup_health import render_markdown as _render_backup
+
+        lines += [_render_backup(bkh), ""]
 
     eh = brief.get("eval_health")
     if eh:

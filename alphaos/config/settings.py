@@ -448,6 +448,18 @@ class Settings:
     # be backfilled for candidates scanned before this shipped).
     baseline_enabled: bool
 
+    # --- OPS-B: off-ecosystem backup target (extends PR9.5's backup script,
+    # deploy/backup_ledger.sh -- these two fields are read by that BASH
+    # script via a small Python shellout, the same pattern alert_failure()
+    # already uses, rather than the script sourcing .env directly). Empty
+    # method = not configured yet (the script prints a visible WARNING and
+    # skips the offsite leg, never a hard failure) -- deliberately no
+    # "enabled" boolean separate from this, since an empty method already IS
+    # the disabled state. The passphrase for env.enc lives in the macOS
+    # Keychain, NEVER here -- see backup_ledger.sh's own header comment.
+    backup2_method: str    # "" | "rclone" | "disk"
+    backup2_dest: str      # rclone remote path, or a mounted disk directory
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -936,6 +948,17 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_atr_update_time = _get(src, "SCHEDULER_ATR_UPDATE_TIME", "06:30")
     _parse_hhmm(scheduler_atr_update_time, "SCHEDULER_ATR_UPDATE_TIME")
 
+    # OPS-B: off-ecosystem backup target. Empty method = not configured yet
+    # (deploy/backup_ledger.sh prints a WARNING and skips the offsite leg,
+    # never a hard failure) -- this IS the disabled state, no separate
+    # boolean needed.
+    backup2_method = _get(src, "BACKUP2_METHOD", "").strip().lower()
+    if backup2_method not in ("", "rclone", "disk"):
+        raise SettingsError(
+            f"BACKUP2_METHOD={backup2_method!r} must be empty (not configured), 'rclone', or 'disk'."
+        )
+    backup2_dest = _get(src, "BACKUP2_DEST", "")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1130,6 +1153,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_text_archive_pull_time=scheduler_text_archive_pull_time,
         scheduler_atr_update_time=scheduler_atr_update_time,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
+        backup2_method=backup2_method,
+        backup2_dest=backup2_dest,
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,
