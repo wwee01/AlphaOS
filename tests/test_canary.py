@@ -9,13 +9,16 @@ HERMETIC throughout -- mock mode only, no real network calls.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
-from alphaos.canary.corpus import load_corpus, select_seed_packets, write_corpus
+from alphaos.canary.corpus import (
+    CorpusTamperedError, load_corpus, select_seed_packets, write_corpus,
+)
 from alphaos.canary.run import (
     DRIFT_NONE, DRIFT_TIER_1, DRIFT_TIER_2, DRIFT_TIER_3,
-    _compute_drift, get_baseline_run, pin_baseline, run_canary,
+    _compute_drift, _json_set, get_baseline_run, pin_baseline, run_canary,
 )
 from alphaos.journal.journal_store import JournalStore
 from alphaos.scheduler import cadence, cost_guard
@@ -70,6 +73,48 @@ def test_write_corpus_refuses_malformed_packet_id(tmp_path):
     with pytest.raises(ValueError):
         write_corpus(str(tmp_path / "corpus"), [{**_FIXTURE, "packet_id": "../../etc/passwd"}],
                      as_of_date="2026-07-10")
+
+
+def test_load_corpus_detects_a_tampered_fixture(tmp_path):
+    """audit MEDIUM (correctness, 2026-07-10) -- the spec's own test list
+    explicitly requires this: 'corpus tamper (sha mismatch) -> loud job
+    failure, fuse-eligible'. A fixture file modified on disk AFTER
+    write_corpus() froze its MANIFEST sha256 must be caught, never silently
+    replayed as if nothing changed."""
+    corpus_dir = str(tmp_path / "corpus")
+    write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-10")
+
+    tampered = {**_FIXTURE, "symbol": "TAMPERED"}
+    with open(os.path.join(corpus_dir, "pkt_canarytest01.json"), "w", encoding="utf-8") as f:
+        json.dump(tampered, f)
+
+    with pytest.raises(CorpusTamperedError, match="sha256"):
+        load_corpus(corpus_dir)
+
+
+def test_load_corpus_untampered_fixtures_load_normally(tmp_path):
+    corpus_dir = str(tmp_path / "corpus")
+    write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-10")
+
+    manifest, packets = load_corpus(corpus_dir)
+
+    assert manifest is not None
+    assert len(packets) == 1
+
+
+def test_run_canary_propagates_corpus_tampered_error_uncaught(tmp_path, journal):
+    """The tamper error must NOT be swallowed into a returned {"error": ...}
+    dict -- only an uncaught exception reaching JobRunner.run_job's own
+    handler marks job_runs 'failed' (fuse-eligible); a returned error key
+    would be wrapped as 'completed' instead (see run_canary_run_job)."""
+    settings = make_settings()
+    corpus_dir = str(tmp_path / "corpus")
+    write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-10")
+    with open(os.path.join(corpus_dir, "pkt_canarytest01.json"), "w", encoding="utf-8") as f:
+        json.dump({**_FIXTURE, "symbol": "TAMPERED"}, f)
+
+    with pytest.raises(CorpusTamperedError):
+        run_canary(journal, settings, corpus_dir=corpus_dir)
 
 
 def test_select_seed_packets_prefers_task_r_relabels(journal):
@@ -137,6 +182,14 @@ def test_run_canary_isolates_one_bad_fixture(tmp_path, journal):
     assert result["n_packets"] == 2
     assert result["n_results"] == 1
     assert result["n_corpus_errors"] == 1
+
+    # audit LOW (2026-07-10): canary_runs.n_prompts must be the FULL corpus
+    # size (2), not just the successful-classification count (1) -- the
+    # failsafe-rate denominator on the baseline side of a future
+    # _compute_drift call reads this same column, and it must mean the
+    # same thing there as it does here.
+    run_row = journal.one("SELECT n_prompts FROM canary_runs WHERE run_id = ?", (result["run_id"],))
+    assert run_row["n_prompts"] == 2
 
 
 def test_run_canary_refuses_when_cost_cap_reached(tmp_path, journal, monkeypatch):
@@ -207,6 +260,18 @@ def _baseline_row(**overrides):
            "system_fingerprints_json": json.dumps(["fp_abc"]), "mean_confidence": 0.7}
     row.update(overrides)
     return row
+
+
+def test_json_set_never_raises_on_null_or_missing_values():
+    """audit NIT (correctness, 2026-07-10): json.loads("null") returns None,
+    and set(None) raises TypeError -- _json_set must tolerate every falsy
+    shape a stored column could hold (not reachable via any current write
+    path, but a DB row should never be able to crash a read)."""
+    assert _json_set(None) == set()
+    assert _json_set("") == set()
+    assert _json_set("null") == set()
+    assert _json_set("[]") == set()
+    assert _json_set('["a", "b"]') == {"a", "b"}
 
 
 def test_compute_drift_none_when_no_baseline_pinned():

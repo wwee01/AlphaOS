@@ -69,6 +69,20 @@ def _results_by_packet(journal, run_id: str) -> dict:
     return {r["packet_id"]: r for r in rows}
 
 
+def _json_set(raw: Optional[str]) -> set:
+    """Parses a JSON-array column (``response_models_json``/
+    ``system_fingerprints_json``) into a set, tolerating every falsy shape
+    (``None``, missing, empty string, or the literal JSON ``null``) as "no
+    values recorded" rather than raising -- ``_compute_drift`` must never
+    raise on a stored value, even a hand-tampered or pre-this-column DB
+    row (audit NIT, 2026-07-10: ``json.loads("null")`` returns ``None``,
+    and ``set(None)`` raises ``TypeError``)."""
+    if not raw:
+        return set()
+    parsed = json.loads(raw)
+    return set(parsed) if parsed else set()
+
+
 def _compute_drift(
     current_agg: dict, current_by_packet: dict, baseline_run: Optional[dict],
     baseline_by_packet: dict, label_diff_pct: float, confidence_shift_band: float,
@@ -83,13 +97,17 @@ def _compute_drift(
         return DRIFT_NONE, {"reason": "no baseline pinned yet"}
 
     detail: dict[str, Any] = {}
-    baseline_models = set(json.loads(baseline_run.get("response_models_json") or "[]"))
-    current_models = set(json.loads(current_agg["response_models_json"]))
-    baseline_fps = set(json.loads(baseline_run.get("system_fingerprints_json") or "[]"))
-    current_fps = set(json.loads(current_agg["system_fingerprints_json"]))
+    baseline_models = _json_set(baseline_run.get("response_models_json"))
+    current_models = _json_set(current_agg["response_models_json"])
+    baseline_fps = _json_set(baseline_run.get("system_fingerprints_json"))
+    current_fps = _json_set(current_agg["system_fingerprints_json"])
     # Only compare when BOTH sides actually observed a value -- an absent
     # system_fingerprint on either side (a model that never sends it) must
-    # never be mistaken for "changed to nothing".
+    # never be mistaken for "changed to nothing". Known, accepted
+    # consequence (audit LOW, 2026-07-10): a baseline pinned during the
+    # mock era (empty identity sets) vs the first real live run also
+    # reads as "no comparison possible" rather than Tier 1 -- re-pin the
+    # baseline once live to get a real identity reference.
     identity_changed = (
         bool(baseline_models and current_models and baseline_models != current_models)
         or bool(baseline_fps and current_fps and baseline_fps != current_fps)
@@ -150,10 +168,18 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
     """Replays every corpus packet once through the current playbook
     classifier, storing every result (including fail-safe), then compares
     against the pinned baseline run (if any) and alerts on Tier 1/2 drift.
-    Never raises; returns a result dict (with an ``"error"`` key on
-    failure -- an empty/missing corpus is a safe no-op, same as EVAL-1's
-    empty-corpus handling, not a hard failure: an operator hasn't populated
-    ``data/canary/`` yet, an expected state until they do)."""
+    Returns a result dict (with an ``"error"`` key on failure -- an empty/
+    missing corpus is a safe no-op, same as EVAL-1's empty-corpus handling,
+    not a hard failure: an operator hasn't populated ``data/canary/`` yet,
+    an expected state until they do).
+
+    Deliberately propagates ``CorpusTamperedError`` uncaught (the ONE
+    exception to an otherwise never-raises contract) if ``load_corpus``
+    finds a fixture whose content no longer matches its own frozen
+    MANIFEST sha256 -- per spec this must be a loud, fuse-eligible job
+    failure, which only an uncaught exception reaching
+    ``JobRunner.run_job``'s own handler produces (a returned ``"error"``
+    key would be swallowed into a 'completed' job_runs row instead)."""
     from alphaos.ai.playbook_classifier import PlaybookClassifier
 
     corpus_dir = corpus_dir or DEFAULT_CORPUS_DIR
@@ -251,7 +277,13 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
                 continue
 
         current_agg = {
-            "n_prompts": result["n_results"],
+            # audit LOW (2026-07-10): must match canary_runs.n_prompts' OWN
+            # meaning (full corpus size, stamped once before this loop even
+            # starts -- see the INSERT above) -- NOT result["n_results"]
+            # (successful-classifications-only), or the failsafe-rate
+            # denominators on the two sides of _compute_drift silently
+            # stop meaning the same thing.
+            "n_prompts": len(packets),
             "n_parse_or_failsafe": result["n_fail_safe"],
             "response_models_json": json.dumps(sorted(response_models)),
             "system_fingerprints_json": json.dumps(sorted(system_fingerprints)),

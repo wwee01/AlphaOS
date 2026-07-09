@@ -110,10 +110,10 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
         JobType.CANARY_RUN,
     ):
         # CANARY_RUN shares this exact date-keyed shape even though its
-        # cadence is weekly, not daily: it can only ever be due on ONE
-        # matching weekday per week (see _once_weekly_due), so a plain SGT
-        # calendar-date key is automatically once-per-week -- no separate
-        # ISO-week key needed.
+        # cadence is weekly, not daily: with its configured weekday held
+        # constant it's due on only ONE matching weekday per week (see
+        # _once_weekly_due's own docstring for the known, accepted
+        # limitation if that weekday setting changes mid-week).
         st = timeutils.stamp(now)
         return f"{job_type}:{st.local_sgt[:10]}"
 
@@ -295,9 +295,17 @@ def _once_weekly_due(
     6=Sunday, Python's ``date.weekday()`` convention), at/after time_str
     (HH:MM)' rule -- the weekly-cadence sibling of ``_once_daily_due``,
     sharing its exact lock-key shape (a plain SGT calendar date, see
-    ``default_lock_key``): since this can only ever be due on ONE matching
-    weekday per week, a date-keyed lock is automatically once-per-week --
-    no separate ISO-week key needed."""
+    ``default_lock_key``): with `weekday` held constant, this can only ever
+    be due on ONE matching weekday per week, so a date-keyed lock is
+    once-per-week in steady state -- no separate ISO-week key needed.
+    KNOWN LIMITATION (audit LOW, 2026-07-10, accepted as benign): if an
+    operator changes the configured weekday mid-week AFTER that week's run
+    already completed, the new weekday's own date still isn't locked yet
+    and the job runs a second time that same ISO week (one extra
+    cost-guarded, mock-gated-by-default replay -- not a correctness or
+    safety issue, just not literally 'once per week' across a
+    reconfiguration). A same-week, same-weekday re-run is still correctly
+    blocked."""
     st = timeutils.stamp(now)
     today_sgt_date = st.local_sgt[:10]
     today_weekday = timeutils.parse_iso(st.local_sgt).weekday()

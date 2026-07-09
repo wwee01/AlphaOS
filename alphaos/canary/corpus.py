@@ -39,6 +39,18 @@ CLEAN_SINCE_UTC = "2026-07-06T14:45:00+00:00"
 DEFAULT_SEED_LIMIT = 20
 
 
+class CorpusTamperedError(Exception):
+    """Raised by ``load_corpus`` when a fixture file's content no longer
+    matches its own frozen MANIFEST sha256 -- the ONE deliberate exception
+    to this module's otherwise-never-raises posture. Per spec: this must be
+    a loud, fuse-eligible job failure (a hand-tampered or corrupted golden
+    corpus is qualitatively different from "no corpus yet" -- it means the
+    thing CANARY is replaying is no longer the thing it was frozen as, which
+    could mask or fabricate a drift verdict), so it is intentionally left
+    to propagate uncaught through run_canary() and up to JobRunner.run_job's
+    own exception handler (which marks job_runs 'failed' and pages)."""
+
+
 def _list_packet_files(corpus_dir: str) -> list:
     if not os.path.isdir(corpus_dir):
         return []
@@ -64,16 +76,40 @@ def load_corpus(corpus_dir: Optional[str] = None) -> tuple:
     ``(None, [])`` if the corpus has never been built yet -- an expected,
     honest empty state (an operator hasn't run ``canary_corpus_build`` and
     reviewed the selection yet), never an error. A `canary run` against an
-    empty corpus is a safe no-op (see canary/run.py)."""
+    empty corpus is a safe no-op (see canary/run.py).
+
+    Raises ``CorpusTamperedError`` if any fixture's on-disk content no
+    longer matches the sha256 recorded for it in MANIFEST.json at write
+    time (spec's own "corpus tamper (sha mismatch) -> loud job failure,
+    fuse-eligible" requirement) -- a frozen golden corpus is meant to be
+    exactly that, frozen; any divergence from its own manifest means either
+    tampering or disk corruption, either way not safe to silently replay."""
     corpus_dir = corpus_dir or DEFAULT_CORPUS_DIR
     files = _list_packet_files(corpus_dir)
     if not files:
         return None, []
+
+    manifest = _read_manifest(corpus_dir)
+    expected_sha_by_file = {e["file"]: e["sha256"] for e in (manifest or {}).get("packets", [])}
+
     packets = []
+    mismatches = []
     for filename in files:
-        with open(os.path.join(corpus_dir, filename), encoding="utf-8") as f:
-            packets.append(json.load(f))
-    return _read_manifest(corpus_dir), packets
+        full_path = os.path.join(corpus_dir, filename)
+        with open(full_path, "rb") as f:
+            content = f.read()
+        expected_sha = expected_sha_by_file.get(filename)
+        if expected_sha is not None:
+            actual_sha = hashlib.sha256(content).hexdigest()
+            if actual_sha != expected_sha:
+                mismatches.append(f"{filename}: expected sha256={expected_sha}, got {actual_sha}")
+        packets.append(json.loads(content))
+    if mismatches:
+        raise CorpusTamperedError(
+            f"{len(mismatches)} corpus fixture(s) no longer match their frozen MANIFEST sha256 "
+            f"in {corpus_dir!r}: " + "; ".join(mismatches)
+        )
+    return manifest, packets
 
 
 def write_corpus(corpus_dir: str, new_packets: list, as_of_date: str) -> tuple:
