@@ -312,10 +312,22 @@ def _what_learned(journal, since_sgt: str, limit: int = UP_TO_N_LEARNED_SENTENCE
         "ORDER BY resolved_at_utc DESC LIMIT ?",
         (since_sgt, limit),
     )
+    # audit MEDIUM (both independent audits, 2026-07-10): `count` below feeds
+    # ONLY the sentence-bullet list, which is deliberately LIMIT-capped at
+    # UP_TO_N_LEARNED_SENTENCES -- it must never be reused as the headline
+    # "N resolved today" claim (that would silently under-report on any day
+    # with more than `limit` resolutions). `total_resolved_today` is the
+    # real, unlimited count for exactly that purpose.
+    total_resolved_today = journal.count_rows(
+        "attribution_records",
+        "resolved_status = 'resolved' AND is_mock = 0 AND resolved_at_utc >= ?",
+        (since_sgt,),
+    )
     return {
         "resolved_today": rows,
         "sentences": [_learned_sentence(r) for r in rows],
         "count": len(rows),
+        "total_resolved_today": total_resolved_today,
         "caveat": ATTRIBUTION_V2_CAVEAT,
     }
 
@@ -607,7 +619,10 @@ def render_markdown(brief: dict) -> str:
 
     wl = brief["what_learned"]
     lines += ["## What AlphaOS learned"]
-    lines.append(f"- {wl['count']} decision(s) resolved today; aggregates in `alphaos attribution` once floors met.")
+    lines.append(
+        f"- {wl['total_resolved_today']} decision(s) resolved today; "
+        "aggregates in `alphaos attribution` once floors met."
+    )
     lines += [f"- {s}" for s in wl["sentences"]]
     lines += [f"> ⚠️ {wl['caveat']}", ""]
 

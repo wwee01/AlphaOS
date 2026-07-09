@@ -419,6 +419,36 @@ def test_render_markdown_omits_delta_r_figure_and_keeps_caveat(orchestrator):
     assert "This is NOT a per-event verdict" in md  # ATTRIBUTION_V2_CAVEAT text
 
 
+def test_what_learned_total_resolved_today_is_not_capped_by_the_sentence_limit(journal):
+    """audit MEDIUM (both independent audits, 2026-07-10): the aggregate
+    headline count must reflect the TRUE number of today's resolutions, not
+    just how many sentence bullets are shown (LIMIT-capped at
+    UP_TO_N_LEARNED_SENTENCES=3) -- otherwise a busy day silently
+    under-reports its own activity count."""
+    from alphaos.reports.daily_brief import _what_learned
+
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=1))
+    for i in range(5):
+        _insert_resolved_attribution_row(journal, symbol=f"SYM{i}", delta_r=0.1)
+
+    learned = _what_learned(journal, since)
+
+    assert learned["total_resolved_today"] == 5  # the true count, never capped
+    assert len(learned["sentences"]) == 3         # the display list stays capped
+    assert learned["count"] == 3                  # unchanged meaning: len(sentences)
+
+
+def test_render_markdown_aggregate_line_uses_true_count_not_sentence_cap(orchestrator):
+    for i in range(5):
+        _insert_resolved_attribution_row(orchestrator.journal, symbol=f"SYM{i}", delta_r=0.1)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+
+    assert "5 decision(s) resolved today" in md
+    assert "3 decision(s) resolved today" not in md
+
+
 # ------------------------------------------------------------------ no-read
 def test_no_decision_path_reads_brief_or_health_modules():
     import pathlib
