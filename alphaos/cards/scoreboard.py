@@ -44,7 +44,12 @@ def live_eligible_cards(journal) -> list[dict]:
     that has NOT already been terminally demoted (a demoted version is never
     re-scored -- re-entry requires a brand new version, per the anti-double-
     jeopardy law; scoring it again would be pointless and could look like a
-    second, contradictory verdict on the same terminal fact)."""
+    second, contradictory verdict on the same terminal fact). Checks BOTH
+    demotion mechanisms (PR13 slice 2): slice 1's own automatic-trigger-only
+    ``card_demotions``, and ``promotion_decisions``'s manual
+    ``direction='demote'`` rows (``alphaos.cards.promotion``'s
+    ``demote_card()``) -- the two tables are never merged, so both must be
+    checked here."""
     return journal.query(
         "SELECT sc.card_id, sc.version AS card_version, sc.state "
         "FROM setup_cards sc "
@@ -52,6 +57,10 @@ def live_eligible_cards(journal) -> list[dict]:
         "AND NOT EXISTS ("
         "  SELECT 1 FROM card_demotions cd "
         "  WHERE cd.card_id = sc.card_id AND cd.card_version = sc.version"
+        ") "
+        "AND NOT EXISTS ("
+        "  SELECT 1 FROM promotion_decisions pd "
+        "  WHERE pd.card_id = sc.card_id AND pd.card_version = sc.version AND pd.direction = 'demote'"
         ")"
     )
 

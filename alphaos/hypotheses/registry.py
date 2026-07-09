@@ -151,3 +151,50 @@ def seed_all(journal, now: Optional[datetime] = None) -> list[dict]:
     """Propose every ``SEEDED_HYPOTHESES`` entry (idempotent per-row --
     calling this on every startup/scheduler tick is safe)."""
     return [propose_hypothesis(journal, spec, now) for spec in SEEDED_HYPOTHESES]
+
+
+_OPERATOR_ONLY_STATUSES = frozenset({
+    HypothesisStatus.MET.value, HypothesisStatus.FAILED.value, HypothesisStatus.WITHDRAWN.value,
+})
+
+
+def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided_by: str) -> dict:
+    """PR13 slice 2: the ONLY writer of MET/FAILED/WITHDRAWN --
+    ``constants.HypothesisStatus``'s own docstring reserves these for "an
+    operator reading the rendered report + claim text together, never set
+    by any automated path in v0"; this function IS that operator path, and
+    the resolver still never calls it. Requires the row to already be
+    ``resolved`` (evidence frozen by the mechanical resolver pass) -- a
+    human adjudicates strictly AFTER the machinery finishes, never before
+    and never on a still-``testing``/``proposed`` row. ``decided_by`` must
+    not be ``'system'`` (Prime Directive 3: this is a human judgment call
+    by construction, same guard ``alphaos.cards.promotion`` enforces for
+    its own decisions).
+
+    Raises ``ValueError`` on any misuse (unknown hypothesis_id, wrong
+    status, decided_by='system') -- this is an operator-invoked CLI action,
+    not a background job, so a loud, immediate error beats a silently
+    swallowed no-op.
+    """
+    if new_status not in _OPERATOR_ONLY_STATUSES:
+        raise ValueError(f"mark_hypothesis_status: {new_status!r} is not an operator-settable status")
+    if decided_by == "system":
+        raise ValueError("mark_hypothesis_status: decided_by must be a real operator identity, not 'system'")
+
+    existing = journal.one(
+        "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (hypothesis_id,),
+    )
+    if existing is None:
+        raise ValueError(f"no such hypothesis_id: {hypothesis_id!r}")
+    if existing["status"] != HypothesisStatus.RESOLVED.value:
+        raise ValueError(
+            f"{hypothesis_id!r} is {existing['status']!r}, not 'resolved' -- an operator can only "
+            "adjudicate a hypothesis once its evidence is frozen"
+        )
+
+    journal.conn.execute(
+        "UPDATE hypothesis_proposals SET status = ? WHERE hypothesis_id = ? AND status = 'resolved'",
+        (new_status, hypothesis_id),
+    )
+    journal.conn.commit()
+    return journal.one("SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (hypothesis_id,))

@@ -2023,6 +2023,52 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR13 slice 2: one row per MANUAL card state-transition decision --
+        # graduation (direction='promote', an existing shadow version moves
+        # to live_eligible, CONTENT UNCHANGED -- v0 mints no new version;
+        # see alphaos/cards/promotion.py's own module docstring for the
+        # "graduation vs mutation" distinction a focused Fable5 consult
+        # drew, 2026-07-10) or a manual override demotion
+        # (direction='demote'). Deliberately a SEPARATE table from slice 1's
+        # own card_demotions (which stays automatic-trigger-only, unchanged,
+        # per that consult's own "don't reopen it" ruling) -- the full
+        # transition history is a reporting-level UNION of both tables, not
+        # a shared one. `preregistration_id` is required (enforced in
+        # promotion.py, not a DB constraint) for direction='promote' only --
+        # audit A4's reconstructability payload; a manual demote is an
+        # operator override that needs no evidence to be safe. `trigger` is
+        # always 'manual' for rows this module writes (an automatic
+        # promotion would violate Prime Directive 3 and cannot exist by
+        # construction -- promotion.py has no caller that doesn't pass an
+        # operator-supplied decided_by). `research_ref` is required (again,
+        # enforced in code) only when the underlying hypothesis's
+        # risk_class='C' (PD#9) -- unreachable today since none of the 8
+        # seeded hypotheses with a card_id are Class C, fixture-tested only.
+        "promotion_decisions",
+        """
+        CREATE TABLE IF NOT EXISTS promotion_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id TEXT NOT NULL UNIQUE,
+            card_id TEXT NOT NULL,
+            card_version INTEGER NOT NULL,
+            from_state TEXT NOT NULL,
+            to_state TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            trigger TEXT NOT NULL DEFAULT 'manual',
+            hypothesis_id TEXT,
+            preregistration_id TEXT,
+            decided_by TEXT NOT NULL,
+            research_ref TEXT,
+            evidence_json TEXT,
+            lineage_id TEXT,
+            decided_at_utc TEXT NOT NULL,
+            decided_at_sgt TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2206,6 +2252,13 @@ INDEXES: list[str] = [
     # daily "what's due" scan.
     "CREATE INDEX IF NOT EXISTS idx_hypothesis_proposals_status ON hypothesis_proposals(status)",
     "CREATE INDEX IF NOT EXISTS idx_hypothesis_proposals_prereg ON hypothesis_proposals(prereg_id)",
+    # PR13 slice 2: "has this exact (card_id, version) ever had a manual
+    # demote decision" is the other half of the anti-double-jeopardy check
+    # (card_demotions covers the automatic half) -- both a card_promote
+    # eligibility check and live_eligible_cards() query this.
+    "CREATE INDEX IF NOT EXISTS idx_promotion_decisions_card_version "
+    "ON promotion_decisions(card_id, card_version, direction)",
+    "CREATE INDEX IF NOT EXISTS idx_promotion_decisions_hypothesis ON promotion_decisions(hypothesis_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
