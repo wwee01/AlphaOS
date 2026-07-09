@@ -657,9 +657,27 @@ item specs under their canonical names in the specs doc):**
     +42 tests. Suite green, ruff/mypy clean. **This was the last item in
     the operator's last explicit instruction — the full REG-1→TEXT-0→
     EVAL-1→PORT-1→INSTR-1 chain is now done.**
-17. 🔴 **BASELINE** — deterministic shadow baseline, three arms (AI / threshold /
-    propose-all), day-block-bootstrap CI; preregistrations row #1. Every week
-    without it is unrecoverable paired evidence — as early as possible.
+17. ✅ **BASELINE** — merged `1af4e3a` (2026-07-09, branch commits `a1fd3b0`+`bb9d934`),
+    Opus-audited (two independent audits, both APPROVE WITH NOTES, zero
+    BLOCKER/HIGH/MEDIUM). Deterministic shadow baseline: two frozen rules
+    (`threshold_v1`, `propose_all_v1`) journaled 2:1 with every AI evaluation,
+    resolved via the ONE replay engine, measured with a new day-block BCa
+    bootstrap (10k resamples, normal-approx fallback). `entry_fill_status` +
+    the verbatim gross/gap-free caveat added pre-merge per audit finding.
+    `preregistrations` row #1 registerable via `alphaos baseline_register`
+    (idempotent). **Q-value/FDR reporting explicitly deferred as KIV** — it
+    requires a FROZEN evaluated-preregistration family that doesn't exist
+    until an operator runs the (not-yet-built) evaluate CLI after
+    `analysis_not_before` (2026-09-07); premature today, not a safety gap.
+    Bundled with 4 small follow-ups from a Fable strategy review of the
+    prior overnight session's reversible decisions (REG-1 floor now requires
+    BOTH its own episode count AND PORT-1 `effective_n()`; attribution.py's
+    `max_holding_days` join via a correlated subquery; ATR-coverage daily-
+    brief line; the audit-agent tool-scope lesson codified in the specs doc
+    §H.14/§T3). +68 tests. Full suite green, ruff/mypy clean. **Not yet
+    done**: no operator has run `baseline_register` against the real
+    production DB yet, so the pre-registration hasn't been created there;
+    the shadow ledger starts accumulating forward-only from merge time.
 18. 🔴 **EARN-1** — real earnings provider behind the PR5 factory (defines
     "catalyst" for the niche; hard gate for card v2).
 19. 🔴 **EXP-1** — shadow small/mid catalyst universe (300–500 names, $5–50M ADV),
@@ -820,7 +838,9 @@ belongs in these documents, not in any session's memory.
 | PR12 is registry-first; the LLM hypothesis generator is v1.1 | Partners' verdict V2: pre-registration is the load-bearing part (PD#4); at current N a generator fills the registry with unresolvable zombies. Seeded with 8 named human hypotheses (H-TQS-1 … H-AI-1). | Generator earns v1.1 when the registry demonstrates resolutions |
 | Diff→version closure law: only an operator-committed YAML changes card behavior; no job writes `cards/*.yaml` | Audit B1 (2026-07-08): without this joint the loop toggles cards on/off but can never change what a card does — and with it automated, PD#3 would be violated structurally. `card_promote` renders the diff; the operator commits it. | Never |
 | One floor law: `effective_n()` shared by reports AND promotion gates; BH-FDR family = cumulative evaluated preregistrations | Audit A1/A5: row-count floors on a one-beta-cluster book ≈ 3–5 independent bets per 30 rows; per-render FDR controls nothing across 365 nightly runs. Mirror of the one-replay-engine rule. | Never |
-| BASELINE runs three arms (AI / interest-threshold / propose-all) | Audit C2: both original arms conditioned on interest_score — two arms measure selection inherited from the scanner, not AI value. The bracket separates them; the claim stays honest-conditional. | Rule v2+ arms are new pre-registrations |
+| BASELINE runs three arms (AI / interest-threshold / propose-all) — **shipped** `1af4e3a` | Audit C2: both original arms conditioned on interest_score — two arms measure selection inherited from the scanner, not AI value. The bracket separates them; the claim stays honest-conditional. | Rule v2+ arms are new pre-registrations |
+| BASELINE's deterministic target uses `settings.min_reward_risk` as the target ratio, not a separate "identical live function" | 2026-07-09 build: the live AI path has no formulaic target (the model picks it narratively) — the only thing resembling "the identical live function" is the reward:risk FLOOR every live PROPOSE must already clear. Reusing that same number as BASELINE's own deterministic target ratio satisfies the spec's "one sizing formula law" as literally as possible without inventing a new unregistered constant. The STOP genuinely does reuse a real shared function (`alphaos.data.atr.atr_stop_price`, extracted from the live path's own `_apply_atr_stop`). | If a future card version gives the live path its own formulaic target, revisit whether BASELINE should track that instead |
+| BASELINE's q-value/FDR reporting deferred as KIV, not built at merge | 2026-07-09 scope/safety audit (LOW-1): `compute_verdicts()` needs a FROZEN family of EVALUATED preregistrations; BASELINE's own hypothesis can't be evaluated before `analysis_not_before` (2026-09-07). Building a "q" display against a family that doesn't include this hypothesis yet would be statistically incoherent, not just early — the live report's own `one_sided_p_below_zero` stays a descriptive bootstrap diagnostic, never mistaken for the formal test. | When an operator first runs `evaluate_hypothesis()` on BASELINE's row (after 2026-09-07) — wire `compute_verdicts()` into whatever surface displays the result then |
 | CANARY + BASELINE + PORT-1 ported by contract from NightDesk #81/#85 | Port the contract, never the code (method note in the specs doc PORT-1 section) — copying modules imports NightDesk's assumptions and none of AlphaOS's tests. | — |
 | REG-1 pulled forward to A2.5 (was item 20's "Regime Engine v1" measurement half) | 2026-07-08 late reconciliation: the PORT-1 gate was about trusting sliced *claims*, never collecting labels. REG-1's urgency is epistemic — the classifier must be frozen BEFORE anyone examines regime-conditional outcomes, or every later regime definition is contaminated by peeking. Backfill is a deterministic derivation from vendor daily bars, so stamp-at-birth is recoverable — which is also why EXP-0 (unrecoverable snapshots) keeps the front slot. One classifier, one truth: EXP-1's own "regime tag v0" deleted, consumes `regime_days`. | Never relabel v1 rows in place; threshold changes = `regime_rules_v2`, new rows |
 | UNIV-1 (market-cap tiers) superseded by EXP-0's ADV-band screen + UNIV-D later derivation | The capacity niche is liquidity-defined, not cap-defined — ADV is the direct measure, cap a proxy needing reference data that didn't exist. UNIV-1's salvaged parts (survivorship `universe_days` law, floor/flags, non-executability of widened names) are in EXP-0 amended; cap tiers become a retroactive date-join once TEXT-0's SEC data exists. Operator-reviewed committed universe file beats an automated monthly rebalance (human-in-loop, versioned like a card). | If the ADV band systematically misses names the thesis wants (then UNIV-D graduates from derivation to screen input) |
