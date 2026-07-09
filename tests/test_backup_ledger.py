@@ -453,27 +453,42 @@ def test_offsite_backup_not_configured_is_a_warning_not_a_failure(tmp_path):
 
 
 def test_offsite_backup_disk_method_copies_artifacts(tmp_path):
+    # audit HIGH fix (2026-07-10): offsite requires the SAME passphrase as
+    # env.enc -- an unencrypted DB must never leave this Mac. A real .env +
+    # passphrase are now required for the offsite leg to proceed at all.
     db = tmp_path / "source.db"
     dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
     offsite = tmp_path / "offsite_target"
     offsite.mkdir()
     _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
 
-    result = _run_backup(db, dest, backup2_method="disk", backup2_dest=offsite)
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
 
     assert result.returncode == 0, result.stderr
     assert "Offsite backup OK" in result.stdout
     today = date.today().isoformat()
-    assert (offsite / f"alphaos-{today}.db.gz").exists()
+    assert (offsite / f"alphaos-{today}.db.gz.enc").exists()  # encrypted, not plaintext
+    assert not (offsite / f"alphaos-{today}.db.gz").exists()  # plaintext must NOT be shipped
     assert (offsite / f"MANIFEST-{today}.json").exists()
+    assert (offsite / f"env-{today}.enc").exists()
 
 
 def test_offsite_backup_disk_method_missing_dest_dir_alerts_and_does_not_crash(tmp_path):
     db = tmp_path / "source.db"
     dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
     _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
 
-    result = _run_backup(db, dest, backup2_method="disk", backup2_dest=tmp_path / "not_mounted")
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=tmp_path / "not_mounted",
+    )
 
     assert result.returncode == 0, result.stderr  # best-effort: never fails the overall run
     assert "BACKUP FAILURE" in result.stdout + result.stderr
@@ -484,16 +499,121 @@ def test_offsite_backup_disk_method_missing_dest_dir_alerts_and_does_not_crash(t
 def test_offsite_backup_only_happens_once_per_month(tmp_path):
     db = tmp_path / "source.db"
     dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
     offsite = tmp_path / "offsite_target"
     offsite.mkdir()
     _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
 
-    r1 = _run_backup(db, dest, backup2_method="disk", backup2_dest=offsite)
-    r2 = _run_backup(db, dest, backup2_method="disk", backup2_dest=offsite)
+    r1 = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+    r2 = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
 
     assert r1.returncode == 0 and r2.returncode == 0
     assert "Offsite backup OK" in r1.stdout
     assert "already done this month" in r2.stdout
+
+
+def test_offsite_db_copy_is_encrypted_not_plaintext(tmp_path):
+    """audit HIGH (correctness, 2026-07-10): spec §3 explicitly requires
+    "Encrypt the DB at the second target too" -- the offsite copy must
+    never be a plain, gunzip-able .db.gz; only the local iCloud copy stays
+    plaintext (fast restore). Verified both by content (not valid gzip) and
+    by decrypting it back with the same passphrase and confirming the real
+    DB content comes out the other side."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "offsite-encryption-check")
+    _write_env_file(env_file)
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Offsite backup OK" in result.stdout
+    today = date.today().isoformat()
+    offsite_db = offsite / f"alphaos-{today}.db.gz.enc"
+    assert offsite_db.exists()
+
+    with pytest.raises(gzip.BadGzipFile):
+        with gzip.open(offsite_db, "rb") as f:
+            f.read()
+
+    decrypt = subprocess.run(
+        ["bash", "-c",
+         'openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$1" -out "$2" 3<<< "$3"',
+         "_", str(offsite_db), str(tmp_path / "restored.db.gz"), "offsite-test-pass"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert decrypt.returncode == 0, decrypt.stderr
+    restored = tmp_path / "restored.db"
+    with gzip.open(tmp_path / "restored.db.gz", "rb") as src, open(restored, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    conn = sqlite3.connect(str(restored))
+    row = conn.execute("SELECT v FROM t").fetchone()
+    conn.close()
+    assert row == ("offsite-encryption-check",)
+
+
+def test_offsite_backup_refuses_when_no_passphrase_armed(tmp_path):
+    """audit HIGH fix, negative case: BACKUP2_METHOD configured but no
+    passphrase available (env.enc itself unarmed/absent) must ship NOTHING
+    offsite -- never fall back to an unencrypted DB copy."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+
+    result = _run_backup(db, dest, backup2_method="disk", backup2_dest=offsite)
+    # no env_path / no passphrase -- env.enc skipped, so offsite must refuse too
+
+    assert result.returncode == 0, result.stderr  # best-effort: never fails the overall run
+    assert "no Keychain passphrase armed" in result.stdout + result.stderr
+    assert list(offsite.iterdir()) == []  # nothing shipped -- not even a plaintext DB
+
+
+def test_no_passphrase_material_ever_appears_in_captured_output(tmp_path):
+    """Spec's own explicitly-named acceptance test: "grep test -- no
+    passphrase/key material in any captured log/journal output." Runs a
+    full backup (env.enc + offsite, both armed) with a distinctive sentinel
+    passphrase and confirms it appears in NEITHER stdout/stderr NOR any
+    artifact written to disk (MANIFEST, offsite manifest, or the .enc
+    files themselves, which are ciphertext and should never contain the
+    key used to produce them in any recognizable form)."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+    sentinel = "SENTINEL-PASSPHRASE-do-not-leak-9f8e7d6c"
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase=sentinel,
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined_output = result.stdout + result.stderr
+    assert sentinel not in combined_output
+
+    for artifact_dir in (dest / "daily", offsite):
+        for artifact in artifact_dir.iterdir():
+            if artifact.is_file():
+                content = artifact.read_bytes()
+                assert sentinel.encode() not in content, f"sentinel leaked into {artifact}"
 
 
 def test_status_json_written_with_expected_fields(tmp_path, monkeypatch):

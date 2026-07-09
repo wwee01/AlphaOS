@@ -19,6 +19,7 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/backup_status.json
+*.enc
 *.db
 *.sqlite
 *.sqlite3

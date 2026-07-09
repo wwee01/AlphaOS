@@ -28,6 +28,17 @@ def test_build_backup_health_none_on_corrupt_json(tmp_path):
     assert build_backup_health(str(status_file)) is None
 
 
+def test_build_backup_health_none_when_json_is_not_an_object(tmp_path):
+    """audit LOW (correctness, 2026-07-10): syntactically valid JSON that
+    isn't a dict (a bare list/number/string) must not flow through as
+    "truthy, not a dict" and crash render_markdown's own .get() calls."""
+    status_file = tmp_path / "backup_status.json"
+
+    for non_dict_json in ("[1, 2, 3]", "42", '"just a string"', "null", "true"):
+        status_file.write_text(non_dict_json)
+        assert build_backup_health(str(status_file)) is None
+
+
 def test_build_backup_health_reads_a_real_status_file(tmp_path):
     status_file = tmp_path / "backup_status.json"
     status_file.write_text(json.dumps({

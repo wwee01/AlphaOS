@@ -43,6 +43,12 @@ SECRET_SETTINGS_FIELDS = frozenset({
     "db_path",
     "last30days_repo_path",
     "last30days_python",
+    # OPS-B (audit MEDIUM, 2026-07-10): an rclone remote string can embed
+    # auth info depending on how the operator's own rclone config is set
+    # up, and a plain disk path leaks deployment layout -- same rationale
+    # as db_path/last30days_repo_path above. backup2_method is a bounded
+    # enum ("", "rclone", "disk") and stays hashed.
+    "backup2_dest",
 })
 
 

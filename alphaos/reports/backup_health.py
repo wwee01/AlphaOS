@@ -25,7 +25,13 @@ def build_backup_health(status_file: Optional[str] = None) -> Optional[dict]:
         return None
     try:
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            parsed = json.load(f)
+        # audit LOW (2026-07-10): syntactically valid JSON that isn't an
+        # object (e.g. a bare list/number/string) would otherwise flow
+        # through as "truthy, not a dict" and crash render_markdown's own
+        # .get() calls -- only ever written by this script as an object,
+        # but a read function must not trust that as a guarantee.
+        return parsed if isinstance(parsed, dict) else None
     except (OSError, json.JSONDecodeError):
         # A torn/corrupt status file must never crash the daily brief --
         # treat it the same as "never run" rather than raising, since this

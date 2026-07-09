@@ -257,7 +257,8 @@ if [ -f "$ENV_SRC" ]; then
     echo "  security add-generic-password -s $BACKUP_KEYCHAIN_SERVICE -a $BACKUP_KEYCHAIN_ACCOUNT -w '<passphrase>' -T /usr/bin/security -T /usr/bin/openssl" >&2
     echo "  (then ALSO store the same passphrase in your password manager -- the Keychain copy dies with this Mac, exactly when a disaster restore would need it)" >&2
   else
-    if openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$ENV_SRC" -out "$ENV_ENC_DEST.tmp" 3<<< "$BACKUP_PASSPHRASE" 2>/tmp/alphaos-env-enc-err.$$; then
+    ENV_ENC_ERR="$(mktemp "${TMPDIR:-/tmp}/alphaos-env-enc-err-XXXXXX")"
+    if openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$ENV_SRC" -out "$ENV_ENC_DEST.tmp" 3<<< "$BACKUP_PASSPHRASE" 2>"$ENV_ENC_ERR"; then
       DECRYPTED_CHECK="$(mktemp "${TMPDIR:-/tmp}/alphaos-env-check-XXXXXX")"
       if openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$ENV_ENC_DEST.tmp" -out "$DECRYPTED_CHECK" 3<<< "$BACKUP_PASSPHRASE" 2>/dev/null \
          && [ "$(shasum -a 256 "$DECRYPTED_CHECK" | cut -d' ' -f1)" = "$(shasum -a 256 "$ENV_SRC" | cut -d' ' -f1)" ]; then
@@ -270,15 +271,22 @@ if [ -f "$ENV_SRC" ]; then
       fi
       rm -f "$DECRYPTED_CHECK"
     else
-      rm -f "$ENV_ENC_DEST.tmp" "/tmp/alphaos-env-enc-err.$$"
-      alert_failure "openssl encryption of .env failed"
+      # audit LOW (2026-07-10): surface WHY openssl failed -- an operator
+      # previously got no diagnostic beyond "it failed" (the captured
+      # stderr was written to a temp file and then discarded unread).
+      alert_failure "openssl encryption of .env failed: $(cat "$ENV_ENC_ERR" 2>/dev/null)"
+      rm -f "$ENV_ENC_DEST.tmp"
     fi
+    rm -f "$ENV_ENC_ERR"
   fi
-  unset BACKUP_PASSPHRASE
-  rm -f "/tmp/alphaos-env-enc-err.$$"
 else
   echo "WARNING: no .env found at $ENV_SRC -- env.enc skipped" >&2
 fi
+# NOTE: BACKUP_PASSPHRASE (if it was set at all) deliberately stays in scope
+# past this point -- the offsite leg (step 9 below) reuses the SAME
+# passphrase to encrypt the DB copy before it ever leaves this Mac. It is
+# unset exactly once, at the very end of the script (step 10), after both
+# uses are done.
 
 # --- 8. MANIFEST.json: sha256 of every artifact this run produced + schema
 #     version + git rev + the EXACT decrypt command (flags included,
@@ -305,71 +313,131 @@ MANIFEST_DEST="$DAILY_DIR/MANIFEST-$TODAY.json"
 } > "$MANIFEST_DEST.tmp" && mv "$MANIFEST_DEST.tmp" "$MANIFEST_DEST"
 echo "MANIFEST OK: $MANIFEST_DEST"
 
-# --- 9. OPS-B: monthly, copy {db.gz, env.enc, MANIFEST} to a second target
-#     OUTSIDE Apple's account domain -- breaks the single-ecosystem failure
-#     domain (iCloud only) PR9.5 shipped with. Same monthly-slot-backfill
-#     pattern as step 4 (fill in if this month doesn't have one yet, robust
-#     to a missed exact "1st" tick -- the next successful nightly backfills
-#     it). Operator-configured (BACKUP2_METHOD=rclone|disk, BACKUP2_DEST=...
-#     in .env) -- read via a small Python shellout (the one place that
-#     already knows how to parse .env correctly), never by sourcing .env
-#     directly in bash. Mechanism only: an unconfigured/absent second target
-#     is a WARNING (visible, not silent), never a hard failure -- arming is
-#     an explicit, deliberate operator action (their own cloud credentials
-#     or external disk), same as env.enc above. ---
+# --- 9. OPS-B: monthly, copy {db.gz(encrypted), env.enc, offsite MANIFEST}
+#     to a second target OUTSIDE Apple's account domain -- breaks the
+#     single-ecosystem failure domain (iCloud only) PR9.5 shipped with.
+#     Same monthly-slot-backfill pattern as step 4 (fill in if this month
+#     doesn't have one yet, robust to a missed exact "1st" tick -- the next
+#     successful nightly backfills it). Operator-configured
+#     (BACKUP2_METHOD=rclone|disk, BACKUP2_DEST=... in .env) -- read via a
+#     small Python shellout (the one place that already knows how to parse
+#     .env correctly), never by sourcing .env directly in bash. Mechanism
+#     only: an unconfigured/absent second target is a WARNING (visible, not
+#     silent), never a hard failure -- arming is an explicit, deliberate
+#     operator action (their own cloud credentials or external disk), same
+#     as env.enc above.
+#
+#     Per spec: "Encrypt the DB at the second target too (cheap); local
+#     plain .backup stays for fast restore" -- the LOCAL daily/monthly
+#     copies stay plaintext gzip (fast restore, already covered by iCloud's
+#     own access controls), but nothing may leave this Mac for a
+#     third-party cloud or a losable external disk unencrypted. This
+#     REUSES the exact same Keychain passphrase as env.enc (encrypted
+#     into a throwaway temp file, never persisted locally, cleaned up
+#     after the copy) -- so the offsite leg is gated on the SAME arming
+#     step as env.enc: no passphrase, no offsite DB copy, full stop. ---
+BACKUP2_CONFIG_ERR="$(mktemp "${TMPDIR:-/tmp}/alphaos-backup2-config-err-XXXXXX")"
 BACKUP2_CONFIG="$("$VENV_PYTHON" -c "
 from alphaos.config.settings import load_settings
 s = load_settings()
 print(s.backup2_method)
 print(s.backup2_dest)
-" 2>/dev/null || echo $'\n')"
+" 2>"$BACKUP2_CONFIG_ERR")"
+BACKUP2_SHELLOUT_STATUS=$?
+BACKUP2_CONFIG_ERR_TEXT="$(cat "$BACKUP2_CONFIG_ERR" 2>/dev/null)"
+rm -f "$BACKUP2_CONFIG_ERR"
 BACKUP2_METHOD="$(echo "$BACKUP2_CONFIG" | sed -n '1p')"
 BACKUP2_DEST="$(echo "$BACKUP2_CONFIG" | sed -n '2p')"
 OFFSITE_MONTHLY_MARKER="$OFFSITE_DIR/.last-offsite-$THIS_MONTH"
 
-if [ -z "$BACKUP2_METHOD" ]; then
+if [ "$BACKUP2_SHELLOUT_STATUS" -ne 0 ]; then
+  # audit MEDIUM (2026-07-10): distinct from "genuinely not configured" --
+  # load_settings() itself raised (an invalid BACKUP2_METHOD, or ANY other
+  # malformed .env value elsewhere), so BACKUP2_METHOD/DEST read as empty
+  # for the wrong reason. Silently treating this the same as "unconfigured"
+  # would let a working offsite setup go dark for a month after an
+  # unrelated .env typo, with only a stderr warning to notice by.
+  alert_failure "offsite backup config could not be read (.env / settings error): $BACKUP2_CONFIG_ERR_TEXT"
+elif [ -z "$BACKUP2_METHOD" ]; then
   echo "WARNING: offsite backup NOT ARMED -- BACKUP2_METHOD unset in .env (rclone|disk). Single-ecosystem failure domain remains." >&2
 elif [ -f "$OFFSITE_MONTHLY_MARKER" ]; then
   echo "Offsite backup already done this month ($THIS_MONTH) -- skipping."
+elif [ -z "${BACKUP_PASSPHRASE:-}" ]; then
+  echo "WARNING: offsite backup configured but SKIPPED -- no Keychain passphrase armed, and an unencrypted DB must never leave this Mac. Arm the same passphrase env.enc uses (see the ARM instructions above) to enable both." >&2
+  alert_failure "offsite backup skipped: BACKUP2_METHOD is configured but no encryption passphrase is armed -- refusing to ship an unencrypted DB off-ecosystem"
 else
   mkdir -p "$OFFSITE_DIR"
-  OFFSITE_ARTIFACTS=("$DAILY_DEST" "$MANIFEST_DEST")
-  if [ "$ENV_ENC_OK" -eq 1 ]; then
-    OFFSITE_ARTIFACTS+=("$ENV_ENC_DEST")
-  fi
+  DB_ENC_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-db-offsite-XXXXXX.db.gz.enc")"
+  OFFSITE_MANIFEST_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-offsite-manifest-XXXXXX.json")"
 
-  OFFSITE_OK=1
-  if [ "$BACKUP2_METHOD" = "disk" ]; then
-    if [ -z "$BACKUP2_DEST" ] || [ ! -d "$BACKUP2_DEST" ]; then
-      alert_failure "offsite backup configured as 'disk' but BACKUP2_DEST ($BACKUP2_DEST) is not a mounted/existing directory"
-      OFFSITE_OK=0
-    else
-      for artifact in "${OFFSITE_ARTIFACTS[@]}"; do
-        cp "$artifact" "$BACKUP2_DEST/" || { alert_failure "offsite disk copy failed for $artifact"; OFFSITE_OK=0; }
-      done
-    fi
-  elif [ "$BACKUP2_METHOD" = "rclone" ]; then
-    if ! command -v rclone >/dev/null 2>&1; then
-      alert_failure "offsite backup configured as 'rclone' but the rclone binary is not installed"
-      OFFSITE_OK=0
-    elif [ -z "$BACKUP2_DEST" ]; then
-      alert_failure "offsite backup configured as 'rclone' but BACKUP2_DEST is empty"
-      OFFSITE_OK=0
-    else
-      for artifact in "${OFFSITE_ARTIFACTS[@]}"; do
-        rclone copyto "$artifact" "$BACKUP2_DEST/$(basename "$artifact")" || { alert_failure "rclone copy failed for $artifact"; OFFSITE_OK=0; }
-      done
-    fi
+  if ! openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$DAILY_DEST" -out "$DB_ENC_TMP" 3<<< "$BACKUP_PASSPHRASE" 2>/dev/null; then
+    alert_failure "offsite backup skipped: openssl encryption of the DB copy failed"
+    rm -f "$DB_ENC_TMP" "$OFFSITE_MANIFEST_TMP"
   else
-    echo "WARNING: unrecognized BACKUP2_METHOD=$BACKUP2_METHOD (expected rclone|disk) -- offsite backup skipped" >&2
-    OFFSITE_OK=0
-  fi
+    DB_ENC_SHA="$(shasum -a 256 "$DB_ENC_TMP" | cut -d' ' -f1)"
+    OFFSITE_DB_NAME="alphaos-$TODAY.db.gz.enc"
+    {
+      echo "{"
+      echo "  \"date\": \"$TODAY\","
+      echo "  \"git_rev\": \"$GIT_REV\","
+      echo "  \"schema_version\": \"$SCHEMA_VERSION\","
+      echo "  \"db_gz_enc\": {\"file\": \"$OFFSITE_DB_NAME\", \"sha256\": \"$DB_ENC_SHA\"},"
+      if [ "$ENV_ENC_OK" -eq 1 ]; then
+        echo "  \"env_enc\": {\"file\": \"$(basename "$ENV_ENC_DEST")\", \"sha256\": \"$(shasum -a 256 "$ENV_ENC_DEST" | cut -d' ' -f1)\"},"
+      else
+        echo "  \"env_enc\": null,"
+      fi
+      echo "  \"note\": \"both artifacts here are encrypted with the SAME passphrase (this Mac's Keychain + your password manager's recovery copy)\","
+      echo "  \"decrypt_db_command\": \"openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in $OFFSITE_DB_NAME -out alphaos-restored.db.gz 3<<< YOUR_PASSPHRASE_HERE\","
+      echo "  \"decrypt_env_command\": \"openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in env-$TODAY.enc -out .env.restored 3<<< YOUR_PASSPHRASE_HERE\""
+      echo "}"
+    } > "$OFFSITE_MANIFEST_TMP"
 
-  if [ "$OFFSITE_OK" -eq 1 ]; then
-    touch "$OFFSITE_MONTHLY_MARKER"
-    echo "Offsite backup OK: $THIS_MONTH -> $BACKUP2_METHOD:$BACKUP2_DEST"
+    OFFSITE_ARTIFACTS=("$DB_ENC_TMP")
+    if [ "$ENV_ENC_OK" -eq 1 ]; then
+      OFFSITE_ARTIFACTS+=("$ENV_ENC_DEST")
+    fi
+
+    OFFSITE_OK=1
+    if [ "$BACKUP2_METHOD" = "disk" ]; then
+      if [ -z "$BACKUP2_DEST" ] || [ ! -d "$BACKUP2_DEST" ]; then
+        alert_failure "offsite backup configured as 'disk' but BACKUP2_DEST ($BACKUP2_DEST) is not a mounted/existing directory"
+        OFFSITE_OK=0
+      else
+        cp "$DB_ENC_TMP" "$BACKUP2_DEST/$OFFSITE_DB_NAME" || { alert_failure "offsite disk copy failed for the encrypted DB"; OFFSITE_OK=0; }
+        cp "$OFFSITE_MANIFEST_TMP" "$BACKUP2_DEST/MANIFEST-$TODAY.json" || { alert_failure "offsite disk copy failed for the offsite manifest"; OFFSITE_OK=0; }
+        for artifact in "${OFFSITE_ARTIFACTS[@]:1}"; do  # remaining artifacts (env.enc, if armed) keep their own names
+          cp "$artifact" "$BACKUP2_DEST/" || { alert_failure "offsite disk copy failed for $artifact"; OFFSITE_OK=0; }
+        done
+      fi
+    elif [ "$BACKUP2_METHOD" = "rclone" ]; then
+      if ! command -v rclone >/dev/null 2>&1; then
+        alert_failure "offsite backup configured as 'rclone' but the rclone binary is not installed"
+        OFFSITE_OK=0
+      elif [ -z "$BACKUP2_DEST" ]; then
+        alert_failure "offsite backup configured as 'rclone' but BACKUP2_DEST is empty"
+        OFFSITE_OK=0
+      else
+        rclone copyto "$DB_ENC_TMP" "$BACKUP2_DEST/$OFFSITE_DB_NAME" || { alert_failure "rclone copy failed for the encrypted DB"; OFFSITE_OK=0; }
+        rclone copyto "$OFFSITE_MANIFEST_TMP" "$BACKUP2_DEST/MANIFEST-$TODAY.json" || { alert_failure "rclone copy failed for the offsite manifest"; OFFSITE_OK=0; }
+        for artifact in "${OFFSITE_ARTIFACTS[@]:1}"; do
+          rclone copyto "$artifact" "$BACKUP2_DEST/$(basename "$artifact")" || { alert_failure "rclone copy failed for $artifact"; OFFSITE_OK=0; }
+        done
+      fi
+    else
+      echo "WARNING: unrecognized BACKUP2_METHOD=$BACKUP2_METHOD (expected rclone|disk) -- offsite backup skipped" >&2
+      OFFSITE_OK=0
+    fi
+
+    rm -f "$DB_ENC_TMP" "$OFFSITE_MANIFEST_TMP"
+    if [ "$OFFSITE_OK" -eq 1 ]; then
+      touch "$OFFSITE_MONTHLY_MARKER"
+      echo "Offsite backup OK (DB encrypted): $THIS_MONTH -> $BACKUP2_METHOD:$BACKUP2_DEST"
+    fi
   fi
 fi
+
+unset BACKUP_PASSPHRASE
 
 # --- 10. Status file (repo-relative, NOT the iCloud-mirrored BACKUP_DIR):
 #     a small, non-sensitive summary the Python report layer reads for the
