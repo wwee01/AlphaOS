@@ -91,6 +91,22 @@ def test_parse_csv_skips_rows_missing_symbol_or_report_date():
     assert rows[0]["symbol"] == "AAPL"
 
 
+def test_parse_csv_skips_row_with_non_iso_report_date():
+    """A malformed reportDate (not a real vendor case observed so far, but
+    never trust external input) must be skipped, never cached as an
+    unparseable date -- audit NIT-1."""
+    body = (
+        "symbol,name,reportDate,fiscalDateEnding,estimate,currency,timeOfTheDay\n"
+        "AAPL,APPLE INC,2026-08-17,2026-06-30,1.5,USD,post-market\n"
+        "MSFT,MICROSOFT,07/09/2026,2026-06-30,1.5,USD,post-market\n"
+        "TSLA,TESLA INC,TBD,2026-06-30,1.5,USD,post-market\n"
+    )
+    rows = _parse_csv(body)
+    assert rows is not None
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "AAPL"
+
+
 def test_parse_float_blank_and_invalid_never_raise():
     assert _parse_float(None) is None
     assert _parse_float("") is None
@@ -117,6 +133,62 @@ def test_fetch_earnings_calendar_logs_via_journal_on_missing_key():
     events = j.query("SELECT message FROM system_events WHERE category = 'earnings_calendar'")
     assert any("API key" in e["message"] for e in events)
     j.close()
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body_bytes: bytes):
+        self._body = body_bytes
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def test_fetch_earnings_calendar_url_encodes_special_characters_in_api_key(monkeypatch):
+    """audit LOW-1: a key containing characters meaningful in a query string
+    (&, =, space) must be percent-encoded, never raw-interpolated -- a raw
+    '&' would silently truncate/corrupt the apikey param and could smuggle
+    extra query params in."""
+    import urllib.request
+
+    captured_urls = []
+
+    def _fake_urlopen(req, timeout=None):
+        captured_urls.append(req.full_url)
+        return _FakeHTTPResponse(_VALID_CSV.encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    s = make_settings(ALPHA_VANTAGE_API_KEY="ab&cd=ef gh")
+    rows = fetch_earnings_calendar(s)
+    assert rows is not None
+    assert len(captured_urls) == 1
+    assert "ab&cd=ef gh" not in captured_urls[0]  # never raw
+    assert "apikey=ab%26cd%3Def" in captured_urls[0] or "apikey=ab%26cd%3Def+gh" in captured_urls[0]
+
+
+def test_fetch_earnings_calendar_decodes_utf8_bom(monkeypatch):
+    """audit NIT-2: a leading UTF-8 BOM must not corrupt the 'symbol'
+    fieldname and cause a valid response to be misread as the unexpected-
+    shape error path."""
+    import urllib.request
+
+    def _fake_urlopen(req, timeout=None):
+        # "utf-8-sig" encoding prepends the actual BOM bytes (EF BB BF) --
+        # don't also embed a literal "﻿" in the source string, or the
+        # fixture ends up double-BOM-prefixed.
+        return _FakeHTTPResponse(_VALID_CSV.encode("utf-8-sig"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    s = make_settings(ALPHA_VANTAGE_API_KEY="test-key")
+    rows = fetch_earnings_calendar(s)
+    assert rows is not None
+    assert len(rows) == 3
+    assert any(r["symbol"] == "AAPL" for r in rows)
 
 
 # ---------------------------------------------------------- capture service

@@ -336,7 +336,7 @@ class Settings:
     earnings_proximity_warning_days: int      # "near-term" warning window (calendar days)
     earnings_proximity_default_hold_days: int  # fallback when max_holding_days isn't known yet
     earnings_proximity_max_symbols_per_scan: int
-    earnings_proximity_timeout_seconds: float  # reserved for a future live provider; mock ignores it
+    earnings_proximity_timeout_seconds: float  # HTTP timeout for the alpha_vantage capture fetch; mock ignores it
     earnings_proximity_fail_open_as_unavailable: bool
 
     # EARN-1: the live earnings-calendar provider (vendor: Alpha Vantage,

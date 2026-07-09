@@ -17,7 +17,9 @@ from __future__ import annotations
 import csv
 import io
 import urllib.error
+import urllib.parse
 import urllib.request
+from datetime import date
 from typing import Optional
 
 from alphaos.constants import Severity
@@ -37,10 +39,19 @@ def fetch_earnings_calendar(settings, journal=None) -> Optional[list[dict]]:
         _log(journal, "No Alpha Vantage API key configured; earnings calendar unavailable.")
         return None
 
-    url = (
-        f"{ALPHA_VANTAGE_BASE_URL}?function=EARNINGS_CALENDAR"
-        f"&horizon={EARNINGS_CALENDAR_HORIZON}&apikey={settings.alpha_vantage_api_key}"
-    )
+    # NEVER log/interpolate this `url` variable (or anything derived from it,
+    # e.g. a caught exception's own `.url`/`.filename` attributes) -- it
+    # embeds apikey as a plaintext query parameter (2026-07-09 scope/safety
+    # audit LOW finding). The exception handler below logs only str(exc),
+    # which for urllib.error.URLError/HTTPError never includes the request
+    # URL -- keep it that way; if a future edit ever needs to log request
+    # details, redact the apikey param first, never pass `url` through as-is.
+    query = urllib.parse.urlencode({
+        "function": "EARNINGS_CALENDAR",
+        "horizon": EARNINGS_CALENDAR_HORIZON,
+        "apikey": settings.alpha_vantage_api_key,
+    })
+    url = f"{ALPHA_VANTAGE_BASE_URL}?{query}"
     try:
         # No explicit Accept header: this endpoint's default response IS
         # CSV, and an explicit "Accept: text/csv" was empirically found to
@@ -49,7 +60,12 @@ def fetch_earnings_calendar(settings, journal=None) -> Optional[list[dict]]:
         # anything makes it refuse, asking for nothing gets the right shape.
         req = urllib.request.Request(url)
         with urllib.request.urlopen(req, timeout=settings.earnings_proximity_timeout_seconds) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
+            # utf-8-sig (not utf-8): tolerates a leading UTF-8 BOM, which
+            # would otherwise corrupt the first fieldname ("﻿symbol")
+            # and make the CSV-shape check below fail-safe-reject a
+            # genuinely valid response. Behaves identically to utf-8 when no
+            # BOM is present (the vendor doesn't send one today).
+            body = resp.read().decode("utf-8-sig", errors="replace")
     except (urllib.error.URLError, ValueError) as exc:
         _log(journal, f"Earnings calendar fetch failed: {exc}")
         return None
@@ -82,6 +98,10 @@ def _parse_csv(body: str, journal=None) -> Optional[list[dict]]:
             report_date = (row.get("reportDate") or "").strip()
             if not symbol or not report_date:
                 continue  # malformed row -- skip it, never fabricate a placeholder
+            try:
+                date.fromisoformat(report_date)
+            except ValueError:
+                continue  # non-ISO reportDate -- skip rather than cache an unparseable date
             rows.append({
                 "symbol": symbol,
                 "company_name": (row.get("name") or "").strip() or None,
