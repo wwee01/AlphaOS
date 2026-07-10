@@ -227,9 +227,35 @@ def cmd_hypothesis_report(orch: Orchestrator) -> int:
     return 0
 
 
-def cmd_hypothesis_mark_status(orch: Orchestrator, hypothesis_id: str, new_status: str, decided_by: str) -> int:
+def cmd_hypothesis_mark_status(
+    orch: Orchestrator, hypothesis_id: str, new_status: str, decided_by: str, confirm: bool,
+) -> int:
     """PR13 slice 2: the only way MET/FAILED/WITHDRAWN ever gets set --
-    always an explicit operator action, never a scheduled job."""
+    always an explicit operator action, never a scheduled job. Without
+    --confirm, this is a dry-run preview showing the hypothesis's own claim
+    text + current status -- no write happens either way unless --confirm
+    is passed and the row is still eligible (Fable5 strategy review,
+    2026-07-10: this write is permanent by design -- reversible decision #9
+    accepted no undo path, but the write itself had no preview ceremony at
+    all, unlike its downstream sibling card_promote; matches that command's
+    dry-run-by-default pattern exactly)."""
+    from alphaos.hypotheses import check_status_change_preconditions
+
+    check = check_status_change_preconditions(orch.journal, hypothesis_id, new_status)
+    if not check["eligible"]:
+        print(f"NOT ELIGIBLE -- {check['reason_code']}: {check['detail']}")
+        _print({"hypothesis_mark_status": {"status": "not_eligible", **check}})
+        return 1
+
+    if not confirm:
+        print(
+            f"ELIGIBLE -- {hypothesis_id} ({check['current_status']} -> {new_status}). "
+            f"Claim: {check['claim']!r}. This is PERMANENT -- there is no un-adjudicate command. "
+            f"Re-run with --confirm to actually record it."
+        )
+        _print({"hypothesis_mark_status": {"status": "dry_run_eligible", **check}})
+        return 0
+
     try:
         row = orch.hypothesis_mark_status(hypothesis_id, new_status, decided_by)
     except ValueError as exc:
@@ -725,17 +751,23 @@ def build_parser() -> argparse.ArgumentParser:
                         "mechanical status, cached verdict/q-value; nothing gated for real)")
     hms = sub.add_parser("hypothesis_mark_met",
                          help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis MET "
-                              "(the only writer of this status; never automated)")
+                              "(the only writer of this status; never automated). PERMANENT, no undo -- "
+                              "dry-run preview unless --confirm is passed")
     hms.add_argument("hypothesis_id")
     hms.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hms.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
     hmf = sub.add_parser("hypothesis_mark_failed",
-                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis FAILED")
+                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis FAILED. "
+                              "PERMANENT, no undo -- dry-run preview unless --confirm is passed")
     hmf.add_argument("hypothesis_id")
     hmf.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hmf.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
     hmw = sub.add_parser("hypothesis_mark_withdrawn",
-                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis WITHDRAWN")
+                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis "
+                              "WITHDRAWN. PERMANENT, no undo -- dry-run preview unless --confirm is passed")
     hmw.add_argument("hypothesis_id")
     hmw.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hmw.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
     sub.add_parser("autonomy_readiness",
                    help="PR13 slice 2: every card-gating hypothesis's promotion precondition "
                         "checklist -- PURE READ, never a trigger")
@@ -875,11 +907,11 @@ def main(argv=None) -> int:
         if args.command == "hypothesis_report":
             return cmd_hypothesis_report(orch)
         if args.command == "hypothesis_mark_met":
-            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "met", args.decided_by)
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "met", args.decided_by, args.confirm)
         if args.command == "hypothesis_mark_failed":
-            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "failed", args.decided_by)
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "failed", args.decided_by, args.confirm)
         if args.command == "hypothesis_mark_withdrawn":
-            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "withdrawn", args.decided_by)
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "withdrawn", args.decided_by, args.confirm)
         if args.command == "autonomy_readiness":
             return cmd_autonomy_readiness(orch)
         if args.command == "card_promote":

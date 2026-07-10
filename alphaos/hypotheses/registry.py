@@ -158,6 +158,68 @@ _OPERATOR_ONLY_STATUSES = frozenset({
 })
 
 
+def check_status_change_preconditions(journal, hypothesis_id: str, new_status: str) -> dict:
+    """PURE READ. Same validation ``mark_hypothesis_status()`` itself
+    performs before its write, exposed separately so a CLI dry-run preview
+    can show the hypothesis's own ``claim`` text before an operator commits
+    an adjudication that -- by design (see ``mark_hypothesis_status()``'s
+    own docstring and ``constants.HypothesisStatus``) -- can never be
+    undone. Mirrors ``alphaos.cards.promotion.check_promotion_preconditions()``'s
+    exact relationship to ``promote_card()``: the real write path calls
+    THIS SAME function rather than re-deriving its own copy of the checks,
+    so the preview and the enforcement can never drift apart.
+
+    Fable5 strategy review (2026-07-10): the report's own reversible-
+    decision #9 accepted "no un-MET path" as the safer direction to err in,
+    but noted the write itself had no ceremony at all -- a single command
+    with no preview, unlike its downstream sibling ``card_promote``, which
+    already has one. This function is the fix: the one-way door stays
+    one-way, but an operator now sees exactly what they're about to freeze
+    (which hypothesis, which claim, old status -> new status) before they
+    have to pass --confirm to actually do it.
+
+    Returns ``{"eligible": bool, "reason_code": Optional[str], "detail": str,
+    "hypothesis_id", "current_status": Optional[str], "claim": Optional[str],
+    "new_status": str}``. Reason codes: ``INVALID_STATUS``,
+    ``HYPOTHESIS_NOT_FOUND``, ``NOT_RESOLVED``.
+    """
+    if new_status not in _OPERATOR_ONLY_STATUSES:
+        return {
+            "eligible": False, "reason_code": "INVALID_STATUS",
+            "detail": f"{new_status!r} is not an operator-settable status "
+                      f"(must be one of {sorted(_OPERATOR_ONLY_STATUSES)})",
+            "hypothesis_id": hypothesis_id, "current_status": None, "claim": None,
+            "new_status": new_status,
+        }
+
+    existing = journal.one(
+        "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (hypothesis_id,),
+    )
+    if existing is None:
+        return {
+            "eligible": False, "reason_code": "HYPOTHESIS_NOT_FOUND",
+            "detail": f"no such hypothesis_id: {hypothesis_id!r}",
+            "hypothesis_id": hypothesis_id, "current_status": None, "claim": None,
+            "new_status": new_status,
+        }
+
+    if existing["status"] != HypothesisStatus.RESOLVED.value:
+        return {
+            "eligible": False, "reason_code": "NOT_RESOLVED",
+            "detail": f"{hypothesis_id!r} is {existing['status']!r}, not 'resolved' -- an operator "
+                      "can only adjudicate a hypothesis once its evidence is frozen",
+            "hypothesis_id": hypothesis_id, "current_status": existing["status"],
+            "claim": existing["claim"], "new_status": new_status,
+        }
+
+    return {
+        "eligible": True, "reason_code": None,
+        "detail": f"{hypothesis_id!r} is resolved and awaiting operator adjudication",
+        "hypothesis_id": hypothesis_id, "current_status": existing["status"],
+        "claim": existing["claim"], "new_status": new_status,
+    }
+
+
 def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided_by: str) -> dict:
     """PR13 slice 2: the ONLY writer of MET/FAILED/WITHDRAWN --
     ``constants.HypothesisStatus``'s own docstring reserves these for "an
@@ -174,7 +236,9 @@ def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided
     Raises ``ValueError`` on any misuse (unknown hypothesis_id, wrong
     status, decided_by='system') -- this is an operator-invoked CLI action,
     not a background job, so a loud, immediate error beats a silently
-    swallowed no-op.
+    swallowed no-op. Reuses ``check_status_change_preconditions()`` for the
+    pre-write validation (never a second, separately-maintained copy of the
+    same checks) before its own atomic write.
 
     Correctness-audit HIGH-1: the ``UPDATE ... WHERE status = 'resolved'``
     clause is the real atomic guard against two concurrent adjudications
@@ -185,21 +249,12 @@ def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided
     evaluate_hypothesis()``'s own identical ``cursor.rowcount == 0`` guard
     for the same class of race.
     """
-    if new_status not in _OPERATOR_ONLY_STATUSES:
-        raise ValueError(f"mark_hypothesis_status: {new_status!r} is not an operator-settable status")
     if decided_by == "system":
         raise ValueError("mark_hypothesis_status: decided_by must be a real operator identity, not 'system'")
 
-    existing = journal.one(
-        "SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (hypothesis_id,),
-    )
-    if existing is None:
-        raise ValueError(f"no such hypothesis_id: {hypothesis_id!r}")
-    if existing["status"] != HypothesisStatus.RESOLVED.value:
-        raise ValueError(
-            f"{hypothesis_id!r} is {existing['status']!r}, not 'resolved' -- an operator can only "
-            "adjudicate a hypothesis once its evidence is frozen"
-        )
+    check = check_status_change_preconditions(journal, hypothesis_id, new_status)
+    if not check["eligible"]:
+        raise ValueError(f"{check['reason_code']}: {check['detail']}")
 
     cursor = journal.conn.execute(
         "UPDATE hypothesis_proposals SET status = ? WHERE hypothesis_id = ? AND status = 'resolved'",

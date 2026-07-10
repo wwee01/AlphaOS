@@ -473,4 +473,94 @@ def test_cmd_hypothesis_mark_met_smoke(orchestrator):
     from alphaos.__main__ import cmd_hypothesis_mark_status
 
     _insert_hypothesis(orchestrator.journal, "H-TEST", status="resolved")
-    assert cmd_hypothesis_mark_status(orchestrator, "H-TEST", "met", "ck") == 0
+    assert cmd_hypothesis_mark_status(orchestrator, "H-TEST", "met", "ck", confirm=True) == 0
+
+
+def test_cmd_hypothesis_mark_status_dry_run_does_not_write(orchestrator):
+    """Fable5 strategy review fix: this write is permanent (reversible
+    decision #9's own accepted trade-off), so it now has the SAME dry-run-
+    by-default ceremony as card_promote -- no write happens without
+    --confirm."""
+    from alphaos.__main__ import cmd_hypothesis_mark_status
+
+    _insert_hypothesis(orchestrator.journal, "H-TEST", status="resolved")
+    exit_code = cmd_hypothesis_mark_status(orchestrator, "H-TEST", "met", "ck", confirm=False)
+
+    assert exit_code == 0
+    row = orchestrator.journal.one(
+        "SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-TEST",)
+    )
+    assert row["status"] == "resolved"  # unchanged
+
+
+def test_cmd_hypothesis_mark_status_confirm_writes(orchestrator):
+    from alphaos.__main__ import cmd_hypothesis_mark_status
+
+    _insert_hypothesis(orchestrator.journal, "H-TEST", status="resolved")
+    exit_code = cmd_hypothesis_mark_status(orchestrator, "H-TEST", "met", "ck", confirm=True)
+
+    assert exit_code == 0
+    row = orchestrator.journal.one(
+        "SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-TEST",)
+    )
+    assert row["status"] == "met"
+
+
+def test_cmd_hypothesis_mark_status_not_eligible_returns_1_even_with_confirm(orchestrator):
+    """A hypothesis that's still 'testing' (not yet resolved) must be
+    refused BEFORE any write is attempted, confirm or not."""
+    from alphaos.__main__ import cmd_hypothesis_mark_status
+
+    _insert_hypothesis(orchestrator.journal, "H-TEST", status="testing")
+    exit_code = cmd_hypothesis_mark_status(orchestrator, "H-TEST", "met", "ck", confirm=True)
+
+    assert exit_code == 1
+    row = orchestrator.journal.one(
+        "SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-TEST",)
+    )
+    assert row["status"] == "testing"  # unchanged
+
+
+def test_cmd_hypothesis_mark_status_unknown_hypothesis_returns_1(orchestrator):
+    from alphaos.__main__ import cmd_hypothesis_mark_status
+
+    assert cmd_hypothesis_mark_status(orchestrator, "H-NOPE", "met", "ck", confirm=True) == 1
+
+
+def test_check_status_change_preconditions_dry_run_shows_the_claim_text(orchestrator):
+    """The whole point of the fix: an operator must see the hypothesis's
+    own claim text in the preview before committing a permanent
+    adjudication -- not just a bare eligible/not-eligible flag."""
+    from alphaos.hypotheses import check_status_change_preconditions
+
+    _insert_hypothesis(orchestrator.journal, "H-TEST", status="resolved")
+    check = check_status_change_preconditions(orchestrator.journal, "H-TEST", "met")
+
+    assert check["eligible"] is True
+    assert check["claim"] == "test claim for H-TEST"
+    assert check["current_status"] == "resolved"
+    assert check["new_status"] == "met"
+
+
+def test_check_status_change_preconditions_invalid_status_reason_code():
+    from alphaos.hypotheses import check_status_change_preconditions
+    from alphaos.journal.journal_store import JournalStore
+
+    journal = JournalStore(":memory:")
+    check = check_status_change_preconditions(journal, "H-ANYTHING", "resolved")
+    assert check["eligible"] is False
+    assert check["reason_code"] == "INVALID_STATUS"
+    journal.close()
+
+
+def test_check_status_change_preconditions_matches_mark_hypothesis_status_exactly(orchestrator):
+    """The preview and the enforcement must never drift apart --
+    mark_hypothesis_status() calls THIS SAME function internally rather
+    than a separately-maintained copy of the same checks (mirrors
+    promote_card()'s own relationship to check_promotion_preconditions())."""
+    import inspect
+
+    from alphaos.hypotheses.registry import mark_hypothesis_status
+
+    source = inspect.getsource(mark_hypothesis_status)
+    assert "check_status_change_preconditions(" in source

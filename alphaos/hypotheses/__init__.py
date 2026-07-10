@@ -11,7 +11,12 @@ gate/eval/labeller/risk/execution path.
 """
 
 from alphaos.hypotheses.constants import HypothesisStatus, RiskClass, SEEDED_HYPOTHESES
-from alphaos.hypotheses.registry import mark_hypothesis_status, propose_hypothesis, seed_all
+from alphaos.hypotheses.registry import (
+    check_status_change_preconditions,
+    mark_hypothesis_status,
+    propose_hypothesis,
+    seed_all,
+)
 from alphaos.hypotheses.resolver import resolve_due_hypotheses
 
 __all__ = [
@@ -22,4 +27,5 @@ __all__ = [
     "seed_all",
     "resolve_due_hypotheses",
     "mark_hypothesis_status",
+    "check_status_change_preconditions",
 ]
