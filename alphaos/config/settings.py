@@ -456,6 +456,21 @@ class Settings:
     # be backfilled for candidates scanned before this shipped).
     baseline_enabled: bool
 
+    # --- CANARY: model-drift canary --- Defaults OFF (unlike baseline/regime):
+    # unlike a pure local computation, this makes a REAL weekly OpenAI call
+    # against an operator-curated corpus that doesn't exist on a fresh
+    # install (data/canary/ starts empty, same as EVAL-1's data/eval/) --
+    # running on an empty corpus is a safe no-op, but there's no reason to
+    # schedule a weekly no-op by default. Same posture as
+    # text_archive_enabled/shadow_tier_enabled: a deliberate operator
+    # decision (curate the corpus, then flip this) rather than an assumed
+    # default.
+    canary_enabled: bool
+    scheduler_canary_run_weekday: int    # 0=Monday .. 6=Sunday (Python's date.weekday()); spec default Sunday
+    scheduler_canary_run_time: str       # "HH:MM" SGT, once-weekly cadence
+    canary_tier2_label_diff_pct: float   # Tier 2: page if a categorical label field differs on >= this fraction
+    canary_tier3_confidence_shift_band: float  # Tier 3 (digest-only): mean-confidence shift beyond this band
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -959,6 +974,30 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"silently trust an arbitrarily old capture."
         )
 
+    # CANARY: once-weekly cadence -- Sunday (6, Python's date.weekday()
+    # convention: 0=Monday) 10:00 SGT, market closed, per spec.
+    scheduler_canary_run_weekday = _get_int(src, "SCHEDULER_CANARY_RUN_WEEKDAY", 6)
+    if not (0 <= scheduler_canary_run_weekday <= 6):
+        raise SettingsError(
+            f"SCHEDULER_CANARY_RUN_WEEKDAY={scheduler_canary_run_weekday!r} must be 0-6 "
+            f"(0=Monday .. 6=Sunday, Python's date.weekday() convention)."
+        )
+    scheduler_canary_run_time = _get(src, "SCHEDULER_CANARY_RUN_TIME", "10:00")
+    _parse_hhmm(scheduler_canary_run_time, "SCHEDULER_CANARY_RUN_TIME")
+
+    # CANARY: drift-tier thresholds -- "threshold in config, not code" per
+    # spec, so an operator can tune sensitivity without a code change.
+    canary_tier2_label_diff_pct = _get_float(src, "CANARY_TIER2_LABEL_DIFF_PCT", 0.20)
+    if not (0.0 < canary_tier2_label_diff_pct <= 1.0):
+        raise SettingsError(
+            f"CANARY_TIER2_LABEL_DIFF_PCT={canary_tier2_label_diff_pct!r} must be in (0, 1]."
+        )
+    canary_tier3_confidence_shift_band = _get_float(src, "CANARY_TIER3_CONFIDENCE_SHIFT_BAND", 0.15)
+    if canary_tier3_confidence_shift_band <= 0:
+        raise SettingsError(
+            f"CANARY_TIER3_CONFIDENCE_SHIFT_BAND={canary_tier3_confidence_shift_band!r} must be > 0."
+        )
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1156,6 +1195,11 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_earnings_calendar_pull_time=scheduler_earnings_calendar_pull_time,
         earnings_calendar_staleness_days=earnings_calendar_staleness_days,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
+        canary_enabled=_get_bool(src, "CANARY_ENABLED", False),
+        scheduler_canary_run_weekday=scheduler_canary_run_weekday,
+        scheduler_canary_run_time=scheduler_canary_run_time,
+        canary_tier2_label_diff_pct=canary_tier2_label_diff_pct,
+        canary_tier3_confidence_shift_band=canary_tier3_confidence_shift_band,
         proposal_ttl_rth_seconds=proposal_ttl_rth_seconds,
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,

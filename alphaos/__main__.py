@@ -244,6 +244,51 @@ def cmd_relabel(orch: Orchestrator, date_from: str, date_to: str, dry_run: bool)
     return 0
 
 
+def cmd_canary_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
+    """CANARY one-off: select real, clean (post-PR9.1) candidate_packets rows
+    -- preferring TASK-R relabels -- into the frozen golden corpus (additive;
+    never overwrites an existing fixture). Review the fixtures, then git
+    add/commit the corpus directory -- it is never auto-committed."""
+    res = orch.canary_corpus_build(corpus_dir=corpus_dir, limit=limit)
+    _print({"canary_corpus_build": res})
+    print(
+        f"\n{res['packets_written']} new packet(s) written to {res['corpus_dir']} "
+        f"(corpus now {res['corpus_size']} packet(s), version {res['corpus_version']}). "
+        "Review the fixtures, then git add/commit the corpus directory -- it is never auto-committed. "
+        "Set CANARY_ENABLED=true once you're ready for the weekly job to run."
+    )
+    return 0
+
+
+def cmd_canary_run(orch: Orchestrator, corpus_dir: str) -> int:
+    """CANARY: replay the frozen golden corpus through the CURRENT playbook
+    classifier and compare against the pinned baseline run. Zero decision
+    surface."""
+    res = orch.canary_run(corpus_dir=corpus_dir)
+    _print({"canary_run": res})
+    return 0 if "error" not in res else 1
+
+
+def cmd_canary_status(orch: Orchestrator) -> int:
+    """CANARY: the latest run's report -- PURE READ."""
+    from alphaos.reports.canary_report import render_markdown
+
+    rep = orch.canary_status()
+    print(render_markdown(rep))
+    print()
+    _print({"canary_status": rep})
+    return 0
+
+
+def cmd_canary_pin_baseline(orch: Orchestrator, run_id: str) -> int:
+    """CANARY: mark run_id as THE reference run every future run diffs
+    against. Never automatic -- an operator decides when a run is clean
+    enough to trust."""
+    res = orch.canary_pin_baseline(run_id)
+    _print({"canary_pin_baseline": res})
+    return 0 if "error" not in res else 1
+
+
 def cmd_universe_build(orch: Orchestrator) -> int:
     """EXP-0: screen the tradable universe down to the shadow-tier ADV/price
     band and write the result to the committed universe file (NOT git-add'd
@@ -523,7 +568,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "switch / protection / cost cap / locking)")
     srj.add_argument("job_type", choices=[
         "scan", "monitor", "outcomes_update", "daily_digest", "benchmark_spine", "text_archive_pull",
-        "atr_update",
+        "atr_update", "canary_run",
     ])
     sub.add_parser("scheduler_health",
                    help="dead-man's-switch check: exit 0 if a job completed recently enough during "
@@ -591,6 +636,21 @@ def build_parser() -> argparse.ArgumentParser:
     rl.add_argument("--from", dest="date_from", required=True, help="SGT calendar date, YYYY-MM-DD")
     rl.add_argument("--to", dest="date_to", required=True, help="SGT calendar date, YYYY-MM-DD")
     rl.add_argument("--dry-run", action="store_true", help="print composed prompts, zero network calls")
+    ccb = sub.add_parser("canary_corpus_build",
+                         help="CANARY: select real, clean candidate_packets rows (preferring TASK-R "
+                              "relabels) into the frozen golden corpus (additive; never auto-committed)")
+    ccb.add_argument("--corpus-dir", default=None, help="defaults to data/canary")
+    ccb.add_argument("--limit", type=int, default=20, help="max NEW packets to select (default 20)")
+    cr = sub.add_parser("canary_run",
+                        help="CANARY: replay the frozen golden corpus through the current playbook "
+                             "classifier and compare against the pinned baseline run")
+    cr.add_argument("--corpus-dir", default=None, help="defaults to data/canary")
+    sub.add_parser("canary_status",
+                   help="CANARY: the latest canary run's report (drift tier, parse/fail-safe rate)")
+    cpb = sub.add_parser("canary_pin_baseline",
+                         help="CANARY: mark a run as THE baseline every future run diffs against "
+                              "(never automatic -- an operator decides when a run is trustworthy)")
+    cpb.add_argument("run_id")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -688,6 +748,14 @@ def main(argv=None) -> int:
             return cmd_eval_report(orch)
         if args.command == "relabel":
             return cmd_relabel(orch, args.date_from, args.date_to, args.dry_run)
+        if args.command == "canary_corpus_build":
+            return cmd_canary_corpus_build(orch, args.corpus_dir, args.limit)
+        if args.command == "canary_run":
+            return cmd_canary_run(orch, args.corpus_dir)
+        if args.command == "canary_status":
+            return cmd_canary_status(orch)
+        if args.command == "canary_pin_baseline":
+            return cmd_canary_pin_baseline(orch, args.run_id)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":

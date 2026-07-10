@@ -65,6 +65,20 @@ def _extract_usage(resp) -> Optional[dict]:
     }
 
 
+def _extract_resp_meta(resp) -> dict:
+    """CANARY: the model-IDENTITY fields the API actually returned, as opposed
+    to `self.model` (what we ASKED for) -- the whole point of a drift canary
+    is noticing when these two diverge silently. `system_fingerprint` is not
+    populated by every model; both fields default to None rather than being
+    omitted, so a caller can always tell 'checked and absent' apart from
+    'never checked'. Best-effort, same as _extract_usage -- never affects/
+    blocks the classification it's measuring."""
+    return {
+        "response_model": getattr(resp, "model", None),
+        "system_fingerprint": getattr(resp, "system_fingerprint", None),
+    }
+
+
 @dataclass
 class PlaybookClassification:
     label_id: str
@@ -104,6 +118,12 @@ class PlaybookClassification:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    # CANARY: model-identity fields the API actually returned (may differ
+    # from `model` above, which is what was requested). None when no real
+    # response was received (mock) or the field wasn't present on this
+    # particular response (some models never send system_fingerprint).
+    response_model: Optional[str] = None
+    system_fingerprint: Optional[str] = None
 
     def to_row(self, packet_id: Optional[str], scan_batch_id: Optional[str], frozen_at_utc: str) -> dict:
         return {
@@ -247,28 +267,32 @@ class PlaybookClassifier:
             timeout=HTTP_TIMEOUT,
         )
         usage = _extract_usage(resp)  # PR9.5: before any truncation/parse check below
+        resp_meta = _extract_resp_meta(resp)  # CANARY: same rationale -- identity survives even a parse failure
         choice = resp.choices[0]
         # A truncated response (token budget too small) yields incomplete JSON that
         # fails to parse. Name that reason explicitly so a fail-safe SPIKE is
         # diagnosable (this was the exact bug that silently blocked all proposals),
         # rather than lumped under a vague "live_exception".
         if getattr(choice, "finish_reason", None) == "length":
-            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value, ai_lineage=ai_lineage, usage=usage)
+            return self._fail_safe(packet, FailsafeReason.TRUNCATED_OUTPUT.value,
+                                   ai_lineage=ai_lineage, usage=usage, resp_meta=resp_meta)
         try:
             obj = structured_json.parse_json_object(choice.message.content)
         except Exception:
-            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value, ai_lineage=ai_lineage, usage=usage)
+            return self._fail_safe(packet, FailsafeReason.PARSE_ERROR.value,
+                                   ai_lineage=ai_lineage, usage=usage, resp_meta=resp_meta)
         # Missing keys are tolerated by coerce_and_validate (degrade safely), but a
         # total absence of the core fields should fail safe.
         if "primary_label" not in obj and "decision" not in obj:
-            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value, ai_lineage=ai_lineage, usage=usage)
+            return self._fail_safe(packet, FailsafeReason.MALFORMED_JSON.value,
+                                   ai_lineage=ai_lineage, usage=usage, resp_meta=resp_meta)
         clean, status = coerce_and_validate(obj, self.settings)
         return self._build(packet, clean, status, LabelSource.OPENAI.value, self.model, False,
-                           raw=obj, ai_lineage=ai_lineage, usage=usage)
+                           raw=obj, ai_lineage=ai_lineage, usage=usage, resp_meta=resp_meta)
 
     # ------------------------------------------------------------- fail-safe
     def _fail_safe(self, packet, reason: str, ai_lineage: Optional[dict] = None,
-                   usage: Optional[dict] = None) -> PlaybookClassification:
+                   usage: Optional[dict] = None, resp_meta: Optional[dict] = None) -> PlaybookClassification:
         clean = {
             "primary_label": LABEL_OTHER,
             "secondary_labels": [],
@@ -286,14 +310,16 @@ class PlaybookClassifier:
         }
         return self._build(packet, clean, reason, LabelSource.FAIL_SAFE.value,
                            self.model if not self.use_mock else "mock", self.use_mock,
-                           raw={"fail_safe": reason}, ai_lineage=ai_lineage, usage=usage)
+                           raw={"fail_safe": reason}, ai_lineage=ai_lineage, usage=usage,
+                           resp_meta=resp_meta)
 
     # --------------------------------------------------------------- builder
     def _build(self, packet, clean: dict, status: str, source: str, model: str,
                is_mock: bool, raw: dict, ai_lineage: Optional[dict] = None,
-               usage: Optional[dict] = None) -> PlaybookClassification:
+               usage: Optional[dict] = None, resp_meta: Optional[dict] = None) -> PlaybookClassification:
         ai_lineage = ai_lineage or {}
         usage = usage or {}
+        resp_meta = resp_meta or {}
         return PlaybookClassification(
             label_id=new_id("lbl"),
             candidate_id=getattr(packet, "candidate_id", ""),
@@ -327,4 +353,6 @@ class PlaybookClassifier:
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
             total_tokens=usage.get("total_tokens"),
+            response_model=resp_meta.get("response_model"),
+            system_fingerprint=resp_meta.get("system_fingerprint"),
         )

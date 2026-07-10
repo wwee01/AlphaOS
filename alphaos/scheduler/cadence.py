@@ -37,6 +37,8 @@ class JobType(StrEnum):
     # EARN-1: once-daily earnings-calendar capture (write side of the live
     # AlphaVantageEarningsProvider).
     EARNINGS_CALENDAR_PULL = "earnings_calendar_pull"
+    # CANARY: once-WEEKLY model-drift replay over the frozen golden corpus.
+    CANARY_RUN = "canary_run"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -108,8 +110,13 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
 
     if job_type in (
         JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE, JobType.TEXT_ARCHIVE_PULL, JobType.ATR_UPDATE,
-        JobType.EARNINGS_CALENDAR_PULL,
+        JobType.EARNINGS_CALENDAR_PULL, JobType.CANARY_RUN,
     ):
+        # CANARY_RUN shares this exact date-keyed shape even though its
+        # cadence is weekly, not daily: with its configured weekday held
+        # constant it's due on only ONE matching weekday per week (see
+        # _once_weekly_due's own docstring for the known, accepted
+        # limitation if that weekday setting changes mid-week).
         st = timeutils.stamp(now)
         return f"{job_type}:{st.local_sgt[:10]}"
 
@@ -150,6 +157,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _atr_update_due(settings, journal, now)
         if job_type == JobType.EARNINGS_CALENDAR_PULL:
             return _earnings_calendar_pull_due(settings, journal, now)
+        if job_type == JobType.CANARY_RUN:
+            return _canary_run_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -287,4 +296,50 @@ def _atr_update_due(settings, journal, now: Optional[datetime]) -> tuple[bool, s
 def _earnings_calendar_pull_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     return _once_daily_due(
         JobType.EARNINGS_CALENDAR_PULL, settings.scheduler_earnings_calendar_pull_time, settings, journal, now,
+    )
+
+
+def _once_weekly_due(
+    job_type: str, weekday: int, time_str: str, settings, journal, now: Optional[datetime],
+) -> tuple[bool, str]:
+    """Generic 'due once per SGT calendar week, on `weekday` (0=Monday..
+    6=Sunday, Python's ``date.weekday()`` convention), at/after time_str
+    (HH:MM)' rule -- the weekly-cadence sibling of ``_once_daily_due``,
+    sharing its exact lock-key shape (a plain SGT calendar date, see
+    ``default_lock_key``): with `weekday` held constant, this can only ever
+    be due on ONE matching weekday per week, so a date-keyed lock is
+    once-per-week in steady state -- no separate ISO-week key needed.
+    KNOWN LIMITATION (audit LOW, 2026-07-10, accepted as benign): if an
+    operator changes the configured weekday mid-week AFTER that week's run
+    already completed, the new weekday's own date still isn't locked yet
+    and the job runs a second time that same ISO week (one extra
+    cost-guarded, mock-gated-by-default replay -- not a correctness or
+    safety issue, just not literally 'once per week' across a
+    reconfiguration). A same-week, same-weekday re-run is still correctly
+    blocked."""
+    st = timeutils.stamp(now)
+    today_sgt_date = st.local_sgt[:10]
+    today_weekday = timeutils.parse_iso(st.local_sgt).weekday()
+    if today_weekday != weekday:
+        return (False, f"today ({today_sgt_date} SGT, weekday={today_weekday}) is not "
+                       f"{job_type}'s configured weekday ({weekday})")
+
+    hh, mm = (int(p) for p in time_str.split(":"))
+    now_hhmm = st.local_sgt[11:16]
+    if now_hhmm < f"{hh:02d}:{mm:02d}":
+        return (False, f"{now_hhmm} SGT is before {job_type} time {time_str}")
+
+    lock_key = default_lock_key(job_type, settings, now)
+    existing = journal.count_rows(
+        "job_runs", "job_type = ? AND lock_key = ? AND status = 'completed'", (job_type, lock_key),
+    )
+    if existing:
+        return (False, f"{job_type} already completed this week ({today_sgt_date} SGT)")
+    return (True, f"at/after {job_type} time {time_str} SGT on the configured weekday, not yet run this week")
+
+
+def _canary_run_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_weekly_due(
+        JobType.CANARY_RUN, settings.scheduler_canary_run_weekday,
+        settings.scheduler_canary_run_time, settings, journal, now,
     )

@@ -233,6 +233,18 @@ def _eval_health(journal) -> Optional[dict]:
     return None if rep["status"] == "no_runs_yet" else rep
 
 
+def _canary_health(journal) -> Optional[dict]:
+    """The latest canary run's summary, or None if no run has ever happened
+    yet (CANARY_ENABLED still false, or an operator hasn't populated
+    data/canary/) -- an expected, honest empty state, never an error. Same
+    persistent-state pattern as _eval_health: shows the LATEST run
+    regardless of when it happened, since CANARY's own cadence is weekly."""
+    from alphaos.reports.canary_report import build_canary_report
+
+    rep = build_canary_report(journal)
+    return None if rep["status"] == "no_runs_yet" else rep
+
+
 def _fused_jobs(journal, settings) -> list[dict]:
     """Every job_type currently self-halted, independent of due-ness (a
     fused job stays fused outside its own due window too -- see
@@ -494,6 +506,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
 
     regime_arming = build_regime_arming_report(journal, settings)
     eval_health = _eval_health(journal)
+    canary_health = _canary_health(journal)
     atr_health = _atr_health(journal)
     baseline_health = _baseline_health(journal, settings)
 
@@ -509,6 +522,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "todays_activity": todays_activity,
         "text_archive_health": text_archive_health,
         "eval_health": eval_health,
+        "canary_health": canary_health,
         "atr_health": atr_health,
         "baseline_health": baseline_health,
         "best_candidate": best_candidate,
@@ -607,6 +621,12 @@ def render_markdown(brief: dict) -> str:
         from alphaos.reports.eval_report import render_markdown as _render_eval
 
         lines += [_render_eval(eh), ""]
+
+    ch = brief.get("canary_health")
+    if ch:
+        from alphaos.reports.canary_report import render_markdown as _render_canary
+
+        lines += [_render_canary(ch), ""]
 
     bc = brief["best_candidate"]
     lines += ["## Best candidate today"]

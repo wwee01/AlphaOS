@@ -137,6 +137,23 @@ def run_earnings_calendar_pull_job(orch, runner) -> dict:
     return {"status": "completed", "earnings_calendar_result": result}
 
 
+def run_canary_run_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``canary.run.run_canary()`` (CANARY). Gated
+    on ``CANARY_ENABLED`` (same pattern as run_text_archive_pull_job) --
+    unlike ATR/benchmark-spine, this makes a REAL weekly OpenAI call, so it
+    stays opt-in until an operator has curated `data/canary/` and decided
+    the recurring cost is worth it. `run_canary()` itself already handles
+    the empty-corpus safe-no-op case and its own cost-guard pre-flight
+    check; this wrapper's only job is the enable gate."""
+    from alphaos.canary.run import run_canary
+
+    if not orch.settings.canary_enabled:
+        return {"status": "skipped", "reason": "CANARY_ENABLED is false"}
+
+    result = run_canary(orch.journal, orch.settings)
+    return {"status": "completed", "canary_result": result}
+
+
 def run_text_archive_pull_job(orch, runner) -> dict:
     """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
     filing pull (TEXT-0). No gating needed -- collect only, never read by

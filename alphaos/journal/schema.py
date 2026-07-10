@@ -1431,6 +1431,7 @@ SCHEMA: list[tuple[str, str]] = [
             regime_config_hash TEXT,
             text_archive_config_hash TEXT,
             baseline_config_hash TEXT,
+            canary_config_hash TEXT,
             scanner_version TEXT,
             scanner_rule_version TEXT,
             universe_version_hash TEXT,
@@ -1937,6 +1938,78 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # CANARY: one row per `alphaos canary run` invocation (a weekly pass
+        # over the frozen golden corpus, `data/canary/`). Detects SILENT
+        # upstream model changes before they contaminate weeks of ledger data
+        # -- distinct from EVAL-1 (which answers "is this prompt better?");
+        # CANARY only answers "did the configured model change under us?".
+        # is_baseline marks the ONE pinned reference run every later run
+        # diffs against (re-pinnable via `canary_pin-baseline`, never more
+        # than one row true at a time -- enforced in canary/run.py, not by a
+        # DB constraint, since "demote the old baseline" is a two-statement
+        # transaction, not expressible as a single CHECK/trigger here).
+        "canary_runs",
+        """
+        CREATE TABLE IF NOT EXISTS canary_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL UNIQUE,
+            corpus_dir TEXT NOT NULL,
+            corpus_version INTEGER,
+            configured_model TEXT,
+            is_mock INTEGER DEFAULT 0,
+            n_prompts INTEGER NOT NULL DEFAULT 0,
+            n_parse_or_failsafe INTEGER NOT NULL DEFAULT 0,
+            response_models_json TEXT,
+            system_fingerprints_json TEXT,
+            mean_confidence REAL,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            latency_ms_total INTEGER,
+            is_baseline INTEGER NOT NULL DEFAULT 0,
+            drift_tier TEXT,
+            drift_detail_json TEXT,
+            lineage_id TEXT,
+            started_at_utc TEXT NOT NULL,
+            started_at_sgt TEXT NOT NULL,
+            finished_at_utc TEXT,
+            finished_at_sgt TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # CANARY: one row per packet replayed through the CURRENT
+        # PlaybookClassifier -- the real production classify() path, same
+        # "one replay engine" reuse as EVAL-1's eval_results (never a second
+        # implementation of the live call). Stores the full raw completion
+        # on every path including fail-safe, since a parse failure IS a
+        # drift signal (Tier 1: "any parse/failsafe rate change from 0").
+        "canary_results",
+        """
+        CREATE TABLE IF NOT EXISTS canary_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            result_id TEXT NOT NULL UNIQUE,
+            run_id TEXT NOT NULL,
+            packet_id TEXT NOT NULL,
+            symbol TEXT,
+            primary_label TEXT,
+            label_decision TEXT,
+            label_confidence REAL,
+            validation_status TEXT,
+            is_failsafe INTEGER NOT NULL DEFAULT 0,
+            raw_json TEXT,
+            response_model TEXT,
+            system_fingerprint TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2114,6 +2187,12 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_earnings_calendar_cache_symbol ON earnings_calendar_cache(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_earnings_calendar_cache_report_date "
     "ON earnings_calendar_cache(report_date)",
+    # CANARY: recent-run lookups (report/status default to the latest run;
+    # drift comparison reads the one pinned baseline) and per-run result joins.
+    "CREATE INDEX IF NOT EXISTS idx_canary_runs_started ON canary_runs(started_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_canary_runs_is_baseline ON canary_runs(is_baseline)",
+    "CREATE INDEX IF NOT EXISTS idx_canary_results_run ON canary_results(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_canary_results_packet ON canary_results(packet_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

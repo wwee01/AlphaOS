@@ -1335,6 +1335,45 @@ class Orchestrator:
 
         return relabel_candidates(self.journal, self.settings, date_from, date_to, dry_run=dry_run)
 
+    def canary_corpus_build(self, corpus_dir: Optional[str] = None, limit: int = 20) -> dict:
+        """CANARY one-off: select up to ``limit`` real, clean (post-PR9.1)
+        candidate_packets rows -- preferring TASK-R relabels -- and write
+        them into the frozen golden corpus (additive -- never overwrites an
+        existing fixture). See alphaos/canary/corpus.py."""
+        from alphaos.canary.corpus import DEFAULT_CORPUS_DIR, select_seed_packets, write_corpus
+
+        root = corpus_dir or DEFAULT_CORPUS_DIR
+        seeds = select_seed_packets(self.journal, limit=limit)
+        manifest, written = write_corpus(root, seeds, as_of_date=timeutils.market_date().isoformat())
+        return {
+            "corpus_dir": root, "candidates_considered": len(seeds),
+            "packets_written": len(written), "corpus_version": manifest["version"],
+            "corpus_size": len(manifest["packets"]),
+        }
+
+    def canary_run(self, corpus_dir: Optional[str] = None) -> dict:
+        """CANARY: replay the frozen golden corpus through the CURRENT
+        playbook classifier and compare against the pinned baseline run.
+        Zero decision surface. See alphaos/canary/run.py."""
+        from alphaos.canary.run import run_canary
+
+        return run_canary(self.journal, self.settings, corpus_dir=corpus_dir)
+
+    def canary_pin_baseline(self, run_id: str) -> dict:
+        """CANARY: mark ``run_id`` as THE reference run every future run
+        diffs against. Never automatic -- an operator decides when a run is
+        clean enough to trust as the baseline."""
+        from alphaos.canary.run import pin_baseline
+
+        return pin_baseline(self.journal, run_id)
+
+    def canary_status(self) -> dict:
+        """CANARY: the latest run's report -- PURE READ. See
+        alphaos/reports/canary_report.py."""
+        from alphaos.reports.canary_report import build_canary_report
+
+        return build_canary_report(self.journal)
+
     def outcomes_update(self, limit: int = 500) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/

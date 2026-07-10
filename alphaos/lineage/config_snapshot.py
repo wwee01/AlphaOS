@@ -137,6 +137,14 @@ BASELINE_CONFIG_FIELDS = (
     "baseline_enabled",
 )
 
+# CANARY: the drift-tier thresholds are real, operator-tunable settings
+# (spec's own "threshold in config, not code") -- unlike TQS/attribution/
+# REGIME/BASELINE, there's no frozen code-constant formula to omit here.
+CANARY_CONFIG_FIELDS = (
+    "canary_enabled", "scheduler_canary_run_weekday", "scheduler_canary_run_time",
+    "canary_tier2_label_diff_pct", "canary_tier3_confidence_shift_band",
+)
+
 
 def settings_dict(settings) -> dict[str, Any]:
     """Full settings as a flat, secret-stripped dict. dataclasses.asdict()
@@ -173,4 +181,5 @@ def build_config_hashes(settings) -> dict[str, str]:
         "regime_config_hash": _subset_hash(full, REGIME_CONFIG_FIELDS),
         "text_archive_config_hash": _subset_hash(full, TEXT_ARCHIVE_CONFIG_FIELDS),
         "baseline_config_hash": _subset_hash(full, BASELINE_CONFIG_FIELDS),
+        "canary_config_hash": _subset_hash(full, CANARY_CONFIG_FIELDS),
     }
