@@ -44,8 +44,10 @@ enforced regardless at the DB level by ``agent_votes``' own
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Optional
 
+from alphaos import lineage
 from alphaos.ai.bear_debater import BearDebater
 from alphaos.constants import CandidateStatus, Severity
 from alphaos.scheduler.cost_guard import check_debate_budget, check_scan_budget, debate_calls_today
@@ -74,11 +76,22 @@ def vote_on_proposal(journal, settings, debater: BearDebater, candidate_row: dic
             return None
         vote = debater.debate(candidate_row, proposal_row, scan_batch_id)
         row = vote.to_row()
+        # AUDIT FIX (correctness/scope-safety, both independently flagged):
+        # every other AI-producing table (openai_evaluations, claude_reviews,
+        # last30days_polarity, tqs_scores) stamps lineage_id; this one didn't.
+        row["lineage_id"] = lineage.get_or_create_lineage_id(journal, settings)
         stamp = timeutils.stamp()
         row["created_at_utc"] = stamp.utc
         row["created_at_sgt"] = stamp.local_sgt
         journal.insert("agent_votes", row)
         return vote.vote_id
+    except sqlite3.IntegrityError:
+        # AUDIT FIX (correctness NIT): a genuine concurrent double-vote on the
+        # same (proposal_id, agent_role) is an expected, idempotent race (the
+        # _already_voted pre-check above only narrows the window, same as
+        # TQS's own belt-and-suspenders idiom) -- treat it as a silent no-op,
+        # matching tqs/batch.py's _insert_result, not a WARNING-level event.
+        return None
     except Exception as exc:  # fail-safe: never let debate touch the real pipeline
         journal.log_system_event(
             Severity.WARNING, "debate",

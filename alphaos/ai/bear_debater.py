@@ -28,6 +28,7 @@ from typing import Optional
 
 from alphaos import lineage
 from alphaos.ai import prompt_templates as pt
+from alphaos.constants import Severity
 from alphaos.util import structured_json
 from alphaos.util.ids import new_id
 
@@ -96,7 +97,7 @@ class BearDebater:
         except Exception as exc:  # pragma: no cover - live path
             if self.journal is not None:
                 self.journal.log_system_event(
-                    "error", "debate",
+                    Severity.WARNING, "debate",
                     f"Bear debate failed for proposal {proposal.get('proposal_id')}; recorded as mock.",
                     {"error": str(exc)},
                 )

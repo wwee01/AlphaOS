@@ -170,6 +170,66 @@ def test_bear_debater_mock_vote_is_deterministic_for_the_same_proposal():
     o.close()
 
 
+# ---------------------------------------------------------------------- lineage
+def test_agent_votes_rows_carry_lineage_id():
+    """Audit fix (both correctness NIT and scope/safety MEDIUM, independently
+    flagged): every other AI-producing table in this codebase
+    (openai_evaluations, claude_reviews, last30days_polarity, tqs_scores)
+    stamps lineage_id -- agent_votes silently didn't. Mirrors
+    test_tqs_flow.py's own test_tqs_scores_rows_carry_lineage_id."""
+    o = _orch(DEBATE_SHADOW_ENABLED="true")
+    pid, _ = inject_pending_proposal(o, symbol="AAPL")
+    _tag_batch(o.journal, pid, "batch1")
+    score_debate_batch(o.journal, o.settings, "batch1")
+    row = o.journal.one("SELECT lineage_id FROM agent_votes WHERE proposal_id = ?", (pid,))
+    assert row and row["lineage_id"]
+    snap = o.journal.one(
+        "SELECT 1 FROM lineage_snapshots WHERE lineage_id = ?", (row["lineage_id"],)
+    )
+    assert snap is not None
+    o.close()
+
+
+# ------------------------------------------------------- idempotent race handling
+def test_concurrent_duplicate_vote_is_a_silent_no_op_not_a_warning():
+    """Audit fix (correctness NIT): a genuine concurrent double-vote on the
+    same (proposal_id, agent_role) -- e.g. _already_voted's own pre-check
+    window raced -- must be a silent idempotent no-op (mirroring
+    tqs/batch.py's _insert_result -> sqlite3.IntegrityError -> None), not a
+    WARNING-level system event (which the broad except Exception fallback
+    would have produced before this fix)."""
+    from alphaos.debate.batch import vote_on_proposal
+
+    o = _orch(DEBATE_SHADOW_ENABLED="true")
+    pid, _ = inject_pending_proposal(o, symbol="AAPL")
+    cand_row = o.journal.one(
+        "SELECT * FROM candidates WHERE candidate_id = "
+        "(SELECT candidate_id FROM trade_proposals WHERE proposal_id = ?)", (pid,),
+    )
+    prop_row = o.journal.one("SELECT * FROM trade_proposals WHERE proposal_id = ?", (pid,))
+    debater = BearDebater(o.settings, o.journal)
+
+    vote_on_proposal(o.journal, o.settings, debater, cand_row, prop_row, "batch1")
+    assert o.journal.count_rows("agent_votes") == 1
+
+    # bypass the _already_voted pre-check to force a genuine DB-level race
+    import alphaos.debate.batch as batch_mod
+    original = batch_mod._already_voted
+    batch_mod._already_voted = lambda *a, **k: False
+    try:
+        result = vote_on_proposal(o.journal, o.settings, debater, cand_row, prop_row, "batch1")
+    finally:
+        batch_mod._already_voted = original
+
+    assert result is None
+    assert o.journal.count_rows("agent_votes") == 1  # still exactly one row
+    warnings = o.journal.query(
+        "SELECT * FROM system_events WHERE category = 'debate' AND severity = 'warning'"
+    )
+    assert warnings == []  # silent no-op, NOT logged as a warning
+    o.close()
+
+
 # --------------------------------------------------------------- cost budget
 def test_daily_cap_stops_mid_batch_and_journals_the_shortfall():
     o = _orch(DEBATE_SHADOW_ENABLED="true", DEBATE_MAX_CALLS_PER_DAY="1")

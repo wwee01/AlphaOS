@@ -221,7 +221,11 @@ def cmd_debate_register(orch: Orchestrator) -> int:
         # enough trading days for effective_n>=30 (not every proposed trade
         # gets a high-conviction oppose vote). ~60 days from registration is
         # a conservative buffer for both, not a claim evidence will exist by
-        # then.
+        # then. If the operator never enables debate_shadow_enabled, this
+        # date elapses with zero data -- harmless: floor_effective_n=30 below
+        # is the actual guard (evaluate_hypothesis reports "insufficient
+        # data" under it regardless of the calendar), so a premature date
+        # can never produce a spurious/early result (audit LOW finding).
         analysis_not_before="2026-09-08",
         params={"rule_version": "oppose_high_conviction_v1", "stance": "oppose", "conviction_floor": 0.7,
                 "target_delta_r": -0.3},
