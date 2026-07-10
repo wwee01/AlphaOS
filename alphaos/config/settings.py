@@ -377,6 +377,31 @@ class Settings:
     # never disable a gate since TQS never gates anything).
     tqs_shadow_enabled: bool
 
+    # --- Red-Team Debate v0 (Roadmap PR14) ---
+    # Shadow-only, bear-only adversarial vote on already-committed PROPOSE
+    # decisions, stored in its OWN table (agent_votes) -- never gates,
+    # never sizes, never changes a proposal's status. Called at the exact
+    # same batch-end call site as TQS (see alphaos/debate/batch.py's module
+    # docstring), strictly AFTER a scan's decisions are committed, so it
+    # cannot influence what it measures by construction.
+    #
+    # UNLIKE TQS (pure math, zero marginal cost, defaults True), this is a
+    # genuinely paid LLM call -- same cost posture as CANARY, which also
+    # defaults OFF ("ship mechanism, arm later"). Default False here
+    # deliberately: an operator must explicitly opt in to spending real
+    # budget on a shadow feature before it starts running automatically.
+    debate_shadow_enabled: bool
+    # A TIGHTER, separate daily sub-cap nested INSIDE the existing shared
+    # 30-day AI cost cap (scheduler_ai_cost_cap_calls_per_30d) -- both must
+    # have room, or debate silently sits out that item. This prevents a new
+    # shadow feature from starving the live evaluator's own share of the
+    # shared cap -- enforced not just by each bound individually but by a
+    # JOINT validation capping this at 25% of the shared cap (see the
+    # loader), so no legal configuration can let debate alone exhaust the
+    # entire 30-day pool in a single day.
+    debate_max_calls_per_day: int
+    debate_bear_model: str
+
     # --- Attribution v2 / counterfactual ΔR (Roadmap PR8) ---
     # Measurement-only: pairs a decision-divergence event (user override, gate
     # block, TTL expiry, or execution vs frozen plan) with the ΔR the outcome
@@ -900,6 +925,32 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"the purpose of a runaway-cost safety net."
         )
 
+    debate_max_calls_per_day = _get_int(src, "DEBATE_MAX_CALLS_PER_DAY", 10)
+    if not (0 <= debate_max_calls_per_day <= 500):
+        raise SettingsError(
+            f"DEBATE_MAX_CALLS_PER_DAY={debate_max_calls_per_day!r} must be between 0 and "
+            f"500. 0 disables real bear-debate calls entirely (mock-only); too high defeats "
+            f"the purpose of a daily sub-cap nested inside the shared 30-day AI cost cap."
+        )
+    # AUDIT FIX (scope/safety HIGH): the two bounds above are each individually
+    # sane but were NOT jointly validated -- a legal combination (e.g. daily=500,
+    # SCHEDULER_AI_COST_CAP_CALLS_PER_30D at its own floor of 50) lets debate
+    # alone exhaust the ENTIRE 30-day shared cap in a single day, locking out
+    # the live evaluator for the rest of the window. That is exactly the
+    # starvation this nested-cap design exists to prevent (see cost_guard.py's
+    # own module docstring). Reuses the SAME ceiling this session's EXP-1 Fable
+    # consultation already established for an equivalent nested shadow sub-cap
+    # (500/2000 = 25% of its own shared pool) rather than inventing a new ratio.
+    if debate_max_calls_per_day > 0.25 * scheduler_ai_cost_cap_calls_per_30d:
+        raise SettingsError(
+            f"DEBATE_MAX_CALLS_PER_DAY={debate_max_calls_per_day!r} must not exceed 25% of "
+            f"SCHEDULER_AI_COST_CAP_CALLS_PER_30D={scheduler_ai_cost_cap_calls_per_30d!r} "
+            f"(max {int(0.25 * scheduler_ai_cost_cap_calls_per_30d)!r} here). A higher daily "
+            f"sub-cap could let bear-debate alone exhaust the entire shared 30-day AI budget "
+            f"in a single day, starving the live evaluator for the rest of the window -- the "
+            f"exact failure this nested cap exists to prevent."
+        )
+
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
@@ -1229,6 +1280,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         proposal_ttl_extended_hours_seconds=proposal_ttl_extended_hours_seconds,
         proposal_ttl_closed_session_seconds=proposal_ttl_closed_session_seconds,
         tqs_shadow_enabled=_get_bool(src, "TQS_SHADOW_ENABLED", True),
+        debate_shadow_enabled=_get_bool(src, "DEBATE_SHADOW_ENABLED", False),
+        debate_max_calls_per_day=debate_max_calls_per_day,
+        debate_bear_model=_get(src, "DEBATE_BEAR_MODEL", "claude-sonnet-4-6"),
         attribution_enabled=_get_bool(src, "ATTRIBUTION_ENABLED", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),

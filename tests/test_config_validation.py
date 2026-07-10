@@ -75,6 +75,26 @@ def test_scheduler_cost_cap_bounds_validation():
     assert s.scheduler_ai_cost_cap_calls_per_30d == 100000
 
 
+def test_debate_daily_cap_cannot_exceed_25pct_of_shared_30day_cap():
+    """PR14 audit fix (scope/safety HIGH): DEBATE_MAX_CALLS_PER_DAY's own
+    [0, 500] bound and SCHEDULER_AI_COST_CAP_CALLS_PER_30D's own [50, 100000]
+    bound are each individually sane, but were NOT jointly validated -- a
+    legal combination (daily=500, shared at its own floor of 50) let debate
+    alone exhaust the ENTIRE 30-day shared cap in a single day, starving the
+    live evaluator for the rest of the window. Reuses the same 25%-of-pool
+    ceiling this session's EXP-1 Fable consultation already established for
+    an equivalent nested shadow sub-cap (500/2000)."""
+    with pytest.raises(SettingsError):
+        make_settings(DEBATE_MAX_CALLS_PER_DAY=500, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
+    with pytest.raises(SettingsError):
+        make_settings(DEBATE_MAX_CALLS_PER_DAY=13, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)  # 13 > 12.5
+    s = make_settings(DEBATE_MAX_CALLS_PER_DAY=12, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)  # 12 <= 12.5
+    assert s.debate_max_calls_per_day == 12
+    s = make_settings()  # defaults: 10 <= 0.25 * 2000 = 500
+    assert s.debate_max_calls_per_day == 10
+    assert s.scheduler_ai_cost_cap_calls_per_30d == 2000
+
+
 def test_benchmark_spine_time_malformed_fails_fast():
     with pytest.raises(SettingsError):
         make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="25:99")

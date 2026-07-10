@@ -1,6 +1,8 @@
-"""Scheduler v1.5 AI cost guard (PR3; true-up in PR9.5).
+"""Scheduler v1.5 AI cost guard (PR3; true-up in PR9.5; CANARY + PR14 each
+add a term -- see ``calls_in_last_30_days``'s own docstring for the current
+count).
 
-Tracks trailing-30-day real (non-mock) OpenAI call volume against
+Tracks trailing-30-day real (non-mock) AI call volume against
 ``settings.scheduler_ai_cost_cap_calls_per_30d`` so a scheduled scan can refuse
 to spend further AI budget once the cap is reached. Advisory/gate-only: this
 module never blocks anything itself, it only reports (bool, detail) for the
@@ -10,7 +12,12 @@ PR9.5 true-up: this originally counted ONLY ``openai_evaluations`` (the
 primary evaluator), silently missing the labeller (``candidate_labels``) and
 narrative-polarity (``last30days_polarity``) calls added by later PRs -- each
 a genuinely separate real OpenAI API call, undercounting real spend 2-3x
-(2026-07-06 exit review finding). All three now count toward the same cap.
+(2026-07-06 exit review finding). All now count toward the same cap.
+
+PR14 adds ``agent_votes`` (the bear-debate agent) here AND a separate,
+TIGHTER ``check_debate_budget``/daily sub-cap -- nested INSIDE this shared
+cap, not a replacement for it, so a new shadow feature can never starve the
+live evaluator's own share of the shared 30-day budget.
 """
 
 from __future__ import annotations
@@ -23,11 +30,11 @@ _TRAILING_DAYS = 30
 
 
 def calls_in_last_30_days(journal) -> int:
-    """Count of real (non-mock) AI calls across all four call sites in the
+    """Count of real (non-mock) AI calls across all six call sites in the
     trailing 30 days: the primary evaluator, the playbook labeller, the
-    narrative-polarity classifier, and EVAL-1's offline replay harness --
-    each a separate real OpenAI API call that should count toward the same
-    spend cap.
+    narrative-polarity classifier, EVAL-1's offline replay harness, CANARY's
+    weekly drift replay, and PR14's bear-debate agent -- each a separate
+    real API call that should count toward the same spend cap.
 
     ``last30days_polarity`` has no ``is_mock`` column (a PR4-era omission,
     not reproduced here); ``model_provider`` is only ever populated by a real
@@ -64,7 +71,10 @@ def calls_in_last_30_days(journal) -> int:
         "created_at_utc >= ? AND run_id IN (SELECT run_id FROM canary_runs WHERE is_mock = 0)",
         (since,),
     )
-    return evaluations + labels + polarity + eval_replays + canary_replays
+    debate_votes = journal.count_rows(
+        "agent_votes", "is_mock = 0 AND created_at_utc >= ?", (since,),
+    )
+    return evaluations + labels + polarity + eval_replays + canary_replays + debate_votes
 
 
 def check_scan_budget(settings, journal) -> tuple[bool, str]:
@@ -81,6 +91,40 @@ def check_scan_budget(settings, journal) -> tuple[bool, str]:
         return (False, f"error checking AI cost cap: {exc}")
 
     detail = f"{used}/{cap} real AI calls used in trailing 30 days"
+    if used >= cap:
+        return (False, f"{detail} -- cap reached")
+    return (True, detail)
+
+
+def debate_calls_today(journal) -> int:
+    """Real (non-mock) bear-debate calls since the start of the current
+    trading day. Uses ``journal.start_of_trading_day_utc()`` -- the same
+    trading-day-aligned "today" boundary already used by
+    ``count_auto_approvals_today``/``count_paper_orders_today`` -- rather
+    than naive UTC midnight, so the daily cap resets in step with every
+    other daily cap in this codebase.
+    """
+    start = journal.start_of_trading_day_utc()
+    return journal.count_rows(
+        "agent_votes", "is_mock = 0 AND created_at_utc >= ?", (start,),
+    )
+
+
+def check_debate_budget(settings, journal) -> tuple[bool, str]:
+    """Whether today's bear-debate sub-cap (``settings.debate_max_calls_per_day``)
+    still has room. This is a SEPARATE, TIGHTER cap nested INSIDE the shared
+    30-day cap above -- passing this check does not imply the shared cap has
+    room; a caller that wants both must check both (see
+    ``alphaos/debate/batch.py``'s own call site). Never raises; fails toward
+    "don't run."
+    """
+    cap = settings.debate_max_calls_per_day
+    try:
+        used = debate_calls_today(journal)
+    except Exception as exc:  # never crash the caller -- fail toward "don't run"
+        return (False, f"error checking debate daily cap: {exc}")
+
+    detail = f"{used}/{cap} bear-debate calls used today"
     if used >= cap:
         return (False, f"{detail} -- cap reached")
     return (True, detail)
