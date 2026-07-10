@@ -22,6 +22,49 @@ from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cost_guard
 
 
+def _alert_new_pending_approvals(orch, scan_batch_id) -> None:
+    """Immediate alert (operator ask, 2026-07-11) for any proposal THIS scan
+    just created that is now sitting in pending_approval, waiting on a human.
+    Deliberately lives here, OUTSIDE run_scan_once/_handle_proposal -- those
+    are Orchestrator decision functions that
+    tests/test_scheduler.py::test_decision_functions_never_reference_alerts_or_fuse_state
+    asserts must never mention alerting at all (PR9's own "alerting is
+    operator-visibility tooling, never a decision path" isolation law). This
+    scheduler-job wrapper is the sanctioned place for that, same as the
+    existing daily-digest alert below.
+
+    Scoped to SCHEDULER-triggered scans only (this function is only ever
+    called from run_scan_job): a manually-triggered scan (CLI/dashboard) has
+    an operator already looking at the screen, who will see the new proposal
+    appear without needing a push -- the actual problem this solves is an
+    UNATTENDED scan producing a proposal nobody is watching for.
+    """
+    from alphaos.util import alerts
+
+    if orch.settings.is_mock or not scan_batch_id:
+        return
+    rows = orch.journal.query(
+        "SELECT proposal_id, symbol, direction, entry, stop, target, proposal_expires_at_utc "
+        "FROM trade_proposals WHERE scan_batch_id = ? AND status = 'pending_approval'",
+        (scan_batch_id,),
+    )
+    if not rows:
+        return
+    symbols = ", ".join(f"{r['symbol']} {r['direction']}" for r in rows)
+    lines = [
+        f"{r['symbol']} {r['direction']}: entry {r['entry']} / stop {r['stop']} / target {r['target']} "
+        f"(expires {r['proposal_expires_at_utc']}, id={r['proposal_id']})"
+        for r in rows
+    ]
+    alerts.send_alert(
+        orch.settings,
+        title=f"AlphaOS: {len(rows)} proposal(s) awaiting your approval ({symbols})",
+        message="\n".join(lines),
+        priority="high",
+        journal=orch.journal,
+    )
+
+
 def run_scan_job(orch, runner) -> dict:
     """Scheduler wrapper around ``orch.run_scan_once()``.
 
@@ -49,6 +92,7 @@ def run_scan_job(orch, runner) -> dict:
         }
 
     scan_summary = orch.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value)
+    _alert_new_pending_approvals(orch, scan_summary.scan_batch_id)
     return {
         "status": "completed",
         "kill_switch_engaged": False,
