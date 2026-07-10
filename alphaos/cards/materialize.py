@@ -52,6 +52,7 @@ cut, logged in HANDOVER.md's reversible decision #1).
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -134,7 +135,23 @@ def prepare_materialization(journal, hypothesis_id: str, staging_dir: str, cards
     targets ``latest_version + 1`` again (``check_materialization_
     preconditions()`` always re-derives the latest registered version
     fresh), so there is no separate "already prepared" state to track.
+
+    Raises ``ValueError`` if ``staging_dir`` resolves to a path inside
+    ``cards_dir``/``CARDS_DIR`` -- a misconfigured staging dir must never
+    make this function's writes land where ``sync_registry()`` would then
+    auto-register an un-reviewed, operator-authorless version (scope/
+    safety-audit LOW-1: the module docstring's "never writes to cards/"
+    claim must hold even under a bad ``CARD_PROMOTION_STAGING_DIR``, not
+    only by convention).
     """
+    directory = Path(cards_dir) if cards_dir is not None else CARDS_DIR
+    staging = Path(staging_dir)
+    if staging.resolve() == directory.resolve() or directory.resolve() in staging.resolve().parents:
+        raise ValueError(
+            f"prepare_materialization: staging_dir {staging_dir!r} resolves inside the cards "
+            f"directory ({directory}) -- refusing to risk writing an un-reviewed version there"
+        )
+
     check = check_materialization_preconditions(journal, hypothesis_id)
     if not check["eligible"]:
         return {"prepared": False, **check}
@@ -144,14 +161,20 @@ def prepare_materialization(journal, hypothesis_id: str, staging_dir: str, cards
     old_version = check["card_version"]
     new_version = old_version + 1
 
-    matches = [c for c in load_card_files(cards_dir) if c["card_id"] == card_id]
-    if not matches:
+    try:
+        matches = [c for c in load_card_files(cards_dir) if c["card_id"] == card_id]
+    except Exception as exc:  # noqa: BLE001 -- surface the operator's own YAML error verbatim, never swallow it
+        return {"prepared": False, "eligible": False, "reason_code": "CARD_FILE_INVALID",
+                "detail": str(exc), "card_id": card_id, "card_version": old_version,
+                "card_state": check["card_state"]}
+    old_card_matches = [c for c in matches if c["version"] == old_version]
+    if not old_card_matches:
         return {"prepared": False, "eligible": False, "reason_code": "CARD_FILE_NOT_FOUND",
-                "detail": f"no on-disk YAML for card_id={card_id!r} in {cards_dir or CARDS_DIR}",
+                "detail": f"no on-disk YAML for card_id={card_id!r} version={old_version} in "
+                          f"{cards_dir or CARDS_DIR}",
                 "card_id": card_id, "card_version": old_version, "card_state": check["card_state"]}
-    old_card = max(matches, key=lambda c: c["version"])
+    old_card = old_card_matches[0]
 
-    staging = Path(staging_dir)
     staging.mkdir(parents=True, exist_ok=True)
 
     scaffold = dict(old_card)
@@ -270,17 +293,20 @@ def confirm_materialization(
 
     old_matches = [c for c in all_cards if c["card_id"] == card_id and c["version"] == old_version]
     old_card = old_matches[0] if old_matches else None
-    # Compare content EXCLUDING the version field itself -- it always
-    # differs by construction (that is the whole point of a version bump),
-    # so including it would make this check permanently unable to fire.
+    # Compare content EXCLUDING the version AND state fields. version always
+    # differs by construction (that is the whole point of a version bump).
+    # state is excluded too (correctness-audit MEDIUM-1): a new version off
+    # a non-shadow parent is FORCED to set state='shadow' by the check
+    # below, so a state-only flip with no real strategy change would
+    # otherwise read as "content changed" and slip past this guard.
     if old_card is not None:
-        new_without_version = {k: v for k, v in new_card.items() if k != "version"}
-        old_without_version = {k: v for k, v in old_card.items() if k != "version"}
+        new_without_version = {k: v for k, v in new_card.items() if k not in ("version", "state")}
+        old_without_version = {k: v for k, v in old_card.items() if k not in ("version", "state")}
         if stable_hash(new_without_version) == stable_hash(old_without_version):
             return {"confirmed": False, "eligible": False, "reason_code": "NO_CONTENT_CHANGE",
                     "detail": f"{card_id} v{new_version}'s content is identical to v{old_version} (besides "
-                              "the version number) -- a no-op version bump is refused (use card_promote to "
-                              "graduate the existing version instead)",
+                              "the version number and state) -- a no-op version bump is refused (use "
+                              "card_promote to graduate the existing version instead)",
                     "card_id": card_id, "card_version": old_version}
 
     if new_card.get("state") != "shadow":
@@ -316,8 +342,8 @@ def confirm_materialization(
             "decision_id": decision_id,
             "card_id": card_id,
             "card_version": old_version,
-            "from_state": "shadow",
-            "to_state": "shadow",
+            "from_state": check["card_state"],
+            "to_state": check["card_state"],
             "direction": "materialize",
             "trigger": "manual",
             "hypothesis_id": hypothesis_id,
@@ -328,9 +354,7 @@ def confirm_materialization(
             "decided_at_utc": now.utc,
             "decided_at_sgt": now.local_sgt,
         })
-    except Exception as exc:  # sqlite3.IntegrityError -- imported lazily to avoid a hard sqlite3 dependency here
-        if type(exc).__name__ != "IntegrityError":
-            raise
+    except sqlite3.IntegrityError as exc:
         return {"confirmed": False, "eligible": False, "reason_code": "CONCURRENT_MATERIALIZATION",
                 "detail": f"{card_id} v{old_version} was materialized by a concurrent decision between "
                           f"the check and this write: {exc}",
@@ -346,10 +370,8 @@ def confirm_materialization(
             "content_json": new_card,
             "lineage_id": lineage.get_or_create_lineage_id(journal, settings),
         })
-    except Exception as exc:
-        if type(exc).__name__ != "IntegrityError":
-            raise
-        # Already registered (a concurrent sync_registry() startup scan won
+    except sqlite3.IntegrityError:
+        pass  # Already registered (a concurrent sync_registry() startup scan won
         # the race) -- same content, computed the same way; a benign no-op.
 
     return {

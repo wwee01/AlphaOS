@@ -196,6 +196,59 @@ def test_prepare_materialization_never_writes_to_cards_dir(journal, tmp_path):
     assert before == after
 
 
+def test_prepare_materialization_refuses_when_staging_dir_is_inside_cards_dir(journal, tmp_path):
+    """Scope/safety-audit LOW-1: a misconfigured staging dir must never be
+    allowed to alias the real cards directory -- that would let this
+    function's own scaffold write land where sync_registry() would then
+    auto-register an un-reviewed, operator-authorless version."""
+    cards_dir = tmp_path / "cards"
+    hyp, card_id, version = _eligible_hypothesis(journal, cards_dir)
+
+    with pytest.raises(ValueError, match="staging_dir"):
+        materialize.prepare_materialization(journal, hyp, str(cards_dir), cards_dir=cards_dir)
+
+    with pytest.raises(ValueError, match="staging_dir"):
+        materialize.prepare_materialization(journal, hyp, str(cards_dir / "nested"), cards_dir=cards_dir)
+
+
+def test_prepare_materialization_selects_old_card_by_registered_version_not_max_on_disk(journal, tmp_path):
+    """Correctness-audit LOW-1: if an unregistered newer-version file
+    already sits in cards_dir (e.g. the operator moved an edited v2 in but
+    hasn't run --confirm yet, and re-runs prepare), the scaffold/evidence
+    must be built from the REGISTERED old_version's file, not whichever
+    file happens to have the highest version number on disk -- otherwise
+    the evidence packet's old_card_content and old_version become
+    internally inconsistent."""
+    cards_dir = tmp_path / "cards"
+    hyp, card_id, old_version = _eligible_hypothesis(journal, cards_dir)  # writes v1, "Test Card v1"
+    # An unregistered v2 already sits on disk (operator's own in-progress edit).
+    _write_card_yaml(cards_dir, card_id, old_version + 1, state="shadow", extra_note="UNREGISTERED-v2")
+
+    result = materialize.prepare_materialization(
+        journal, hyp, str(tmp_path / "staging"), cards_dir=cards_dir,
+    )
+    assert result["prepared"] is True
+    scaffold = yaml.safe_load(open(result["scaffold_path"], encoding="utf-8"))
+    assert scaffold["name"] == "Test Card v1"  # built from the REGISTERED v1, not the on-disk v2
+    assert result["old_version"] == old_version
+
+
+def test_prepare_materialization_refuses_cleanly_when_an_unrelated_card_file_is_malformed(journal, tmp_path):
+    """Correctness-audit LOW-3: a malformed OTHER card file in cards_dir
+    must not crash prepare_materialization with a raw, uncaught exception
+    -- it should surface as a clean CARD_FILE_INVALID reason code, matching
+    confirm_materialization's own existing behavior for the same case."""
+    cards_dir = tmp_path / "cards"
+    hyp, card_id, version = _eligible_hypothesis(journal, cards_dir)
+    bad_path = cards_dir / "unrelated_card.yaml"
+    with open(bad_path, "w", encoding="utf-8") as f:
+        yaml.safe_dump({"card_id": "unrelated_card", "version": 1, "name": "bad"}, f)  # missing invalidation_rule
+
+    result = materialize.prepare_materialization(journal, hyp, str(tmp_path / "staging"), cards_dir=cards_dir)
+    assert result["prepared"] is False
+    assert result["reason_code"] == "CARD_FILE_INVALID"
+
+
 # ------------------------------------------------------- confirm_materialization
 def _prep_confirm_fixture(journal, tmp_path, new_state="shadow", new_content_differs=True):
     cards_dir = tmp_path / "cards"
@@ -236,6 +289,50 @@ def test_confirm_materialization_happy_path(journal, settings, tmp_path):
     assert new_row["state"] == "shadow"
 
 
+def test_default_git_check_direct(tmp_path):
+    """Scope/safety-audit MEDIUM-1 + correctness-audit MEDIUM-2: every OTHER
+    test in this file injects a fake git_check_fn, so the REAL
+    materialize._default_git_check -- the function that actually runs in
+    production (confirm_materialization's own default) -- was previously
+    exercised by nothing. This test calls it directly against a real repo,
+    proving the PD#3-critical git-tracked-and-clean gate itself, not just
+    the plumbing that routes its return value to a reason code."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+
+    untracked = repo / "untracked.yaml"
+    untracked.write_text("a: 1\n")
+    assert materialize._default_git_check(untracked) is False
+
+    staged_only = repo / "staged_only.yaml"
+    staged_only.write_text("a: 1\n")
+    subprocess.run(["git", "add", str(staged_only)], cwd=str(repo), check=True)
+    assert materialize._default_git_check(staged_only) is False  # staged, not committed
+
+    committed_clean = repo / "committed_clean.yaml"
+    committed_clean.write_text("a: 1\n")
+    _init_git_repo(repo)  # no-op if already a repo; keeps this test self-contained
+    subprocess.run(["git", "add", str(committed_clean)], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add committed_clean"], cwd=str(repo), check=True)
+    assert materialize._default_git_check(committed_clean) is True
+
+    committed_clean.write_text("a: 2\n")  # dirty again after commit
+    assert materialize._default_git_check(committed_clean) is False
+
+
+def test_confirm_materialization_happy_path_via_the_real_default_git_check(journal, settings, tmp_path):
+    """Same as test_confirm_materialization_happy_path, but WITHOUT
+    injecting git_check_fn -- exercises confirm_materialization's actual
+    production code path end-to-end against a real committed file."""
+    hyp, card_id, old_version, new_version, cards_dir = _prep_confirm_fixture(journal, tmp_path)
+
+    result = materialize.confirm_materialization(journal, settings, hyp, "ck", cards_dir=cards_dir)
+
+    assert result["confirmed"] is True
+    assert result["new_version"] == new_version
+
+
 def test_confirm_materialization_refuses_when_decided_by_is_system(journal, settings, tmp_path):
     hyp, *_rest = _prep_confirm_fixture(journal, tmp_path)
     with pytest.raises(ValueError, match="system"):
@@ -261,6 +358,64 @@ def test_confirm_materialization_refuses_when_content_unchanged(journal, setting
     )
     assert result["confirmed"] is False
     assert result["reason_code"] == "NO_CONTENT_CHANGE"
+
+
+def _eligible_hypothesis_with_live_eligible_parent(journal, cards_dir, hypothesis_id="H-TEST", card_id="test_card", version=1):
+    """Same shape as _eligible_hypothesis, but the parent card is
+    registered live_eligible -- a materialize off a non-shadow parent is
+    an explicitly supported case (the module docstring names it), unlike
+    _eligible_hypothesis's own shadow-parent default."""
+    _write_card_yaml(cards_dir, card_id, version, state="live_eligible")
+    _insert_card(journal, card_id, version, state="live_eligible")
+    _insert_hypothesis(journal, hypothesis_id, card_id=card_id, status="met", last_q_value=0.02)
+    return hypothesis_id, card_id, version
+
+
+def test_confirm_materialization_refuses_a_state_only_flip_with_no_real_content_change(journal, settings, tmp_path):
+    """Correctness-audit MEDIUM-1: a new version off a NON-shadow parent is
+    forced to set state='shadow' (see test_..._not_shadow below), so a
+    byte-identical-otherwise clone that only flips state must ALSO be
+    refused as a no-op -- comparing full content (including state) would
+    let this slip through, since state genuinely differs by construction
+    on this path."""
+    cards_dir = tmp_path / "cards"
+    hyp, card_id, old_version = _eligible_hypothesis_with_live_eligible_parent(journal, cards_dir)
+    new_version = old_version + 1
+    # Same content as the parent (name/invalidation_rule identical), only
+    # state flipped to shadow (forced) and version bumped.
+    _write_card_yaml(cards_dir, card_id, new_version, state="shadow", extra_note="v1")
+    _init_git_repo(cards_dir)
+    _git_commit_all(cards_dir)
+
+    result = materialize.confirm_materialization(
+        journal, settings, hyp, "ck", cards_dir=cards_dir, git_check_fn=lambda p: True,
+    )
+    assert result["confirmed"] is False
+    assert result["reason_code"] == "NO_CONTENT_CHANGE"
+
+
+def test_confirm_materialization_records_the_parents_actual_state_not_hardcoded_shadow(journal, settings, tmp_path):
+    """Correctness-audit LOW-2: from_state/to_state on the journaled
+    promotion_decisions row must reflect the PARENT's actual registered
+    state, not a hardcoded 'shadow' -- a materialize off a live_eligible
+    parent should record that provenance accurately."""
+    cards_dir = tmp_path / "cards"
+    hyp, card_id, old_version = _eligible_hypothesis_with_live_eligible_parent(journal, cards_dir)
+    new_version = old_version + 1
+    _write_card_yaml(cards_dir, card_id, new_version, state="shadow", extra_note="really-different-v2")
+    _init_git_repo(cards_dir)
+    _git_commit_all(cards_dir)
+
+    result = materialize.confirm_materialization(
+        journal, settings, hyp, "ck", cards_dir=cards_dir, git_check_fn=lambda p: True,
+    )
+    assert result["confirmed"] is True
+    decision = journal.one(
+        "SELECT * FROM promotion_decisions WHERE card_id = ? AND card_version = ? AND direction = 'materialize'",
+        (card_id, old_version),
+    )
+    assert decision["from_state"] == "live_eligible"
+    assert decision["to_state"] == "live_eligible"
 
 
 def test_confirm_materialization_refuses_when_new_version_not_shadow(journal, settings, tmp_path):
