@@ -17,9 +17,20 @@ genuinely unexpected exceptions are allowed to propagate up to
 
 from __future__ import annotations
 
-from alphaos.constants import TriggerSource
+from alphaos.constants import Severity, TriggerSource
 from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cost_guard
+
+
+# Caps the detail-line list in the alert message body -- with no cap, a
+# large batch of simultaneous pending_approval proposals (every scanned
+# symbol clearing per-trade risk in the same tick, up to the full universe)
+# could exceed alerts.py's 1000-char truncation cap and cut a line off
+# mid-word (audit-caught, correctness LOW-1). Mirrors daily_brief.py's own
+# MAX_SYMBOLS_IN_ONE_ACTION precedent for the identical reason. The alert
+# TITLE (count + full symbol list) is unaffected by this cap and stays
+# well under the truncation limit even at the full 20-symbol universe.
+MAX_DETAIL_LINES_IN_APPROVAL_ALERT = 8
 
 
 def _alert_new_pending_approvals(orch, scan_batch_id) -> None:
@@ -38,31 +49,53 @@ def _alert_new_pending_approvals(orch, scan_batch_id) -> None:
     an operator already looking at the screen, who will see the new proposal
     appear without needing a push -- the actual problem this solves is an
     UNATTENDED scan producing a proposal nobody is watching for.
-    """
-    from alphaos.util import alerts
 
-    if orch.settings.is_mock or not scan_batch_id:
-        return
-    rows = orch.journal.query(
-        "SELECT proposal_id, symbol, direction, entry, stop, target, proposal_expires_at_utc "
-        "FROM trade_proposals WHERE scan_batch_id = ? AND status = 'pending_approval'",
-        (scan_batch_id,),
-    )
-    if not rows:
-        return
-    symbols = ", ".join(f"{r['symbol']} {r['direction']}" for r in rows)
-    lines = [
-        f"{r['symbol']} {r['direction']}: entry {r['entry']} / stop {r['stop']} / target {r['target']} "
-        f"(expires {r['proposal_expires_at_utc']}, id={r['proposal_id']})"
-        for r in rows
-    ]
-    alerts.send_alert(
-        orch.settings,
-        title=f"AlphaOS: {len(rows)} proposal(s) awaiting your approval ({symbols})",
-        message="\n".join(lines),
-        priority="high",
-        journal=orch.journal,
-    )
+    Wrapped in its own try/except (scope/safety-audit LOW-1): this runs
+    AFTER run_scan_once() has already committed every proposal it created --
+    a bug here (a query error, an alerts.py regression) must never surface
+    as a spurious SCAN JOB FAILURE (which would itself page a false
+    high-priority incident and mask that the scan actually succeeded).
+    Matches this module's own stated law: "Alerting must never block or
+    fail the job that triggers it."
+    """
+    try:
+        from alphaos.util import alerts
+
+        if orch.settings.is_mock or not scan_batch_id:
+            return
+        rows = orch.journal.query(
+            "SELECT proposal_id, symbol, direction, entry, stop, target, proposal_expires_at_utc "
+            "FROM trade_proposals WHERE scan_batch_id = ? AND status = 'pending_approval'",
+            (scan_batch_id,),
+        )
+        if not rows:
+            return
+        symbols = ", ".join(f"{r['symbol']} {r['direction']}" for r in rows)
+        shown = rows[:MAX_DETAIL_LINES_IN_APPROVAL_ALERT]
+        lines = [
+            f"{r['symbol']} {r['direction']}: entry {r['entry']} / stop {r['stop']} / target {r['target']} "
+            f"(expires {r['proposal_expires_at_utc']}, id={r['proposal_id']})"
+            for r in shown
+        ]
+        remaining = len(rows) - len(shown)
+        if remaining > 0:
+            lines.append(f"... +{remaining} more (see the full pending_approval queue)")
+        alerts.send_alert(
+            orch.settings,
+            title=f"AlphaOS: {len(rows)} proposal(s) awaiting your approval ({symbols})",
+            message="\n".join(lines),
+            priority="high",
+            journal=orch.journal,
+        )
+    except Exception as exc:  # noqa: BLE001 -- never let an alert bug fail the scan job itself
+        try:
+            orch.journal.log_system_event(
+                Severity.WARNING, "scheduler",
+                f"_alert_new_pending_approvals failed (scan already completed successfully): {exc}",
+                {"scan_batch_id": scan_batch_id},
+            )
+        except Exception:  # pragma: no cover -- double-fault belt+suspenders, never escalate
+            pass
 
 
 def run_scan_job(orch, runner) -> dict:

@@ -40,6 +40,26 @@ def _insert_proposal(journal, scan_batch_id, symbol="AAPL", status="pending_appr
 
 
 # --------------------------------------------------- _alert_new_pending_approvals
+def test_alert_new_pending_approvals_never_raises_even_if_alerts_send_alert_breaks(journal, monkeypatch):
+    """Scope/safety-audit LOW-1: an exception anywhere inside this function
+    (a query error, an alerts.py regression) must never propagate out --
+    it would otherwise mark a SUCCESSFULLY-COMPLETED scan job as failed,
+    triggering a false high-priority page over an alerting bug, not a
+    real scan failure."""
+    settings = make_settings(NTFY_TOPIC="test-topic", ALPHAOS_MODE="paper")
+    orch = _FakeOrch(settings, journal)
+    monkeypatch.setattr(
+        "alphaos.util.alerts.send_alert", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    batch_id = new_id("scan")
+    _insert_proposal(journal, batch_id)
+
+    _alert_new_pending_approvals(orch, batch_id)  # must not raise
+
+    events = journal.query("SELECT * FROM system_events WHERE category = 'scheduler'")
+    assert events
+
+
 def test_alert_new_pending_approvals_fires_for_a_real_scan_batch(journal, monkeypatch):
     settings = make_settings(NTFY_TOPIC="test-topic", ALPHAOS_MODE="paper")
     orch = _FakeOrch(settings, journal)
@@ -116,6 +136,33 @@ def test_alert_new_pending_approvals_noop_when_scan_batch_id_missing(journal, mo
     assert calls == []
 
 
+def test_alert_new_pending_approvals_caps_detail_lines_for_a_large_batch(journal, monkeypatch):
+    """Correctness-audit LOW-1: an unbounded per-proposal detail-line join
+    could exceed alerts.py's 1000-char truncation cap and cut a line off
+    mid-word for a large simultaneous batch. The message body must stay
+    capped (with a "+N more" summary line) even though the title itself
+    (count + full symbol list) is uncapped and stays well under the limit."""
+    from alphaos.scheduler.jobs import MAX_DETAIL_LINES_IN_APPROVAL_ALERT
+
+    settings = make_settings(NTFY_TOPIC="test-topic", ALPHAOS_MODE="paper")
+    orch = _FakeOrch(settings, journal)
+    calls = []
+    monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: calls.append(k))
+
+    batch_id = new_id("scan")
+    n = MAX_DETAIL_LINES_IN_APPROVAL_ALERT + 5
+    for i in range(n):
+        _insert_proposal(journal, batch_id, symbol=f"SYM{i:02d}")
+
+    _alert_new_pending_approvals(orch, batch_id)
+
+    assert len(calls) == 1
+    assert f"{n} proposal(s)" in calls[0]["title"]
+    body_lines = calls[0]["message"].split("\n")
+    assert len(body_lines) == MAX_DETAIL_LINES_IN_APPROVAL_ALERT + 1  # + the "+N more" summary line
+    assert "+5 more" in body_lines[-1]
+
+
 # ------------------------------------------------------------------- entry fill
 def _order_row(**overrides):
     row = {
@@ -148,9 +195,10 @@ def test_open_position_alert_says_short_for_a_short_fill(journal, monkeypatch):
     monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: calls.append(k) or True)
     pm = PositionManager(settings, journal)
 
-    pm.open_position(_order_row(symbol="TSLA", is_short=1), 250.0)
+    pm.open_position(_order_row(symbol="TSLA", direction="short", is_short=1), 250.0)
 
     assert "SHORT" in calls[0]["title"]
+    assert "TSLA short" in calls[0]["message"]  # correctness-audit NIT-2: title and message must agree
 
 
 def test_open_position_silent_in_mock_mode(journal, monkeypatch):
@@ -184,7 +232,7 @@ def test_close_position_alerts_on_a_real_exit_fill(journal, monkeypatch):
     position_id = pm.open_position(_order_row(symbol="AAPL"), 150.0)
     calls.clear()  # discard the entry-fill alert; this test is about the exit
 
-    pm.close_position(position_id, 160.0, "target_hit")
+    pm.close_position(position_id, 160.0, "target")
 
     assert len(calls) == 1
     assert "AAPL" in calls[0]["title"]
@@ -200,9 +248,32 @@ def test_close_position_alert_says_loss_for_a_losing_exit(journal, monkeypatch):
     position_id = pm.open_position(_order_row(symbol="AAPL"), 150.0)
     calls.clear()
 
-    pm.close_position(position_id, 140.0, "stop_hit")
+    pm.close_position(position_id, 140.0, "stop")
 
     assert "LOSS" in calls[0]["title"]
+
+
+def test_close_position_alert_says_breakeven_for_a_true_zero_net_pnl_exit(journal, monkeypatch):
+    """Correctness-audit LOW-2: the BREAKEVEN title branch was previously
+    untested (COST_SLIPPAGE_BPS defaults to 1.0, so entry==exit alone
+    yields a small net LOSS, not a true breakeven) -- zero the cost model
+    explicitly to hit net_pnl == 0 exactly, matching how trade_outcomes.win
+    itself is computed (net_pnl > 0), so this proves the alert title
+    agrees with the persisted record on the boundary case, not just the
+    two non-boundary cases."""
+    settings = make_settings(NTFY_TOPIC="test-topic", ALPHAOS_MODE="paper", COST_SLIPPAGE_BPS="0")
+    calls = []
+    monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: calls.append(k) or True)
+    pm = PositionManager(settings, journal)
+    position_id = pm.open_position(_order_row(symbol="AAPL"), 150.0)
+    calls.clear()
+
+    pm.close_position(position_id, 150.0, "stop")
+
+    row = journal.one("SELECT net_pnl, win FROM trade_outcomes WHERE position_id = ?", (position_id,))
+    assert row["net_pnl"] == 0
+    assert row["win"] == 0
+    assert "BREAKEVEN" in calls[0]["title"]
 
 
 def test_close_position_silent_in_mock_mode(journal, monkeypatch):
@@ -213,7 +284,7 @@ def test_close_position_silent_in_mock_mode(journal, monkeypatch):
     position_id = pm.open_position(_order_row(), 150.0)
     calls.clear()
 
-    pm.close_position(position_id, 160.0, "target_hit")
+    pm.close_position(position_id, 160.0, "target")
 
     assert calls == []
 
@@ -226,7 +297,7 @@ def test_close_position_silent_for_a_seed_demo_fixture_row(journal, monkeypatch)
     position_id = pm.open_position(_order_row(is_demo=1), 150.0)
     calls.clear()
 
-    pm.close_position(position_id, 160.0, "target_hit")
+    pm.close_position(position_id, 160.0, "target")
 
     assert calls == []
 
