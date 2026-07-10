@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Optional
 
 from alphaos.config.settings import SettingsError, load_settings
 from alphaos.orchestrator import Orchestrator
@@ -280,6 +281,121 @@ def cmd_card_demotion_check(orch: Orchestrator) -> int:
     demote (+ alert) any card with >= 2 consecutive breach snapshots."""
     result = orch.card_demotion_check()
     _print({"card_demotion_check": result})
+    return 0
+
+
+def cmd_hypothesis_mark_status(
+    orch: Orchestrator, hypothesis_id: str, new_status: str, decided_by: str, confirm: bool,
+) -> int:
+    """PR13 slice 2: the only way MET/FAILED/WITHDRAWN ever gets set --
+    always an explicit operator action, never a scheduled job. Without
+    --confirm, this is a dry-run preview showing the hypothesis's own claim
+    text + current status -- no write happens either way unless --confirm
+    is passed and the row is still eligible (Fable5 strategy review,
+    2026-07-10: this write is permanent by design -- reversible decision #9
+    accepted no undo path, but the write itself had no preview ceremony at
+    all, unlike its downstream sibling card_promote; matches that command's
+    dry-run-by-default pattern exactly)."""
+    from alphaos.hypotheses import check_status_change_preconditions
+
+    check = check_status_change_preconditions(orch.journal, hypothesis_id, new_status)
+    if not check["eligible"]:
+        print(f"NOT ELIGIBLE -- {check['reason_code']}: {check['detail']}")
+        _print({"hypothesis_mark_status": {"status": "not_eligible", **check}})
+        return 1
+
+    if not confirm:
+        print(
+            f"ELIGIBLE -- {hypothesis_id} ({check['current_status']} -> {new_status}). "
+            f"Claim: {check['claim']!r}. This is PERMANENT -- there is no un-adjudicate command. "
+            f"Re-run with --confirm to actually record it."
+        )
+        _print({"hypothesis_mark_status": {"status": "dry_run_eligible", **check}})
+        return 0
+
+    try:
+        row = orch.hypothesis_mark_status(hypothesis_id, new_status, decided_by)
+    except ValueError as exc:
+        print(f"Refused: {exc}")
+        _print({"hypothesis_mark_status": {"status": "refused", "error": str(exc)}})
+        return 1
+    print(f"{hypothesis_id}: status -> {row['status']} (decided_by={decided_by})")
+    _print({"hypothesis_mark_status": {"status": "ok", "hypothesis": row}})
+    return 0
+
+
+def cmd_autonomy_readiness(orch: Orchestrator) -> int:
+    """PR13 slice 2: every card-gating hypothesis's promotion precondition
+    checklist -- PURE READ, never a trigger."""
+    from alphaos.reports.autonomy_readiness import render_markdown
+
+    rep = orch.autonomy_readiness_report()
+    print(render_markdown(rep))
+    print()
+    _print({"autonomy_readiness": rep})
+    return 0
+
+
+def cmd_card_promote(
+    orch: Orchestrator, hypothesis_id: str, decided_by: str, research_ref: Optional[str], confirm: bool,
+) -> int:
+    """PR13 slice 2: graduate a card from shadow to live_eligible (content
+    unchanged). Without --confirm, this is a dry-run preview of the
+    precondition checklist only -- no write happens either way unless
+    --confirm is passed and every precondition clears."""
+    from alphaos.cards.promotion import check_promotion_preconditions
+
+    check = check_promotion_preconditions(orch.journal, hypothesis_id, research_ref)
+    if not check["eligible"]:
+        print(f"NOT ELIGIBLE -- {check['reason_code']}: {check['detail']}")
+        _print({"card_promote": {"status": "not_eligible", **check}})
+        return 1
+
+    if not confirm:
+        print(
+            f"ELIGIBLE -- {check['card_id']} v{check['card_version']} would be promoted "
+            f"shadow -> live_eligible. Re-run with --confirm to actually promote."
+        )
+        _print({"card_promote": {"status": "dry_run_eligible", **check}})
+        return 0
+
+    row = orch.card_promote(hypothesis_id, decided_by, research_ref)
+    print(f"Promoted: {row['card_id']} v{row['card_version']} shadow -> live_eligible (decided_by={decided_by})")
+    _print({"card_promote": {"status": "promoted", "decision": row}})
+    return 0
+
+
+def cmd_card_demote(
+    orch: Orchestrator, card_id: str, card_version: int, decided_by: str, reason: str, confirm: bool,
+) -> int:
+    """PR13 slice 2: a manual override demotion -- an operator's own
+    judgment call, not evidence-gated. Without --confirm, this is a preview
+    only -- scope/safety-audit LOW: the preview now runs the SAME
+    precondition check demote_card() itself uses, so it can never say
+    "would demote" against a card that a --confirm run would then refuse
+    (matches cmd_card_promote's own dry-run behavior)."""
+    from alphaos.cards.promotion import check_demotion_preconditions
+
+    check = check_demotion_preconditions(orch.journal, card_id, card_version)
+    if not check["eligible"]:
+        print(f"NOT ELIGIBLE -- {check['reason_code']}: {check['detail']}")
+        _print({"card_demote": {"status": "not_eligible", **check}})
+        return 1
+
+    if not confirm:
+        print(f"Would demote {card_id} v{card_version} (decided_by={decided_by}, reason={reason!r}). "
+              "Re-run with --confirm to actually demote.")
+        _print({"card_demote": {"status": "dry_run_eligible", **check}})
+        return 0
+
+    try:
+        row = orch.card_demote_manual(card_id, card_version, decided_by, reason)
+    except ValueError as exc:
+        print(f"Refused: {exc}")
+        _print({"card_demote": {"status": "refused", "error": str(exc)}})
+        return 1
+    print(f"Demoted: {card_id} v{card_version} (decided_by={decided_by})")
+    _print({"card_demote": {"status": "demoted", "decision": row}})
     return 0
 
 
@@ -738,6 +854,43 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("card_demotion_check",
                    help="PR13 slice 1: one daily pass -- snapshot every live_eligible card, "
                         "demote (+ alert) any card with >= 2 consecutive breach snapshots")
+    hms = sub.add_parser("hypothesis_mark_met",
+                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis MET "
+                              "(the only writer of this status; never automated). PERMANENT, no undo -- "
+                              "dry-run preview unless --confirm is passed")
+    hms.add_argument("hypothesis_id")
+    hms.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hms.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
+    hmf = sub.add_parser("hypothesis_mark_failed",
+                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis FAILED. "
+                              "PERMANENT, no undo -- dry-run preview unless --confirm is passed")
+    hmf.add_argument("hypothesis_id")
+    hmf.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hmf.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
+    hmw = sub.add_parser("hypothesis_mark_withdrawn",
+                         help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis "
+                              "WITHDRAWN. PERMANENT, no undo -- dry-run preview unless --confirm is passed")
+    hmw.add_argument("hypothesis_id")
+    hmw.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hmw.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
+    sub.add_parser("autonomy_readiness",
+                   help="PR13 slice 2: every card-gating hypothesis's promotion precondition "
+                        "checklist -- PURE READ, never a trigger")
+    cpr = sub.add_parser("card_promote",
+                        help="PR13 slice 2: graduate a card from shadow to live_eligible (content "
+                             "unchanged, no new version). Dry-run preview unless --confirm is passed")
+    cpr.add_argument("hypothesis_id")
+    cpr.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    cpr.add_argument("--research-ref", default=None, help="required when the hypothesis is risk_class='C'")
+    cpr.add_argument("--confirm", action="store_true", help="actually promote (default: dry-run preview)")
+    cdm = sub.add_parser("card_demote",
+                        help="PR13 slice 2: manual override demotion -- an operator judgment call, "
+                             "not evidence-gated. Dry-run preview unless --confirm is passed")
+    cdm.add_argument("card_id")
+    cdm.add_argument("card_version", type=int)
+    cdm.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    cdm.add_argument("--reason", required=True, help="free-text reason, recorded on the decision row")
+    cdm.add_argument("--confirm", action="store_true", help="actually demote (default: dry-run preview)")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -875,6 +1028,18 @@ def main(argv=None) -> int:
             return cmd_card_scoreboard(orch)
         if args.command == "card_demotion_check":
             return cmd_card_demotion_check(orch)
+        if args.command == "hypothesis_mark_met":
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "met", args.decided_by, args.confirm)
+        if args.command == "hypothesis_mark_failed":
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "failed", args.decided_by, args.confirm)
+        if args.command == "hypothesis_mark_withdrawn":
+            return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "withdrawn", args.decided_by, args.confirm)
+        if args.command == "autonomy_readiness":
+            return cmd_autonomy_readiness(orch)
+        if args.command == "card_promote":
+            return cmd_card_promote(orch, args.hypothesis_id, args.decided_by, args.research_ref, args.confirm)
+        if args.command == "card_demote":
+            return cmd_card_demote(orch, args.card_id, args.card_version, args.decided_by, args.reason, args.confirm)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":

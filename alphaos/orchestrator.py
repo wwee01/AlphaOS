@@ -1337,6 +1337,40 @@ class Orchestrator:
 
         return run_daily_card_evaluation(self.journal, self.settings)
 
+    def hypothesis_mark_status(self, hypothesis_id: str, new_status: str, decided_by: str) -> dict:
+        """PR13 slice 2: the ONLY writer of MET/FAILED/WITHDRAWN. Operator-
+        only by construction (raises if decided_by='system'); requires the
+        hypothesis to already be 'resolved'. See
+        alphaos/hypotheses/registry.py's mark_hypothesis_status()."""
+        from alphaos.hypotheses import mark_hypothesis_status
+
+        return mark_hypothesis_status(self.journal, hypothesis_id, new_status, decided_by)
+
+    def autonomy_readiness_report(self) -> dict:
+        """PR13 slice 2: every card-gating hypothesis's promotion precondition
+        checklist. PURE READ. See alphaos/reports/autonomy_readiness.py."""
+        from alphaos.reports.autonomy_readiness import build_autonomy_readiness_report
+
+        return build_autonomy_readiness_report(self.journal)
+
+    def card_promote(self, hypothesis_id: str, decided_by: str, research_ref: Optional[str] = None) -> dict:
+        """PR13 slice 2: graduate the card named by hypothesis_id from
+        shadow to live_eligible (content unchanged, no new version minted --
+        see alphaos/cards/promotion.py's own "graduation vs mutation"
+        module docstring). Raises ValueError with a reason_code if any
+        precondition is unmet. Never touches setup_cards or card YAML."""
+        from alphaos.cards.promotion import promote_card
+
+        return promote_card(self.journal, hypothesis_id, decided_by, research_ref)
+
+    def card_demote_manual(self, card_id: str, card_version: int, decided_by: str, reason: str) -> dict:
+        """PR13 slice 2: a manual override demotion -- an operator's own
+        judgment call, not evidence-gated. See
+        alphaos/cards/promotion.py's demote_card()."""
+        from alphaos.cards.promotion import demote_card
+
+        return demote_card(self.journal, card_id, card_version, decided_by, reason)
+
     def backfill_regime_days(self) -> dict:
         """REG-1 one-off: extend benchmark_bars SPY history, classify the
         full available series into regime_days, and stamp any pre-existing
