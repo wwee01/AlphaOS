@@ -76,6 +76,11 @@ class ApprovalEngine:
             return self._deny(proposal, ReasonCode.MARGIN_APPROVAL_REQUIRED.value,
                               "auto cannot enable margin/leverage or a short path needing margin")
 
+        # Count-then-insert below assumes the single-threaded, synchronous
+        # scan loop this codebase runs today (one candidate handled fully,
+        # including the journal insert, before the next is considered) --
+        # there is no DB-level UNIQUE backstop on either cap. If concurrent
+        # scan execution is ever introduced, this needs one.
         if unattended:
             # Own cap FIRST (an intersection of two caps, not two parallel
             # additive budgets -- see Settings.max_unattended_approvals_per_day).
@@ -102,9 +107,15 @@ class ApprovalEngine:
             proposal, label, approved=True, approver=approver, reason=reason,
             freshness_ok=freshness_ok, risk_ok=risk_ok,
         )
+        # Log progress against the cap that actually gated THIS approval --
+        # the own cap for the unattended door, the shared cap otherwise.
+        if unattended:
+            progress = f"{unattended_used + 1}/{self.settings.max_unattended_approvals_per_day}"
+        else:
+            progress = f"{used + 1}/{self.settings.max_auto_approvals_per_day}"
         self.journal.log_system_event(
             Severity.INFO, "approval",
-            f"{label.value} {proposal.symbol} ({used + 1}/{self.settings.max_auto_approvals_per_day}).",
+            f"{label.value} {proposal.symbol} ({progress}).",
             {"proposal_id": proposal.proposal_id},
         )
         return ApprovalOutcome(True, "auto_approved", label.value, reason, approval_id)

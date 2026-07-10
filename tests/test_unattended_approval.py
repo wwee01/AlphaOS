@@ -207,6 +207,68 @@ def test_scheduler_scan_outside_any_window_is_not_unattended_eligible(monkeypatc
     o.close()
 
 
+def test_scheduler_scan_at_window_start_boundary_is_eligible(monkeypatch):
+    """Correctness-audit LOW-1: the half-open boundary (start inclusive) is
+    load-bearing and was previously untested -- a </>= mutation at either
+    edge would have survived the suite silently."""
+    from datetime import datetime as _dt
+
+    monkeypatch.setattr(
+        "alphaos.scheduler.cadence.market_now_et", lambda now=None: _dt(2026, 7, 10, 15, 45),
+    )
+    o = _orch(
+        UNATTENDED_APPROVE_WINDOWS="15:45-16:00", MAX_UNATTENDED_APPROVALS_PER_DAY="50",
+        LABELLING_ENABLED="true", INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6",
+    )
+    from alphaos.constants import TriggerSource
+
+    summ = o.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value)
+
+    assert summ.auto_submitted > 0
+    o.close()
+
+
+def test_scheduler_scan_at_windows_last_minute_is_eligible(monkeypatch):
+    """15:59 is still inside a 15:45-16:00 window (end exclusive)."""
+    from datetime import datetime as _dt
+
+    monkeypatch.setattr(
+        "alphaos.scheduler.cadence.market_now_et", lambda now=None: _dt(2026, 7, 10, 15, 59),
+    )
+    o = _orch(
+        UNATTENDED_APPROVE_WINDOWS="15:45-16:00", MAX_UNATTENDED_APPROVALS_PER_DAY="50",
+        LABELLING_ENABLED="true", INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6",
+    )
+    from alphaos.constants import TriggerSource
+
+    summ = o.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value)
+
+    assert summ.auto_submitted > 0
+    o.close()
+
+
+def test_scheduler_scan_at_window_end_boundary_is_not_eligible(monkeypatch):
+    """Correctness-audit LOW-1: 16:00 itself must NOT be eligible -- the
+    window's end is exclusive, so this proves the boundary isn't off-by-one
+    in the other, unsafe direction (matching one minute too many)."""
+    from datetime import datetime as _dt
+
+    monkeypatch.setattr(
+        "alphaos.scheduler.cadence.market_now_et", lambda now=None: _dt(2026, 7, 10, 16, 0),
+    )
+    o = _orch(
+        UNATTENDED_APPROVE_WINDOWS="15:45-16:00", MAX_UNATTENDED_APPROVALS_PER_DAY="50",
+        LABELLING_ENABLED="true", INTEREST_SCAN_TOP_N="6", MAX_CANDIDATES_TO_AI="6",
+    )
+    from alphaos.constants import TriggerSource
+
+    summ = o.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value)
+
+    assert summ.auto_submitted == 0
+    assert o.journal.query("SELECT * FROM approvals WHERE label = 'UNATTENDED_APPROVED'") == []
+    o.close()
+
+
 def test_no_unattended_windows_configured_is_never_eligible(monkeypatch):
     """The default (empty) config -- feature inert regardless of trigger
     source or wall-clock."""

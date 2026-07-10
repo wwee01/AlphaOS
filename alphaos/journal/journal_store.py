@@ -246,6 +246,8 @@ class JournalStore:
             "max_daily_loss_pct": settings.max_daily_loss_pct,
             "paper_equity": settings.paper_equity,
             "max_auto_approvals_per_day": settings.max_auto_approvals_per_day,
+            "unattended_approve_windows": settings.unattended_approve_windows,
+            "max_unattended_approvals_per_day": settings.max_unattended_approvals_per_day,
             "max_spread_pct": settings.max_spread_pct,
             "min_dollar_volume": settings.min_dollar_volume,
             "max_data_age_seconds": settings.max_data_age_seconds,
