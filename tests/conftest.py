@@ -7,6 +7,8 @@ ONLY inside tests and never reaches the runtime path.
 
 from __future__ import annotations
 
+import urllib.request
+
 import pytest
 
 from alphaos.cards.registry import get_default_card
@@ -30,6 +32,41 @@ def make_settings(**overrides):
     }
     env.update({k: str(v) for k, v in overrides.items()})
     return load_settings(load_env_file=False, env=env)
+
+
+def _block_ntfy_calls(real_urlopen):
+    """Pass through every real urlopen call EXCEPT one targeting ntfy.sh --
+    scoped by URL, not a blanket block, because a blanket block also catches
+    the market-data provider's own pre-existing real HTTP path
+    (alpaca_data.py's get_snapshot, reachable whenever ALPHAOS_MODE=paper +
+    non-empty Alpaca keys are set, fake or real), which is a separate,
+    already-existing test-suite gap unrelated to this feature's scope."""
+
+    def _urlopen(request, *args, **kwargs):
+        url = getattr(request, "full_url", None) or (request if isinstance(request, str) else "")
+        if "ntfy.sh" in url:
+            raise AssertionError(
+                "A test attempted a real urllib.request.urlopen() call to ntfy.sh -- "
+                "alerts.send_alert must be monkeypatched in every test that reaches "
+                "paper/live mode + a configured NTFY_TOPIC, not left to rely on the "
+                "empty-topic no-op. See tests/test_alerts.py for the monkeypatch pattern."
+            )
+        return real_urlopen(request, *args, **kwargs)
+
+    return _urlopen
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network_calls(monkeypatch):
+    """Defense-in-depth backstop (scope/safety audit LOW-2, PR9's immediate-
+    alerts audit): the zero-network-leak guarantee previously rested only on
+    two conventions (mock-mode default + unset NTFY_TOPIC default) with no
+    hard stop. A future paper-mode test that sets a topic and forgets to
+    monkeypatch alerts.send_alert would otherwise silently POST to ntfy.sh.
+    Tests that intentionally exercise urlopen (tests/test_alerts.py) already
+    monkeypatch it themselves, which overrides this default for their
+    duration -- this fixture only catches call sites nobody stubbed."""
+    monkeypatch.setattr(urllib.request, "urlopen", _block_ntfy_calls(urllib.request.urlopen))
 
 
 @pytest.fixture
