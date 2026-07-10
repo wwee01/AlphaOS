@@ -754,8 +754,46 @@ item specs under their canonical names in the specs doc):**
     holding for explicit operator merge instruction. PR13.5's diff-
     rendering/YAML-writing ceremony explicitly NOT built (no producer of
     real diff content exists yet) — one labeled function-boundary seam is
-    left for it. → cards v2–v3 →
-    **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
+    left for it. → cards v2–v3 (blocked on real shadow evidence for
+    H-CAT-1/H-POL-1 — not yet buildable) →
+    **PR14** 🟡 (Red-Team Debate v0, shadow bear-only) — built out of strict
+    roadmap order ahead of cards v2–v3 since it has no evidence gate (a
+    registry/mechanism-only shadow feature, same "ship mechanism now,
+    evidence-gated items wait for real data" precedent as EXP-1/PR13.5);
+    built + audit-fixed 2026-07-10, branch `feat/pr14-red-team-debate` @
+    `c7e7741` (build `8dc4087` + audit-fixup `c7e7741`). Adversarial "bear"
+    LLM agent votes on trade proposals strictly after a scan batch's
+    decisions are committed, mirroring TQS's own post-commit call-site
+    guarantee. New `agent_votes` table (role-parameterized for a future
+    triad); new `alphaos/ai/bear_debater.py` (mock-path convention modeled
+    on `OpenAIClient`, not `ClaudeReviewer`'s manual-only/no-mock
+    convention, since this runs automatically and every test here is
+    offline); new `alphaos/debate/batch.py` scoped via `candidates.status
+    ='proposed'` — NOT `trade_proposals.status`, which never actually
+    persists `'proposed'` for a real propose decision (a real bug
+    self-caught pre-audit, empirically proven via swap-test-restore: the
+    naive filter would have voted on zero real proposals in production).
+    `debate_max_calls_per_day` (default 10) nests inside the existing
+    shared 30-day AI cost cap; `debate_shadow_enabled` defaults **False**
+    (a genuinely paid LLM call, follows CANARY's cost posture not TQS's
+    zero-cost default-True). New CLI `cmd_debate_register()` pre-registers
+    the bear-debate hypothesis (`oppose_high_conviction_v1`). Two
+    independent Opus audits, zero BLOCKER: scope/safety found + fixed a
+    real **HIGH** (the daily sub-cap's own bound was never validated
+    against the shared 30-day cap it nests inside — a legal config could
+    let debate alone exhaust the entire shared budget in one day, exactly
+    what the nested-cap design was supposed to prevent; fixed via a joint
+    25%-of-pool bound, reusing EXP-1's own established ratio) + a MEDIUM
+    (independently also flagged by correctness: `agent_votes.lineage_id`
+    was always NULL, unlike every other AI-producing table — fixed to
+    match `tqs/batch.py`'s own pattern); correctness found only NITs (same
+    lineage gap; a concurrent-race edge case logged noisier than TQS's own
+    silent-no-op convention — fixed to match). 28 PR14-specific tests
+    (25 + 1 settings-validation test), every fix's regression test
+    empirically verified to fail pre-fix/pass post-fix, full suite green
+    both times, ruff/mypy clean. **COMMITTED, NOT YET MERGED**, holding for
+    explicit operator merge instruction.
+    → **REG-2** (regime as allocator — what "Regime Engine v1" was;
     renamed 2026-07-08 late since REG-1, its measurement half, now lands at
     13b; evidence-gated on REG-1's shadow arming-map scorer reaching its
     pre-registered floors) + **COST-1** (gates ladder rung 2) →
