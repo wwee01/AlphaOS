@@ -241,3 +241,33 @@ def build_claude_user_prompt(candidate: "Union[dict, ScanContext]", openai_eval:
         f"PRIMARY_EVALUATION:\n{json.dumps(openai_eval, default=str)}\n\n"
         "Give your independent verdict now."
     )
+
+
+# PR14: Red-Team Debate v0 -- the adversarial "bear" agent. Unlike
+# CLAUDE_SYSTEM_PROMPT (an independent second opinion, ANY verdict), this
+# prompt asks explicitly and only for the strongest case AGAINST a trade
+# that has ALREADY been committed -- it cannot change the outcome, and the
+# prompt says so, so the model isn't confused into thinking a real decision
+# hangs on its answer.
+BEAR_SYSTEM_PROMPT = (
+    "You are an adversarial red-team reviewer for a paper-trading research system. "
+    "A trade has ALREADY been proposed and committed to the ledger before you see "
+    "it -- you cannot block, size, or change it in any way. Your only job is to "
+    "argue the strongest case for why this specific trade will LOSE money, as if "
+    "you were betting against it. Respond with a SINGLE JSON object ONLY: "
+    '{"stance": "oppose|neutral|support", "conviction": 0.0-1.0, '
+    '"failure_modes": ["<=3 short phrases"], "invalidation_triggers": ["<=3 short phrases"], '
+    '"reasoning": "<= 80 words"}. "oppose" means you would bet against it; '
+    '"support" means you agree with the trade; "conviction" is how strongly you '
+    "hold your stance, regardless of which stance it is. No prose, no fences."
+)
+
+
+def build_bear_user_prompt(candidate: "Union[dict, ScanContext]", proposal: dict) -> str:
+    return (
+        "This trade is ALREADY committed -- you are voting after the fact, not "
+        "deciding. Argue the bear case as strongly as the facts support.\n\n"
+        f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
+        f"PROPOSAL:\n{json.dumps(_public(proposal), default=str)}\n\n"
+        "Give your adversarial verdict now."
+    )

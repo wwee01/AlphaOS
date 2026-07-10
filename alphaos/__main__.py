@@ -178,6 +178,59 @@ def cmd_baseline_register(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_debate_register(orch: Orchestrator) -> int:
+    """PR14 spec: register the bear-debate pre-registration block BEFORE
+    any real (non-mock) vote can accumulate evidence toward it (Prime
+    Directive: pre-registration discipline) -- one-off, operator-invoked,
+    idempotent (refuses a duplicate rather than creating a second row for
+    the same hypothesis, since register_hypothesis() itself is NOT
+    idempotent -- every call creates a new row). Mirrors
+    cmd_baseline_register()'s own shape exactly.
+
+    Gates a possible v0.1 expansion to a full triad (bull/neutral agents
+    alongside bear): this hypothesis resolving TRUE is the evidence bar
+    for that expansion, not an assumption made now.
+    """
+    from alphaos.stats.preregistration import register_hypothesis
+
+    hypothesis = (
+        "Proposals with a high-conviction bear-oppose vote (agent_votes.stance="
+        "'oppose' AND conviction >= 0.7) underperform all other proposed trades "
+        "by >= 0.3R mean replay_r, conditional on effective_n >= 30 over a "
+        "trailing 28-day span"
+    )
+    metric = (
+        "mean_bear_oppose_delta_r = mean(candidate_outcomes.replay_r | "
+        "oppose_high_conviction_cohort) - mean(candidate_outcomes.replay_r | "
+        "complement_cohort), oppose_high_conviction_v1"
+    )
+    existing = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (hypothesis, metric),
+    )
+    if existing:
+        print(f"Already registered: {existing['prereg_id']} (at {existing['registered_at_utc']}) -- no-op.")
+        _print({"debate_register": {"status": "already_registered", **existing}})
+        return 0
+
+    prereg_id = register_hypothesis(
+        orch.journal, hypothesis, metric,
+        floor_effective_n=30, floor_span_days=28.0,
+        # debate_shadow_enabled defaults False -- an operator must first opt
+        # in before any real vote accumulates, then needs a 28-day span PLUS
+        # enough trading days for effective_n>=30 (not every proposed trade
+        # gets a high-conviction oppose vote). ~60 days from registration is
+        # a conservative buffer for both, not a claim evidence will exist by
+        # then.
+        analysis_not_before="2026-09-08",
+        params={"rule_version": "oppose_high_conviction_v1", "stance": "oppose", "conviction_floor": 0.7,
+                "target_delta_r": -0.3},
+    )
+    print(f"Registered: {prereg_id}")
+    _print({"debate_register": {"status": "registered", "prereg_id": prereg_id}})
+    return 0
+
+
 def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
@@ -570,6 +623,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("baseline_register",
                    help="BASELINE: one-off, idempotent -- register the pre-registration block "
                         "(preregistrations row #1)")
+    sub.add_parser("debate_register",
+                   help="PR14: one-off, idempotent -- register the bear-debate pre-registration "
+                        "block (oppose_high_conviction_v1)")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -680,6 +736,8 @@ def main(argv=None) -> int:
             return cmd_baseline_report(orch)
         if args.command == "baseline_register":
             return cmd_baseline_register(orch)
+        if args.command == "debate_register":
+            return cmd_debate_register(orch)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":

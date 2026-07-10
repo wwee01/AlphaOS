@@ -72,6 +72,7 @@ from alphaos.execution import protection_watchdog
 from alphaos import lineage
 from alphaos import proposals as proposal_ttl
 from alphaos import tqs
+from alphaos import debate
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsService
 from alphaos.risk.risk_engine import RiskEngine
@@ -112,6 +113,8 @@ class ScanSummary:
     earnings_skipped_budget_cap: int = 0
     tqs_scored_candidates: int = 0
     tqs_scored_proposals: int = 0
+    debate_voted: int = 0
+    debate_skipped: int = 0
     polarity_classified: int = 0
     high_risk_narrative: int = 0
     decision_upgraded: int = 0
@@ -508,6 +511,19 @@ class Orchestrator:
             tqs_result = tqs.score_scan_batch(self.journal, self.settings, scan_batch_id)
             summary.tqs_scored_candidates = tqs_result["scored_candidates"]
             summary.tqs_scored_proposals = tqs_result["scored_proposals"]
+
+        # PR14: Red-Team Debate v0 shadow bear-agent voting. Same ordering
+        # guarantee as TQS above -- MUST run last, strictly AFTER every
+        # decision has already been committed, so "the bear agent cannot
+        # influence this scan's decisions" is true by construction. Unlike
+        # TQS, this is a genuinely paid LLM call, so the settings check
+        # lives here (not inside score_debate_batch) for the same reason as
+        # TQS's own: a disabled shadow costs zero queries, not just zero
+        # writes/spend.
+        if self.settings.debate_shadow_enabled:
+            debate_result = debate.score_debate_batch(self.journal, self.settings, scan_batch_id)
+            summary.debate_voted = debate_result["voted"]
+            summary.debate_skipped = debate_result["skipped"]
 
         return summary
 

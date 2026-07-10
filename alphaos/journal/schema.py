@@ -1906,6 +1906,51 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # PR14: Red-Team Debate v0 -- one row per (proposal, agent_role) vote.
+        # `agent_role='bear'` only in v0 (a future triad would add 'bull'/
+        # 'neutral' rows to this SAME table -- it is role-parameterized on
+        # purpose, not a bear-only schema). Invoked batch-at-scan-end, AFTER
+        # the scan batch's own decisions are already committed (the PR7/TQS
+        # call-site pattern -- see orchestrator.py's own run_scan_once,
+        # "MUST run last"), so a debate vote can never influence the
+        # proposal it is voting on: shadow law, true by construction, not
+        # discipline. Pure measurement -- nothing downstream reads this
+        # table yet; the one planned consumer is this feature's OWN
+        # pre-registered hypothesis (registered via `alphaos debate_register`,
+        # mirroring BASELINE's cmd_baseline_register()), evaluated once,
+        # exactly like every other PORT-1 preregistration.
+        #
+        # is_mock mirrors OpenAIClient's own convention
+        # (`settings.is_mock or not settings.has_anthropic_key`) -- NOT
+        # ClaudeReviewer's (that class is a manual, on-demand, human-button
+        # feature that simply raises if no key is configured, which is fine
+        # for a button but wrong for an automated batch job that must run
+        # safely offline in every test).
+        "agent_votes",
+        """
+        CREATE TABLE IF NOT EXISTS agent_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vote_id TEXT NOT NULL UNIQUE,
+            proposal_id TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            scan_batch_id TEXT,
+            agent_role TEXT NOT NULL,
+            stance TEXT NOT NULL,
+            conviction REAL NOT NULL,
+            failure_modes_json TEXT,
+            invalidation_triggers_json TEXT,
+            reasoning TEXT,
+            is_mock INTEGER NOT NULL DEFAULT 0,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
+            lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2072,6 +2117,14 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_replay_status "
     "ON shadow_baseline_decisions(replay_status)",
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_symbol ON shadow_baseline_decisions(symbol)",
+    # PR14: one vote per (proposal, role) -- a re-run of the same batch's
+    # debate pass must be a no-op, never a duplicate vote (idempotent-insert
+    # idiom, same as idx_universe_days_symbol_date/idx_regime_days_date_version).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_votes_proposal_role "
+    "ON agent_votes(proposal_id, agent_role)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_votes_candidate ON agent_votes(candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_votes_scan_batch ON agent_votes(scan_batch_id)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_votes_created ON agent_votes(created_at_utc)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
