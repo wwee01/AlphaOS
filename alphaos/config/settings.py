@@ -486,6 +486,11 @@ class Settings:
     # PR13 slice 1: "HH:MM" SGT, once-daily cadence, after outcomes_update
     # has had a chance to resolve the day's candidates.
     scheduler_card_demotion_check_time: str
+    # PR13.5: staging dir for card_materialize's proposed-scaffold + evidence
+    # files -- deliberately OUTSIDE alphaos/cards/ (never git-add'd/committed
+    # by this codebase itself; the operator's own edit + mv + commit is the
+    # authorship act, per PD#3).
+    card_promotion_staging_dir: str
 
     # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
     # instrument) --- Defaults ON, same rationale as regime_enabled: pure
@@ -1094,6 +1099,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_card_demotion_check_time = _get(src, "SCHEDULER_CARD_DEMOTION_CHECK_TIME", "06:50")
     _parse_hhmm(scheduler_card_demotion_check_time, "SCHEDULER_CARD_DEMOTION_CHECK_TIME")
 
+    # PR13.5: card_materialize's staging dir for proposed scaffolds/evidence.
+    card_promotion_staging_dir = _get(src, "CARD_PROMOTION_STAGING_DIR", "data/promotions")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1292,6 +1300,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         earnings_calendar_staleness_days=earnings_calendar_staleness_days,
         scheduler_hypothesis_resolve_time=scheduler_hypothesis_resolve_time,
         scheduler_card_demotion_check_time=scheduler_card_demotion_check_time,
+        card_promotion_staging_dir=card_promotion_staging_dir,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         canary_enabled=_get_bool(src, "CANARY_ENABLED", False),
         scheduler_canary_run_weekday=scheduler_canary_run_weekday,

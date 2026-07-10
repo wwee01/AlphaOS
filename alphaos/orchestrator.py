@@ -1371,6 +1371,23 @@ class Orchestrator:
 
         return demote_card(self.journal, card_id, card_version, decided_by, reason)
 
+    def card_materialize_prepare(self, hypothesis_id: str) -> dict:
+        """PR13.5: write a proposed next-version scaffold + evidence packet
+        to the staging dir for the operator to inspect and author. PURE
+        READ w.r.t. cards/ -- see alphaos/cards/materialize.py's own module
+        docstring for the full graduation-vs-materialization distinction."""
+        from alphaos.cards.materialize import prepare_materialization
+
+        return prepare_materialization(self.journal, hypothesis_id, self.settings.card_promotion_staging_dir)
+
+    def card_materialize_confirm(self, hypothesis_id: str, decided_by: str) -> dict:
+        """PR13.5: verify the operator has authored + committed the new
+        version's YAML, then register it and journal the decision. NEVER
+        writes to cards/ itself. See alphaos/cards/materialize.py."""
+        from alphaos.cards.materialize import confirm_materialization
+
+        return confirm_materialization(self.journal, self.settings, hypothesis_id, decided_by)
+
     def backfill_regime_days(self) -> dict:
         """REG-1 one-off: extend benchmark_bars SPY history, classify the
         full available series into regime_days, and stamp any pre-existing
