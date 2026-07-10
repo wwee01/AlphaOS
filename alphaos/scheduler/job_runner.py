@@ -33,6 +33,7 @@ _JOB_FUNCS = {
     cadence.JobType.EARNINGS_CALENDAR_PULL: jobs.run_earnings_calendar_pull_job,
     cadence.JobType.CANARY_RUN: jobs.run_canary_run_job,
     cadence.JobType.HYPOTHESIS_RESOLVE: jobs.run_hypothesis_resolve_job,
+    cadence.JobType.CARD_DEMOTION_CHECK: jobs.run_card_demotion_check_job,
 }
 
 
@@ -202,6 +203,7 @@ class JobRunner:
             cadence.JobType.EARNINGS_CALENDAR_PULL,
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
+            cadence.JobType.CARD_DEMOTION_CHECK,
         ):
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
             if not due:
@@ -299,6 +301,7 @@ class JobRunner:
             cadence.JobType.EARNINGS_CALENDAR_PULL,
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
+            cadence.JobType.CARD_DEMOTION_CHECK,
         ):
             recent_by_job_type[job_type] = self.journal.query(
                 "SELECT * FROM job_runs WHERE job_type = ? ORDER BY id DESC LIMIT ?",

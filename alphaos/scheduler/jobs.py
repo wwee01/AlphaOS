@@ -176,6 +176,19 @@ def run_hypothesis_resolve_job(orch, runner) -> dict:
     }
 
 
+def run_card_demotion_check_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``alphaos.cards.demotion.run_daily_card_evaluation()``
+    (PR13 slice 1). No gating needed -- reads already-journaled candidate_outcomes,
+    writes only card_scoreboard_snapshots/card_demotions, never a gate/eval/
+    labeller/risk/execution path. Demotion never touches setup_cards/card YAML
+    (Prime Directive 7 -- only an operator-committed version bump changes card
+    behavior)."""
+    from alphaos.cards.demotion import run_daily_card_evaluation
+
+    result = run_daily_card_evaluation(orch.journal, orch.settings)
+    return {"status": "completed", "card_demotion_check_result": result}
+
+
 def run_text_archive_pull_job(orch, runner) -> dict:
     """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
     filing pull (TEXT-0). No gating needed -- collect only, never read by

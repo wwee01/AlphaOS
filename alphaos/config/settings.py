@@ -476,6 +476,9 @@ class Settings:
     # hypothesis resolver reads already-journaled tables only, so there is
     # no reason to run it more than once a day.
     scheduler_hypothesis_resolve_time: str
+    # PR13 slice 1: "HH:MM" SGT, once-daily cadence, after outcomes_update
+    # has had a chance to resolve the day's candidates.
+    scheduler_card_demotion_check_time: str
 
     # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
     # instrument) --- Defaults ON, same rationale as regime_enabled: pure
@@ -1080,6 +1083,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_hypothesis_resolve_time = _get(src, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME", "06:45")
     _parse_hhmm(scheduler_hypothesis_resolve_time, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME")
 
+    # PR13 slice 1: once-daily card-scoreboard/demotion cadence.
+    scheduler_card_demotion_check_time = _get(src, "SCHEDULER_CARD_DEMOTION_CHECK_TIME", "06:50")
+    _parse_hhmm(scheduler_card_demotion_check_time, "SCHEDULER_CARD_DEMOTION_CHECK_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1277,6 +1284,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_earnings_calendar_pull_time=scheduler_earnings_calendar_pull_time,
         earnings_calendar_staleness_days=earnings_calendar_staleness_days,
         scheduler_hypothesis_resolve_time=scheduler_hypothesis_resolve_time,
+        scheduler_card_demotion_check_time=scheduler_card_demotion_check_time,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         canary_enabled=_get_bool(src, "CANARY_ENABLED", False),
         scheduler_canary_run_weekday=scheduler_canary_run_weekday,

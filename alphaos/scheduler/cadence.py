@@ -42,6 +42,8 @@ class JobType(StrEnum):
     # PR12: once-daily hypothesis-registry resolver (reads already-journaled
     # tables only -- no external calls, so no cost_guard wiring needed).
     HYPOTHESIS_RESOLVE = "hypothesis_resolve"
+    # PR13 slice 1: once-daily per-card scoreboard snapshot + demotion check.
+    CARD_DEMOTION_CHECK = "card_demotion_check"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -114,6 +116,7 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
     if job_type in (
         JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE, JobType.TEXT_ARCHIVE_PULL, JobType.ATR_UPDATE,
         JobType.EARNINGS_CALENDAR_PULL, JobType.CANARY_RUN, JobType.HYPOTHESIS_RESOLVE,
+        JobType.CARD_DEMOTION_CHECK,
     ):
         # CANARY_RUN shares this exact date-keyed shape even though its
         # cadence is weekly, not daily: with its configured weekday held
@@ -164,6 +167,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _canary_run_due(settings, journal, now)
         if job_type == JobType.HYPOTHESIS_RESOLVE:
             return _hypothesis_resolve_due(settings, journal, now)
+        if job_type == JobType.CARD_DEMOTION_CHECK:
+            return _card_demotion_check_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -353,4 +358,10 @@ def _canary_run_due(settings, journal, now: Optional[datetime]) -> tuple[bool, s
 def _hypothesis_resolve_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     return _once_daily_due(
         JobType.HYPOTHESIS_RESOLVE, settings.scheduler_hypothesis_resolve_time, settings, journal, now,
+    )
+
+
+def _card_demotion_check_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(
+        JobType.CARD_DEMOTION_CHECK, settings.scheduler_card_demotion_check_time, settings, journal, now,
     )
