@@ -39,6 +39,9 @@ class JobType(StrEnum):
     EARNINGS_CALENDAR_PULL = "earnings_calendar_pull"
     # CANARY: once-WEEKLY model-drift replay over the frozen golden corpus.
     CANARY_RUN = "canary_run"
+    # PR12: once-daily hypothesis-registry resolver (reads already-journaled
+    # tables only -- no external calls, so no cost_guard wiring needed).
+    HYPOTHESIS_RESOLVE = "hypothesis_resolve"
 
 
 def scan_windows(settings) -> list[tuple[str, str]]:
@@ -110,7 +113,7 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
 
     if job_type in (
         JobType.DAILY_DIGEST, JobType.BENCHMARK_SPINE, JobType.TEXT_ARCHIVE_PULL, JobType.ATR_UPDATE,
-        JobType.EARNINGS_CALENDAR_PULL, JobType.CANARY_RUN,
+        JobType.EARNINGS_CALENDAR_PULL, JobType.CANARY_RUN, JobType.HYPOTHESIS_RESOLVE,
     ):
         # CANARY_RUN shares this exact date-keyed shape even though its
         # cadence is weekly, not daily: with its configured weekday held
@@ -159,6 +162,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _earnings_calendar_pull_due(settings, journal, now)
         if job_type == JobType.CANARY_RUN:
             return _canary_run_due(settings, journal, now)
+        if job_type == JobType.HYPOTHESIS_RESOLVE:
+            return _hypothesis_resolve_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -342,4 +347,10 @@ def _canary_run_due(settings, journal, now: Optional[datetime]) -> tuple[bool, s
     return _once_weekly_due(
         JobType.CANARY_RUN, settings.scheduler_canary_run_weekday,
         settings.scheduler_canary_run_time, settings, journal, now,
+    )
+
+
+def _hypothesis_resolve_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    return _once_daily_due(
+        JobType.HYPOTHESIS_RESOLVE, settings.scheduler_hypothesis_resolve_time, settings, journal, now,
     )

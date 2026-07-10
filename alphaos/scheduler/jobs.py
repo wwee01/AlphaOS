@@ -154,6 +154,28 @@ def run_canary_run_job(orch, runner) -> dict:
     return {"status": "completed", "canary_result": result}
 
 
+def run_hypothesis_resolve_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``alphaos.hypotheses``' seed + resolve pass
+    (PR12). No gating needed -- reads already-journaled tables and writes
+    only to ``hypothesis_proposals``/``preregistrations``, never read by any
+    gate/eval/labeller/risk/execution path (same "zero decision surface"
+    rationale as run_atr_update_job/run_benchmark_spine_job). ``seed_all()``
+    runs every tick (idempotent per hypothesis_id) so a hypothesis added to
+    ``SEEDED_HYPOTHESES`` in a later release is picked up without a separate
+    one-off migration step."""
+    from alphaos.hypotheses import resolve_due_hypotheses, seed_all
+
+    seeded = seed_all(orch.journal)
+    resolve_summary = resolve_due_hypotheses(orch.journal)
+    return {
+        "status": "completed",
+        "hypothesis_resolve_result": {
+            "seeded_count": len(seeded),
+            **resolve_summary,
+        },
+    }
+
+
 def run_text_archive_pull_job(orch, runner) -> dict:
     """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
     filing pull (TEXT-0). No gating needed -- collect only, never read by

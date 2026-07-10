@@ -472,6 +472,10 @@ class Settings:
     # INSTR-1: "HH:MM" SGT, once-daily cadence (mirrors benchmark_spine) --
     # ATR(14) only changes once a day (built from completed daily bars).
     scheduler_atr_update_time: str
+    # PR12: "HH:MM" SGT, once-daily cadence (mirrors atr_update) -- the
+    # hypothesis resolver reads already-journaled tables only, so there is
+    # no reason to run it more than once a day.
+    scheduler_hypothesis_resolve_time: str
 
     # --- BASELINE: deterministic shadow baseline (the "does the AI add R?"
     # instrument) --- Defaults ON, same rationale as regime_enabled: pure
@@ -1072,6 +1076,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         )
     backup2_dest = _get(src, "BACKUP2_DEST", "")
 
+    # PR12: once-daily hypothesis-resolver cadence, after atr_update.
+    scheduler_hypothesis_resolve_time = _get(src, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME", "06:45")
+    _parse_hhmm(scheduler_hypothesis_resolve_time, "SCHEDULER_HYPOTHESIS_RESOLVE_TIME")
+
     # --- trade sizing: stop distance + target reward:risk (drive the mock
     # baseline; min_reward_risk also clamps live OpenAI proposals) ------------
     stop_loss_pct = _get_float(src, "STOP_LOSS_PCT", 0.03)
@@ -1268,6 +1276,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_atr_update_time=scheduler_atr_update_time,
         scheduler_earnings_calendar_pull_time=scheduler_earnings_calendar_pull_time,
         earnings_calendar_staleness_days=earnings_calendar_staleness_days,
+        scheduler_hypothesis_resolve_time=scheduler_hypothesis_resolve_time,
         baseline_enabled=_get_bool(src, "BASELINE_ENABLED", True),
         canary_enabled=_get_bool(src, "CANARY_ENABLED", False),
         scheduler_canary_run_weekday=scheduler_canary_run_weekday,
