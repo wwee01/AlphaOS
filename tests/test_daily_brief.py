@@ -15,6 +15,7 @@ from alphaos.reports.daily_brief import (
     MOONSHOT_TARGET_MONTHLY_PCT,
     _atr_health,
     _fused_jobs,
+    _hypothesis_resolution_status,
     _moonshot_gap,
     _one_action,
     _text_archive_health,
@@ -59,13 +60,14 @@ def test_render_markdown_and_compact_never_raise_on_empty_journal(orchestrator):
 
 
 # ------------------------------------------------------- one-action priority
-def _needs_you(incident=0, fused=None, pending=None):
+def _needs_you(incident=0, fused=None, pending=None, hypothesis_resolution=None):
     return {
         "pending_approval_count": len(pending or []),
         "pending_approvals": pending or [],
         "open_incident_count": incident,
         "open_incidents": [],
         "fused_jobs": fused or [],
+        "hypothesis_resolution": hypothesis_resolution,
     }
 
 
@@ -180,6 +182,191 @@ def test_expiring_soon_excludes_already_expired_approvals():
     action = _one_action(needs_you, [], _ok_moonshot())
 
     assert action == "Nothing needs you right now."
+
+
+# --------------------------------- PR12 hypothesis-resolution alert (_one_action)
+def _first_ever_resolution():
+    return {
+        "resolved_today_count": 1,
+        "resolved_today": [{"hypothesis_id": "H-WIN-1", "last_verdict": "inconclusive"}],
+        "is_first_ever": True,
+    }
+
+
+def _routine_resolution():
+    return {
+        "resolved_today_count": 1,
+        "resolved_today": [{"hypothesis_id": "H-TQS-1", "last_verdict": "forward-test-candidate"}],
+        "is_first_ever": False,
+    }
+
+
+def test_priority_first_ever_hypothesis_resolution_pings_to_build_the_generator():
+    needs_you = _needs_you(incident=0, fused=[], pending=[], hypothesis_resolution=_first_ever_resolution())
+    positions_health = [{"symbol": "AAPL", "verdict": VERDICT_HOLD}]
+
+    action = _one_action(needs_you, positions_health, _ok_moonshot())
+
+    assert "H-WIN-1" in action
+    assert "first time" in action
+    assert "ask Claude" in action
+    assert "LLM-based hypothesis generator" in action
+
+
+def test_priority_routine_hypothesis_resolution_does_not_pitch_the_generator():
+    """A LATER (non-first) resolution is still worth surfacing, but must not
+    repeat the "ask Claude to build the generator" pitch every time --
+    that message is reserved for the one-time milestone."""
+    needs_you = _needs_you(incident=0, fused=[], pending=[], hypothesis_resolution=_routine_resolution())
+    positions_health = [{"symbol": "AAPL", "verdict": VERDICT_HOLD}]
+
+    action = _one_action(needs_you, positions_health, _ok_moonshot())
+
+    assert "H-TQS-1" in action
+    assert "resolved today" in action
+    assert "ask Claude" not in action
+
+
+def test_priority_hypothesis_resolution_beats_below_floor_note():
+    needs_you = _needs_you(incident=0, fused=[], pending=[], hypothesis_resolution=_first_ever_resolution())
+    positions_health = [{"symbol": "AAPL", "verdict": VERDICT_HOLD}]
+
+    action = _one_action(needs_you, positions_health, _below_floor_moonshot())
+
+    assert "H-WIN-1" in action
+    assert "below the data floor" not in action
+
+
+def test_priority_exit_review_beats_hypothesis_resolution():
+    needs_you = _needs_you(incident=0, fused=[], pending=[], hypothesis_resolution=_first_ever_resolution())
+    positions_health = [{"symbol": "AAPL", "verdict": VERDICT_EXIT_REVIEW}]
+
+    action = _one_action(needs_you, positions_health, _ok_moonshot())
+
+    assert "EXIT_REVIEW" in action
+    assert "H-WIN-1" not in action
+
+
+def test_priority_expiring_approval_beats_hypothesis_resolution():
+    needs_you = _needs_you(
+        incident=0, fused=[], pending=[{"seconds_remaining": 30}], hypothesis_resolution=_first_ever_resolution(),
+    )
+
+    action = _one_action(needs_you, [], _ok_moonshot())
+
+    assert "expiring" in action
+    assert "H-WIN-1" not in action
+
+
+def test_no_hypothesis_resolution_falls_through_to_below_floor_note():
+    """hypothesis_resolution=None (the common case -- no resolutions today)
+    must not itself become an action; the chain falls through normally."""
+    needs_you = _needs_you(incident=0, fused=[], pending=[], hypothesis_resolution=None)
+    positions_health = [{"symbol": "AAPL", "verdict": VERDICT_HOLD}]
+
+    action = _one_action(needs_you, positions_health, _below_floor_moonshot())
+
+    assert "below the data floor" in action
+
+
+# --------------------------- PR12 hypothesis-resolution alert (_hypothesis_resolution_status)
+def _insert_hypothesis_row(journal, hypothesis_id, status="testing", resolved_at_utc=None, last_verdict=None):
+    journal.insert("hypothesis_proposals", {
+        "hypothesis_id": hypothesis_id,
+        "risk_class": "B",
+        "claim": f"test claim for {hypothesis_id}",
+        "analysis_not_before": "2026-01-01",
+        "status": status,
+        "resolved_at_utc": resolved_at_utc,
+        "last_verdict": last_verdict,
+    })
+
+
+def test_hypothesis_resolution_status_none_on_a_quiet_day(journal):
+    _insert_hypothesis_row(journal, "H-TQS-1", status="testing")
+    assert _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00") is None
+
+
+def test_hypothesis_resolution_status_detects_first_ever_resolution(journal):
+    _insert_hypothesis_row(
+        journal, "H-WIN-1", status="resolved",
+        resolved_at_utc="2026-07-11T10:00:00+00:00", last_verdict="inconclusive",
+    )
+    _insert_hypothesis_row(journal, "H-TQS-1", status="testing")  # still pending -- must not count
+
+    result = _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00")
+
+    assert result["resolved_today_count"] == 1
+    assert result["resolved_today"][0]["hypothesis_id"] == "H-WIN-1"
+    assert result["is_first_ever"] is True
+
+
+def test_hypothesis_resolution_status_not_first_ever_when_an_older_one_already_resolved(journal):
+    """The registry demonstrated a resolution on an EARLIER day -- today's
+    resolution is real and worth surfacing, but is NOT the first-ever
+    milestone, so the generator pitch must not fire again."""
+    _insert_hypothesis_row(
+        journal, "H-TQS-1", status="resolved",
+        resolved_at_utc="2026-07-05T10:00:00+00:00", last_verdict="forward-test-candidate",
+    )
+    _insert_hypothesis_row(
+        journal, "H-WIN-1", status="resolved",
+        resolved_at_utc="2026-07-11T10:00:00+00:00", last_verdict="inconclusive",
+    )
+
+    result = _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00")
+
+    assert result["resolved_today_count"] == 1
+    assert result["resolved_today"][0]["hypothesis_id"] == "H-WIN-1"
+    assert result["is_first_ever"] is False
+
+
+def test_hypothesis_resolution_status_scoped_to_today_only(journal):
+    """A hypothesis resolved YESTERDAY must not appear in today's list --
+    since_sgt scoping matches every other _today() helper in this module."""
+    _insert_hypothesis_row(
+        journal, "H-TQS-1", status="resolved",
+        resolved_at_utc="2026-07-10T10:00:00+00:00", last_verdict="forward-test-candidate",
+    )
+
+    assert _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00") is None
+
+
+def test_hypothesis_resolution_status_multiple_resolving_same_day_are_all_first_ever(journal):
+    """Two hypotheses clearing their floor on the exact same day is still
+    the registry's first-ever resolution collectively -- both belong in
+    resolved_today, and the milestone still fires."""
+    _insert_hypothesis_row(
+        journal, "H-WIN-1", status="resolved",
+        resolved_at_utc="2026-07-11T09:00:00+00:00", last_verdict="inconclusive",
+    )
+    _insert_hypothesis_row(
+        journal, "H-TQS-1", status="resolved",
+        resolved_at_utc="2026-07-11T10:00:00+00:00", last_verdict="forward-test-candidate",
+    )
+
+    result = _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00")
+
+    assert result["resolved_today_count"] == 2
+    assert result["is_first_ever"] is True
+
+
+def test_render_markdown_includes_hypothesis_resolution_milestone_line(orchestrator):
+    _insert_hypothesis_row(
+        orchestrator.journal, "H-WIN-1", status="resolved",
+        resolved_at_utc=timeutils.now_utc().isoformat(), last_verdict="inconclusive",
+    )
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+    assert "Hypotheses resolved today" in md
+    assert "H-WIN-1" in md
+    assert "first-ever resolution" in md
+
+
+def test_render_markdown_omits_hypothesis_resolution_line_on_a_quiet_day(orchestrator):
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    md = render_markdown(brief)
+    assert "Hypotheses resolved today" not in md
 
 
 # ------------------------------------------------------------- moonshot gap
