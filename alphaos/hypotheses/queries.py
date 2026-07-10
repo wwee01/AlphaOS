@@ -41,6 +41,26 @@ trade_proposals joins -- applied uniformly here rather than trusting
 today's absence of a *known* duplicate-producing code path for the other
 joined tables (candidate_catalysts/last30days_polarity have no DB-level
 uniqueness constraint on candidate_id either).
+
+FABLE5 STRATEGY REVIEW FIX (2026-07-10): the centered-delta design above
+(reversible decision #1) freezes one arm's mean as a fixed CONSTANT and
+ignores that arm's OWN sampling error -- this is a real, known lean, and it
+leans the wrong way: it makes every resulting confidence interval a touch
+NARROWER (more confident) than it should be, i.e. ANTI-CONSERVATIVE, the one
+direction this codebase's whole measurement philosophy exists to guard
+against. The resolver's own floor check (``effective_n()``/
+``floor_span_days``) previously applied ONLY to the centered arm -- a
+reference mean computed from a handful of rows could silently anchor an
+entire comparison. Every ``h_xxx_1_rows()`` function below now ALSO returns
+its own reference arm's rows (as a THIRD tuple element, ``None`` for
+``h_rej_1_rows``, which centers against nothing), so
+``alphaos.hypotheses.resolver`` can run the SAME ``effective_n()``/
+``floor_span_days`` check against the reference arm too -- reusing the
+hypothesis's own already-frozen floor rather than inventing a second,
+separately-tuned number. This narrows, but does not eliminate, the bias:
+even a reference arm that clears its own floor is still a point estimate
+treated as a known constant. See ``alphaos.reports.hypothesis_report``'s own
+rendered caveat for the reader-facing version of this note.
 """
 
 from __future__ import annotations
@@ -92,7 +112,23 @@ def _quantile(values: list[float], q: float) -> Optional[float]:
     return vals[idx]
 
 
-def h_tqs_1_rows(journal) -> tuple[list[dict], str]:
+def _reference_rows(rows: list[dict]) -> list[dict]:
+    """Shape a frozen reference arm's own raw query rows into the same
+    ``{symbol, decision_date, max_holding_days}`` form ``effective_n()``
+    expects -- so the resolver can run the identical floor check against
+    the reference arm that it already runs against the centered arm (Fable5
+    strategy review fix; see module docstring)."""
+    return [
+        {
+            "symbol": r["symbol"],
+            "decision_date": (r["decision_at_utc"] or "")[:10],
+            "max_holding_days": r["max_holding_days"],
+        }
+        for r in rows
+    ]
+
+
+def h_tqs_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Top-vs-bottom TQS quartile, on 3d replay_r. Bottom quartile's mean is
     the frozen reference (TQS is meant to distinguish good from bad setups;
     the bottom arm is the "no signal" baseline); each TOP-quartile row's own
@@ -110,12 +146,13 @@ def h_tqs_1_rows(journal) -> tuple[list[dict], str]:
     )
     scores = [r["tqs_score"] for r in rows if r["tqs_score"] is not None]
     if len(scores) < 4:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     bottom_cut = _quantile(scores, 0.25)
     top_cut = _quantile(scores, 0.75)
-    bottom_mean = _mean([r["forward_3d_r"] for r in rows if r["tqs_score"] is not None and r["tqs_score"] <= bottom_cut])
+    bottom_rows = [r for r in rows if r["tqs_score"] is not None and r["tqs_score"] <= bottom_cut]
+    bottom_mean = _mean([r["forward_3d_r"] for r in bottom_rows])
     if bottom_mean is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = []
     for r in rows:
         if r["tqs_score"] is None or r["tqs_score"] < top_cut:
@@ -126,10 +163,10 @@ def h_tqs_1_rows(journal) -> tuple[list[dict], str]:
             "max_holding_days": r["max_holding_days"],
             "centered_delta": r["forward_3d_r"] - bottom_mean,
         })
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(bottom_rows)
 
 
-def h_cat_1_rows(journal) -> tuple[list[dict], str]:
+def h_cat_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Catalyst presence vs absence, on replay_r. 'none_found' (actively
     searched, nothing found) is the frozen reference -- 'unavailable'/'error'
     rows are excluded entirely (missing data, not evidence of absence)."""
@@ -144,9 +181,10 @@ def h_cat_1_rows(journal) -> tuple[list[dict], str]:
         "AND cc.id = (SELECT cc2.id FROM candidate_catalysts cc2 "
         "WHERE cc2.candidate_id = cc.candidate_id ORDER BY cc2.id DESC LIMIT 1)"
     )
-    none_found_mean = _mean([r["replay_r"] for r in rows if r["catalyst_status"] == "none_found"])
+    none_found_rows = [r for r in rows if r["catalyst_status"] == "none_found"]
+    none_found_mean = _mean([r["replay_r"] for r in none_found_rows])
     if none_found_mean is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = [
         {
             "symbol": r["symbol"],
@@ -156,16 +194,19 @@ def h_cat_1_rows(journal) -> tuple[list[dict], str]:
         }
         for r in rows if r["catalyst_status"] == "confirmed"
     ]
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(none_found_rows)
 
 
-def h_int_1_rows(journal) -> tuple[list[dict], str]:
+def h_int_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Interest-score top decile vs the population median, on replay_r --
     the population median (not a bottom-decile mean) is the frozen
     reference, matching the spec's own literal "top decile > median"
     wording. `candidates.candidate_id` is DB-level UNIQUE (schema.py), so
     this driving table needs no dedup of its own -- only the
-    candidate_outcomes/trade_proposals joins do."""
+    candidate_outcomes/trade_proposals joins do. Reference-arm floor: the
+    reference here is the WHOLE population (the median includes the tested
+    top-decile rows too, not a disjoint arm), so the reference-arm rows
+    returned are simply every row this function queried."""
     rows = journal.query(
         "SELECT c.symbol, c.candidate_id, c.interest_score, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
@@ -176,11 +217,11 @@ def h_int_1_rows(journal) -> tuple[list[dict], str]:
     )
     scores = [r["interest_score"] for r in rows]
     if len(scores) < 10:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     top_cut = _quantile(scores, 0.90)
     population_median = _median([r["replay_r"] for r in rows])
     if population_median is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = [
         {
             "symbol": r["symbol"],
@@ -190,10 +231,10 @@ def h_int_1_rows(journal) -> tuple[list[dict], str]:
         }
         for r in rows if r["interest_score"] >= top_cut
     ]
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(rows)
 
 
-def h_win_1_rows(journal) -> tuple[list[dict], str]:
+def h_win_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Morning (SGT hour < 12) vs afternoon (>= 12) regular-session scan
     windows, on replay_r. Afternoon is the frozen reference (the rel_volume
     formula's own denominator is a full-PRIOR-day baseline, structurally
@@ -216,9 +257,10 @@ def h_win_1_rows(journal) -> tuple[list[dict], str]:
         except (TypeError, ValueError, IndexError):
             return None
 
-    afternoon_mean = _mean([r["replay_r"] for r in rows if (_hour(r) or 0) >= 12])
+    afternoon_rows = [r for r in rows if (_hour(r) or 0) >= 12]
+    afternoon_mean = _mean([r["replay_r"] for r in afternoon_rows])
     if afternoon_mean is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = []
     for r in rows:
         hh = _hour(r)
@@ -230,10 +272,10 @@ def h_win_1_rows(journal) -> tuple[list[dict], str]:
             "max_holding_days": r["max_holding_days"],
             "centered_delta": r["replay_r"] - afternoon_mean,
         })
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(afternoon_rows)
 
 
-def h_ttl_1_rows(journal) -> tuple[list[dict], str]:
+def h_ttl_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Expired proposals' counterfactual replay_r vs approved-and-beyond
     proposals' OWN replay_r (both measured via the SAME counterfactual
     field -- candidate_outcomes.replay_r -- rather than mixing a
@@ -260,9 +302,10 @@ def h_ttl_1_rows(journal) -> tuple[list[dict], str]:
         "AND co.replay_r IS NOT NULL "
         "AND " + _LATEST_PROPOSAL.format(ref="tp.candidate_id")
     )
-    approved_mean = _mean([r["replay_r"] for r in rows if r["status"] in ("approved", "submitted", "filled")])
+    approved_rows = [r for r in rows if r["status"] in ("approved", "submitted", "filled")]
+    approved_mean = _mean([r["replay_r"] for r in approved_rows])
     if approved_mean is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = [
         {
             "symbol": r["symbol"],
@@ -272,15 +315,18 @@ def h_ttl_1_rows(journal) -> tuple[list[dict], str]:
         }
         for r in rows if r["status"] == "expired"
     ]
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(approved_rows)
 
 
-def h_rej_1_rows(journal) -> tuple[list[dict], str]:
+def h_rej_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Operator rejections' own already-computed delta_r -- maps directly
     onto the existing attribution machinery, no centering needed (this is
     exactly the same shape as BASELINE's own H-AI-1, just a different
     attribution_type slice). attribution_records carries no candidate_id
-    fan-out risk here -- read directly, one row per resolved rejection."""
+    fan-out risk here -- read directly, one row per resolved rejection. No
+    frozen reference arm here (nothing is centered against a constant), so
+    the third element is always None -- the resolver's reference-arm floor
+    check is skipped for this hypothesis by construction, not by omission."""
     rows = journal.query(
         "SELECT symbol, delta_r, decision_at_utc "
         "FROM attribution_records "
@@ -297,10 +343,10 @@ def h_rej_1_rows(journal) -> tuple[list[dict], str]:
         }
         for r in rows
     ]
-    return out, "delta_r"
+    return out, "delta_r", None
 
 
-def h_pol_1_rows(journal) -> tuple[list[dict], str]:
+def h_pol_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
     """Polarity divergence vs alignment, on replay_r. 'aligned' is the
     frozen reference; each 'divergent' row's replay_r is centered against
     it. NULL/unknown alignment rows are excluded (not the same as
@@ -316,9 +362,10 @@ def h_pol_1_rows(journal) -> tuple[list[dict], str]:
         "AND p.id = (SELECT p2.id FROM last30days_polarity p2 "
         "WHERE p2.candidate_id = p.candidate_id ORDER BY p2.id DESC LIMIT 1)"
     )
-    aligned_mean = _mean([r["replay_r"] for r in rows if r["direction_alignment"] == "aligned"])
+    aligned_rows = [r for r in rows if r["direction_alignment"] == "aligned"]
+    aligned_mean = _mean([r["replay_r"] for r in aligned_rows])
     if aligned_mean is None:
-        return [], "centered_delta"
+        return [], "centered_delta", None
     out = [
         {
             "symbol": r["symbol"],
@@ -328,7 +375,7 @@ def h_pol_1_rows(journal) -> tuple[list[dict], str]:
         }
         for r in rows if r["direction_alignment"] == "divergent"
     ]
-    return out, "centered_delta"
+    return out, "centered_delta", _reference_rows(aligned_rows)
 
 
 # Dispatch table -- registry.py looks up by SEEDED_HYPOTHESES' own

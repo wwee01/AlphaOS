@@ -118,12 +118,27 @@ def _resolve_one(journal, row: dict, today: date, summary: dict) -> None:
         )
         return
 
-    rows, value_key = metric_fn(journal)
+    rows, value_key, reference_arm_rows = metric_fn(journal)
     en = effective_n(rows)
     clears_floor = (
         en["effective_n"] >= prereg["floor_effective_n"]
         and (en["span_days"] or 0) >= prereg["floor_span_days"]
     )
+    # FABLE5 STRATEGY REVIEW FIX (2026-07-10): the centered-delta design
+    # (alphaos.hypotheses.queries's own module docstring) freezes one arm's
+    # mean as a fixed constant, ignoring that arm's OWN sampling error -- an
+    # ANTI-CONSERVATIVE lean (narrower CIs than warranted) that gets WORSE
+    # the thinner the reference arm is. Apply the SAME floor to the
+    # reference arm (reusing this hypothesis's own already-frozen numbers,
+    # never a second, separately-tuned threshold) before evaluating --
+    # h_rej_1_rows has no reference arm (reference_arm_rows is None) and is
+    # exempt by construction, not by omission.
+    if reference_arm_rows is not None:
+        ref_en = effective_n(reference_arm_rows)
+        clears_floor = clears_floor and (
+            ref_en["effective_n"] >= prereg["floor_effective_n"]
+            and (ref_en["span_days"] or 0) >= prereg["floor_span_days"]
+        )
     if not clears_floor:
         summary["not_yet_sufficient"].append(hid)
         return

@@ -69,5 +69,12 @@ def render_markdown(rep: dict) -> str:
         "before treating a 'rejected' or 'forward-test-candidate' verdict as good or bad news "
         "for that specific hypothesis (they are not uniformly the same direction). "
         "MET/FAILED/WITHDRAWN are operator-only; this report never sets them.",
+        "> ⚠️ Most hypotheses here use a centered-delta design: one arm's mean is frozen as a "
+        "fixed reference and every other observation is measured against it, ignoring that "
+        "reference arm's own sampling error. This is a real, known lean, and it leans "
+        "ANTI-CONSERVATIVE -- confidence intervals read a touch narrower (more confident) than "
+        "they should. The resolver now requires the reference arm to ALSO clear this "
+        "hypothesis's own sample-size/span floor before evaluating (Fable5 strategy review, "
+        "2026-07-10), which narrows but does not eliminate this bias.",
     ]
     return "\n".join(lines)

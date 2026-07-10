@@ -215,7 +215,7 @@ def test_h_tqs_1_rows_centers_top_quartile_against_bottom_quartile_mean(journal)
         })
         _insert_outcome(journal, cid, "MSFT", f"2026-02-{i+1:02d}", forward_3d_r=1.0)
 
-    rows, value_key = hyp_queries.h_tqs_1_rows(journal)
+    rows, value_key, reference_arm_rows = hyp_queries.h_tqs_1_rows(journal)
 
     assert value_key == "centered_delta"
     # _quantile() is nearest-rank (no interpolation, see its own docstring),
@@ -226,6 +226,8 @@ def test_h_tqs_1_rows_centers_top_quartile_against_bottom_quartile_mean(journal)
     assert all(r["symbol"] == "MSFT" for r in rows)  # never a low-TQS (AAPL) row
     for r in rows:
         assert r["centered_delta"] == pytest.approx(1.0)  # 1.0 (own) - 0.0 (bottom mean)
+    assert reference_arm_rows is not None
+    assert len(reference_arm_rows) >= 1  # the bottom-quartile rows the mean was frozen from
 
 
 def test_h_cat_1_rows_excludes_unavailable_and_error_status(journal):
@@ -237,11 +239,13 @@ def test_h_cat_1_rows_excludes_unavailable_and_error_status(journal):
         })
         _insert_outcome(journal, cid, "AAPL", "2026-01-01", replay_r=0.5)
 
-    rows, value_key = hyp_queries.h_cat_1_rows(journal)
+    rows, value_key, reference_arm_rows = hyp_queries.h_cat_1_rows(journal)
 
     assert value_key == "centered_delta"
     assert len(rows) == 1  # only the 'confirmed' row is returned
     assert rows[0]["centered_delta"] == pytest.approx(0.0)  # 0.5 (own) - 0.5 (none_found mean)
+    assert reference_arm_rows is not None
+    assert len(reference_arm_rows) == 1  # the single 'none_found' row
 
 
 def test_h_cat_1_rows_ignores_a_parallel_user_override_outcome_row(journal):
@@ -265,11 +269,13 @@ def test_h_cat_1_rows_ignores_a_parallel_user_override_outcome_row(journal):
     })
     _insert_outcome(journal, "c2", "MSFT", "2026-01-01", replay_r=0.5)
 
-    rows, value_key = hyp_queries.h_cat_1_rows(journal)
+    rows, value_key, reference_arm_rows = hyp_queries.h_cat_1_rows(journal)
 
     assert value_key == "centered_delta"
     assert len(rows) == 1  # c1 must appear exactly once, never twice
     assert rows[0]["centered_delta"] == pytest.approx(0.0)  # 0.5 (real row) - 0.5 (none_found mean) -- NOT 99.0-derived
+    assert reference_arm_rows is not None
+    assert len(reference_arm_rows) == 1  # c2's 'none_found' row only, never c1's parallel override
 
 
 def test_h_ttl_1_rows_uses_only_the_most_recent_proposal_per_candidate(journal):
@@ -290,7 +296,7 @@ def test_h_ttl_1_rows_uses_only_the_most_recent_proposal_per_candidate(journal):
     })
     _insert_outcome(journal, "c2", "MSFT", "2026-01-02", replay_r=-0.3)
 
-    rows, value_key = hyp_queries.h_ttl_1_rows(journal)
+    rows, value_key, reference_arm_rows = hyp_queries.h_ttl_1_rows(journal)
 
     assert value_key == "centered_delta"
     # c1's MOST RECENT proposal is 'approved' -- it must contribute to the
@@ -300,6 +306,8 @@ def test_h_ttl_1_rows_uses_only_the_most_recent_proposal_per_candidate(journal):
     assert len(rows) == 1
     assert rows[0]["symbol"] == "MSFT"
     assert rows[0]["centered_delta"] == pytest.approx(-0.3 - 0.5)  # own (-0.3) - approved_mean (0.5, from c1 only)
+    assert reference_arm_rows is not None
+    assert len(reference_arm_rows) == 1  # c1's approved row only, never c1's OWN expired arm too
 
 
 def test_h_rej_1_rows_passes_through_delta_r_unchanged(journal):
@@ -318,12 +326,13 @@ def test_h_rej_1_rows_passes_through_delta_r_unchanged(journal):
         "decision_at_utc": "2026-01-01T12:00:00+00:00",
     })
 
-    rows, value_key = hyp_queries.h_rej_1_rows(journal)
+    rows, value_key, reference_arm_rows = hyp_queries.h_rej_1_rows(journal)
 
     assert value_key == "delta_r"
     assert len(rows) == 1
     assert rows[0]["delta_r"] == -0.4
     assert rows[0]["max_holding_days"] is None  # attribution_records carries no holding-window field
+    assert reference_arm_rows is None  # no frozen reference arm for this hypothesis, by construction
 
 
 # ------------------------------------------------------------------ resolver
@@ -336,8 +345,14 @@ def _seed_one(journal, hypothesis_id: str, monkeypatch=None, days_ago: int = 0):
     return hyp_registry.propose_hypothesis(journal, spec, now=now)
 
 
-def _fake_metric_fn_factory(rows):
-    return lambda journal: (rows, "centered_delta")
+def _fake_metric_fn_factory(rows, reference_arm_rows=None):
+    """`reference_arm_rows=None` (the default) means "this hypothesis has no
+    frozen reference arm to floor-check" -- exactly h_rej_1_rows's own real
+    shape, and the shape every OTHER existing test here relies on so the new
+    reference-arm floor check (Fable5 strategy review fix) doesn't silently
+    change what they were already testing. Pass an explicit list to
+    exercise the new check itself."""
+    return lambda journal: (rows, "centered_delta", reference_arm_rows)
 
 
 def _clustered_rows(n: int, start="2026-01-01", value=0.3, values=None):
@@ -390,6 +405,45 @@ def test_resolver_evaluates_once_floor_is_cleared(journal, monkeypatch):
     refreshed = journal.one("SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
     assert refreshed["status"] == HypothesisStatus.RESOLVED.value
     assert refreshed["last_verdict"] in ("rejected", "forward-test-candidate", "inconclusive")
+
+
+def test_resolver_leaves_hypothesis_testing_when_reference_arm_is_thin(journal, monkeypatch):
+    """Fable5 strategy review fix: the centered arm alone clearing its own
+    floor is NOT enough -- a reference mean frozen from a handful of rows
+    is exactly the anti-conservative-bias risk the fix targets. H-WIN-1 is
+    Class A (floor_effective_n=30); the centered arm clears it (35 rows)
+    but the reference arm here (5 rows) does not."""
+    row = _seed_one(journal, "H-WIN-1", days_ago=40)
+    monkeypatch.setitem(
+        hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows",
+        _fake_metric_fn_factory(_clustered_rows(35), reference_arm_rows=_clustered_rows(5)),
+    )
+
+    summary = hyp_resolver.resolve_due_hypotheses(journal)
+
+    assert "H-WIN-1" in summary["not_yet_sufficient"]
+    assert "H-WIN-1" not in summary["evaluated"]
+    refreshed = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
+    assert refreshed["status"] == HypothesisStatus.TESTING.value
+    prereg = journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id = ?", (row["prereg_id"],))
+    assert prereg["evaluated_at_utc"] is None  # the one-shot must NOT have been consumed
+
+
+def test_resolver_evaluates_once_both_centered_and_reference_arm_clear_floor(journal, monkeypatch):
+    """The positive case paired with the test above: once the reference arm
+    ALSO clears the same floor the centered arm already had to clear,
+    evaluation proceeds exactly as before this fix."""
+    row = _seed_one(journal, "H-WIN-1", days_ago=40)
+    monkeypatch.setitem(
+        hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows",
+        _fake_metric_fn_factory(_clustered_rows(35), reference_arm_rows=_clustered_rows(35)),
+    )
+
+    summary = hyp_resolver.resolve_due_hypotheses(journal)
+
+    assert "H-WIN-1" in summary["evaluated"]
+    refreshed = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
+    assert refreshed["status"] == HypothesisStatus.RESOLVED.value
     prereg = journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id = ?", (row["prereg_id"],))
     assert prereg["evaluated_at_utc"] is not None
 
@@ -503,6 +557,18 @@ def test_hypothesis_report_empty_state(journal):
     rep = build_hypothesis_report(journal)
     assert rep["n_total"] == 0
     assert "hypothesis registry" in render_markdown(rep)
+
+
+def test_hypothesis_report_names_the_anti_conservative_bias(journal):
+    """Fable5 strategy review fix: the report must name, in plain language,
+    that the centered-delta design leans anti-conservative (narrower CIs
+    than warranted) -- not just that raw verdict/status needs a human
+    reading claim text, which was the report's only existing caveat."""
+    from alphaos.reports.hypothesis_report import build_hypothesis_report, render_markdown
+
+    rep = build_hypothesis_report(journal)
+    markdown = render_markdown(rep)
+    assert "anti-conservative" in markdown.lower()
 
 
 def test_hypothesis_report_marks_overdue(journal):
