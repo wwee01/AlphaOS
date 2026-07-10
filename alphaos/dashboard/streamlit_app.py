@@ -316,7 +316,7 @@ def tab_tonight(orch: Orchestrator) -> None:
         st.write("Best candidate today: (none)")
 
     wl = brief["what_learned"]
-    st.write(f"Learned today ({wl['count']} resolved):")
+    st.write(f"Learned today ({wl['total_resolved_today']} resolved):")
     if wl["sentences"]:
         for sentence in wl["sentences"]:
             st.write(f"- {sentence}")

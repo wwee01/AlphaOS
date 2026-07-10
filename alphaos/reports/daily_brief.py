@@ -296,11 +296,13 @@ def _best_candidate_today(journal, since_sgt: str) -> Optional[dict]:
 
 def _learned_sentence(row: dict) -> str:
     """Plain, descriptive, non-judgmental -- reuses the reporting law's
-    'aggregate tone, no moralizing' rule (specs doc §H.9)."""
-    delta = row.get("delta_r")
-    delta_str = f"{delta:+.2f}R" if delta is not None else "an unresolved ΔR"
+    'aggregate tone, no moralizing' rule (specs doc §H.9). Deliberately NEVER
+    renders a per-event ΔR number (audit C4): a single resolved event's delta
+    is not a verdict, it's one noisy draw -- floor-gated aggregates belong in
+    `alphaos attribution` once its own effective-N/span floor is met, not
+    here."""
     kind = (row.get("attribution_type") or "decision").replace("_", " ")
-    return f"{row.get('symbol', '?')}: {kind} resolved, ΔR={delta_str}."
+    return f"{row.get('symbol', '?')}: {kind} resolved."
 
 
 def _what_learned(journal, since_sgt: str, limit: int = UP_TO_N_LEARNED_SENTENCES) -> dict:
@@ -310,10 +312,22 @@ def _what_learned(journal, since_sgt: str, limit: int = UP_TO_N_LEARNED_SENTENCE
         "ORDER BY resolved_at_utc DESC LIMIT ?",
         (since_sgt, limit),
     )
+    # audit MEDIUM (both independent audits, 2026-07-10): `count` below feeds
+    # ONLY the sentence-bullet list, which is deliberately LIMIT-capped at
+    # UP_TO_N_LEARNED_SENTENCES -- it must never be reused as the headline
+    # "N resolved today" claim (that would silently under-report on any day
+    # with more than `limit` resolutions). `total_resolved_today` is the
+    # real, unlimited count for exactly that purpose.
+    total_resolved_today = journal.count_rows(
+        "attribution_records",
+        "resolved_status = 'resolved' AND is_mock = 0 AND resolved_at_utc >= ?",
+        (since_sgt,),
+    )
     return {
         "resolved_today": rows,
         "sentences": [_learned_sentence(r) for r in rows],
         "count": len(rows),
+        "total_resolved_today": total_resolved_today,
         "caveat": ATTRIBUTION_V2_CAVEAT,
     }
 
@@ -605,7 +619,11 @@ def render_markdown(brief: dict) -> str:
 
     wl = brief["what_learned"]
     lines += ["## What AlphaOS learned"]
-    lines += [f"- {s}" for s in wl["sentences"]] or ["- (nothing newly resolved today)"]
+    lines.append(
+        f"- {wl['total_resolved_today']} decision(s) resolved today; "
+        "aggregates in `alphaos attribution` once floors met."
+    )
+    lines += [f"- {s}" for s in wl["sentences"]]
     lines += [f"> ⚠️ {wl['caveat']}", ""]
 
     from alphaos.reports.regime_arming_scorer import render_markdown as _render_regime_arming
