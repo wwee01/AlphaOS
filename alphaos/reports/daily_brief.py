@@ -293,13 +293,31 @@ def _fused_jobs(journal, settings) -> list[dict]:
 
 def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
     """PR12 registry: which hypotheses resolved TODAY, and whether ANY of
-    them is the registry's first-ever resolution. "First-ever" is detected
-    as n_resolved_total == resolved_today_count -- i.e. every hypothesis
-    that has EVER resolved, resolved today, meaning before today the
-    registry had resolved nothing. Self-limiting by construction: this
-    fires once, on the day it happens, and stays silent on every later day
-    a routine (non-first) resolution occurs -- it never re-flags the
-    "first" milestone twice, and never fires at all on a quiet day.
+    them is the registry's first-ever resolution.
+
+    Both queries key off ``resolved_at_utc`` (an immutable timestamp,
+    stamped exactly once by the resolver's own one-shot
+    ``_mark_resolved()`` and never cleared or rewritten anywhere), NEVER
+    off the current ``status`` column. ``status`` is NOT a permanent
+    "has this ever resolved" ledger: PR13 slice 2's own
+    ``mark_hypothesis_status()`` -- a shipped, intended, promotion-gating
+    operator action -- moves a row from ``resolved`` to ``met``/``failed``/
+    ``withdrawn`` WITHOUT touching ``resolved_at_utc``. An earlier version
+    of this function counted ``status = 'resolved'`` rows, which silently
+    re-armed the "first ever" milestone (and, worse, could drop a same-day
+    adjudicated resolution from `resolved_today` entirely) the moment an
+    operator adjudicated a prior resolution -- caught by two independent
+    audits empirically reproducing exactly that sequence. Keying off
+    ``resolved_at_utc IS NOT NULL`` instead makes both counts immune to
+    any later status transition.
+
+    "First-ever" is detected as n_resolved_total == resolved_today_count
+    -- i.e. every hypothesis that has EVER resolved, resolved today,
+    meaning before today the registry had resolved nothing. Self-limiting
+    by construction: this fires once, on the day it happens, and stays
+    silent on every later day a routine (non-first) resolution occurs --
+    it never re-flags the "first" milestone twice, and never fires at all
+    on a quiet day.
 
     Named per the master reference's own decision record (§9, "PR12 is
     registry-first; the LLM hypothesis generator is v1.1 ... Generator
@@ -310,12 +328,12 @@ def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
     """
     resolved_today = journal.query(
         "SELECT hypothesis_id, last_verdict FROM hypothesis_proposals "
-        "WHERE status = 'resolved' AND resolved_at_utc >= ? ORDER BY resolved_at_utc",
+        "WHERE resolved_at_utc >= ? ORDER BY resolved_at_utc",
         (since_sgt,),
     )
     if not resolved_today:
         return None
-    n_resolved_total = journal.count_rows("hypothesis_proposals", "status = 'resolved'")
+    n_resolved_total = journal.count_rows("hypothesis_proposals", "resolved_at_utc IS NOT NULL")
     return {
         "resolved_today_count": len(resolved_today),
         "resolved_today": resolved_today,
@@ -532,7 +550,8 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
                 f"The hypothesis registry resolved for the first time ({ids}) -- ask Claude to start "
                 "building the LLM-based hypothesis generator (v1.1) if you want to proceed."
             )
-        return f"{hyp_res['resolved_today_count']} hypothesis(es) resolved today ({ids})."
+        noun = "hypothesis" if hyp_res["resolved_today_count"] == 1 else "hypotheses"
+        return f"{hyp_res['resolved_today_count']} {noun} resolved today ({ids})."
     if moonshot_gap.get("status") == "below_sample_floor":
         return f"Nothing actionable yet -- still below the data floor ({moonshot_gap['data_progress']})."
     return "Nothing needs you right now."

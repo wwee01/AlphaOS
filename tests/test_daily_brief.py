@@ -321,6 +321,49 @@ def test_hypothesis_resolution_status_not_first_ever_when_an_older_one_already_r
     assert result["is_first_ever"] is False
 
 
+def test_hypothesis_resolution_status_not_first_ever_after_the_earlier_one_was_adjudicated(journal):
+    """Both audits (correctness HIGH-1, scope/safety HIGH-1): an operator
+    adjudicating an earlier resolution via mark_hypothesis_status() --
+    the shipped, intended, promotion-gating PR13 slice 2 workflow -- moves
+    status OUT of 'resolved' into 'met'/'failed'/'withdrawn' WITHOUT
+    touching resolved_at_utc. The milestone detection must key off the
+    immutable resolved_at_utc, never off the mutable status column, or
+    this exact sequence falsely re-arms "first ever" on the next routine
+    resolution and re-pitches the generator build a second time."""
+    _insert_hypothesis_row(
+        journal, "H-TQS-1", status="met",  # already adjudicated -- no longer 'resolved'
+        resolved_at_utc="2026-07-05T10:00:00+00:00", last_verdict="forward-test-candidate",
+    )
+    _insert_hypothesis_row(
+        journal, "H-WIN-1", status="resolved",
+        resolved_at_utc="2026-07-11T10:00:00+00:00", last_verdict="inconclusive",
+    )
+
+    result = _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00")
+
+    assert result["resolved_today_count"] == 1
+    assert result["resolved_today"][0]["hypothesis_id"] == "H-WIN-1"
+    assert result["is_first_ever"] is False
+
+
+def test_hypothesis_resolution_status_includes_a_same_day_adjudicated_resolution(journal):
+    """Correctness-audit MEDIUM-1: if the operator adjudicates a hypothesis
+    the SAME day it resolved (status now 'met', not 'resolved'), it must
+    still appear in resolved_today -- filtering on status would silently
+    drop the ping entirely, not just mislabel it."""
+    _insert_hypothesis_row(
+        journal, "H-WIN-1", status="met",  # resolved AND adjudicated, same day
+        resolved_at_utc="2026-07-11T10:00:00+00:00", last_verdict="inconclusive",
+    )
+
+    result = _hypothesis_resolution_status(journal, "2026-07-11T00:00:00+00:00")
+
+    assert result is not None
+    assert result["resolved_today_count"] == 1
+    assert result["resolved_today"][0]["hypothesis_id"] == "H-WIN-1"
+    assert result["is_first_ever"] is True
+
+
 def test_hypothesis_resolution_status_scoped_to_today_only(journal):
     """A hypothesis resolved YESTERDAY must not appear in today's list --
     since_sgt scoping matches every other _today() helper in this module."""
@@ -638,14 +681,33 @@ def test_render_markdown_aggregate_line_uses_true_count_not_sentence_cap(orchest
 
 # ------------------------------------------------------------------ no-read
 def test_no_decision_path_reads_brief_or_health_modules():
+    """Scope/safety-audit LOW-2: widened beyond the original 3 files to
+    cover the rest of the actual decision/execution path this codebase
+    has (there is no separate alphaos/gates/ package -- gate/execution
+    logic lives across risk_engine.py/order_manager.py/approval.py and
+    the remaining alphaos/execution/ modules). Deliberately excludes
+    orchestrator.py: its own daily_brief_report() is a sanctioned PURE-READ
+    pass-through wrapper (the same "_report" pattern as hypothesis_report/
+    card_scoreboard_report), not a decision path -- it is EXPECTED to
+    reference daily_brief, so including it here would be a false positive."""
     import pathlib
 
     import alphaos.approval as approval_mod
     import alphaos.risk.risk_engine as risk_mod
-    from alphaos.execution import order_manager as order_mod
+    from alphaos.execution import (
+        exit_rules as exit_rules_mod,
+        order_manager as order_mod,
+        position_manager as position_mod,
+        protection_watchdog as watchdog_mod,
+    )
 
-    for mod, name in ((approval_mod, "approval.py"), (risk_mod, "risk_engine.py"),
-                      (order_mod, "order_manager.py")):
+    modules = (
+        (approval_mod, "approval.py"), (risk_mod, "risk_engine.py"),
+        (order_mod, "order_manager.py"),
+        (exit_rules_mod, "exit_rules.py"), (position_mod, "position_manager.py"),
+        (watchdog_mod, "protection_watchdog.py"),
+    )
+    for mod, name in modules:
         text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
         assert "daily_brief" not in text and "position_health" not in text, \
             f"{name} references a PR11 report module"
