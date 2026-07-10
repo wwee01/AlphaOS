@@ -1906,6 +1906,37 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # EARN-1: the once-daily earnings-calendar capture cache (the
+        # write side of the live AlphaVantageEarningsProvider). Append-only:
+        # a (symbol, report_date, fiscal_date_ending) triple already seen is
+        # never rewritten, only newly-seen or REVISED triples (a company's
+        # report_date shifting for the same fiscal period) add a new row --
+        # this is a point-in-time record, not a "current best guess" table,
+        # matching TEXT-0's own seen_at law (created_at_utc, auto-stamped by
+        # JournalStore.insert(), is the ONLY field any future backtest may
+        # condition on; report_date is the EVENT date, not the discovery
+        # date). Read ONLY by AlphaVantageEarningsProvider's live per-symbol
+        # lookup (alphaos/earnings/earnings_provider.py) -- never by any
+        # gate/risk/execution path directly.
+        "earnings_calendar_cache",
+        """
+        CREATE TABLE IF NOT EXISTS earnings_calendar_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            company_name TEXT,
+            report_date TEXT NOT NULL,
+            fiscal_date_ending TEXT,
+            estimate_eps REAL,
+            currency TEXT,
+            timing TEXT,
+            source TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2072,6 +2103,17 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_replay_status "
     "ON shadow_baseline_decisions(replay_status)",
     "CREATE INDEX IF NOT EXISTS idx_baseline_decisions_symbol ON shadow_baseline_decisions(symbol)",
+    # EARN-1: (symbol, report_date, fiscal_date_ending) is expected always
+    # non-null in practice (AlphaVantage populates all three on every row
+    # observed so far), so a plain UNIQUE index is the right primary
+    # backstop here; the capture job ALSO wraps each insert in a try/except
+    # IntegrityError (belt + suspenders, house pattern #2) in case a future
+    # vendor response ever omits one.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_earnings_calendar_cache_symbol_date_fiscal "
+    "ON earnings_calendar_cache(symbol, report_date, fiscal_date_ending)",
+    "CREATE INDEX IF NOT EXISTS idx_earnings_calendar_cache_symbol ON earnings_calendar_cache(symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_earnings_calendar_cache_report_date "
+    "ON earnings_calendar_cache(report_date)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

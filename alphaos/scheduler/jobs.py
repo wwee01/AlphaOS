@@ -125,6 +125,18 @@ def run_atr_update_job(orch, runner) -> dict:
     return {"status": "completed", "atr_update_result": result}
 
 
+def run_earnings_calendar_pull_job(orch, runner) -> dict:
+    """Scheduler wrapper around
+    ``earnings_calendar_service.update_earnings_calendar()`` (EARN-1). No
+    gating needed -- write-only capture, same rationale as
+    run_atr_update_job; the ONLY reader is AlphaVantageEarningsProvider's
+    live-only per-symbol lookup, never a gate/risk/execution path directly."""
+    from alphaos.reports.earnings_calendar_service import update_earnings_calendar
+
+    result = update_earnings_calendar(orch.journal, orch.settings)
+    return {"status": "completed", "earnings_calendar_result": result}
+
+
 def run_text_archive_pull_job(orch, runner) -> dict:
     """Scheduler wrapper around ``text_archive.service``'s cik_map refresh +
     filing pull (TEXT-0). No gating needed -- collect only, never read by

@@ -30,6 +30,7 @@ SECRET_SETTINGS_FIELDS = frozenset({
     "anthropic_api_key",
     "massive_api_key",
     "benzinga_api_key",
+    "alpha_vantage_api_key",
     "alpaca_api_key",
     "alpaca_secret_key",
     "ntfy_topic",

@@ -66,6 +66,9 @@ EARNINGS_CONFIG_FIELDS = (
     "earnings_proximity_warning_days", "earnings_proximity_default_hold_days",
     "earnings_proximity_max_symbols_per_scan", "earnings_proximity_timeout_seconds",
     "earnings_proximity_fail_open_as_unavailable",
+    # EARN-1: the live provider's own on/off-relevant settings (the API key
+    # itself is excluded via SECRET_SETTINGS_FIELDS, same as benzinga/massive).
+    "scheduler_earnings_calendar_pull_time", "earnings_calendar_staleness_days",
 )
 
 PROPOSAL_TTL_CONFIG_FIELDS = (
