@@ -617,3 +617,27 @@ def test_scheduler_status_report_includes_hypothesis_resolve(orchestrator):
 def test_hypothesis_resolve_due_once_daily(settings, journal):
     due, reason = cadence.is_due(cadence.JobType.HYPOTHESIS_RESOLVE, settings, journal)
     assert isinstance(due, bool)  # exercises the real dispatch path end-to-end, no monkeypatching
+
+
+# ------------------------------------------------------------ no-read proof
+def test_risk_engine_and_approval_never_reference_hypotheses_at_all():
+    """Scope/safety-audit LOW regression: the hypotheses package's single
+    most important safety property -- zero decision-surface leakage -- was
+    previously asserted only by prose docstrings, never by a regression
+    test. Mirrors alphaos.tqs's own already-established structural-proof
+    pattern (test_tqs_flow.py's test_risk_engine_and_approval_never_
+    reference_tqs_at_all): these ARE the actual gate/approval/execution
+    logic, so they must not mention 'hypothes' in any form."""
+    import pathlib
+
+    import alphaos.approval as approval_mod
+    import alphaos.execution.order_manager as order_mod
+    import alphaos.risk.risk_engine as risk_mod
+
+    for mod, name in (
+        (approval_mod, "approval.py"),
+        (risk_mod, "risk_engine.py"),
+        (order_mod, "order_manager.py"),
+    ):
+        text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+        assert "hypothes" not in text.lower(), f"{name} references hypotheses"

@@ -1,10 +1,13 @@
 """PR12: per-hypothesis metric queries.
 
-Each `h_xxx_1_rows(journal)` returns `(rows, value_key)` shaped for
-`alphaos.stats.preregistration.evaluate_hypothesis()` -- every row carries
-`symbol`/`decision_date`/`max_holding_days` (the last degrades to 0 via
-effective_n()'s own graceful-missing handling when no trade_proposals row
-exists for that candidate) plus the named `value_key` column.
+Each `h_xxx_1_rows(journal)` returns `(rows, value_key, reference_arm_rows)`
+shaped for `alphaos.stats.preregistration.evaluate_hypothesis()` -- every row
+in `rows` carries `symbol`/`decision_date`/`max_holding_days` (the last
+degrades to 0 via effective_n()'s own graceful-missing handling when no
+trade_proposals row exists for that candidate) plus the named `value_key`
+column. `reference_arm_rows` (added by the Fable5 strategy review fix below)
+is the frozen reference arm's own rows in that same shape, or `None` for
+`h_rej_1_rows` (no reference arm to floor-check, by construction).
 
 DESIGN NOTE (a reversible decision, logged in HANDOVER.md): most of these
 hypotheses are naturally TWO-ARM comparisons (top vs bottom, catalyst vs
