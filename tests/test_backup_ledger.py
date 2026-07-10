@@ -22,7 +22,11 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "backup_ledger.sh"
 
 
-def _run_backup(db_path: Path, dest_dir: Path, text_archive_dir: Path | None = None) -> subprocess.CompletedProcess:
+def _run_backup(
+    db_path: Path, dest_dir: Path, text_archive_dir: Path | None = None,
+    env_path: Path | None = None, passphrase: str | None = None,
+    backup2_method: str | None = None, backup2_dest: Path | None = None,
+) -> subprocess.CompletedProcess:
     # text_archive_dir defaults to a sibling path that does NOT exist --
     # without an explicit override, the script falls back to its own real
     # default ($REPO_DIR/data/text_archive). That's harmless only because
@@ -32,13 +36,26 @@ def _run_backup(db_path: Path, dest_dir: Path, text_archive_dir: Path | None = N
     # Pinning an explicit non-existent default keeps every test hermetic
     # regardless of the real repo's data/ state, now and later.
     archive_dir = text_archive_dir if text_archive_dir is not None else dest_dir.parent / "no_text_archive_by_default"
+    # OPS-B: env_path defaults to a sibling non-existent path too, for the
+    # exact same reason -- without an explicit override the script would
+    # fall back to $REPO_DIR/.env (the real one), and every test using this
+    # helper would silently start reading/encrypting the operator's real
+    # secrets. Never let a test touch the real .env.
+    env_src = env_path if env_path is not None else dest_dir.parent / "no_env_by_default"
     env = {
         **os.environ,
         "ALPHAOS_BACKUP_DB_PATH": str(db_path),
         "ALPHAOS_BACKUP_DEST_DIR": str(dest_dir),
         "ALPHAOS_BACKUP_TEXT_ARCHIVE_DIR": str(archive_dir),
+        "ALPHAOS_BACKUP_ENV_PATH": str(env_src),
         "ALPHAOS_BACKUP_TEST_MODE": "1",
     }
+    if passphrase is not None:
+        env["ALPHAOS_BACKUP_ENC_PASSPHRASE_OVERRIDE"] = passphrase
+    if backup2_method is not None:
+        env["BACKUP2_METHOD"] = backup2_method
+    if backup2_dest is not None:
+        env["BACKUP2_DEST"] = str(backup2_dest)
     return subprocess.run(
         ["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=30,
     )
@@ -308,3 +325,318 @@ def test_text_archive_mirror_is_incremental_not_a_daily_rotation(tmp_path):
     assert r1.returncode == 0 and r2.returncode == 0
     assert "1 file(s) synced" in r1.stdout
     assert "0 file(s) synced" in r2.stdout
+
+
+# =============================================================================
+# OPS-B: env.enc encryption + MANIFEST + off-ecosystem second target
+# =============================================================================
+def _write_env_file(path: Path, content: str = "OPENAI_API_KEY=sk-test-fake\nSOME_SECRET=abc123\n") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+
+
+def test_env_enc_not_armed_without_a_keychain_passphrase_is_a_warning_not_a_failure(tmp_path):
+    """No ALPHAOS_BACKUP_ENC_PASSPHRASE_OVERRIDE and (in this sandboxed test
+    environment) nothing in the real Keychain under the fixed service/account
+    name -- env.enc must be skipped with a loud warning, never fail the run
+    (the DB backup, the CRITICAL part, is unaffected)."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+
+    result = _run_backup(db, dest, env_path=env_file)  # no passphrase override
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, result.stderr
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()  # DB backup unaffected
+    if "env.enc OK" not in combined:
+        assert "NOT ARMED" in combined
+        assert not (dest / "daily" / f"env-{today}.enc").exists()
+
+
+def test_env_enc_encrypts_and_round_trip_verifies_with_a_passphrase(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file, "OPENAI_API_KEY=sk-round-trip-test\n")
+
+    result = _run_backup(db, dest, env_path=env_file, passphrase="test-passphrase-123")
+
+    assert result.returncode == 0, result.stderr
+    assert "env.enc OK" in result.stdout
+    assert "round-trip verified" in result.stdout
+    today = date.today().isoformat()
+    enc_file = dest / "daily" / f"env-{today}.enc"
+    assert enc_file.exists()
+
+    # Independently decrypt it ourselves (not trusting the script's own
+    # self-check) and confirm it actually matches the source. A here-string
+    # on an explicit fd is awkward to express directly via subprocess's own
+    # stdin= plumbing, so shell out to a tiny bash wrapper -- matching
+    # exactly how the script itself passes the passphrase (never argv/env).
+    verify = subprocess.run(
+        ["bash", "-c", 'openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$1" 3<<< "$2"',
+         "_", str(enc_file), "test-passphrase-123"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert verify.returncode == 0, verify.stderr
+    assert "OPENAI_API_KEY=sk-round-trip-test" in verify.stdout
+
+
+def test_env_enc_skipped_when_source_env_file_absent(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    _make_real_sqlite_db(db, "x")
+
+    result = _run_backup(db, dest, env_path=tmp_path / "does_not_exist_env", passphrase="whatever")
+
+    assert result.returncode == 0, result.stderr
+    assert "env.enc skipped" in result.stdout + result.stderr
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()  # DB backup unaffected
+
+
+def test_manifest_json_contains_sha256_of_the_db_backup(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    _make_real_sqlite_db(db, "manifest-test")
+
+    result = _run_backup(db, dest)
+
+    assert result.returncode == 0, result.stderr
+    today = date.today().isoformat()
+    manifest_file = dest / "daily" / f"MANIFEST-{today}.json"
+    assert manifest_file.exists()
+
+    import json
+    manifest = json.loads(manifest_file.read_text())
+    db_gz = dest / "daily" / f"alphaos-{today}.db.gz"
+    expected_sha = hashlib.sha256(db_gz.read_bytes()).hexdigest()
+    assert manifest["db_gz"]["sha256"] == expected_sha
+    assert manifest["date"] == today
+    assert "schema_version" in manifest
+    assert "git_rev" in manifest
+
+
+def test_manifest_includes_env_enc_entry_only_when_armed(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+
+    result = _run_backup(db, dest, env_path=env_file, passphrase="test-pass")
+
+    assert result.returncode == 0, result.stderr
+    import json
+    today = date.today().isoformat()
+    manifest = json.loads((dest / "daily" / f"MANIFEST-{today}.json").read_text())
+    assert manifest["env_enc"] is not None
+    assert "sha256" in manifest["env_enc"]
+
+
+def test_offsite_backup_not_configured_is_a_warning_not_a_failure(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    _make_real_sqlite_db(db, "x")
+
+    result = _run_backup(db, dest, backup2_method="")  # explicitly empty/unconfigured
+
+    assert result.returncode == 0, result.stderr
+    assert "NOT ARMED" in result.stdout + result.stderr
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()  # DB backup unaffected
+
+
+def test_offsite_backup_disk_method_copies_artifacts(tmp_path):
+    # audit HIGH fix (2026-07-10): offsite requires the SAME passphrase as
+    # env.enc -- an unencrypted DB must never leave this Mac. A real .env +
+    # passphrase are now required for the offsite leg to proceed at all.
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Offsite backup OK" in result.stdout
+    today = date.today().isoformat()
+    assert (offsite / f"alphaos-{today}.db.gz.enc").exists()  # encrypted, not plaintext
+    assert not (offsite / f"alphaos-{today}.db.gz").exists()  # plaintext must NOT be shipped
+    assert (offsite / f"MANIFEST-{today}.json").exists()
+    assert (offsite / f"env-{today}.enc").exists()
+
+
+def test_offsite_backup_disk_method_missing_dest_dir_alerts_and_does_not_crash(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=tmp_path / "not_mounted",
+    )
+
+    assert result.returncode == 0, result.stderr  # best-effort: never fails the overall run
+    assert "BACKUP FAILURE" in result.stdout + result.stderr
+    today = date.today().isoformat()
+    assert (dest / "daily" / f"alphaos-{today}.db.gz").exists()  # DB backup unaffected
+
+
+def test_offsite_backup_only_happens_once_per_month(tmp_path):
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+
+    r1 = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+    r2 = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert r1.returncode == 0 and r2.returncode == 0
+    assert "Offsite backup OK" in r1.stdout
+    assert "already done this month" in r2.stdout
+
+
+def test_offsite_db_copy_is_encrypted_not_plaintext(tmp_path):
+    """audit HIGH (correctness, 2026-07-10): spec §3 explicitly requires
+    "Encrypt the DB at the second target too" -- the offsite copy must
+    never be a plain, gunzip-able .db.gz; only the local iCloud copy stays
+    plaintext (fast restore). Verified both by content (not valid gzip) and
+    by decrypting it back with the same passphrase and confirming the real
+    DB content comes out the other side."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "offsite-encryption-check")
+    _write_env_file(env_file)
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase="offsite-test-pass",
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Offsite backup OK" in result.stdout
+    today = date.today().isoformat()
+    offsite_db = offsite / f"alphaos-{today}.db.gz.enc"
+    assert offsite_db.exists()
+
+    with pytest.raises(gzip.BadGzipFile):
+        with gzip.open(offsite_db, "rb") as f:
+            f.read()
+
+    decrypt = subprocess.run(
+        ["bash", "-c",
+         'openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$1" -out "$2" 3<<< "$3"',
+         "_", str(offsite_db), str(tmp_path / "restored.db.gz"), "offsite-test-pass"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert decrypt.returncode == 0, decrypt.stderr
+    restored = tmp_path / "restored.db"
+    with gzip.open(tmp_path / "restored.db.gz", "rb") as src, open(restored, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    conn = sqlite3.connect(str(restored))
+    row = conn.execute("SELECT v FROM t").fetchone()
+    conn.close()
+    assert row == ("offsite-encryption-check",)
+
+
+def test_offsite_backup_refuses_when_no_passphrase_armed(tmp_path):
+    """audit HIGH fix, negative case: BACKUP2_METHOD configured but no
+    passphrase available (env.enc itself unarmed/absent) must ship NOTHING
+    offsite -- never fall back to an unencrypted DB copy."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+
+    result = _run_backup(db, dest, backup2_method="disk", backup2_dest=offsite)
+    # no env_path / no passphrase -- env.enc skipped, so offsite must refuse too
+
+    assert result.returncode == 0, result.stderr  # best-effort: never fails the overall run
+    assert "no Keychain passphrase armed" in result.stdout + result.stderr
+    assert list(offsite.iterdir()) == []  # nothing shipped -- not even a plaintext DB
+
+
+def test_no_passphrase_material_ever_appears_in_captured_output(tmp_path):
+    """Spec's own explicitly-named acceptance test: "grep test -- no
+    passphrase/key material in any captured log/journal output." Runs a
+    full backup (env.enc + offsite, both armed) with a distinctive sentinel
+    passphrase and confirms it appears in NEITHER stdout/stderr NOR any
+    artifact written to disk (MANIFEST, offsite manifest, or the .enc
+    files themselves, which are ciphertext and should never contain the
+    key used to produce them in any recognizable form)."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    env_file = tmp_path / "dotenv"
+    offsite = tmp_path / "offsite_target"
+    offsite.mkdir()
+    _make_real_sqlite_db(db, "x")
+    _write_env_file(env_file)
+    sentinel = "SENTINEL-PASSPHRASE-do-not-leak-9f8e7d6c"
+
+    result = _run_backup(
+        db, dest, env_path=env_file, passphrase=sentinel,
+        backup2_method="disk", backup2_dest=offsite,
+    )
+
+    assert result.returncode == 0, result.stderr
+    combined_output = result.stdout + result.stderr
+    assert sentinel not in combined_output
+
+    for artifact_dir in (dest / "daily", offsite):
+        for artifact in artifact_dir.iterdir():
+            if artifact.is_file():
+                content = artifact.read_bytes()
+                assert sentinel.encode() not in content, f"sentinel leaked into {artifact}"
+
+
+def test_status_json_written_with_expected_fields(tmp_path, monkeypatch):
+    """The status file is written repo-relative (data/backup_status.json),
+    not into the throwaway dest dir -- redirect REPO_DIR's notion of "data/"
+    by running from a temp copy would be disproportionate for this one
+    assertion; instead just confirm the real repo's status file gets
+    refreshed and has the expected shape after a run."""
+    db = tmp_path / "source.db"
+    dest = tmp_path / "dest"
+    _make_real_sqlite_db(db, "x")
+    status_file = SCRIPT.parent.parent / "data" / "backup_status.json"
+    status_file.unlink(missing_ok=True)
+
+    try:
+        result = _run_backup(db, dest)
+
+        assert result.returncode == 0, result.stderr
+        assert status_file.exists()
+        import json
+        status = json.loads(status_file.read_text())
+        assert "nightly_backup_ok_at_utc" in status
+        assert "env_enc_armed" in status
+        assert "offsite_configured" in status
+    finally:
+        status_file.unlink(missing_ok=True)
