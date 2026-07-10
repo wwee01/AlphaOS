@@ -399,6 +399,51 @@ def cmd_card_demote(
     return 0
 
 
+def cmd_card_materialize(orch: Orchestrator, hypothesis_id: str, decided_by: Optional[str], confirm: bool) -> int:
+    """PR13.5: without --confirm, stages a proposed next-version scaffold +
+    evidence packet for the operator to inspect and author (no cards/
+    write). With --confirm, verifies the operator has authored, moved, and
+    git-committed the new version's YAML, then registers it -- refuses
+    otherwise. See alphaos/cards/materialize.py's own module docstring for
+    why this is a separate command from card_promote (that one graduates
+    an EXISTING version's state; this one mints a NEW version's content)."""
+    if not confirm:
+        result = orch.card_materialize_prepare(hypothesis_id)
+        if not result["prepared"]:
+            print(f"NOT ELIGIBLE -- {result['reason_code']}: {result['detail']}")
+            _print({"card_materialize": {"status": "not_eligible", **result}})
+            return 1
+        print(
+            f"Staged {result['card_id']} v{result['new_version']} scaffold at {result['scaffold_path']} "
+            f"(evidence at {result['evidence_path']}). Edit it, move it into the cards directory, git "
+            f"commit it, then re-run with --decided-by <you> --confirm."
+        )
+        _print({"card_materialize": {"status": "staged", **result}})
+        return 0
+
+    if not decided_by:
+        print("Refused: --decided-by is required with --confirm")
+        _print({"card_materialize": {"status": "refused", "error": "--decided-by is required with --confirm"}})
+        return 1
+
+    try:
+        result = orch.card_materialize_confirm(hypothesis_id, decided_by)
+    except ValueError as exc:
+        print(f"Refused: {exc}")
+        _print({"card_materialize": {"status": "refused", "error": str(exc)}})
+        return 1
+
+    if not result["confirmed"]:
+        print(f"NOT ELIGIBLE -- {result['reason_code']}: {result['detail']}")
+        _print({"card_materialize": {"status": "not_eligible", **result}})
+        return 1
+
+    print(f"Registered: {result['card_id']} v{result['new_version']} (materialized from v{result['old_version']}, "
+          f"decided_by={decided_by})")
+    _print({"card_materialize": {"status": "confirmed", **result}})
+    return 0
+
+
 def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
@@ -891,6 +936,15 @@ def build_parser() -> argparse.ArgumentParser:
     cdm.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
     cdm.add_argument("--reason", required=True, help="free-text reason, recorded on the decision row")
     cdm.add_argument("--confirm", action="store_true", help="actually demote (default: dry-run preview)")
+    cma = sub.add_parser("card_materialize",
+                        help="PR13.5: draft (and, with --confirm, register) a new card version's "
+                             "content -- the operator authors the diff themselves; this never writes "
+                             "to the cards directory")
+    cma.add_argument("hypothesis_id")
+    cma.add_argument("--decided-by", default=None, help="operator identity, never 'system' (required with --confirm)")
+    cma.add_argument("--confirm", action="store_true",
+                      help="register the operator-committed new version (default: stage a scaffold + evidence "
+                           "packet for review only)")
     ecb = sub.add_parser("eval_corpus_build",
                          help="EVAL-1: select real, clean candidate_packets rows into the frozen "
                               "golden corpus (additive; ground_truth_label starts null, never "
@@ -1040,6 +1094,8 @@ def main(argv=None) -> int:
             return cmd_card_promote(orch, args.hypothesis_id, args.decided_by, args.research_ref, args.confirm)
         if args.command == "card_demote":
             return cmd_card_demote(orch, args.card_id, args.card_version, args.decided_by, args.reason, args.confirm)
+        if args.command == "card_materialize":
+            return cmd_card_materialize(orch, args.hypothesis_id, args.decided_by, args.confirm)
         if args.command == "eval_corpus_build":
             return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
         if args.command == "eval":
