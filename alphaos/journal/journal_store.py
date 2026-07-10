@@ -308,10 +308,26 @@ class JournalStore:
         return int(self.scalar(sql, params) or 0)
 
     def count_auto_approvals_today(self) -> int:
+        """The SHARED daily cap (settings.max_auto_approvals_per_day) counts
+        BOTH global-auto (AUTO_APPROVED) and unattended-window
+        (UNATTENDED_APPROVED, 2026-07-11) rows together -- one budget across
+        both mechanisms, so raising one door's own cap can never silently
+        raise the other's effective ceiling."""
+        return self.count_rows(
+            "approvals",
+            "label IN ('AUTO_APPROVED', 'UNATTENDED_APPROVED') AND created_at_utc >= ?",
+            (self.start_of_trading_day_utc(),),
+        )
+
+    def count_unattended_approvals_today(self) -> int:
+        """The unattended-window mechanism's OWN cap
+        (settings.max_unattended_approvals_per_day) -- UNATTENDED_APPROVED
+        rows only, checked in ADDITION to (not instead of) the shared cap
+        above."""
         return self.count_rows(
             "approvals",
             "label = ? AND created_at_utc >= ?",
-            ("AUTO_APPROVED", self.start_of_trading_day_utc()),
+            ("UNATTENDED_APPROVED", self.start_of_trading_day_utc()),
         )
 
     def count_paper_orders_today(self, strategy: Optional[str] = None) -> int:

@@ -131,6 +131,12 @@ class ApprovalLabel(StrEnum):
     MANUAL_APPROVED = "MANUAL_APPROVED"
     AUTO_APPROVED = "AUTO_APPROVED"
     REJECTED = "REJECTED"
+    # Unattended close-window auto-approval (2026-07-11) -- a DISTINCT label
+    # from AUTO_APPROVED so the audit trail always shows which mechanism
+    # fired, even though both count toward the same shared
+    # max_auto_approvals_per_day cap (see journal_store.count_auto_approvals_today).
+    # NOT PR15/L3 -- see Settings.unattended_approve_windows's own docstring.
+    UNATTENDED_APPROVED = "UNATTENDED_APPROVED"
 
 
 class ExitClassification(StrEnum):
