@@ -20,6 +20,17 @@ docstring. Symbols whose bars history could not be fetched at all are
 SKIPPED, not included with a fabricated zero ADV (unknown != safe, same law
 as the freshness guard) -- ``build_shadow_universe``'s ``skipped`` list
 records why, so a screen-run gap is visible, never silent.
+
+HONESTY NOTE (feed-relative ADV, added after a Fable5 review of the v1
+screen, 2026-07-10): ``adv_20d_usd`` is computed from bars on
+``settings.market_data_feed`` (IEX on the free Alpaca tier) -- IEX volume
+is roughly 2-3% of the CONSOLIDATED tape, so these dollar figures are NOT
+comparable to a "$X/day on the whole market" claim; a name showing $45M
+here can easily be a $1B+/day consolidated name. This is stamped into
+``screen_params["feed"]`` below precisely so a later refresh on a
+different feed (e.g. after upgrading to SIP) is visibly incomparable to
+this version, rather than silently producing a different-shaped universe
+under identical-looking band parameters.
 """
 
 from __future__ import annotations
@@ -81,6 +92,10 @@ def build_shadow_universe(settings, journal=None, assets_provider=None, bars_pro
         "adv_lookback_days": settings.shadow_tier_adv_lookback_days,
         "target_count": settings.shadow_tier_target_count,
         "max_count": settings.shadow_tier_max_count,
+        # Fable5 review, 2026-07-10: the feed that defined the ADV band --
+        # see the module HONESTY NOTE above. Makes a later refresh on a
+        # different feed visibly incomparable to this version.
+        "feed": settings.market_data_feed,
     }
 
     result: dict[str, Any] = {

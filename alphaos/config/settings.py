@@ -433,9 +433,16 @@ class Settings:
     # symbol list, and committed it (the spec's own acceptance gate) --
     # flipping this on is a deliberate, later, separate step, not a side
     # effect of shipping the mechanism.
+    # HONESTY NOTE (Fable5 review, 2026-07-10): the ADV band below is
+    # measured on ``market_data_feed`` (IEX on the free Alpaca tier), which
+    # carries roughly 2-3% of consolidated-tape volume -- these are NOT
+    # consolidated dollar figures. See alphaos/universe/builder.py's own
+    # module docstring for the full note; the committed universe file
+    # stamps the feed used into its own screen_params for exactly this
+    # reason.
     shadow_tier_enabled: bool
     shadow_tier_universe_file: str        # committed JSON path
-    shadow_tier_min_adv_usd: float         # $5M -- 20d avg dollar volume floor
+    shadow_tier_min_adv_usd: float         # $5M on market_data_feed -- 20d avg dollar volume floor
     shadow_tier_max_adv_usd: float         # $50M -- ceiling (megacap book starts above this)
     shadow_tier_min_price: float           # $5 -- excludes penny-stock manipulation risk
     shadow_tier_max_price: float           # $100
