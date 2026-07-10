@@ -521,6 +521,27 @@ def test_cmd_hypothesis_mark_status_not_eligible_returns_1_even_with_confirm(orc
     assert row["status"] == "testing"  # unchanged
 
 
+def test_cmd_hypothesis_mark_status_cannot_re_adjudicate_an_already_met_hypothesis(orchestrator):
+    """Scope/safety-audit LOW regression: the 'testing' case above proves
+    refusal-before-resolution, but not the specific one-way-door property
+    this whole ceremony exists to protect -- that an ALREADY-adjudicated
+    hypothesis (status='met') can never be flipped again, even to a
+    DIFFERENT terminal status, even with --confirm. Covered only
+    transitively via the 'testing' case before this test; a future refactor
+    that special-cased 'testing' could pass every other test while quietly
+    reopening this exact door."""
+    from alphaos.__main__ import cmd_hypothesis_mark_status
+
+    _insert_hypothesis(orchestrator.journal, "H-TEST", status="met")
+    exit_code = cmd_hypothesis_mark_status(orchestrator, "H-TEST", "failed", "ck", confirm=True)
+
+    assert exit_code == 1
+    row = orchestrator.journal.one(
+        "SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-TEST",)
+    )
+    assert row["status"] == "met"  # unchanged -- never flipped to 'failed'
+
+
 def test_cmd_hypothesis_mark_status_unknown_hypothesis_returns_1(orchestrator):
     from alphaos.__main__ import cmd_hypothesis_mark_status
 
@@ -557,10 +578,27 @@ def test_check_status_change_preconditions_matches_mark_hypothesis_status_exactl
     """The preview and the enforcement must never drift apart --
     mark_hypothesis_status() calls THIS SAME function internally rather
     than a separately-maintained copy of the same checks (mirrors
-    promote_card()'s own relationship to check_promotion_preconditions())."""
+    promote_card()'s own relationship to check_promotion_preconditions()).
+
+    Correctness-audit LOW regression: a plain substring search over
+    inspect.getsource() passes vacuously off the function's OWN docstring
+    (which itself mentions ``check_status_change_preconditions()`` in
+    prose) even with the real call removed -- verified empirically by
+    stripping the real call line and confirming a substring-only version of
+    this test still passed. An AST walk for an actual Call node has no such
+    blind spot: prose text in a docstring is a Constant/Expr node, never a
+    Call, so this can only pass if the function genuinely invokes
+    check_status_change_preconditions()."""
+    import ast
     import inspect
+    import textwrap
 
     from alphaos.hypotheses.registry import mark_hypothesis_status
 
     source = inspect.getsource(mark_hypothesis_status)
-    assert "check_status_change_preconditions(" in source
+    tree = ast.parse(textwrap.dedent(source))
+    calls = [
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert "check_status_change_preconditions" in calls
