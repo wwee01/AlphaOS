@@ -15,6 +15,8 @@ All offline, in-memory, mock mode. No real money, no network.
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from alphaos.cards import promotion
@@ -234,6 +236,66 @@ def test_promoting_does_not_change_live_eligible_cards_by_itself(journal):
     assert card_id not in [c["card_id"] for c in cards]
 
 
+def test_promotion_decisions_index_is_unique_and_catches_a_duplicate_direction_row(journal):
+    """Correctness-audit HIGH-2 regression: (card_id, card_version,
+    direction) must be a UNIQUE index, not a plain one, or a concurrent
+    race that gets past the application-level ALREADY_PROMOTED check would
+    silently insert a SECOND row instead of being caught at the DB level
+    (which is exactly what promote_card()'s own sqlite3.IntegrityError
+    catch claims to handle -- before this fix, that catch was dead code)."""
+    _insert_card(journal, "test_card", 1, state="shadow")
+    journal.insert("promotion_decisions", {
+        "decision_id": "dec1", "card_id": "test_card", "card_version": 1,
+        "from_state": "shadow", "to_state": "live_eligible", "direction": "promote",
+        "decided_by": "ck", "decided_at_utc": "2026-01-01T00:00:00+00:00",
+        "decided_at_sgt": "2026-01-01T08:00:00+08:00",
+    })
+    with pytest.raises(sqlite3.IntegrityError):
+        journal.insert("promotion_decisions", {
+            "decision_id": "dec2", "card_id": "test_card", "card_version": 1,
+            "from_state": "shadow", "to_state": "live_eligible", "direction": "promote",
+            "decided_by": "someone_else", "decided_at_utc": "2026-01-01T00:00:01+00:00",
+            "decided_at_sgt": "2026-01-01T08:00:01+08:00",
+        })
+
+
+def test_mark_hypothesis_status_detects_a_concurrent_race_via_rowcount(journal, monkeypatch):
+    """Correctness-audit HIGH-1 regression: a losing racer's own UPDATE
+    (WHERE status='resolved' no longer matches, because a concurrent
+    winner already flipped it) must be DETECTED via cursor.rowcount, never
+    silently re-read the winner's row and report false success. Simulates
+    the race deterministically by hooking journal.one() (the SELECT
+    mark_hypothesis_status uses for its own initial check): the FIRST call
+    returns the real 'resolved' row as normal, but as a side effect also
+    performs a 'concurrent' winner's write immediately afterward -- so by
+    the time mark_hypothesis_status's own UPDATE runs, the row has already
+    moved away from 'resolved' (sqlite3.Connection.execute itself can't be
+    monkeypatched on an instance -- it's a read-only C-level attribute --
+    so journal.one() is the highest-fidelity injection point available)."""
+    _insert_hypothesis(journal, "H-TEST", status="resolved")
+    real_one = journal.one
+    calls = {"n": 0}
+
+    def _one_with_concurrent_winner(sql, params=()):
+        result = real_one(sql, params)
+        calls["n"] += 1
+        if calls["n"] == 1 and "hypothesis_id = ?" in sql:
+            journal.conn.execute(
+                "UPDATE hypothesis_proposals SET status = 'failed' WHERE hypothesis_id = ?",
+                ("H-TEST",),
+            )
+            journal.conn.commit()
+        return result
+
+    monkeypatch.setattr(journal, "one", _one_with_concurrent_winner)
+
+    with pytest.raises(ValueError, match="concurrent operator"):
+        mark_hypothesis_status(journal, "H-TEST", "met", decided_by="ck")
+
+    row = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-TEST",))
+    assert row["status"] == "failed"  # the concurrent winner's write survives untouched
+
+
 # -------------------------------------------------------------- demote_card
 def test_demote_card_writes_decision(journal):
     _insert_card(journal, "test_card", 1, state="live_eligible")
@@ -384,6 +446,20 @@ def test_cmd_card_demote_dry_run_does_not_write(orchestrator):
     exit_code = cmd_card_demote(orchestrator, "card_a", 1, "ck", "test reason", confirm=False)
 
     assert exit_code == 0
+    assert orchestrator.journal.count_rows("promotion_decisions") == 0
+
+
+def test_cmd_card_demote_dry_run_reports_ineligible_card_honestly(orchestrator):
+    """Scope/safety-audit LOW regression: previously this dry-run skipped
+    any check at all and would print "Would demote" even for an
+    unregistered or already-terminally-demoted card, contradicting what a
+    --confirm run would then do. Now it runs the same precondition check
+    demote_card() itself uses."""
+    from alphaos.__main__ import cmd_card_demote
+
+    exit_code = cmd_card_demote(orchestrator, "nope_card", 1, "ck", "test reason", confirm=False)
+
+    assert exit_code == 1
     assert orchestrator.journal.count_rows("promotion_decisions") == 0
 
 

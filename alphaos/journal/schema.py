@@ -2045,6 +2045,11 @@ SCHEMA: list[tuple[str, str]] = [
         # enforced in code) only when the underlying hypothesis's
         # risk_class='C' (PD#9) -- unreachable today since none of the 8
         # seeded hypotheses with a card_id are Class C, fixture-tested only.
+        # `lineage_id` is deliberately left NULL by both writers in v0
+        # (scope/safety-audit NIT): populating it would mean threading
+        # `settings` through promote_card()/demote_card() for a column no
+        # report currently reads -- correct scope for a later pass once a
+        # real consumer needs it, not a gap in this one.
         "promotion_decisions",
         """
         CREATE TABLE IF NOT EXISTS promotion_decisions (
@@ -2255,8 +2260,20 @@ INDEXES: list[str] = [
     # PR13 slice 2: "has this exact (card_id, version) ever had a manual
     # demote decision" is the other half of the anti-double-jeopardy check
     # (card_demotions covers the automatic half) -- both a card_promote
-    # eligibility check and live_eligible_cards() query this.
-    "CREATE INDEX IF NOT EXISTS idx_promotion_decisions_card_version "
+    # eligibility check and live_eligible_cards() query this. UNIQUE
+    # (correctness-audit HIGH-2): a given (card_id, card_version) can have
+    # AT MOST ONE 'promote' row (ALREADY_PROMOTED already refuses a second
+    # one in application code) and AT MOST ONE 'demote' row
+    # (CARD_VERSION_TERMINALLY_DEMOTED already refuses a second one) --
+    # this index is the real DB-level backstop for that invariant under a
+    # genuine concurrent-write race, matching every other "unique
+    # constraint catches the loser" idiom in this codebase
+    # (idx_jobruns_lock_key_active, hypothesis_proposals.hypothesis_id).
+    # Before this fix the index was a plain (non-unique) INDEX, meaning
+    # promotion.py's own sqlite3.IntegrityError catch could never actually
+    # fire -- a concurrent double-promote would have silently inserted two
+    # rows instead of being caught.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_decisions_card_version "
     "ON promotion_decisions(card_id, card_version, direction)",
     "CREATE INDEX IF NOT EXISTS idx_promotion_decisions_hypothesis ON promotion_decisions(hypothesis_id)",
 ]

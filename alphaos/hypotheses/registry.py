@@ -175,6 +175,15 @@ def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided
     status, decided_by='system') -- this is an operator-invoked CLI action,
     not a background job, so a loud, immediate error beats a silently
     swallowed no-op.
+
+    Correctness-audit HIGH-1: the ``UPDATE ... WHERE status = 'resolved'``
+    clause is the real atomic guard against two concurrent adjudications
+    (only one can ever flip a 'resolved' row), but the initial rowcount-0
+    case must be DETECTED, not silently re-read -- otherwise a losing
+    racer's own call re-SELECTs the WINNER's row and returns it as if its
+    own write had succeeded. Mirrors ``alphaos.stats.preregistration.
+    evaluate_hypothesis()``'s own identical ``cursor.rowcount == 0`` guard
+    for the same class of race.
     """
     if new_status not in _OPERATOR_ONLY_STATUSES:
         raise ValueError(f"mark_hypothesis_status: {new_status!r} is not an operator-settable status")
@@ -192,9 +201,14 @@ def mark_hypothesis_status(journal, hypothesis_id: str, new_status: str, decided
             "adjudicate a hypothesis once its evidence is frozen"
         )
 
-    journal.conn.execute(
+    cursor = journal.conn.execute(
         "UPDATE hypothesis_proposals SET status = ? WHERE hypothesis_id = ? AND status = 'resolved'",
         (new_status, hypothesis_id),
     )
     journal.conn.commit()
+    if cursor.rowcount == 0:
+        raise ValueError(
+            f"{hypothesis_id!r} was adjudicated by a concurrent operator between this call's "
+            "read and write -- re-check its current status before retrying"
+        )
     return journal.one("SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (hypothesis_id,))

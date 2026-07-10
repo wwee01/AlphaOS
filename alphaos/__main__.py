@@ -287,11 +287,22 @@ def cmd_card_demote(
 ) -> int:
     """PR13 slice 2: a manual override demotion -- an operator's own
     judgment call, not evidence-gated. Without --confirm, this is a preview
-    only."""
+    only -- scope/safety-audit LOW: the preview now runs the SAME
+    precondition check demote_card() itself uses, so it can never say
+    "would demote" against a card that a --confirm run would then refuse
+    (matches cmd_card_promote's own dry-run behavior)."""
+    from alphaos.cards.promotion import check_demotion_preconditions
+
+    check = check_demotion_preconditions(orch.journal, card_id, card_version)
+    if not check["eligible"]:
+        print(f"NOT ELIGIBLE -- {check['reason_code']}: {check['detail']}")
+        _print({"card_demote": {"status": "not_eligible", **check}})
+        return 1
+
     if not confirm:
         print(f"Would demote {card_id} v{card_version} (decided_by={decided_by}, reason={reason!r}). "
               "Re-run with --confirm to actually demote.")
-        _print({"card_demote": {"status": "dry_run"}})
+        _print({"card_demote": {"status": "dry_run_eligible", **check}})
         return 0
 
     try:

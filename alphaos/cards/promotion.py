@@ -45,13 +45,18 @@ from typing import Optional
 
 from alphaos.cards.scoreboard import compute_card_scoreboard
 from alphaos.hypotheses.constants import HypothesisStatus, RiskClass
+from alphaos.stats.fdr import DEFAULT_FDR_Q
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 # q_value must be strictly below this to count as "reliable enough to act
-# on" -- matches PORT-1's own DEFAULT_FDR_Q (alphaos.stats.fdr), reused
-# verbatim rather than a second literal.
-Q_VALUE_FLOOR = 0.1
+# on" -- correctness-audit LOW-1: genuinely IMPORTED from PORT-1's own
+# family-wide FDR discovery threshold (alphaos.stats.fdr), not a second,
+# independently-typed literal that could silently drift from it. Reusing
+# the discovery-level q as the promotion floor is a deliberate semantic
+# reuse (this codebase's own "one truth" posture), not a coincidence of
+# matching numbers.
+Q_VALUE_FLOOR = DEFAULT_FDR_Q
 
 
 def is_terminally_demoted(journal, card_id: str, card_version: int) -> bool:
@@ -222,6 +227,33 @@ def promote_card(
     return journal.one("SELECT * FROM promotion_decisions WHERE decision_id = ?", (decision_id,))
 
 
+def check_demotion_preconditions(journal, card_id: str, card_version: int) -> dict:
+    """PURE READ -- the demote-side equivalent of
+    ``check_promotion_preconditions()``. Scope/safety-audit LOW: the CLI's
+    ``card_demote`` dry-run previously skipped any check at all (unlike
+    ``card_promote``'s own dry-run, which already ran the full precondition
+    check), so a preview could say "would demote" against an unregistered
+    or already-terminally-demoted card and then have the real
+    ``--confirm`` run refuse. Both the dry-run preview and ``demote_card()``
+    itself now call this SAME function, so a preview can never claim
+    eligibility the real write would then contradict. Returns
+    ``{"eligible", "reason_code", "detail"}`` (no ``card_id``/``card_version``
+    keys -- unlike the promote-side check, both are already caller-supplied
+    here, never looked up from a hypothesis)."""
+    card = journal.one(
+        "SELECT card_id, version AS card_version, state FROM setup_cards "
+        "WHERE card_id = ? AND version = ?",
+        (card_id, card_version),
+    )
+    if card is None:
+        return {"eligible": False, "reason_code": "CARD_NOT_REGISTERED",
+                "detail": f"no setup_cards row for {card_id!r} v{card_version}"}
+    if is_terminally_demoted(journal, card_id, card_version):
+        return {"eligible": False, "reason_code": "CARD_VERSION_TERMINALLY_DEMOTED",
+                "detail": f"{card_id} v{card_version} was already demoted"}
+    return {"eligible": True, "reason_code": None, "detail": "eligible for manual demotion"}
+
+
 def demote_card(journal, card_id: str, card_version: int, decided_by: str, reason: str) -> dict:
     """Manual override demotion -- an operator's own judgment call, not
     evidence-gated (unlike promotion, no hypothesis/preregistration backing
@@ -237,18 +269,15 @@ def demote_card(journal, card_id: str, card_version: int, decided_by: str, reaso
     if decided_by == "system":
         raise ValueError("demote_card: decided_by must be a real operator identity, not 'system'")
 
+    check = check_demotion_preconditions(journal, card_id, card_version)
+    if not check["eligible"]:
+        raise ValueError(f"{check['reason_code']}: {check['detail']}")
+
     card = journal.one(
         "SELECT card_id, version AS card_version, state FROM setup_cards "
         "WHERE card_id = ? AND version = ?",
         (card_id, card_version),
     )
-    if card is None:
-        raise ValueError(f"CARD_NOT_REGISTERED: no setup_cards row for {card_id!r} v{card_version}")
-    if is_terminally_demoted(journal, card_id, card_version):
-        raise ValueError(
-            f"CARD_VERSION_TERMINALLY_DEMOTED: {card_id} v{card_version} was already demoted"
-        )
-
     now = timeutils.stamp()
     decision_id = new_id("promodec")
     try:
