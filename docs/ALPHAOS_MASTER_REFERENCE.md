@@ -717,8 +717,44 @@ item specs under their canonical names in the specs doc):**
     decision-surface leakage, floor reused verbatim from `attribution.py`,
     complete scheduler wiring). 22 tests, full suite green (1383 passed),
     ruff/mypy clean. **COMMITTED, NOT YET MERGED**, holding for explicit
-    operator merge instruction. → **PR13 slice 2** (promotion + PR13.5
-    diff→version, not yet built) → cards v2–v3 →
+    operator merge instruction. → **PR13 slice 2** 🟡 (card promotion/
+    graduation + manual demotion) — built + audit-fixed 2026-07-10, branch
+    `feat/pr13-slice2-promotion` @ `23e539e` (merge `297b71e` + build
+    `f251797` + audit-fixup `23e539e`). A focused Fable5 consult (not full-
+    panel) drew the "graduation vs. mutation" distinction before this was
+    built: v0 ships graduation ONLY (an existing shadow card version's
+    state moves to live_eligible, content untouched, no version minted) —
+    mutation (a real content diff via PR13.5's own ceremony) has no
+    producer today (PR12 proposes no diff content; PD#4 defers a generator
+    to v1.1) and was explicitly ruled out of scope. Gates on operator-set
+    `MET` (new `mark_hypothesis_status()`, the only writer of MET/FAILED/
+    WITHDRAWN) via a new `check_promotion_preconditions()` (~10 named
+    reason codes) + new `promotion_decisions` table, kept deliberately
+    separate from slice 1's own `card_demotions`. Never touches
+    `setup_cards`/card YAML (Prime Directive 7). Two independent Opus
+    audits, both **APPROVE WITH NOTES**, zero BLOCKER/MEDIUM from either —
+    scope/safety confirmed via whole-repo grep that a card's registered
+    state/content is provably untouched and no automatic path can reach
+    promotion; correctness found + fixed 2 real **HIGH**s (a
+    `mark_hypothesis_status()` race: the DB-level `WHERE status='resolved'`
+    guard was correct, but a losing racer's own call never checked
+    `cursor.rowcount` and silently reported the WINNER's row as its own
+    success — fixed to match the sibling `evaluate_hypothesis()`'s own
+    correct pattern; and a `sqlite3.IntegrityError` catch in
+    `promote_card()`/`demote_card()` that was dead code because the index
+    it relied on was non-unique — a real concurrent double-promote would
+    have silently inserted two rows — fixed by making the index UNIQUE)
+    plus a LOW (`Q_VALUE_FLOOR` was a duplicated literal, now a genuine
+    import from `alphaos.stats.fdr.DEFAULT_FDR_Q`); scope/safety found one
+    LOW (`card_demote`'s CLI dry-run skipped precondition checks entirely,
+    unlike `card_promote`'s own dry-run — fixed with a shared
+    `check_demotion_preconditions()`). Every fix verified with a regression
+    test confirmed to fail pre-fix/pass post-fix. 40 tests, full suite
+    green (1454 passed), ruff/mypy clean. **COMMITTED, NOT YET MERGED**,
+    holding for explicit operator merge instruction. PR13.5's diff-
+    rendering/YAML-writing ceremony explicitly NOT built (no producer of
+    real diff content exists yet) — one labeled function-boundary seam is
+    left for it. → cards v2–v3 →
     **PR14** → **REG-2** (regime as allocator — what "Regime Engine v1" was;
     renamed 2026-07-08 late since REG-1, its measurement half, now lands at
     13b; evidence-gated on REG-1's shadow arming-map scorer reaching its
