@@ -120,15 +120,23 @@ _AFT_CLOSE = time(20, 0)
 
 
 def market_session(dt: Optional[datetime] = None) -> MarketSession:
-    """Classify the US market session for an instant (weekends => CLOSED).
+    """Classify the US market session for an instant (weekends AND NYSE
+    full-closure holidays => CLOSED; see ``market_calendar.py``).
 
-    This is a calendar-naive approximation (no holiday table in v1); holidays
-    are a known gap, surfaced in the README.
+    Half-days (early 1pm ET close) are NOT modeled -- a half-day still
+    classifies by the regular open/close times below, so a monitor tick
+    late in a half-day would see REGULAR when the exchange has in fact
+    already closed. A known, narrower gap than the pre-holiday-calendar
+    state (weekends + full closures are now both correctly CLOSED).
     """
     if dt is None:
         dt = now_utc()
     et = dt.astimezone(_ET)
     if et.weekday() >= 5:  # Sat/Sun
+        return MarketSession.CLOSED
+    from alphaos.util.market_calendar import is_us_market_holiday
+
+    if is_us_market_holiday(et.date()):
         return MarketSession.CLOSED
     t = et.time()
     if _PRE_OPEN <= t < _REG_OPEN:

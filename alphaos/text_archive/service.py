@@ -281,11 +281,9 @@ def pull_new_filings(journal, settings, edgar_provider=None, storage_root: Optio
 
 
 def is_probable_trading_day(d: _date) -> bool:
-    """Weekday-only proxy (Mon-Fri) -- this codebase has NO market-holiday
-    table anywhere yet (see ``timeutils.market_session``'s own "calendar-
-    naive... no holiday table in v1" docstring caveat); a real US-market
-    holiday will still read as a probable trading day here, same
-    pre-existing, accepted limitation as the rest of the system. Used only
-    to suppress an obviously-wrong weekend zero-doc alert, not as a claim of
-    full market-calendar accuracy."""
-    return d.weekday() < 5
+    """Weekend/NYSE-holiday check (delegates to ``market_calendar.py``).
+    Used only to suppress an obviously-wrong weekend/holiday zero-doc alert,
+    not as a claim that EDGAR's own filing calendar matches NYSE's exactly."""
+    from alphaos.util.market_calendar import is_trading_day
+
+    return is_trading_day(d)

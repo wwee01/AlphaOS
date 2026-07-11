@@ -629,6 +629,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
 
     return {
         "date_sgt": since_sgt[:10],
+        "is_trading_day_today": digest["is_trading_day_today"],
         "kill_switch_engaged": kill_switch.is_engaged(),
         "kill_switch_reason": kill_switch.reason(),
         "market_condition": _market_condition(journal, settings),
@@ -662,6 +663,9 @@ def render_markdown(brief: dict) -> str:
     ]
     if brief["kill_switch_engaged"]:
         lines += [f"⚠️ **KILL SWITCH ENGAGED** — {brief['kill_switch_reason']}", ""]
+
+    if not brief.get("is_trading_day_today", True):
+        lines += ["📅 Not a trading day (weekend/NYSE holiday) — no live scanning occurred today.", ""]
 
     regime = brief.get("regime")
     if regime:
@@ -847,4 +851,6 @@ def render_compact(brief: dict) -> str:
         f"Pending approvals: {ny['pending_approval_count']}",
         f"Open incidents: {ny['open_incident_count']}  |  Fused jobs: {len(ny['fused_jobs'])}",
     ]
+    if not brief.get("is_trading_day_today", True):
+        lines.append("Not a trading day (weekend/NYSE holiday) -- no live scanning occurred.")
     return "\n".join(lines)

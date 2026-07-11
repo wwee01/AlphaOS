@@ -186,6 +186,11 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
 
 def _scan_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     market_dt_et = market_now_et(now)
+    from alphaos.util.market_calendar import is_trading_day
+
+    if not is_trading_day(market_dt_et.date()):
+        return (False, f"{market_dt_et.date()} is a weekend/NYSE holiday, not a trading day")
+
     hhmm = format_hhmm_et(market_dt_et)
     window = window_containing(hhmm, scan_windows(settings))
     if window is None:
