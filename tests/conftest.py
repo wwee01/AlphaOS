@@ -7,12 +7,14 @@ ONLY inside tests and never reaches the runtime path.
 
 from __future__ import annotations
 
+import os
+import urllib.error
 import urllib.request
 
 import pytest
 
 from alphaos.cards.registry import get_default_card
-from alphaos.config.settings import load_settings
+from alphaos.config.settings import ALPACA_DATA_BASE_URL, load_settings
 from alphaos.constants import TEST_FIXTURE_NEWS_LABEL
 from alphaos.journal.journal_store import JournalStore
 from alphaos.news.news_service import NewsItem
@@ -34,13 +36,24 @@ def make_settings(**overrides):
     return load_settings(load_env_file=False, env=env)
 
 
-def _block_ntfy_calls(real_urlopen):
-    """Pass through every real urlopen call EXCEPT one targeting ntfy.sh --
-    scoped by URL, not a blanket block, because a blanket block also catches
-    the market-data provider's own pre-existing real HTTP path
-    (alpaca_data.py's get_snapshot, reachable whenever ALPHAOS_MODE=paper +
-    non-empty Alpaca keys are set, fake or real), which is a separate,
-    already-existing test-suite gap unrelated to this feature's scope."""
+def _stub_known_network_calls(real_urlopen, *, allow_alpaca_live):
+    """Pass through every real urlopen call EXCEPT the two known real-network
+    paths reachable from tests:
+
+    * ntfy.sh (alerts) is a hard block -- scoped by URL, not a blanket block,
+      so a test that forgets to monkeypatch alerts.send_alert fails loudly.
+    * Alpaca market data (alpaca_data.py's get_snapshot/get_snapshots,
+      reachable whenever ALPHAOS_MODE=paper + non-empty Alpaca keys are set,
+      fake or real) is faked with the same urllib.error.URLError its own
+      except-block already handles -- the provider falls back to its normal
+      _empty() snapshot, identical in shape to what a real unauthenticated
+      call (e.g. the fake "k"/"s" keys used throughout the suite) would
+      already produce, just without the real round-trip. Skipped when
+      RUN_LIVE_ALPACA_TESTS=true, matching test_live_alpaca.py's own opt-in
+      gate for exercising the real endpoint. Tests that want the mapped
+      response shape (not just _empty()) monkeypatch urlopen themselves --
+      see test_shadow_tier_universe.py -- which overrides this default for
+      the remainder of that test."""
 
     def _urlopen(request, *args, **kwargs):
         url = getattr(request, "full_url", None) or (request if isinstance(request, str) else "")
@@ -51,6 +64,10 @@ def _block_ntfy_calls(real_urlopen):
                 "paper/live mode + a configured NTFY_TOPIC, not left to rely on the "
                 "empty-topic no-op. See tests/test_alerts.py for the monkeypatch pattern."
             )
+        if not allow_alpaca_live and url.startswith(ALPACA_DATA_BASE_URL):
+            raise urllib.error.URLError(
+                "network access disabled in tests (see conftest._block_real_network_calls)"
+            )
         return real_urlopen(request, *args, **kwargs)
 
     return _urlopen
@@ -59,14 +76,20 @@ def _block_ntfy_calls(real_urlopen):
 @pytest.fixture(autouse=True)
 def _block_real_network_calls(monkeypatch):
     """Defense-in-depth backstop (scope/safety audit LOW-2, PR9's immediate-
-    alerts audit): the zero-network-leak guarantee previously rested only on
-    two conventions (mock-mode default + unset NTFY_TOPIC default) with no
-    hard stop. A future paper-mode test that sets a topic and forgets to
-    monkeypatch alerts.send_alert would otherwise silently POST to ntfy.sh.
-    Tests that intentionally exercise urlopen (tests/test_alerts.py) already
-    monkeypatch it themselves, which overrides this default for their
-    duration -- this fixture only catches call sites nobody stubbed."""
-    monkeypatch.setattr(urllib.request, "urlopen", _block_ntfy_calls(urllib.request.urlopen))
+    alerts audit; extended for the Alpaca market-data path per the hermetic-
+    Alpaca-data-tests fixup): the zero-network-leak guarantee previously
+    rested only on conventions (mock-mode default + unset NTFY_TOPIC default)
+    with no hard stop, and the Alpaca data path had no stop at all -- two
+    scheduler tests using fake Alpaca keys were making real HTTPS calls to
+    data.alpaca.markets on every run. Tests that intentionally exercise
+    urlopen (tests/test_alerts.py, tests/test_shadow_tier_universe.py)
+    already monkeypatch it themselves, which overrides this default for
+    their duration -- this fixture only catches call sites nobody stubbed."""
+    allow_alpaca_live = os.environ.get("RUN_LIVE_ALPACA_TESTS") == "true"
+    monkeypatch.setattr(
+        urllib.request, "urlopen",
+        _stub_known_network_calls(urllib.request.urlopen, allow_alpaca_live=allow_alpaca_live),
+    )
 
 
 @pytest.fixture
