@@ -47,9 +47,12 @@ def test_2022_new_years_day_saturday_is_not_observed_the_preceding_friday():
     trading day; Jan 1, 2022 itself is also not a holiday entry (a specific
     date isn't a trading day anyway since it's a Saturday, but it must not
     additionally appear in the set, and Dec 31 must not appear either)."""
-    holidays_2021 = us_market_holidays(2021)
     holidays_2022 = us_market_holidays(2022)
-    assert date(2021, 12, 31) not in holidays_2021
+    # The phantom entry a removed exception would produce lands in the
+    # 2022 set (computed as new_years - 1 day while year=2022), NOT the
+    # 2021 set -- asserting against 2021 here would pass regardless of
+    # whether the exception exists, silently failing to guard it.
+    assert date(2021, 12, 31) not in holidays_2022
     assert date(2022, 1, 1) not in holidays_2022
     # Every OTHER 2022 fixed-date holiday that falls on a weekend still
     # shifts normally -- Juneteenth (Jun 19, 2022) was a Sunday, observed
