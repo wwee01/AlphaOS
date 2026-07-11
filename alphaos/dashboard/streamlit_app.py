@@ -27,6 +27,13 @@ port-forwarding.
 
 This is intentionally not the full 15-tab UI. It never presents simulated
 performance as real: everything is labelled paper/simulated.
+
+PR-UI-B1 (styling only): a dark "cockpit instrument" visual theme
+(console_theme.py + .streamlit/config.toml's [theme] section) is layered on
+top of the above -- same tabs, same data, same gates, same read-only-render
+discipline. Nothing in console_theme.py fetches data, writes anything, or
+adds a code path; see that module's docstring for the full theme + the two
+pure HTML-rendering helpers (R-ladder, TTL bar) it provides.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ import streamlit as st
 from alphaos.ai.claude_reviewer import ClaudeUnavailable
 from alphaos.config.settings import load_settings
 from alphaos.constants import ProposalStatus
+from alphaos.dashboard import console_theme
 from alphaos.orchestrator import Orchestrator
 from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
 from alphaos.reports.daily_brief import build_daily_brief, render_markdown
@@ -174,18 +182,29 @@ def render_annunciator(orch: Orchestrator, positions_health: list[dict]) -> None
 
     col_mode, col_ks = st.columns([1, 2])
     with col_mode:
-        st.metric("Mode", s.mode.value.upper())
+        # PR-UI-B1: keyed only so console_theme.CONSOLE_CSS can scope the
+        # "annunciator badge" border/shape to this metric specifically
+        # (Streamlit stamps a `st-key-<key>` CSS class on a keyed
+        # container) -- same st.metric call, same value, no behavior change.
+        with st.container(key="annunciator_mode_badge"):
+            st.metric("Mode", s.mode.value.upper())
     with col_ks:
-        if ks.is_engaged():
-            st.error(f"🔴 KILL SWITCH ENGAGED — {ks.reason()}")
-            if st.button("Release kill switch", key="annunciator_release_ks"):
-                ks.release()
-                st.rerun()
-        else:
-            st.success("🟢 Kill switch armed (not engaged)")
-            if st.button("Engage kill switch", key="annunciator_engage_ks"):
-                ks.engage("dashboard")
-                st.rerun()
+        # Same scoping trick for the kill-switch alert: outline-by-default /
+        # filled-only-when-engaged badge styling (DESIGN.md "Annunciator
+        # Badges") is scoped to just this container, so it never bleeds into
+        # the st.error/st.success/st.warning calls elsewhere in the app
+        # (e.g. System Health, which this PR does not touch).
+        with st.container(key="annunciator_ks_badge"):
+            if ks.is_engaged():
+                st.error(f"🔴 KILL SWITCH ENGAGED — {ks.reason()}")
+                if st.button("Release kill switch", key="annunciator_release_ks"):
+                    ks.release()
+                    st.rerun()
+            else:
+                st.success("🟢 Kill switch armed (not engaged)")
+                if st.button("Engage kill switch", key="annunciator_engage_ks"):
+                    ks.engage("dashboard")
+                    st.rerun()
     st.markdown(
         f"**{AUTONOMY_LEVEL_LABEL}**  ·  Heartbeat: **{hb_label}**  ·  "
         f"Open R ({len(positions_health)} pos): **{r_label}**  ·  "
@@ -261,7 +280,7 @@ def tab_tonight(orch: Orchestrator) -> None:
     else:
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**② Needs you**")
+            st.markdown(console_theme.render_section_label("② Needs you"), unsafe_allow_html=True)
             for p in ny["pending_approvals"]:
                 remaining = _format_seconds_remaining(p.get("seconds_remaining"))
                 st.write(f"- {p.get('symbol')} proposal — TTL {remaining} (see Approval Center)")
@@ -274,7 +293,7 @@ def tab_tonight(orch: Orchestrator) -> None:
             if not (ny["pending_approvals"] or ny["open_incidents"] or ny["fused_jobs"] or exit_review):
                 st.write("(nothing here)")
         with c2:
-            st.markdown("**③ Open risk now**")
+            st.markdown(console_theme.render_section_label("③ Open risk now"), unsafe_allow_html=True)
             r_values = [p["current_r"] for p in ph if p.get("current_r") is not None]
             if ph:
                 r_label = f"{round(sum(r_values), 2):+.2f}R total" if r_values else "R n/a"
@@ -288,14 +307,14 @@ def tab_tonight(orch: Orchestrator) -> None:
 
     st.divider()
     ta = brief["todays_activity"]
-    st.markdown("**④ Today's machine activity**")
+    st.markdown(console_theme.render_section_label("④ Today's machine activity"), unsafe_allow_html=True)
     st.write(
         f"Candidates: {ta['candidates_today']} · Proposed: {ta['proposed_today']} · "
         f"Blocked: {ta['blocked_today']} · Rejected: {ta['rejected_today']}"
     )
 
     st.divider()
-    st.markdown("**⑤ Tonight's brief**")
+    st.markdown(console_theme.render_section_label("⑤ Tonight's brief"), unsafe_allow_html=True)
     mc = brief["market_condition"]
     if mc.get("excess_return_pct") is not None:
         st.write(
@@ -325,7 +344,7 @@ def tab_tonight(orch: Orchestrator) -> None:
     st.caption(f"⚠️ {wl['caveat']}")
 
     st.divider()
-    st.markdown("**⑥ Moonshot gap (10% MoM target)**")
+    st.markdown(console_theme.render_section_label("⑥ Moonshot gap (10% MoM target)"), unsafe_allow_html=True)
     mg = brief["moonshot_gap"]
     if mg["status"] == "ok":
         st.write(
@@ -346,10 +365,18 @@ _VERDICT_ICON = {VERDICT_HOLD: "🟢", VERDICT_ATTENTION: "🟡", VERDICT_EXIT_R
 
 
 def tab_positions_health(positions_health: list[dict]) -> None:
-    """UI-PR-A item 3: per-open-position health cards with a text/emoji
-    R-ladder (UI/UX doc §8 wireframe / §12 item 3 -- no charting library
-    needed in v1). EXIT_REVIEW is a human decision flag ONLY: AlphaOS never
-    auto-exits on a health verdict (position_health.py's own invariant)."""
+    """UI-PR-A item 3 / PR-UI-B1: per-open-position health cards with an
+    HTML/CSS R-ladder (UI/UX doc §8 wireframe / §12 item 3 -- still no
+    charting library, console_theme.render_r_ladder() is text/HTML/CSS only).
+    EXIT_REVIEW is a human decision flag ONLY: AlphaOS never auto-exits on a
+    health verdict (position_health.py's own invariant).
+
+    PR-UI-B1 note: the ladder's stop_r/target_r are derived here from the
+    SAME two numbers already shown today (distance_to_stop_r,
+    distance_to_target_r) -- current_r minus/plus the distance -- not from
+    any new query or computation. When either distance is unavailable, this
+    falls back to the exact plain-text line PR-UI-A already rendered, so no
+    information that used to be visible is ever lost, only re-presented."""
     st.subheader("Positions")
     st.caption(
         "Per-open-position thesis validity, reusing position_manager's R math. "
@@ -362,13 +389,41 @@ def tab_positions_health(positions_health: list[dict]) -> None:
 
     for p in positions_health:
         icon = _VERDICT_ICON.get(p["verdict"], "⚪")
-        with st.container(border=True):
+        # PR-UI-B1: `key=` is ONLY here so console_theme.CONSOLE_CSS can give
+        # this specific bordered container the ported #27272a module-border
+        # color via its documented `st-key-<key>` CSS class -- verified
+        # against the running app that Streamlit's own border=True styling
+        # has no distinct data-testid/inline-style hook to target otherwise
+        # (bordered and unbordered st.container()s share the same
+        # data-testid="stVerticalBlock"). Same border=True call, same cards,
+        # same data -- position_id keeps the key unique per card.
+        with st.container(border=True, key=f"poscard_{p['position_id']}"):
             st.markdown(f"**{icon} {p['symbol']}** · {p['direction']} · verdict: **{p['verdict']}**")
             if p["current_r"] is not None:
-                st.write(
-                    f"`stop` ── now **{p['current_r']:+.2f}R** ── `entry` ── `target`   "
-                    f"(distance to stop: {p['distance_to_stop_r']}, to target: {p['distance_to_target_r']})"
+                stop_r = (
+                    p["current_r"] - p["distance_to_stop_r"]
+                    if p["distance_to_stop_r"] is not None else None
                 )
+                target_r = (
+                    p["current_r"] + p["distance_to_target_r"]
+                    if p["distance_to_target_r"] is not None else None
+                )
+                if stop_r is not None and target_r is not None:
+                    st.markdown(
+                        console_theme.render_r_ladder(
+                            stop_r=stop_r, entry_r=0.0, current_r=p["current_r"], target_r=target_r,
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(
+                        f"distance to stop: {p['distance_to_stop_r']}R · "
+                        f"to target: {p['distance_to_target_r']}R"
+                    )
+                else:
+                    st.write(
+                        f"now **{p['current_r']:+.2f}R** "
+                        f"(distance to stop: {p['distance_to_stop_r']}, to target: {p['distance_to_target_r']})"
+                    )
             else:
                 st.write("R: unavailable (no live price, or a degenerate risk basis)")
             st.write(f"thesis: **{p['thesis_status']}**")
@@ -433,6 +488,20 @@ def tab_approval_center(orch: Orchestrator) -> None:
             f"{v['symbol']} · {v['side']} · qty {v['qty']} · R:R {v['reward_risk']} · "
             f"expires in {_format_seconds_remaining(v['proposal_seconds_remaining'])} · {pid}{stale_flag}"
         ):
+            # PR-UI-B1: the same TTL already named in the expander title
+            # above, re-presented as a bar -- seconds_remaining/
+            # proposal_ttl_seconds are the identical fields the dataframe
+            # column and the title's "expires in ..." text already use;
+            # `label` is that same _format_seconds_remaining() text, so the
+            # words shown are byte-identical, only their layout changes.
+            st.markdown(
+                console_theme.render_ttl_bar(
+                    seconds_remaining=v["proposal_seconds_remaining"],
+                    total_ttl_seconds=v["proposal_ttl_seconds"],
+                    label=_format_seconds_remaining(v["proposal_seconds_remaining"]),
+                ),
+                unsafe_allow_html=True,
+            )
             if v["proposal_is_stale"]:
                 st.warning(
                     "This proposal's TTL has expired — approval will be rejected. "
@@ -765,7 +834,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
             for c in cands
         ]
 
-    st.markdown("#### Catalyst enrichment summary")
+    st.markdown(console_theme.render_section_label("Catalyst enrichment summary"), unsafe_allow_html=True)
     st.caption("Official catalyst context (Roadmap 2.4) — advisory only; never bypasses gates or approval.")
     cs = j.catalyst_summary()
     cc1, cc2 = st.columns(2)
@@ -798,7 +867,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("None.")
 
-    st.markdown("#### last30days research summary")
+    st.markdown(console_theme.render_section_label("last30days research summary"), unsafe_allow_html=True)
     st.caption(
         "Recent community narrative (Roadmap 2.5) — SEPARATE keyless social/research "
         "layer; advisory CONTEXT only, never bypasses gates/approval and never executes. "
@@ -838,7 +907,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("None.")
 
-    st.markdown("#### last30days narrative polarity")
+    st.markdown(console_theme.render_section_label("last30days narrative polarity"), unsafe_allow_html=True)
     st.caption(
         "LLM-derived polarity over live last30days clusters (Roadmap 2.7) — advisory "
         "CONTEXT. Aligned, high-confidence polarity can ARM an override upgrade; it "
@@ -873,7 +942,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("None.")
 
-    st.markdown("#### Decision adjustments (label vs eval)")
+    st.markdown(console_theme.render_section_label("Decision adjustments (label vs eval)"), unsafe_allow_html=True)
     st.caption(
         "How the advisory AI label moved the no-news eval's call (Roadmap 2.6). "
         "Default is downgrade-only; symmetric up/down moves happen ONLY when armed "
@@ -903,7 +972,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("None.")
 
-    st.markdown("#### Armed Watch / Near Action")
+    st.markdown(console_theme.render_section_label("Armed Watch / Near Action"), unsafe_allow_html=True)
     st.caption(
         "Override armed a real driver but the decision stayed WATCH (no proposal) — "
         "near-action watchlist items (Roadmap 2.8). NOT rejects. Manual-only via "
@@ -925,7 +994,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
     else:
         st.info("No armed-watch / near-action candidates.")
 
-    st.markdown("#### User overrides")
+    st.markdown(console_theme.render_section_label("User overrides"), unsafe_allow_html=True)
     st.caption(
         "Manual user overrides of AlphaOS recommendations (Roadmap 2.8) — a SEPARATE "
         "decision layer; AlphaOS's original call is preserved. Safety-gated; never "
@@ -956,7 +1025,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
     else:
         st.info("No user overrides yet.")
 
-    st.markdown("#### Labels summary")
+    st.markdown(console_theme.render_section_label("Labels summary"), unsafe_allow_html=True)
     ls = j.label_summary()
     c1, c2 = st.columns(2)
     with c1:
@@ -972,7 +1041,7 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
         else:
             st.info("No labels yet.")
 
-    st.markdown("#### Proposed candidates")
+    st.markdown(console_theme.render_section_label("Proposed candidates"), unsafe_allow_html=True)
     prop = j.proposed_candidates(100)
     if prop:
         st.dataframe(_rows(prop), width="stretch")
@@ -1043,6 +1112,10 @@ def main(orch: Orchestrator | None = None) -> None:
         # fail-closed regardless of Streamlit internals -- nothing below may
         # ever run for a non-loopback connection.
         return
+    # PR-UI-B1: console theme (styling only -- see console_theme.py's module
+    # docstring). One CSS injection, after the loopback gate so the refusal
+    # path above stays exactly as minimal as it was before this PR.
+    st.markdown(console_theme.CONSOLE_CSS, unsafe_allow_html=True)
     orch = orch or get_orchestrator()
     # IMPORTANT: do NOT call orch.startup() here. startup() WRITES (a config
     # snapshot + one system_event per check); calling it on render made the
