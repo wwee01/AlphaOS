@@ -132,7 +132,7 @@ def _promotion_demotion_entries(journal, limit: int) -> list[dict]:
     from alphaos.cards.scoreboard import demoted_cards, promotion_history
 
     out = []
-    for p in promotion_history(journal)[:limit]:
+    for p in promotion_history(journal, limit=limit):
         out.append({
             "kind": "promotion_demotion",
             "timestamp": p.get("decided_at_utc"),

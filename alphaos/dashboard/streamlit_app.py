@@ -1116,8 +1116,19 @@ def _hypothesis_progress_label(progress: "Optional[dict]") -> str:
     en, floor_en = progress["effective_n"], progress["floor_effective_n"]
     span = progress.get("span_days")
     floor_span = progress["floor_span_days"]
-    span_str = f"{span:.0f}" if span is not None else "0"
-    ready = "✓ clears floor" if progress["clears_floor"] else "below floor"
+    # Audit fixup (NIT): a missing span is UNKNOWN, never rendered as "0" --
+    # unknown-never-zero, same posture as everywhere else numbers can be
+    # missing.
+    span_str = f"{span:.0f}" if span is not None else "n/a"
+    if progress.get("resolver_ready"):
+        ready = "✓ resolver-ready"
+    elif progress["clears_floor"]:
+        # Audit fixup (LOW-1): data floor cleared but the pre-registered
+        # analysis_not_before date hasn't arrived -- the resolver will NOT
+        # act yet; say so instead of implying readiness.
+        ready = "✓ data floor met · awaiting analysis date"
+    else:
+        ready = "below floor"
     return f"n={en}/{floor_en} · span={span_str}/{floor_span:.0f}d · {ready}"
 
 

@@ -59,6 +59,11 @@ def _progress_for_row(journal, row: dict) -> Optional[dict]:
     if prereg is None:
         return None
 
+    # PERF NOTE (audit MEDIUM-1, accepted for now): each testing hypothesis
+    # runs its full metric query + effective_n() per report build (~7 scans
+    # per Learning-panel render at today's table sizes -- milliseconds).
+    # Revisit with a cache/row-cap when EXP-1 multiplies data volume; a
+    # premature cache here would be a second source of truth to keep honest.
     rows, _value_key, reference_arm_rows = metric_fn(journal)
     en = effective_n(rows)
     clears_floor = (
@@ -71,12 +76,24 @@ def _progress_for_row(journal, row: dict) -> Optional[dict]:
             ref_en["effective_n"] >= prereg["floor_effective_n"]
             and (ref_en["span_days"] or 0) >= prereg["floor_span_days"]
         )
+    # Audit fixup (LOW-1): clears_floor alone could read as "resolver will
+    # act on its next pass" -- but the resolver ALSO enforces the
+    # analysis_not_before calendar floor, which this progress view
+    # deliberately ignores (it answers "how far along", not "due"). Surface
+    # the calendar state explicitly so the tab can never imply readiness
+    # before the pre-registered date.
+    from alphaos.util import timeutils
+
+    anb = row.get("analysis_not_before") or ""
+    calendar_floor_reached = bool(anb) and timeutils.stamp().local_sgt[:10] >= str(anb)
     return {
         "effective_n": en["effective_n"],
         "floor_effective_n": prereg["floor_effective_n"],
         "span_days": en["span_days"],
         "floor_span_days": prereg["floor_span_days"],
         "clears_floor": clears_floor,
+        "calendar_floor_reached": calendar_floor_reached,
+        "resolver_ready": clears_floor and calendar_floor_reached,
     }
 
 
