@@ -149,5 +149,15 @@ def test_console_css_is_a_style_block_and_references_ported_tokens():
     assert "<style>" in console_theme.CONSOLE_CSS
     assert "</style>" in console_theme.CONSOLE_CSS
     assert "#27272a" in console_theme.CONSOLE_CSS  # ported module-border token
-    assert "JetBrains Mono" in console_theme.CONSOLE_CSS
-    assert "Inter" in console_theme.CONSOLE_CSS
+    assert "ui-monospace" in console_theme.CONSOLE_CSS
+    assert "system-ui" in console_theme.CONSOLE_CSS
+
+
+def test_console_css_makes_no_external_font_cdn_call():
+    """Audit-fixup 2026-07-11 (correctness + scope/safety, both LOW): an
+    earlier version imported JetBrains Mono/Inter from fonts.googleapis.com
+    -- the dashboard's own first-ever browser-side external call, on a
+    loopback-only app that may not have internet. System font stacks only,
+    now and going forward."""
+    assert "fonts.googleapis.com" not in console_theme.CONSOLE_CSS
+    assert "@import" not in console_theme.CONSOLE_CSS

@@ -197,6 +197,26 @@ The shape language is **Precision-Engineered**.
   affordance is a mockup interaction flourish, not adopted — changing the
   kill switch's interaction model is explicitly out of scope for a
   styling-only PR.
+- **Audit-fixup 2026-07-11 (correctness + scope/safety, both LOW): the
+  Colors/Typography prose above is the generator's own generic style-guide
+  language, not a description of AlphaOS.** "executing a high-slippage
+  trade" (Amber) and "margin incidents" (Red) describe capabilities AlphaOS
+  does not have — this system is paper-only, has no margin trading, and
+  `_AMBER`/`_RED` are used exclusively for the TTL-bar "low" state and
+  kill-switch-engaged/TTL-expired respectively (see
+  `alphaos/dashboard/console_theme.py`), never for a trade-execution or
+  margin concept. Left the ported text verbatim (per this file's own
+  "ported verbatim" purpose above) rather than editing the source quote;
+  recording here instead so the mismatch can't seed future confusion about
+  what these two colors actually gate in this codebase.
+- **No Google Fonts import.** The Typography section names JetBrains Mono
+  and Inter; PR-UI-B1 initially imported both from `fonts.googleapis.com`
+  with system fonts as a fallback, then dropped the import entirely
+  (audit-fixup 2026-07-11, correctness + scope/safety, both LOW) — a
+  webfont fetch would have been this loopback-only dashboard's first-ever
+  browser-side external call. `console_theme.py`'s `_MONO_STACK`/
+  `_SANS_STACK` are system-font-only; no code in this repo references
+  JetBrains Mono or Inter.
 - **No dim-placeholder "888,888.88" LCD texture.** Decorative and not
   requested by the governing brief's concrete technical approach; skipped
   to keep the change minimal and avoid a purely-cosmetic addition with no

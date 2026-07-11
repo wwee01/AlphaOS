@@ -21,11 +21,19 @@ Three things live here:
 
 1. ``CONSOLE_CSS`` — one CSS block, injected once via
    ``st.markdown(CONSOLE_CSS, unsafe_allow_html=True)`` near the top of
-   ``main()``. Google Fonts import for JetBrains Mono (data/numerals) and
-   Inter (labels/UI) WITH system fallbacks first in each font stack, so a
-   blocked/offline font fetch (this app is loopback-only and may not always
-   have internet — see streamlit_app.py's module docstring) degrades to a
-   perfectly legible system font rather than breaking anything.
+   ``main()``. System-only font stacks (no Google Fonts/any external CDN
+   import) for data/numerals and labels/UI — this app is loopback-only and
+   may not always have internet (see streamlit_app.py's module docstring),
+   and a webfont fetch would also be the dashboard's own first-ever
+   browser-side call to an external host (the backend already talks to
+   Alpaca/SEC/etc., but the operator's BROWSER never has, until now).
+   Audit-fixup 2026-07-11: an earlier version imported JetBrains Mono/Inter
+   from fonts.googleapis.com with these same system stacks as a fallback;
+   dropped the import rather than keep an egress that only ever existed to
+   be degraded away, on a console whose whole point is a calm, minimal-
+   dependency operating surface. System stacks alone (ui-monospace/SF Mono/
+   Menlo for data, -apple-system/Segoe UI/system-ui for labels) already
+   render cleanly on every real platform this app runs on.
 
 2. Two small, PURE, read-only HTML-rendering helpers for the two components
    Streamlit cannot render natively as widgets: ``render_r_ladder`` (a
@@ -73,20 +81,16 @@ _PRIMARY = "#4cd7f6"  # cyan -- interactive / "in progress" only, never decorati
 _AMBER = "#ffb873"  # attention -- reserved for states that need eyes on them
 _RED = "#ef4444"  # critical -- kill switch / expired / incident only
 
-_MONO_STACK = (
-    "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
-)
-_SANS_STACK = (
-    "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
-)
+_MONO_STACK = "ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+_SANS_STACK = "-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif"
 
 CONSOLE_CSS = f"""
 <style>
-/* PR-UI-B1 console theme. Google Fonts import -- system fallbacks are listed
-   FIRST in every font-family stack below, so if this fetch fails (offline /
-   loopback-only host), text still renders in a legible system font; nothing
-   depends on this import succeeding. */
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;600;700&display=swap');
+/* PR-UI-B1 console theme. System-only font stacks -- no external font CDN
+   import (audit-fixup 2026-07-11: an earlier version imported JetBrains
+   Mono/Inter from Google Fonts; dropped so this loopback-only, may-not-
+   have-internet app's browser side makes zero external calls, same as it
+   always has). */
 
 /* ---- base numerals: st.metric values go monospaced/tabular ---- */
 [data-testid="stMetricValue"] {{
