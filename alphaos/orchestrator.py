@@ -1415,6 +1415,17 @@ class Orchestrator:
 
         return build_journal_feed(self.journal, limit=limit)
 
+    def governance_report(self, *, autonomy_level_label: str) -> dict:
+        """PR-UI-B3: the Autonomy & Risk tab's full read-only dict (autonomy
+        may/may-not panel + unattended exception, kill-switch explanation,
+        hard limits, real-money lock, trading calendar). PURE READ. See
+        alphaos/reports/governance_report.py."""
+        from alphaos.reports.governance_report import build_governance_report
+
+        return build_governance_report(
+            self.journal, self.settings, self.kill_switch, autonomy_level_label=autonomy_level_label
+        )
+
     def autonomy_readiness_report(self) -> dict:
         """PR13 slice 2: every card-gating hypothesis's promotion precondition
         checklist. PURE READ. See alphaos/reports/autonomy_readiness.py."""

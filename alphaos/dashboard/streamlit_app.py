@@ -12,6 +12,10 @@ Tabs:
   read-only sub-panels over PR7/PR8/PR12/HGEN-1/PR13 report data. Pure read;
   the operator-only MET/FAILED/WITHDRAWN ruling and hypothesis_accept/
   hypothesis_reject stay CLI-only actions (never a UI button here).
+* Autonomy & Risk (PR-UI-B3) — the governance console: generated may/may-not
+  panel + unattended-window exception, kill-switch explanation (control
+  stays in the annunciator only), read-only hard limits, real-money lock,
+  trading calendar. Pure read; see alphaos/reports/governance_report.py.
 * Open Trades / Closed Trades
 * System Health — mode, broker status, data freshness, kill switch.
 
@@ -1328,6 +1332,119 @@ def tab_learning(orch: Orchestrator) -> None:
                     st.caption(prov)
 
 
+def tab_governance(orch: Orchestrator) -> None:
+    """PR-UI-B3: Autonomy & Risk -- the governance console (UI/UX doc §10),
+    "deliberately the most physical-feeling screen". PURE READ, zero writes,
+    zero new mutating widgets. The only kill-switch CONTROL stays in the
+    annunciator strip (render_annunciator, above every tab) -- this tab only
+    EXPLAINS the same state, never a second control surface for it.
+
+    Every string below comes from orch.governance_report() (PR-UI-B3's
+    build_governance_report()) -- this function only renders that dict, it
+    never queries the journal or reads a settings field directly. See that
+    module's docstring for the binding content rulings (generated-not-hand-
+    written may/may-not panel, no fake L2 criteria, no liquidation language,
+    no drawdown governor, no LIVE badge, no unlock affordance)."""
+    st.subheader("Autonomy & Risk")
+    st.caption(
+        "The governance console — what AlphaOS may and may not do alone, "
+        "current safety-switch state, and every hard limit it runs under. "
+        "Read-only: the only kill-switch CONTROL lives in the strip above."
+    )
+    rep = orch.governance_report(autonomy_level_label=AUTONOMY_LEVEL_LABEL)
+
+    col_autonomy, col_limits = st.columns(2)
+    with col_autonomy:
+        with st.container(border=True):
+            st.markdown(console_theme.render_section_label("Autonomy"), unsafe_allow_html=True)
+            auto = rep["autonomy"]
+            st.markdown(f"**Level: {auto['level_label']}**")
+            st.write(auto["may_alone"])
+            st.write(auto["may_not_alone"])
+            exc = auto["unattended_exception"]
+            if exc:
+                st.info(exc["text"])
+            else:
+                st.caption(
+                    "No unattended close-window exception armed "
+                    "(UNATTENDED_APPROVE_WINDOWS unset or its daily cap is 0)."
+                )
+            st.caption(f"L2: {auto['l2_status']}")
+
+    with col_limits:
+        with st.container(border=True):
+            st.markdown(console_theme.render_section_label("Hard limits (read-only)"), unsafe_allow_html=True)
+            hl = rep["hard_limits"]
+            # Literal "$" is escaped as "\$" throughout this panel -- Streamlit's
+            # markdown renderer treats a bare "$...$" pair as inline LaTeX math
+            # (confirmed via live preview: an unescaped "Min $ volume: **$2,000,000**"
+            # silently swallowed the dollar figure), and this panel is the first
+            # place in the app to put a literal dollar amount inside st.write()
+            # text (existing tabs speak in R-multiples or use st.metric, which
+            # doesn't parse markdown).
+            st.write(
+                f"Risk/trade: **{hl['risk_per_trade_pct'] * 100:.2f}%** "
+                f"(\\${hl['risk_per_trade_dollars']:,.2f})"
+            )
+            st.write(f"Max open positions: **{hl['max_open_positions']}**")
+            st.write(
+                f"Daily-loss stop: **{hl['daily_loss_stop_pct'] * 100:.2f}%** "
+                f"(\\${hl['daily_loss_stop_dollars']:,.2f})"
+            )
+            st.write(f"Auto-approvals: **{hl['auto_approvals_used_today']}/{hl['auto_approvals_cap']}** today")
+            st.write(
+                f"Unattended approvals: **{hl['unattended_approvals_used_today']}/"
+                f"{hl['unattended_approvals_cap']}** today · window(s): {hl['unattended_windows_label']}"
+            )
+            st.write(
+                f"Max spread: **{hl['max_spread_pct'] * 100:.2f}%** · "
+                f"Min \\$ volume: **\\${hl['min_dollar_volume']:,.0f}**"
+            )
+            st.write(f"AI budget (30d, all real calls): **{hl['ai_budget_used_30d']}/{hl['ai_budget_cap_30d']}**")
+            st.write(f"Bear-debate calls: **{hl['debate_calls_used_today']}/{hl['debate_calls_cap_today']}** today")
+            st.write(
+                f"Hypothesis-gen calls: **{hl['hypothesis_gen_calls_used_today']}/"
+                f"{hl['hypothesis_gen_calls_cap_today']}** today"
+            )
+            st.write(
+                f"Max paper trades/day: **{hl['max_paper_trades_per_day_display']}** "
+                f"(used {hl['paper_trades_used_today']} today)"
+            )
+            st.caption(hl["changes_note"])
+
+    col_ks, col_lock = st.columns(2)
+    with col_ks:
+        with st.container(border=True):
+            st.markdown(console_theme.render_section_label("Kill switch"), unsafe_allow_html=True)
+            ks = rep["kill_switch"]
+            if ks["engaged"]:
+                st.error(f"● {ks['state_label']} — {ks['reason']}")
+            else:
+                st.success(f"● {ks['state_label']}")
+            st.write(ks["explanation"])
+            st.caption(ks["control_note"])
+
+    with col_lock:
+        with st.container(border=True):
+            st.markdown(console_theme.render_section_label("Real-money lock"), unsafe_allow_html=True)
+            lock = rep["real_money_lock"]
+            st.write(f"🔒 {lock['structural_statement']}")
+            st.write(
+                f"`REAL_TRADING_ENABLED={lock['real_trading_enabled_raw']}` · "
+                f"`ALLOW_REAL_ORDERS={lock['allow_real_orders_raw']}` · mode=`{lock['mode']}`"
+            )
+            st.caption(lock["no_unlock_note"])
+
+    with st.container(border=True):
+        st.markdown(console_theme.render_section_label("Trading calendar"), unsafe_allow_html=True)
+        cal = rep["trading_calendar"]
+        day_state = "a trading day" if cal["is_trading_day"] else "MARKET CLOSED"
+        st.caption(
+            f"Today ({cal['today_et']} ET): {day_state} · scan windows: {cal['scan_windows_label']} · "
+            f"{cal['note']}"
+        )
+
+
 def main(orch: Orchestrator | None = None) -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
     if not _is_loopback_request():
@@ -1380,8 +1497,8 @@ def main(orch: Orchestrator | None = None) -> None:
     tabs = st.tabs(
         [
             "Tonight", "Positions", "Approval Center", "Candidates / Proposals",
-            "Candidate Flow", "Learning", "Open Trades", "Closed Trades", "System Health",
-            "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
+            "Candidate Flow", "Learning", "Autonomy & Risk", "Open Trades", "Closed Trades",
+            "System Health", "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
         ]
     )
     with tabs[0]:
@@ -1397,18 +1514,20 @@ def main(orch: Orchestrator | None = None) -> None:
     with tabs[5]:
         tab_learning(orch)
     with tabs[6]:
-        tab_open_trades(orch)
+        tab_governance(orch)
     with tabs[7]:
-        tab_closed_trades(orch)
+        tab_open_trades(orch)
     with tabs[8]:
-        tab_system_health(orch)
+        tab_closed_trades(orch)
     with tabs[9]:
-        tab_trade_packet(orch)
+        tab_system_health(orch)
     with tabs[10]:
-        tab_scan_batches(orch)
+        tab_trade_packet(orch)
     with tabs[11]:
-        tab_scheduler_runs(orch)
+        tab_scan_batches(orch)
     with tabs[12]:
+        tab_scheduler_runs(orch)
+    with tabs[13]:
         tab_system_events(orch)
 
 
