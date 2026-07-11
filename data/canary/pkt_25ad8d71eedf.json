@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_3b37d46d39d9",
+  "catalyst_age_minutes": 403.3,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Leading And Lagging Sectors For July 8, 2026",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0178,
+  "direction": "short",
+  "dollar_volume": 157167841.75,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": -0.0046,
+  "interest_rank": 4,
+  "interest_score": 0.3519,
+  "last30days_context": "unavailable",
+  "last_price": 55.045,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.343,
+  "near_day_high": false,
+  "near_day_low": true,
+  "official_news_context": "company news: Leading And Lagging Sectors For July 8, 2026",
+  "packet_id": "pkt_25ad8d71eedf",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Sector Sympathy Move",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-08T19:54:02.306843+00:00"
+  },
+  "rel_strength_vs_qqq": -0.0186,
+  "rel_strength_vs_spy": -0.0139,
+  "rel_volume": 1.573,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "reversal / dip off the low",
+  "shortlist_reason": "reversal: near day low, rel-vol 1.6x",
+  "spread_pct": 0.000182,
+  "structure_hint": "reversal",
+  "symbol": "XLF",
+  "tradeable_volatility": false
+}

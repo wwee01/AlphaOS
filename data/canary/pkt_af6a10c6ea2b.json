@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_f89da218a178",
+  "catalyst_age_minutes": 171.4,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Leading And Lagging Sectors For July 6, 2026",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0253,
+  "direction": "long",
+  "dollar_volume": 30467148.75,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0095,
+  "interest_rank": 3,
+  "interest_score": 0.3818,
+  "last30days_context": "unavailable",
+  "last_price": 185.07,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.224,
+  "near_day_high": true,
+  "near_day_low": false,
+  "official_news_context": "company news: Leading And Lagging Sectors For July 6, 2026",
+  "packet_id": "pkt_af6a10c6ea2b",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Sector Sympathy Move",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T16:02:08.346327+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0071,
+  "rel_strength_vs_spy": 0.0174,
+  "rel_volume": 0.255,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: near day high, move 2.5%",
+  "spread_pct": 0.000108,
+  "structure_hint": "trend",
+  "symbol": "XLK",
+  "tradeable_volatility": false
+}

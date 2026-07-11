@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_6fbda321ae64",
+  "catalyst_age_minutes": 2871.9,
+  "catalyst_confidence": 0.5,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "possible",
+  "catalyst_summary": "company news: Oil Stocks Rally, S&P 500 Plunges As Iran Ceasefire Sinks: Stock Market Today",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0067,
+  "direction": "short",
+  "dollar_volume": 168207410.69,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0019,
+  "interest_rank": 5,
+  "interest_score": 0.1289,
+  "last30days_context": "3 themes across jobs (3 items): Iwm Jobs, Employment | Indeed; Vacancies - IWM; $iwm Jobs, Employment | Indeed",
+  "last_price": 295.21,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.268,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: Oil Stocks Rally, S&P 500 Plunges As Iran Ceasefire Sinks: Stock Market Today",
+  "packet_id": "pkt_1eeb01e36b6d",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Sector Sympathy Move",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-10T16:04:41.668057+00:00"
+  },
+  "rel_strength_vs_qqq": -0.0077,
+  "rel_strength_vs_spy": -0.0088,
+  "rel_volume": 1.632,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "range / no clear setup",
+  "shortlist_reason": "range: rel-vol 1.6x",
+  "spread_pct": 0.000102,
+  "structure_hint": "range",
+  "symbol": "IWM",
+  "tradeable_volatility": false
+}

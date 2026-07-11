@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_723388196248",
+  "catalyst_age_minutes": 14.3,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Nvidia-Backed Starcloud's CEO Says SpaceX IPO Could Be \u2018Most Undervalued IPO of All Time\u2019 and Tear Through $10 Trillion",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0113,
+  "direction": "short",
+  "dollar_volume": 19841121.72,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": -0.014,
+  "interest_rank": 5,
+  "interest_score": 0.3624,
+  "last30days_context": "4 themes across jobs,reddit (4 items): MSFT and AMZN both look cheap. Only one of them actually is.; 800,000 Jobs available - Urgent: looking for Candidates; Amazon Careers: Impact the Future, Today; Amazon Careers: Impact the Future, Today",
+  "last_price": 240.84,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.31,
+  "near_day_high": true,
+  "near_day_low": false,
+  "official_news_context": "company news: Nvidia-Backed Starcloud's CEO Says SpaceX IPO Could Be \u2018Most Undervalued IPO of All Time\u2019 and Tear Through $10 Trillion",
+  "packet_id": "pkt_ab841c53a1f3",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-09T13:41:02.066242+00:00"
+  },
+  "rel_strength_vs_qqq": -0.0244,
+  "rel_strength_vs_spy": -0.0151,
+  "rel_volume": 1.687,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "reversal / dip off the low",
+  "shortlist_reason": "reversal: near day high, rel-vol 1.7x",
+  "spread_pct": 0.000664,
+  "structure_hint": "reversal",
+  "symbol": "AMZN",
+  "tradeable_volatility": false
+}

@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_e4828faa4523",
+  "catalyst_age_minutes": 491.4,
+  "catalyst_confidence": 0.5,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "possible",
+  "catalyst_summary": "company news: Netflix, Alphabet, Nike And A Consumer Defensive Stock On CNBC\u2019s \u2018Final Trades\u2019",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0211,
+  "direction": "short",
+  "dollar_volume": 156205786.94,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": -0.0066,
+  "interest_rank": 4,
+  "interest_score": 0.5105,
+  "last30days_context": "2 themes across jobs,reddit (4 items): NFLX or PSKY? Which stock is overvalued?; 63 Nflx Career jobs in United States (2 new) - LinkedIn",
+  "last_price": 75.955,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.234,
+  "near_day_high": false,
+  "near_day_low": true,
+  "official_news_context": "company news: Netflix, Alphabet, Nike And A Consumer Defensive Stock On CNBC\u2019s \u2018Final Trades\u2019",
+  "packet_id": "pkt_7948511988dc",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Other/Unclassified",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:53:05.194332+00:00"
+  },
+  "rel_strength_vs_qqq": -0.038,
+  "rel_strength_vs_spy": -0.0307,
+  "rel_volume": 0.57,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "reversal / dip off the low",
+  "shortlist_reason": "reversal: near day low, move -2.1%, rel-strength vs SPY -3.1%",
+  "spread_pct": 0.000132,
+  "structure_hint": "reversal",
+  "symbol": "NFLX",
+  "tradeable_volatility": true
+}

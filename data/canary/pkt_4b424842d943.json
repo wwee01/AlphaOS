@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_b619d1803ef1",
+  "catalyst_age_minutes": 149.5,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Chip Rout Drags Nasdaq 100 Lower, Oil Climbs: Stock Market Today",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0308,
+  "direction": "long",
+  "dollar_volume": 140616518.06,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0087,
+  "interest_rank": 3,
+  "interest_score": 0.6018,
+  "last30days_context": "unavailable",
+  "last_price": 54.795,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.446,
+  "near_day_high": true,
+  "near_day_low": false,
+  "official_news_context": "company news: Chip Rout Drags Nasdaq 100 Lower, Oil Climbs: Stock Market Today",
+  "packet_id": "pkt_4b424842d943",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Breakout",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-07T19:50:47.054723+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0518,
+  "rel_strength_vs_spy": 0.0368,
+  "rel_volume": 1.612,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "breakout continuation",
+  "shortlist_reason": "breakout: near day high, rel-vol 1.6x, move 3.1%, rel-strength vs SPY 3.7%",
+  "spread_pct": 0.000182,
+  "structure_hint": "breakout",
+  "symbol": "XLE",
+  "tradeable_volatility": true
+}

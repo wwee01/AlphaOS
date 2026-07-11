@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_e37fe6364235",
+  "catalyst_age_minutes": 101.1,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Why Is Caterpillar Stock Gaining Thursday?",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0005,
+  "direction": "short",
+  "dollar_volume": 2752428.86,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0011,
+  "interest_rank": 7,
+  "interest_score": 0.3285,
+  "last30days_context": "unavailable",
+  "last_price": 522.58,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.35,
+  "near_day_high": true,
+  "near_day_low": true,
+  "official_news_context": "company news: Why Is Caterpillar Stock Gaining Thursday?",
+  "packet_id": "pkt_c089156ab4e0",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Other/Unclassified",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-09T13:39:18.192427+00:00"
+  },
+  "rel_strength_vs_qqq": -0.0136,
+  "rel_strength_vs_spy": -0.0043,
+  "rel_volume": 2.599,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "reversal / dip off the low",
+  "shortlist_reason": "reversal: near day high, near day low, rel-vol 2.6x",
+  "spread_pct": 0.00023,
+  "structure_hint": "reversal",
+  "symbol": "DIA",
+  "tradeable_volatility": false
+}

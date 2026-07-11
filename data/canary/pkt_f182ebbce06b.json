@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_81d8ab20668b",
+  "catalyst_age_minutes": 109.3,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: 'U.S. Supreme Court Declines To Block Texas Law Requiring Age Verification And Parental Consent To Download Apps' - Reuters News",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0352,
+  "direction": "long",
+  "dollar_volume": 337821206.5,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0193,
+  "interest_rank": 6,
+  "interest_score": 0.4277,
+  "last30days_context": "8 themes across hackernews,reddit (8 items): Meta Is Building a Cloud Business to Sell Excess AI Compute; Meta building cloud business to sell excess AI capacity; Meta's stock sinks on report company could raise tens of billions of dollars to fund AI push; Meta Pauses Employee-Tr",
+  "last_price": 603.25,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.375,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: 'U.S. Supreme Court Declines To Block Texas Law Requiring Age Verification And Parental Consent To Download Apps' - Reuters News",
+  "packet_id": "pkt_f182ebbce06b",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:52:11.516022+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0183,
+  "rel_strength_vs_spy": 0.0256,
+  "rel_volume": 0.83,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: move 3.5%, rel-strength vs SPY 2.6%",
+  "spread_pct": 0.001127,
+  "structure_hint": "trend",
+  "symbol": "META",
+  "tradeable_volatility": true
+}

@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_b87b7f1310dd",
+  "catalyst_age_minutes": 33.3,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Costco Shares Slip as JPMorgan Cuts Price Target to $1,100",
+  "catalyst_type": "company_news",
+  "change_pct": -0.0459,
+  "direction": "short",
+  "dollar_volume": 58213355.76,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": -0.0209,
+  "interest_rank": 2,
+  "interest_score": 0.8143,
+  "last30days_context": "9 themes across hackernews,jobs (9 items): Career Opportunities | Costco; Cost Stock Jobs, Employment | Indeed; Show HN: Foreman, a self-hosted LLM gateway for cost aware model routing; Hy3 (295B A21B), a reasoning and agent model with great cost efficiency; ZK Cost-Aware Model T",
+  "last_price": 909.47,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.641,
+  "near_day_high": false,
+  "near_day_low": true,
+  "official_news_context": "company news: Costco Shares Slip as JPMorgan Cuts Price Target to $1,100",
+  "packet_id": "pkt_660af7b8b2c0",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-09T16:07:22.977976+00:00"
+  },
+  "rel_strength_vs_qqq": -0.0612,
+  "rel_strength_vs_spy": -0.0526,
+  "rel_volume": 2.222,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "reversal / dip off the low",
+  "shortlist_reason": "reversal: near day low, gap -2.1%, rel-vol 2.2x, move -4.6%, rel-strength vs SPY -5.3%",
+  "spread_pct": 0.003958,
+  "structure_hint": "reversal",
+  "symbol": "COST",
+  "tradeable_volatility": true
+}

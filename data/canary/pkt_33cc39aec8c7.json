@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_b9d480fb01da",
+  "catalyst_age_minutes": 120.1,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Semiconductors Below Support; Fed Minutes Ahead; Trump Says Iran Ceasefire Is Over, But Will He Back Off?",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0368,
+  "direction": "long",
+  "dollar_volume": 1051025169.06,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": -0.0088,
+  "interest_rank": 2,
+  "interest_score": 0.5406,
+  "last30days_context": "7 themes across hackernews,jobs,reddit (7 items): Why is NVDA fallling??; I've made loss in every AI stock!; Nvidia Corporation Common Stock Nvda Jobs, Employment | Indeed; Jobs at NVIDIA | NVIDIA Careers; Search for Jobs - myworkdayjobs.com",
+  "last_price": 204.21,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.42,
+  "near_day_high": true,
+  "near_day_low": false,
+  "official_news_context": "company news: Semiconductors Below Support; Fed Minutes Ahead; Trump Says Iran Ceasefire Is Over, But Will He Back Off?",
+  "packet_id": "pkt_33cc39aec8c7",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Momentum",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-08T19:50:39.643852+00:00"
+  },
+  "rel_strength_vs_qqq": 0.036,
+  "rel_strength_vs_spy": 0.0407,
+  "rel_volume": 1.08,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: near day high, move 3.7%, rel-strength vs SPY 4.1%",
+  "spread_pct": 0.000147,
+  "structure_hint": "trend",
+  "symbol": "NVDA",
+  "tradeable_volatility": true
+}

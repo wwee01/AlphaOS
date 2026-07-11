@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_05eeb0d1d151",
+  "catalyst_age_minutes": 18.3,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0757,
+  "direction": "long",
+  "dollar_volume": 385848190.66,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0323,
+  "interest_rank": 2,
+  "interest_score": 0.6612,
+  "last30days_context": "15 themes across hackernews,jobs,reddit (15 items): This is my thesis on AMD.1000+; AMD Ryzen AI Halo \u2013 $4k AI Dev Kit; Just a small comparison between NVDA and AMD revenue vs stock price; AMD will reinstate memory encryption on Ryzen 9000 CPUs via BIOS update in July; AMD silent",
+  "last_price": 557.485,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.682,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "packet_id": "pkt_d27d1d035916",
+  "provenance": {
+    "historical_label_decision": "propose",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:49:46.651109+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0588,
+  "rel_strength_vs_spy": 0.0661,
+  "rel_volume": 0.857,
+  "sector_context": "none",
+  "sentiment_context": "unknown \u2014 advisory, keyless",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: gap 3.2%, move 7.6%, rel-strength vs SPY 6.6%",
+  "spread_pct": 0.009256,
+  "structure_hint": "trend",
+  "symbol": "AMD",
+  "tradeable_volatility": true
+}

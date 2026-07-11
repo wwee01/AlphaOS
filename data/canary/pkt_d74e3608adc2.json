@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_faf3e9e73df1",
+  "catalyst_age_minutes": 22.4,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0441,
+  "direction": "long",
+  "dollar_volume": 297499031.19,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0341,
+  "interest_rank": 3,
+  "interest_score": 0.5361,
+  "last30days_context": "unavailable",
+  "last_price": 376.41,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.477,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "packet_id": "pkt_d74e3608adc2",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:53:58.490296+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0272,
+  "rel_strength_vs_spy": 0.0345,
+  "rel_volume": 1.098,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: gap 3.4%, move 4.4%, rel-strength vs SPY 3.5%",
+  "spread_pct": 0.000133,
+  "structure_hint": "trend",
+  "symbol": "AVGO",
+  "tradeable_volatility": true
+}

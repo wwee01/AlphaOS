@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_d34d578b4ac3",
+  "catalyst_age_minutes": 170.0,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Chip Rally Ignites Nasdaq 100 Rebound Ahead of SK Hynix's US Listing: Stock Market Today",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0203,
+  "direction": "long",
+  "dollar_volume": 66950030.91,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0095,
+  "interest_rank": 8,
+  "interest_score": 0.206,
+  "last30days_context": "unavailable",
+  "last_price": 184.17,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.227,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: Chip Rally Ignites Nasdaq 100 Rebound Ahead of SK Hynix's US Listing: Stock Market Today",
+  "packet_id": "pkt_789ce514f70a",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "Sector Sympathy Move",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:54:49.345161+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0034,
+  "rel_strength_vs_spy": 0.0107,
+  "rel_volume": 0.562,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: move 2.0%",
+  "spread_pct": 0.000109,
+  "structure_hint": "trend",
+  "symbol": "XLK",
+  "tradeable_volatility": false
+}

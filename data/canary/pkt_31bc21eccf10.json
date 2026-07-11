@@ -1,0 +1,51 @@
+{
+  "analyst_context": "none",
+  "candidate_id": "cand_9896a36a784b",
+  "catalyst_age_minutes": 24.1,
+  "catalyst_confidence": 0.8,
+  "catalyst_risk_tags": [
+    "catalyst_context_only"
+  ],
+  "catalyst_sources": [
+    "benzinga"
+  ],
+  "catalyst_status": "confirmed",
+  "catalyst_summary": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "catalyst_type": "company_news",
+  "change_pct": 0.0291,
+  "direction": "long",
+  "dollar_volume": 176222329.04,
+  "earnings_context": "none",
+  "filing_context": "none",
+  "freshness_status": "usable",
+  "gap_pct": 0.0251,
+  "interest_rank": 5,
+  "interest_score": 0.4353,
+  "last30days_context": "unavailable",
+  "last_price": 608.78,
+  "liquidity_ok": true,
+  "macro_context": "none",
+  "missing_data_flags": [],
+  "momentum_score": 0.277,
+  "near_day_high": false,
+  "near_day_low": false,
+  "official_news_context": "company news: Which Semiconductor ETF Is Winning The AI Race In 2026?",
+  "packet_id": "pkt_31bc21eccf10",
+  "provenance": {
+    "historical_label_decision": "watch",
+    "historical_primary_label": "News Reaction",
+    "is_task_r_relabel": false,
+    "seeded_from_created_at_utc": "2026-07-06T19:55:40.584542+00:00"
+  },
+  "rel_strength_vs_qqq": 0.0122,
+  "rel_strength_vs_spy": 0.0195,
+  "rel_volume": 0.44,
+  "sector_context": "none",
+  "sentiment_context": "unavailable",
+  "setup_hint": "trend continuation",
+  "shortlist_reason": "trend: gap 2.5%, move 2.9%",
+  "spread_pct": 0.000263,
+  "structure_hint": "trend",
+  "symbol": "SMH",
+  "tradeable_volatility": true
+}
