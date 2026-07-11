@@ -27,6 +27,7 @@ from typing import Optional
 from alphaos.constants import EarningsDataStatus, Severity
 from alphaos.earnings.earnings_provider import EarningsProximityProvider, make_earnings_provider
 from alphaos.util import timeutils
+from alphaos.util.market_calendar import nth_trading_day_after
 
 _UNAVAILABLE_STATUSES = frozenset({
     EarningsDataStatus.UNAVAILABLE.value,
@@ -116,6 +117,19 @@ def _risk_tags(data_status: str, within_hold: Optional[int], within_warning: Opt
     return tags
 
 
+def _hold_window_end_date(ref: date, hold_days: int) -> date:
+    """The last calendar date still INSIDE the hold window: the
+    ``hold_days``-th TRADING date after ``ref`` (HOLD-1: ``max_holding_days``
+    means trading days, matching the replay engine and the live exit check in
+    ``PositionManager._check_exit`` -- see ``trading_days_between()``'s
+    docstring for the alignment proof). A Thursday entry with a 3-trading-day
+    hold spans Fri/Mon/Tue -- ``hold_days<=0`` (no forward window at all)
+    degenerates to "only today itself is inside"."""
+    if not hold_days or hold_days <= 0:
+        return ref
+    return nth_trading_day_after(ref, hold_days)
+
+
 def compute_proximity_flags(
     earnings_date: Optional[str], data_status: str, hold_days: int, warning_days: int,
     today: Optional[date] = None,
@@ -128,7 +142,16 @@ def compute_proximity_flags(
     trade-level "is this proposal near earnings" check must resolve to a
     concrete bool once a hold length is chosen; the ambiguity lives entirely
     in earnings_data_status, which callers must check separately before
-    trusting a False as a real "no")."""
+    trusting a False as a real "no").
+
+    HOLD-1: ``earnings_within_hold_window`` compares the earnings date
+    against the TRADING-day hold window end (see ``_hold_window_end_date``),
+    not a calendar-day cutoff -- a 3-trading-day hold starting Thursday spans
+    through Tuesday (Fri/Mon/Tue), so an earnings date on Monday (calendar
+    day 4) now correctly flags as inside the hold, even though it's outside
+    a naive "today + hold_days calendar days" window.
+    ``days_until_earnings``/``earnings_within_warning_window`` stay calendar
+    (informational only, not an enforcement boundary)."""
     if data_status in _UNAVAILABLE_STATUSES or not earnings_date:
         return {
             "days_until_earnings": None,
@@ -144,7 +167,10 @@ def compute_proximity_flags(
             "earnings_within_warning_window": 0,
             "risk_tags": _risk_tags(EarningsDataStatus.UNAVAILABLE.value, 0, 0),
         }
-    within_hold = 1 if 0 <= days_until <= hold_days else 0
+    ref = today or timeutils.market_date()
+    earnings_day = date.fromisoformat(earnings_date)  # _days_between already validated this parses
+    hold_window_end = _hold_window_end_date(ref, hold_days)
+    within_hold = 1 if ref <= earnings_day <= hold_window_end else 0
     within_warning = 1 if 0 <= days_until <= warning_days else 0
     return {
         "days_until_earnings": days_until,

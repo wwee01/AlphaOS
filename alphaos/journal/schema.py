@@ -608,6 +608,12 @@ SCHEMA: list[tuple[str, str]] = [
             return_pct REAL,
             realized_r REAL,
             holding_days REAL,
+            -- HOLD-1: additive trading-day hold length (trading_days_between()
+            -- convention -- see PositionManager._check_exit / close_position).
+            -- holding_days above is UNCHANGED (calendar days, continuity for
+            -- every pre-HOLD-1 row); this column is simply NULL on rows
+            -- journaled before HOLD-1 shipped -- never backfilled.
+            holding_trading_days INTEGER,
             is_same_day INTEGER,
             classification TEXT,
             mfe REAL,

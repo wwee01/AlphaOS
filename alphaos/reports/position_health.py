@@ -19,6 +19,7 @@ from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import protection_watchdog
 from alphaos.execution.position_manager import PositionManager
 from alphaos.util import timeutils
+from alphaos.util.market_calendar import trading_days_between
 
 THESIS_INTACT = "INTACT"
 THESIS_AT_RISK = "AT_RISK"
@@ -40,10 +41,27 @@ _VERDICT_BY_THESIS = {
 
 
 def _days_held(pos: dict, now=None) -> Optional[float]:
+    """Calendar age of the position. SECONDARY detail as of HOLD-1 -- see
+    ``_trading_days_held`` for the PRIMARY number, which is what
+    ``max_holding_days`` now means."""
     opened = timeutils.parse_iso(pos.get("opened_at"))
     if opened is None:
         return None
     return round(((now or timeutils.now_utc()) - opened).total_seconds() / 86400.0, 3)
+
+
+def _trading_days_held(pos: dict, now=None) -> Optional[int]:
+    """Trading days elapsed since entry -- the PRIMARY "days held" number as
+    of HOLD-1, since ``max_holding_days`` now means trading days (matching
+    the replay engine). Uses the exact same ``trading_days_between()``
+    convention as ``PositionManager._check_exit`` -- and the same
+    ``_opened_et_date`` entry-date resolution -- so this dashboard number and
+    the live enforcement decision never disagree."""
+    opened_et_date = PositionManager._opened_et_date(pos)
+    if opened_et_date is None:
+        return None
+    now_et_date = timeutils.to_et(now or timeutils.now_utc()).date()
+    return trading_days_between(opened_et_date, now_et_date)
 
 
 def _r_at_price(pos: dict, price) -> Optional[float]:
@@ -152,6 +170,7 @@ def assess_positions(journal, settings, market) -> list[dict]:
             "protection_status": pos.get("protection_status") or "unknown",
             "freshness_status": freshness_status,
             "days_held": _days_held(pos),
+            "trading_days_held": _trading_days_held(pos),
             "max_holding_days": pos.get("max_holding_days"),
             "earnings_within_hold_window": earnings_flag,
         })

@@ -739,10 +739,13 @@ def render_markdown(brief: dict) -> str:
     lines += [f"## Positions ({len(ph)} open)"]
     if ph:
         for p in ph:
+            # HOLD-1: trading_days_held is PRIMARY (matches max_holding_days'
+            # trading-day semantics); calendar days_held stays as secondary detail.
             lines.append(
                 f"- {p['symbol']} ({p['direction']}): {p['verdict']} — "
                 f"R={p['current_r']}, thesis={p['thesis_status']}, "
-                f"days_held={p['days_held']}/{p['max_holding_days']}"
+                f"trading_days_held={p['trading_days_held']}/{p['max_holding_days']} "
+                f"(calendar={p['days_held']}d)"
             )
     else:
         lines.append("- (none)")

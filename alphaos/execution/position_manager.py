@@ -14,6 +14,7 @@ MAE<=0 always; the final value at close is written onto
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Optional
 
 from alphaos.constants import (
@@ -30,6 +31,7 @@ from alphaos.execution.costs import CostModel
 from alphaos import lineage
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
+from alphaos.util.market_calendar import is_trading_day, trading_days_between
 
 FILL_PRICE_BASIS = "latest_quote_or_bar"
 
@@ -272,6 +274,25 @@ class PositionManager:
             },
         )
 
+    @staticmethod
+    def _opened_et_date(pos: dict) -> Optional[date]:
+        """The ET calendar date a position was opened on. Prefers
+        ``opened_market_date`` (already an ET date, stamped by
+        ``open_position()`` via ``timeutils.market_date()``); falls back to
+        converting ``opened_at`` (UTC instant) to ET for legacy/manual rows
+        that predate that column or were inserted directly (e.g. test
+        fixtures, demo seeding). The dashboard's health reading reuses this
+        same helper so the live exit check and the displayed "days held"
+        agree on the exact same entry date."""
+        omd = pos.get("opened_market_date")
+        if omd:
+            try:
+                return date.fromisoformat(omd)
+            except (TypeError, ValueError):
+                pass
+        opened = timeutils.parse_iso(pos.get("opened_at"))
+        return timeutils.to_et(opened).date() if opened is not None else None
+
     def _check_exit(self, pos: dict, price: float) -> Optional[str]:
         direction = pos["direction"]
         stop = pos.get("stop_price")
@@ -287,13 +308,28 @@ class PositionManager:
             if target is not None and price >= target:
                 return "target"
         # Time expiry (swing horizon). Day-trade experiment uses max_holding_days=0.
+        #
+        # HOLD-1: max_holding_days means TRADING days, matching the replay
+        # engine (outcomes_engine.replay_bracket() counts bars[:max_days],
+        # where bars are already filtered to strictly after the decision day
+        # -- see trading_days_between()'s docstring for the exact alignment
+        # proof). A position entered Thursday with max_days=3 hits Fri=1,
+        # Mon=2, Tue=3 -> expires during Tuesday's checks, never over the
+        # weekend. Two guards, both required:
+        #   (a) is_trading_day(now) -- never fire a time_expiry against a
+        #       stale weekend/holiday price; the market wasn't even open.
+        #   (b) trading_days_between(opened, now) >= max_days -- the actual
+        #       trading-day count, not a calendar-day proxy.
         max_days = pos.get("max_holding_days")
         if max_days and max_days > 0:
-            opened = timeutils.parse_iso(pos.get("opened_at"))
-            if opened is not None:
-                held = (timeutils.now_utc() - opened).total_seconds() / 86400.0
-                if held >= max_days:
-                    return "time_expiry"
+            opened_et_date = self._opened_et_date(pos)
+            now_et_date = timeutils.to_et(timeutils.now_utc()).date()
+            if (
+                opened_et_date is not None
+                and is_trading_day(now_et_date)
+                and trading_days_between(opened_et_date, now_et_date) >= max_days
+            ):
+                return "time_expiry"
         return None
 
     def _mark_to_market(self, pos: dict, price: float) -> None:
@@ -335,9 +371,19 @@ class PositionManager:
         realized_r = round(pnl_per_share / risk_per_share, 3) if risk_per_share else None
         return_pct = round((pnl_per_share / entry), 4) if entry else None
 
+        now_dt = timeutils.now_utc()
         opened = timeutils.parse_iso(pos.get("opened_at"))
         holding_days = (
-            round((timeutils.now_utc() - opened).total_seconds() / 86400.0, 4) if opened else None
+            round((now_dt - opened).total_seconds() / 86400.0, 4) if opened else None
+        )
+        # HOLD-1 additive field: trading-day hold length, using the SAME
+        # trading_days_between() convention _check_exit enforces against.
+        # holding_days above is left EXACTLY as-is (calendar, continuity for
+        # every historical row) -- this is a new, separate column.
+        opened_et_date = self._opened_et_date(pos)
+        holding_trading_days = (
+            trading_days_between(opened_et_date, timeutils.to_et(now_dt).date())
+            if opened_et_date is not None else None
         )
         same_day = exit_rules.is_same_day_exit(pos.get("opened_market_date"))
         classification = exit_rules.classify_exit(exit_reason, net_pnl)
@@ -401,6 +447,7 @@ class PositionManager:
                 "return_pct": return_pct,
                 "realized_r": realized_r,
                 "holding_days": holding_days,
+                "holding_trading_days": holding_trading_days,
                 "is_same_day": 1 if same_day else 0,
                 "classification": classification.value,
                 "mfe": mfe,
