@@ -28,7 +28,7 @@ from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
 from alphaos.execution.costs import CostModel
 from alphaos import lineage
-from alphaos.util import timeutils
+from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
 FILL_PRICE_BASIS = "latest_quote_or_bar"
@@ -82,6 +82,33 @@ class PositionManager:
                 **target_profile_bundle(proposal),
             },
         )
+        # Immediate fill alert (operator ask, 2026-07-11): fires on every REAL
+        # entry fill regardless of trigger source (scheduler, CLI, dashboard),
+        # since PositionManager.open_position() is the single chokepoint every
+        # fill path (internal sim, alpaca-paper sync/async) converges on --
+        # same "insert wins, then alert" pattern alphaos/cards/demotion.py
+        # already uses. Never fires for mock-mode or seed_demo fixture rows
+        # (is_mock/is_demo) -- this is operator-visibility tooling, not a
+        # decision path (this module is NOT in the scheduler.jobs::alerts
+        # or Orchestrator-decision-function grep tests' banned lists; see
+        # tests/test_scheduler.py's own PR9 isolation tests for that
+        # boundary -- pure gate/approval decision logic in approval.py/
+        # risk_engine.py, plus the specific Orchestrator methods named
+        # there, are what must never reference alerts, not this fulfillment
+        # layer that only runs after every gate already passed).
+        if not self.settings.is_mock and not order_row.get("is_demo"):
+            direction_word = "SHORT" if order_row.get("is_short") else "BUY"
+            alerts.send_alert(
+                self.settings,
+                title=f"AlphaOS: {order_row['symbol']} {direction_word} filled",
+                message=(
+                    f"{order_row['symbol']} {order_row['direction']} x{order_row['qty']} "
+                    f"@ {fill_price} (stop {order_row.get('stop_loss_price')}, "
+                    f"target {order_row.get('take_profit_price')}). position_id={position_id}"
+                ),
+                priority="default",
+                journal=self.journal,
+            )
         return position_id
 
     # ------------------------------------------------------------- monitor
@@ -413,6 +440,26 @@ class PositionManager:
             f"net {net_pnl}, same_day={same_day}).",
             {"position_id": position_id, "exit_id": exit_id},
         )
+        # Immediate fill alert (operator ask, 2026-07-11) -- see the matching
+        # comment in open_position() for why alerting here is safe (single
+        # chokepoint every exit path -- local watchdog, broker bracket-leg
+        # reconcile, protection_watchdog's forced close -- converges on,
+        # firing only after every gate/write already completed, never a
+        # decision-path function itself).
+        if not self.settings.is_mock and not pos.get("is_demo"):
+            outcome_word = "WIN" if net_pnl > 0 else "LOSS" if net_pnl < 0 else "BREAKEVEN"
+            alerts.send_alert(
+                self.settings,
+                title=f"AlphaOS: {pos['symbol']} closed ({outcome_word})",
+                message=(
+                    f"{pos['symbol']} SELL/close x{qty} @ {exit_price} -- {exit_reason} "
+                    f"({classification.value}). net {net_pnl}"
+                    + (f", {realized_r}R" if realized_r is not None else "")
+                    + f". position_id={position_id}"
+                ),
+                priority="default",
+                journal=self.journal,
+            )
         return {
             "exit_id": exit_id,
             "position_id": position_id,

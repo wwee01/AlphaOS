@@ -42,6 +42,28 @@ def test_unset_topic_noop_does_not_log_a_system_event(journal):
     assert journal.count_rows("system_events") == 0
 
 
+# ------------------------------------------------ conftest network backstop
+def test_forgetting_to_monkeypatch_urlopen_is_blocked_by_the_autouse_fixture(journal):
+    """Scope/safety audit LOW-2: the zero-network-leak guarantee previously
+    rested only on mock-mode-default + unset-topic-default, with no hard
+    stop for a test that configures a real topic and forgets to stub
+    send_alert/urlopen. This test deliberately does NOT monkeypatch urlopen
+    -- proving tests/conftest.py's autouse `_block_real_network_calls`
+    fixture is what stands between a real topic + a missed stub and an
+    actual outbound POST to ntfy.sh.
+
+    Asserting `result is False` alone wouldn't distinguish "blocked by our
+    fixture" from "a real urlopen call happened to fail for some unrelated
+    reason" (e.g. no network in a sandboxed test runner) -- so this checks
+    the specific guard message landed in system_events, proving OUR fixture,
+    not incidental network absence, is what stopped the call."""
+    result = alerts.send_alert(_settings(topic="a-real-topic"), "title", "message", journal=journal)
+
+    assert result is False
+    row = journal.one("SELECT * FROM system_events WHERE category = 'alerts'")
+    assert "real urllib.request.urlopen() call to ntfy.sh" in row["detail_json"]
+
+
 # ------------------------------------------------------------------ success
 class _FakeResponse:
     def __init__(self, status=200):
