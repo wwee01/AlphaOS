@@ -997,6 +997,59 @@ def test_no_orders_approvals_fills_positions_created_by_pr9_code():
 
 
 # =============================================================================
+# Trading-day awareness (operator request, 2026-07-11): a real Saturday scan
+# window previously read as due, same as any weekday -- closing this is what
+# actually protects the just-armed unattended-approval door from acting on a
+# closed-market scan.
+# =============================================================================
+def test_scan_not_due_on_a_real_saturday_within_a_configured_window():
+    """The exact bug the operator reported: 2026-07-11 is a Saturday, and
+    09:35 ET falls inside the default first scan window."""
+    from datetime import datetime, timezone
+
+    s = make_settings()  # default SCHEDULER_SCAN_WINDOWS includes 09:35-09:50
+    j = JournalStore(":memory:")
+    saturday_in_window = datetime(2026, 7, 11, 13, 35, tzinfo=timezone.utc)  # 09:35 ET (EDT)
+
+    due, reason = cadence.is_due(cadence.JobType.SCAN, s, j, now=saturday_in_window)
+
+    assert due is False
+    assert "not a trading day" in reason
+    j.close()
+
+
+def test_scan_not_due_on_a_weekday_nyse_holiday_within_a_configured_window():
+    """Christmas Day 2026 is a Friday (a weekday) -- the case a weekday-only
+    check would have missed."""
+    from datetime import datetime, timezone
+
+    s = make_settings()
+    j = JournalStore(":memory:")
+    christmas_in_window = datetime(2026, 12, 25, 14, 35, tzinfo=timezone.utc)  # 09:35 ET (EST)
+
+    due, reason = cadence.is_due(cadence.JobType.SCAN, s, j, now=christmas_in_window)
+
+    assert due is False
+    assert "not a trading day" in reason
+    j.close()
+
+
+def test_scan_still_due_on_an_ordinary_weekday_within_a_configured_window():
+    """Confirms the trading-day gate doesn't over-block a genuine trading
+    day -- same window, same time-of-day, just a real Monday."""
+    from datetime import datetime, timezone
+
+    s = make_settings()
+    j = JournalStore(":memory:")
+    monday_in_window = datetime(2026, 7, 13, 13, 35, tzinfo=timezone.utc)  # 09:35 ET (EDT), Monday
+
+    due, reason = cadence.is_due(cadence.JobType.SCAN, s, j, now=monday_in_window)
+
+    assert due is True
+    j.close()
+
+
+# =============================================================================
 # PR9.5: benchmark spine cadence + scheduler wiring
 # =============================================================================
 def test_benchmark_spine_not_due_before_its_configured_time():

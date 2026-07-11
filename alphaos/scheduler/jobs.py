@@ -272,10 +272,11 @@ def run_text_archive_pull_job(orch, runner) -> dict:
     any gate/eval/labeller/risk/execution path (same rationale as
     run_outcomes_job/run_benchmark_spine_job). Zero new docs on what looks
     like a real trading day pages an alert (EDGAR is never truly quiet on a
-    trading day -- silence means the fetcher is broken); a weekend never
-    does (this codebase has no market-holiday table anywhere yet, so an
-    actual holiday can still page -- a pre-existing, accepted limitation,
-    not one unique to this job)."""
+    trading day -- silence means the fetcher is broken); a weekend or NYSE
+    holiday never does (``is_probable_trading_day`` delegates to
+    ``market_calendar.is_trading_day`` as of the trading-day-calendar fix --
+    EDGAR's own filing calendar isn't claimed to match NYSE's exactly, but
+    it's close enough that a false positive here is no longer expected)."""
     from alphaos.text_archive.service import (
         is_probable_trading_day, pull_new_filings, refresh_cik_map,
     )

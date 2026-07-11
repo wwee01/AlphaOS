@@ -59,6 +59,35 @@ def test_render_markdown_and_compact_never_raise_on_empty_journal(orchestrator):
     assert len(compact) < 1000  # must clear alerts.py's truncation cap comfortably
 
 
+# ------------------------------------------------------------ trading-day note
+def test_brief_and_renders_flag_a_non_trading_day(orchestrator, monkeypatch):
+    """Operator request, 2026-07-11: the digest fired normally on a real
+    Saturday with no indication anywhere that markets were closed. The
+    digest still ALWAYS sends (standing operator preference -- pings over
+    silence) but must now say so in its own content."""
+    monkeypatch.setattr("alphaos.util.market_calendar.is_trading_day", lambda d: False)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+
+    assert brief["is_trading_day_today"] is False
+    md = render_markdown(brief)
+    compact = render_compact(brief)
+    assert "Not a trading day" in md
+    assert "Not a trading day" in compact
+
+
+def test_brief_and_renders_omit_the_note_on_a_real_trading_day(orchestrator, monkeypatch):
+    monkeypatch.setattr("alphaos.util.market_calendar.is_trading_day", lambda d: True)
+
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+
+    assert brief["is_trading_day_today"] is True
+    md = render_markdown(brief)
+    compact = render_compact(brief)
+    assert "Not a trading day" not in md
+    assert "Not a trading day" not in compact
+
+
 # ------------------------------------------------------- one-action priority
 def _needs_you(incident=0, fused=None, pending=None, hypothesis_resolution=None):
     return {

@@ -360,8 +360,11 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "feed_coverage_today": round(shadow_fresh / shadow_scanned, 4) if shadow_scanned else None,
     }
 
+    from alphaos.util.market_calendar import is_trading_day
+
     return {
         "date_sgt": timeutils.stamp().local_sgt[:10],
+        "is_trading_day_today": is_trading_day(timeutils.market_date()),
         "kill_switch_engaged": kill_switch.is_engaged(),
         "kill_switch_reason": kill_switch.reason(),
         "scheduler_runs_today": scheduler_runs_today,

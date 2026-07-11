@@ -372,7 +372,10 @@ daily auto-approval cap without bypassing gates.
 - **News is off (no-news baseline).** Benzinga/web/Massive are deferred seams.
 - **Costs are modelled** (commission + slippage; net P&L = gross − costs, configurable
   via `COST_*`). MFE/MAE are still exit-time approximations, not intra-trade path tracking.
-- **No market-holiday calendar** in session classification (weekend-aware only).
+- **NYSE full-closure holidays + weekends** are now in session classification
+  (`alphaos/util/market_calendar.py`, computed, no external data file); a
+  half-day (early 1pm ET close) is NOT modeled and still reads as a full
+  trading day.
 - **Baseline comparison** records the no-news baseline structure/fields only; no
   statistical claims are made on the (currently tiny) forward sample.
 - `shadow`/`research` modes and the day-trade engine are recognized stubs.
