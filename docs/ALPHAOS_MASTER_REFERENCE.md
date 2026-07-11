@@ -751,11 +751,30 @@ item specs under their canonical names in the specs doc):**
     `check_demotion_preconditions()`). Every fix verified with a regression
     test confirmed to fail pre-fix/pass post-fix. 40 tests, full suite
     green (1454 passed), ruff/mypy clean. **COMMITTED, NOT YET MERGED**,
-    holding for explicit operator merge instruction. PR13.5's diff-
-    rendering/YAML-writing ceremony explicitly NOT built (no producer of
-    real diff content exists yet) — one labeled function-boundary seam is
-    left for it. → cards v2–v3 (blocked on real shadow evidence for
-    H-CAT-1/H-POL-1 — not yet buildable) →
+    holding for explicit operator merge instruction. → **PR13.5** ✅
+    (diff-to-version materialization ceremony) — built + audit-fixed
+    2026-07-10, branch `feat/pr13-5-diff-version-materialization`
+    (build `389e9c5` + audit-fixup `bebe6e0`, merged `0eecd6f`).
+    **Correction (this entry was stale until 2026-07-11):** an earlier
+    draft of this punch list said PR13.5's ceremony was "explicitly NOT
+    built (no producer of real diff content exists yet)" — that described
+    a moment BEFORE this slice landed, and was never updated after it did.
+    PR13.5 is a VERSIONING CEREMONY over hand-authored content, not a diff
+    generator: `alphaos/cards/materialize.py`'s own module docstring is
+    explicit that the original spec's `proposed_diff_json` artifact never
+    existed anywhere in this codebase, and that no automated mechanism
+    proposes *what* should change in a new card version — `prepare_
+    materialization()` stages a scaffold (a verbatim copy of the current
+    version, version field bumped) + an evidence packet to a staging dir;
+    the OPERATOR authors the real content by hand; `confirm_
+    materialization()` verifies that a git-tracked, content-actually-
+    changed, `state: shadow` version was born before registering it. No
+    structured diff schema exists, and none is planned until CDIFF-1 (see
+    below) has a real MET hypothesis with a desired card-linked change to
+    design against — designing one earlier would be speculative, the exact
+    over-eager mistake PR12's own two-arm-hypothesis scope cut already
+    taught this project once. → cards v2–v3 (blocked on real shadow
+    evidence for H-CAT-1/H-POL-1 — not yet buildable) →
     **PR14** 🟡 (Red-Team Debate v0, shadow bear-only) — built out of strict
     roadmap order ahead of cards v2–v3 since it has no evidence gate (a
     registry/mechanism-only shadow feature, same "ship mechanism now,
@@ -835,7 +854,72 @@ item specs under their canonical names in the specs doc):**
     the brief's per-event ΔR) — built + audit-fixed 2026-07-10 (branch
     `feat/brief-fix-1-reporting-law` @ `2f057b9`, two independent Opus
     audits both APPROVE WITH NOTES) — **committed, not yet merged**,
-    holding for explicit operator merge instruction · 🔴 the operator's
+    holding for explicit operator merge instruction · 🟡 **HGEN-1** (the
+    Hypothesis Proposer, shadow + registry-first) — built 2026-07-11
+    following a Fable5 strategy consult the same day; branch
+    `feat/hgen-1-hypothesis-proposer`. Ruled explicitly as an EXTENSION of
+    PR12's registry, never a second one: a generated (or manually
+    authored) candidate lands in a NEW `hypothesis_drafts` quarantine
+    table first and ONLY there — it never appears in
+    `compute_verdicts()`'s family, `hypothesis_proposals`, or
+    `preregistrations` until an operator explicitly runs
+    `hypothesis_accept`, which calls the SAME `propose_hypothesis()` every
+    one of the 8 seeded hypotheses already goes through (never a second,
+    separately-tuned registration path) — this is the load-bearing safety
+    property of the whole build, since PORT-1's BH-FDR family is "every
+    EVALUATED preregistration" and a quarantined draft touches none of
+    that. New `alphaos/hypotheses/proposer.py` (deterministic substrate:
+    strict candidate schema validation, hard-block duplicate detection
+    against both `hypothesis_proposals` and existing drafts, mechanical
+    risk classification that always defaults UP a class on ambiguity and
+    always wins over a candidate's own proposed class) built and tested
+    BEFORE any LLM code; new `alphaos/hypotheses/generator.py`
+    (`HypothesisGenerator`, mock-path convention modeled on
+    `OpenAIClient` since it stamps `openai_primary_model`, not
+    `BearDebater`'s Anthropic-keyed convention) is thin, default-off
+    (`HYPOTHESIS_GEN_SHADOW_ENABLED`), and operator-triggered only — no
+    scheduler job, no cron wiring. Runtime gate G1 (re-checked EVERY run,
+    CANARY's "the flag alone is never enough" convention) refuses
+    generation until >= 1 hypothesis has actually resolved with a verdict
+    — zero have as of this build, so the feature is INERT-BY-DATA even
+    with the flag on, which is correct and intended. `HYPOTHESIS_GEN_MAX_
+    CALLS_PER_DAY` (default 5) nests inside the same shared 30-day AI cost
+    cap via the identical 25%-of-pool joint validation PR14's
+    `debate_max_calls_per_day` established (reused verbatim, not a new
+    ratio); a separate unreviewed-draft ceiling (10) and concurrent-
+    testing acceptance cap (4) bound operator review load and registry
+    growth independently of cost. Also fixes `record_config_version()`'s
+    safe snapshot (previously captured only `has_openai_key`/
+    `has_anthropic_key`, not WHICH model those keys drove) to include
+    `openai_primary_model`/`openai_review_model` + the new HGEN flags/caps
+    — an operator-directed fixup for the exact fingerprint gap that would
+    have hidden today's own `gpt-5.6-luna` model switch from
+    `config_hash`. **Gate-arming dates:** G1 (arm manual `hypothesis_
+    generate`, re-checked every run, not just at settings-load) = the
+    first resolver-written resolution — earliest 2026-08-07 (H-WIN-1's own
+    `analysis_not_before`, PR12's Class A floor). G2 (arm
+    `HYPOTHESIS_GEN_RECURRING_ENABLED`'s eventual scheduler wiring, not
+    built in this release) = >= 3 resolved hypotheses spanning >= 2
+    distinct verdicts (met/failed/inconclusive), re-checked at run time —
+    the same "a flag is never enough on its own" posture as G1. **Not yet
+    audited / not yet merged.** · 🔴 **CDIFF-1** (the card-diff generator) — NOT
+    built. Explicitly out of scope for HGEN-1, which generates HYPOTHESES
+    ONLY (see `alphaos/cards/materialize.py`'s own module docstring, freshly
+    corrected above): no diff-schema, no card-content generation, no
+    automated "what should this card become" mechanism. Gated on the FIRST
+    real MET hypothesis resolution with a desired card-linked change
+    (earliest 2026-08-21, PR13.5's own reasoning for why designing a diff
+    schema before that evidence exists would be speculative) — designing
+    this earlier would repeat PR12's own "don't build the two-arm
+    generalization before you have a reason to" lesson a second time. When
+    eventually built, it must include a scaffold-renderer CONSUME side
+    (materialize.py's own `prepare_materialization()` currently renders a
+    verbatim scaffold; CDIFF-1 would need to feed it real proposed content)
+    plus a round-trip test (propose → render → operator edits → confirm →
+    re-parse matches). Neither HGEN-1 nor CDIFF-1 is PR15 or PR16 — PR15 is
+    already claimed by the L3 autonomy promotion (see the punch-list entry
+    above referencing `PR15/L3`); these names are reserved separately.
+    · 🔴 the operator's
     quarterly restore drill (user-only; blocks L3).
 
 ---

@@ -2173,6 +2173,79 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # HGEN-1: the draft quarantine -- the load-bearing safety property of
+        # the whole Hypothesis Proposer build. A generated (or manually
+        # authored) candidate hypothesis lands HERE first and ONLY here;
+        # nothing in this table is ever read by compute_verdicts()'s family,
+        # inserted into hypothesis_proposals, or linked to a preregistrations
+        # row until an operator explicitly runs `hypothesis_accept` (which
+        # calls the SAME propose_hypothesis() every seeded PR12 hypothesis
+        # goes through -- never a second registration path). This is why a
+        # draft can never shift the seeded 8's q-values: BH-FDR's family is
+        # "every evaluated preregistration" (fdr.py's own module docstring),
+        # and a quarantined draft touches none of preregistrations,
+        # hypothesis_proposals, or evaluate_hypothesis() until accepted.
+        #
+        # status: 'draft' (awaiting operator review) -> 'accepted' (operator
+        # ran hypothesis_accept; accepted_hypothesis_id now points at the
+        # real hypothesis_proposals row propose_hypothesis() created) or
+        # 'rejected' (operator ran hypothesis_reject, OR the intake pipeline
+        # itself hard-blocked a duplicate -- see rejected_reason). Mechanical
+        # lifecycle only, same non-semantic-verdict posture as
+        # hypothesis_proposals.status (constants.HypothesisStatus's own
+        # docstring) -- 'accepted'/'rejected' describe the DRAFT's own fate,
+        # never a statistical verdict on the underlying claim (that verdict,
+        # once the draft is accepted and resolved, comes from
+        # compute_verdicts() exactly like every other hypothesis).
+        #
+        # source: 'generated' (HypothesisGenerator, alphaos/hypotheses/
+        # generator.py) or 'manual' (a human-authored candidate run through
+        # the same intake_draft() quarantine pipeline -- no CLI ships for
+        # this in v0, but the schema/logic layer supports it so a future
+        # thin wrapper needs no migration). model_id/model_provider/
+        # prompt_hash/system_prompt_hash/lineage_id are NULL for source=
+        # 'manual' (no LLM call was made) -- mirrors every other AI-producing
+        # table's own "populated only on a real call" convention (agent_
+        # votes, last30days_polarity).
+        #
+        # mechanical_risk_class is what alphaos.hypotheses.proposer's
+        # classifier assigned (see its own module docstring for the mapping
+        # + "default up a class on any ambiguity" rule) -- it, not
+        # proposed_risk_class, is what hypothesis_accept actually passes to
+        # propose_hypothesis() (floors are never settable by a draft any
+        # more than by a seeded spec; RISK_CLASS_FLOORS still derives them
+        # mechanically from the class alone).
+        "hypothesis_drafts",
+        """
+        CREATE TABLE IF NOT EXISTS hypothesis_drafts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            claim_text TEXT NOT NULL,
+            metric_fn_name TEXT,
+            direction TEXT,
+            card_id TEXT,
+            proposed_risk_class TEXT NOT NULL,
+            mechanical_risk_class TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            source TEXT NOT NULL,
+            model_id TEXT,
+            model_provider TEXT,
+            prompt_hash TEXT,
+            system_prompt_hash TEXT,
+            lineage_id TEXT,
+            evidence_check_json TEXT,
+            duplicate_check_json TEXT,
+            rejected_reason TEXT,
+            accepted_hypothesis_id TEXT,
+            accepted_at_utc TEXT,
+            accepted_by TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         # PR13 slice 2: one row per MANUAL card state-transition decision --
         # graduation (direction='promote', an existing shadow version moves
         # to live_eligible, CONTENT UNCHANGED -- v0 mints no new version;
@@ -2450,6 +2523,19 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_promotion_decisions_card_version "
     "ON promotion_decisions(card_id, card_version, direction)",
     "CREATE INDEX IF NOT EXISTS idx_promotion_decisions_hypothesis ON promotion_decisions(hypothesis_id)",
+    # HGEN-1: status backs the unreviewed-draft ceiling check + the
+    # `hypothesis_drafts` list CLI's default view; (metric_fn_name,
+    # direction) backs the duplicate-detection query's own lookup (not
+    # UNIQUE -- duplicate-ness also depends on normalized title/claim_text
+    # text, a Python-side comparison no SQL index can express, so this is a
+    # narrowing index only, never the sole guard). created_at_utc backs the
+    # 30-day cost-guard pool count.
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_status ON hypothesis_drafts(status)",
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_metric_direction "
+    "ON hypothesis_drafts(metric_fn_name, direction)",
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_created ON hypothesis_drafts(created_at_utc)",
+    "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_accepted_hypothesis "
+    "ON hypothesis_drafts(accepted_hypothesis_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

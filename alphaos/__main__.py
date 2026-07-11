@@ -324,6 +324,53 @@ def cmd_hypothesis_mark_status(
     return 0
 
 
+def cmd_hypothesis_drafts(orch: Orchestrator, status: Optional[str]) -> int:
+    """HGEN-1: list drafts (optionally filtered by status) with their
+    status/checks -- PURE READ."""
+    drafts = orch.hypothesis_drafts_list(status=status)
+    _print({"hypothesis_drafts": drafts, "count": len(drafts)})
+    return 0
+
+
+def cmd_hypothesis_accept(orch: Orchestrator, draft_id: str, decided_by: str) -> int:
+    """HGEN-1: the authorship act -- calls propose_hypothesis() with the
+    draft's own MECHANICAL risk class. This is the ONLY path from draft to
+    the real registry."""
+    try:
+        row = orch.hypothesis_draft_accept(draft_id, decided_by)
+    except ValueError as exc:
+        print(f"Refused: {exc}")
+        _print({"hypothesis_accept": {"status": "refused", "error": str(exc)}})
+        return 1
+    print(f"{draft_id}: accepted -> {row['accepted_hypothesis_id']} (decided_by={decided_by})")
+    _print({"hypothesis_accept": {"status": "ok", "draft": row}})
+    return 0
+
+
+def cmd_hypothesis_reject(orch: Orchestrator, draft_id: str, decided_by: str, reason: str) -> int:
+    """HGEN-1: record an operator rejection of a pending draft."""
+    try:
+        row = orch.hypothesis_draft_reject(draft_id, decided_by, reason)
+    except ValueError as exc:
+        print(f"Refused: {exc}")
+        _print({"hypothesis_reject": {"status": "refused", "error": str(exc)}})
+        return 1
+    print(f"{draft_id}: rejected (decided_by={decided_by}, reason={reason!r})")
+    _print({"hypothesis_reject": {"status": "ok", "draft": row}})
+    return 0
+
+
+def cmd_hypothesis_generate(orch: Orchestrator) -> int:
+    """HGEN-1: one hypothesis-generation pass -- operator-triggered only, no
+    scheduler job. Default-off; re-checks the G1 runtime gate + unreviewed-
+    draft ceiling + cost caps every call. A refused/skipped run is a safe,
+    zero-exit-code no-op (matches canary_run's own posture) -- the
+    'reason' field explains why."""
+    result = orch.hypothesis_generate()
+    _print({"hypothesis_generate": result})
+    return 0
+
+
 def cmd_autonomy_readiness(orch: Orchestrator) -> int:
     """PR13 slice 2: every card-gating hypothesis's promotion precondition
     checklist -- PURE READ, never a trigger."""
@@ -918,6 +965,24 @@ def build_parser() -> argparse.ArgumentParser:
     hmw.add_argument("hypothesis_id")
     hmw.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
     hmw.add_argument("--confirm", action="store_true", help="actually record it (default: dry-run preview)")
+    hd = sub.add_parser("hypothesis_drafts",
+                        help="HGEN-1: list quarantined hypothesis drafts with status/checks -- PURE READ")
+    hd.add_argument("--status", default=None, choices=["draft", "accepted", "rejected"],
+                    help="filter by draft status (default: all)")
+    hac = sub.add_parser("hypothesis_accept",
+                         help="HGEN-1: the authorship act -- accept a quarantined draft into the "
+                              "real registry via propose_hypothesis() (mechanical risk class)")
+    hac.add_argument("draft_id")
+    hac.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hrj = sub.add_parser("hypothesis_reject",
+                         help="HGEN-1: reject a quarantined draft (never touches the real registry)")
+    hrj.add_argument("draft_id")
+    hrj.add_argument("--decided-by", required=True, help="operator identity, never 'system'")
+    hrj.add_argument("--reason", required=True, help="free-text reason, recorded on the draft row")
+    sub.add_parser("hypothesis_generate",
+                   help="HGEN-1: one hypothesis-generation pass (operator-triggered only, no "
+                        "scheduler job). Default-off; refuses over the G1 runtime gate, the "
+                        "unreviewed-draft ceiling, or the cost caps -- a refused run is a safe no-op")
     sub.add_parser("autonomy_readiness",
                    help="PR13 slice 2: every card-gating hypothesis's promotion precondition "
                         "checklist -- PURE READ, never a trigger")
@@ -1088,6 +1153,14 @@ def main(argv=None) -> int:
             return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "failed", args.decided_by, args.confirm)
         if args.command == "hypothesis_mark_withdrawn":
             return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "withdrawn", args.decided_by, args.confirm)
+        if args.command == "hypothesis_drafts":
+            return cmd_hypothesis_drafts(orch, args.status)
+        if args.command == "hypothesis_accept":
+            return cmd_hypothesis_accept(orch, args.draft_id, args.decided_by)
+        if args.command == "hypothesis_reject":
+            return cmd_hypothesis_reject(orch, args.draft_id, args.decided_by, args.reason)
+        if args.command == "hypothesis_generate":
+            return cmd_hypothesis_generate(orch)
         if args.command == "autonomy_readiness":
             return cmd_autonomy_readiness(orch)
         if args.command == "card_promote":

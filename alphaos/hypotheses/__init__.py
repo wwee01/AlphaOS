@@ -10,7 +10,9 @@ writes to `hypothesis_proposals`/`preregistrations`. Never read by any
 gate/eval/labeller/risk/execution path.
 """
 
-from alphaos.hypotheses.constants import HypothesisStatus, RiskClass, SEEDED_HYPOTHESES
+from alphaos.hypotheses.constants import DraftStatus, HypothesisStatus, RiskClass, SEEDED_HYPOTHESES
+from alphaos.hypotheses.generator import run_hypothesis_generate
+from alphaos.hypotheses.proposer import accept_draft, list_drafts, reject_draft
 from alphaos.hypotheses.registry import (
     check_status_change_preconditions,
     mark_hypothesis_status,
@@ -22,10 +24,15 @@ from alphaos.hypotheses.resolver import resolve_due_hypotheses
 __all__ = [
     "RiskClass",
     "HypothesisStatus",
+    "DraftStatus",
     "SEEDED_HYPOTHESES",
     "propose_hypothesis",
     "seed_all",
     "resolve_due_hypotheses",
     "mark_hypothesis_status",
     "check_status_change_preconditions",
+    "list_drafts",
+    "accept_draft",
+    "reject_draft",
+    "run_hypothesis_generate",
 ]
