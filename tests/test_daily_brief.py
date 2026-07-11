@@ -740,9 +740,11 @@ def test_no_decision_path_reads_brief_or_health_modules():
     # every new report module, or the ratchet silently stops covering them --
     # tqs_report/journal_feed are B2's additions; promotion_history lives in
     # cards/scoreboard.py (a mixed module), so its FUNCTION name is guarded
-    # rather than the module name.
+    # rather than the module name. governance_report is PR-UI-B3's addition,
+    # same pattern (see tests/test_governance_tab.py's swap-test proving this
+    # ratchet actually catches a real reference to it).
     banned = ("daily_brief", "position_health", "tqs_report", "journal_feed",
-              "promotion_history")
+              "promotion_history", "governance_report")
     for mod, name in modules:
         text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
         for token in banned:
