@@ -1,6 +1,9 @@
 # AlphaOS UI/UX Design — The Operator Console
 
-**Version 1.1 · 2026-07-08 · Fable 5** *(v1.1: UI-PR-A recorded shipped-as-designed;
+**Version 1.2 · 2026-07-12 · Fable 5** *(v1.2: §16 mobile design added — operator
+request, supersedes the same-day "defer mobile entirely" ruling's SCHEDULING while
+keeping all its CONTENT findings binding; Stitch-mockup adoption ruling recorded in
+`ported/stitch-design-tokens.md`. v1.1: UI-PR-A recorded shipped-as-designed;
 next-UI pointers added. v1.0: 2026-07-05.)*
 **Reviewed as: trading command-center product designer · trading systems architect ·
 risk/audit UX designer · AI-agent transparency designer.**
@@ -449,6 +452,74 @@ Screens 1 (Tonight), 8-partial (governance) are wireframed above (§5, §10).
 > Include empty/quiet states ("✓ Nothing needs you. Next scan 21:30. Heartbeat
 > 4m.") and a MOCK-data watermark variant. No charts with tiny samples; no
 > red/green P&L heroes; numbers wear their confidence everywhere.
+
+---
+
+## 16. Mobile (v1.2 · 2026-07-12 · operator-requested)
+
+**Provenance.** The 2026-07-11 Stitch-adoption ruling deferred mobile and found
+the four Stitch *mobile* mockups unsalvageable as content specs (crypto tickers,
+one-tap "EXECUTE LIQUIDATION", L4-ACTIVE badges, 4.0× leverage, pseudocode exit
+plans — none of it AlphaOS). The operator has now explicitly requested mobile
+design, which supersedes that ruling's *scheduling* (defer) but not its *content
+findings* — every banned item above stays banned. What the mockups DO contribute,
+as layout reference only: the single-column stacked-instrument-block rhythm, the
+hero one-action card, and the **4-item bottom-priority IA (Tonight / Approvals /
+Positions / Risk)** — the one salvageable idea, adopted here as the mobile IA.
+
+**Access model (unchanged law).** The dashboard stays loopback-only. "Mobile" =
+the operator's phone browser reaching 127.0.0.1 through their own tunnel
+(Tailscale/SSH port-forward — the §11 standing design for remote access). No
+auth layer, no exposed port, no separate mobile app or second frontend: a second
+frontend would re-implement and re-audit the entire gated action surface, which
+remains the true substrate trigger, not styling. ntfy push (PR9 + the immediate
+proposal/fill alerts) remains the "needs-you" channel; the notification is still
+the front door, the tunneled console is now a properly-usable second step.
+
+**Design, by principle:**
+
+1. **Same four questions, one thumb.** What is it doing / why / what does it
+   need from me / how do I stop it — all reachable without horizontal scrolling
+   or precision taps at 390px.
+2. **IA = priority subset, not a different app.** The 12 desktop tabs don't
+   collapse into a hamburger; the four operating surfaces (Tonight, Approvals,
+   Positions, Risk/governance once B3 ships) lead, everything else remains
+   reachable but secondary. Same tabs, same code, same gates — mobile is a
+   viewport, never a fork.
+3. **Asymmetric friction AMPLIFIES on touch.** Fat fingers make accidental taps
+   cheaper, so: Approve keeps its full-exit-plan-visible confirm restating max
+   loss (never one-tap); destructive/irreversible controls never sit in the
+   thumb's resting zone directly adjacent to navigation; kill-switch ENGAGE
+   keeps its typed confirmation (typing on mobile is friction, and stopping
+   must be *findable* in one glance — the annunciator strip pins it — but
+   deliberate to fire).
+4. **The annunciator condenses, never disappears.** At narrow width it becomes
+   a two-line strip: MODE badge · kill state · heartbeat age / open-R ·
+   approvals count. It is the first thing rendered on every screen.
+5. **Instrument blocks stack single-column**, full-bleed with the same 1px
+   border language; R-ladders stay horizontal (they compress well); TTL bars
+   keep their label text (never icon-only state).
+6. **Touch targets ≥ 44px; data stays dense, controls don't.** Reading density
+   is a desktop virtue worth keeping on mobile for tables (horizontal scroll
+   *within* a bordered block is acceptable); tappable controls are not allowed
+   to inherit that density.
+
+**Implementation slice — PR-UI-M1 (Sonnet, after B2/B3):** a responsive pass in
+`console_theme.py` + minimal `streamlit_app.py` ordering changes only. One
+`@media (max-width: 480px)` block: single-column collapse of `st.columns` pairs
+(Streamlit stacks them natively — verify, don't fight it), condensed annunciator
+styling, 44px control sizing, R-ladder/TTL-bar width behavior at narrow
+viewports. Tab ORDER puts Tonight/Positions/Approval Center first (already
+true). Zero behavior change, same T4 protocol as B1. Verified at 390×844 via
+browser tooling, not just resized desktop.
+
+**Explicitly deferred, with the trigger that would revisit each:** a native app
+or PWA wrapper (trigger: documented repeated TTL expiries while the operator is
+away from the desk — the §11 evidence bar, unchanged); actionable push
+notifications, i.e. approve-from-notification (trigger: an auth/identity layer
+existing at all, which is a Crossing-era decision, not a styling one); any
+mobile-specific write path (never — the UI can never do what the CLI cannot,
+§1.8, and mobile inherits it).
 
 ---
 
