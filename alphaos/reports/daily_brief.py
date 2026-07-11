@@ -341,7 +341,10 @@ def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
-def _needs_you(journal, digest: dict, fused_jobs: list[dict], hypothesis_resolution: Optional[dict] = None) -> dict:
+def _needs_you(
+    journal, digest: dict, fused_jobs: list[dict], hypothesis_resolution: Optional[dict] = None,
+    hypothesis_drafts_pending: Optional[dict] = None,
+) -> dict:
     pending = journal.open_proposals()
     for p in pending:
         p["seconds_remaining"] = seconds_remaining(p.get("proposal_expires_at_utc"))
@@ -353,7 +356,26 @@ def _needs_you(journal, digest: dict, fused_jobs: list[dict], hypothesis_resolut
         "open_incident_count": protection.get("open_incident_count", 0),
         "fused_jobs": fused_jobs,
         "hypothesis_resolution": hypothesis_resolution,
+        "hypothesis_drafts_pending": hypothesis_drafts_pending,
     }
+
+
+def _hypothesis_drafts_pending(journal) -> Optional[dict]:
+    """HGEN-1: a named, always-visible "Needs you" line when quarantined
+    drafts await operator review -- follows ``_unattended_approvals_today``'s
+    own pattern (reporting only; this reads hypothesis_drafts, it never
+    writes to it). None when the queue is empty -- omit, don't fabricate,
+    same idiom as every other health section here. Deliberately NOT scoped
+    to "today" (unlike most other Needs-you lines): an unreviewed draft from
+    yesterday is exactly as much a pending operator action today as one
+    generated an hour ago."""
+    rows = journal.query(
+        "SELECT draft_id, title, source, mechanical_risk_class FROM hypothesis_drafts "
+        "WHERE status = 'draft' ORDER BY id DESC"
+    )
+    if not rows:
+        return None
+    return {"count": len(rows), "draft_ids": [r["draft_id"] for r in rows]}
 
 
 def _todays_activity(journal, since_sgt: str) -> dict:
@@ -603,7 +625,8 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     regime = _regime_header(journal)
     fused_jobs = _fused_jobs(journal, settings)
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
-    needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution)
+    hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
+    needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
     todays_activity = _todays_activity(journal, since_sgt)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
@@ -699,6 +722,12 @@ def render_markdown(brief: dict) -> str:
         ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
         milestone = " (registry's first-ever resolution)" if hyp_res["is_first_ever"] else ""
         lines.append(f"- Hypotheses resolved today: **{hyp_res['resolved_today_count']}** ({ids}){milestone}")
+    drafts_pending = ny.get("hypothesis_drafts_pending")
+    if drafts_pending:
+        lines.append(
+            f"- Hypothesis drafts awaiting review: **{drafts_pending['count']}** "
+            f"({', '.join(drafts_pending['draft_ids'])})"
+        )
     ua = brief.get("unattended_approvals")
     if ua:
         lines.append(

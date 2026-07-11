@@ -448,6 +448,33 @@ class Settings:
     debate_max_calls_per_day: int
     debate_bear_model: str
 
+    # --- HGEN-1: the Hypothesis Proposer (shadow, registry-first) ---
+    # Draft quarantine + deterministic substrate are ALWAYS active (zero
+    # cost, zero decision surface -- same posture as PR12's own registry
+    # itself); this flag gates ONLY the LLM-calling layer
+    # (HypothesisGenerator / `alphaos hypothesis_generate`), same "ship
+    # mechanism, arm the paid call separately" posture as debate_shadow_
+    # enabled/canary_enabled. Default False: a genuinely paid LLM call, no
+    # reason to spend budget on a shadow feature without explicit opt-in.
+    hypothesis_gen_shadow_enabled: bool
+    # Recurring (scheduled) generation is NOT built in HGEN-1 (no scheduler
+    # job, no cron wiring) -- this flag ships now, inert (no code path reads
+    # it beyond the joint validation below), for a FUTURE arming once G2's
+    # own evidence bar is cleared (see docs/ALPHAOS_MASTER_REFERENCE.md).
+    # Joint validation: cannot be True while hypothesis_gen_shadow_enabled
+    # is False (recurring generation of an already-off feature is a
+    # contradiction, not a valid "off-but-armed" state).
+    hypothesis_gen_recurring_enabled: bool
+    # A TIGHTER, separate daily sub-cap nested INSIDE the existing shared
+    # 30-day AI cost cap -- same nested-cap pattern as debate_max_calls_
+    # per_day (PR14), including the identical joint 25%-of-shared-pool
+    # validation (see the loader).
+    hypothesis_gen_max_calls_per_day: int
+    # How many raw candidates one generation call may produce -- a SEPARATE
+    # bound from the daily call cap (one call can yield up to this many
+    # hypothesis_drafts rows in one shot).
+    hypothesis_gen_max_proposals_per_run: int
+
     # --- Attribution v2 / counterfactual ΔR (Roadmap PR8) ---
     # Measurement-only: pairs a decision-divergence event (user override, gate
     # block, TTL expiry, or execution vs frozen plan) with the ΔR the outcome
@@ -1047,6 +1074,49 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"exact failure this nested cap exists to prevent."
         )
 
+    # --- HGEN-1: hypothesis-generation caps (nested inside the same shared
+    # 30-day AI cost cap, identical pattern to DEBATE_MAX_CALLS_PER_DAY above)
+    hypothesis_gen_max_calls_per_day = _get_int(src, "HYPOTHESIS_GEN_MAX_CALLS_PER_DAY", 5)
+    if not (0 <= hypothesis_gen_max_calls_per_day <= 100):
+        raise SettingsError(
+            f"HYPOTHESIS_GEN_MAX_CALLS_PER_DAY={hypothesis_gen_max_calls_per_day!r} must be "
+            f"between 0 and 100. 0 disables real generation calls entirely (mock-only); too "
+            f"high defeats the purpose of a daily sub-cap nested inside the shared 30-day AI "
+            f"cost cap."
+        )
+    # Reuses the SAME 25%-of-shared-pool joint bound PR14's debate_max_calls_
+    # per_day established -- one ratio, applied uniformly to every nested
+    # shadow sub-cap, never a second independently-chosen ceiling per feature.
+    if hypothesis_gen_max_calls_per_day > 0.25 * scheduler_ai_cost_cap_calls_per_30d:
+        raise SettingsError(
+            f"HYPOTHESIS_GEN_MAX_CALLS_PER_DAY={hypothesis_gen_max_calls_per_day!r} must not "
+            f"exceed 25% of SCHEDULER_AI_COST_CAP_CALLS_PER_30D="
+            f"{scheduler_ai_cost_cap_calls_per_30d!r} "
+            f"(max {int(0.25 * scheduler_ai_cost_cap_calls_per_30d)!r} here). A higher daily "
+            f"sub-cap could let hypothesis generation alone exhaust the entire shared 30-day "
+            f"AI budget in a single day, starving the live evaluator for the rest of the "
+            f"window -- the exact failure this nested cap exists to prevent."
+        )
+
+    hypothesis_gen_max_proposals_per_run = _get_int(src, "HYPOTHESIS_GEN_MAX_PROPOSALS_PER_RUN", 3)
+    if not (1 <= hypothesis_gen_max_proposals_per_run <= 20):
+        raise SettingsError(
+            f"HYPOTHESIS_GEN_MAX_PROPOSALS_PER_RUN={hypothesis_gen_max_proposals_per_run!r} "
+            f"must be between 1 and 20. Too high risks flooding the operator review queue "
+            f"(the separate UNREVIEWED_DRAFT_CEILING=10 code constant is the backstop, but a "
+            f"single run should never be able to blow past it on its own)."
+        )
+
+    hypothesis_gen_shadow_enabled = _get_bool(src, "HYPOTHESIS_GEN_SHADOW_ENABLED", False)
+    hypothesis_gen_recurring_enabled = _get_bool(src, "HYPOTHESIS_GEN_RECURRING_ENABLED", False)
+    if hypothesis_gen_recurring_enabled and not hypothesis_gen_shadow_enabled:
+        raise SettingsError(
+            "HYPOTHESIS_GEN_RECURRING_ENABLED=true requires HYPOTHESIS_GEN_SHADOW_ENABLED=true -- "
+            "recurring generation of an already-disabled generator is a contradiction, not a "
+            "valid 'off but armed' configuration. (Recurring generation has no scheduler job "
+            "wired in this build regardless -- this flag is a future arming, inert today.)"
+        )
+
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
@@ -1409,6 +1479,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         debate_shadow_enabled=_get_bool(src, "DEBATE_SHADOW_ENABLED", False),
         debate_max_calls_per_day=debate_max_calls_per_day,
         debate_bear_model=_get(src, "DEBATE_BEAR_MODEL", "claude-sonnet-4-6"),
+        hypothesis_gen_shadow_enabled=hypothesis_gen_shadow_enabled,
+        hypothesis_gen_recurring_enabled=hypothesis_gen_recurring_enabled,
+        hypothesis_gen_max_calls_per_day=hypothesis_gen_max_calls_per_day,
+        hypothesis_gen_max_proposals_per_run=hypothesis_gen_max_proposals_per_run,
         attribution_enabled=_get_bool(src, "ATTRIBUTION_ENABLED", True),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),

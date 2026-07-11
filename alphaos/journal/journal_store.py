@@ -257,6 +257,23 @@ class JournalStore:
             "has_benzinga_key": settings.has_benzinga_key,
             "has_alpaca_keys": settings.has_alpaca_keys,
             "allow_fixture_news": settings.allow_fixture_news,
+            # HGEN-1 fixup (operator-directed, 2026-07-11): the snapshot
+            # previously captured only has_openai_key/has_anthropic_key --
+            # WHICH model those keys drive was invisible to config_hash, so
+            # a same-day model switch (e.g. gpt-5.6-luna) moved zero bits of
+            # the fingerprint. openai_primary_model/openai_review_model are
+            # config, not secrets (unlike the API key itself), so they
+            # belong in the safe snapshot alongside every other non-secret
+            # setting above. Also captures the new HGEN flags/caps this
+            # build ships, for the same reason every other feature's own
+            # flags/caps already appear here (debate_max_calls_per_day,
+            # canary_tier2_label_diff_pct, etc. -- see the fields above).
+            "openai_primary_model": settings.openai_primary_model,
+            "openai_review_model": settings.openai_review_model,
+            "hypothesis_gen_shadow_enabled": settings.hypothesis_gen_shadow_enabled,
+            "hypothesis_gen_recurring_enabled": settings.hypothesis_gen_recurring_enabled,
+            "hypothesis_gen_max_calls_per_day": settings.hypothesis_gen_max_calls_per_day,
+            "hypothesis_gen_max_proposals_per_run": settings.hypothesis_gen_max_proposals_per_run,
         }
         payload = json.dumps(safe, sort_keys=True, default=str)
         # PR9.5 fix: builtin hash() on a str is PYTHONHASHSEED-randomized (a
