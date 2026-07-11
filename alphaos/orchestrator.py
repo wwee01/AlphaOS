@@ -1367,6 +1367,36 @@ class Orchestrator:
 
         return mark_hypothesis_status(self.journal, hypothesis_id, new_status, decided_by)
 
+    def hypothesis_drafts_list(self, status: Optional[str] = None) -> list:
+        """HGEN-1: list drafts (optionally filtered by status). PURE READ."""
+        from alphaos.hypotheses import list_drafts
+
+        return list_drafts(self.journal, status=status)
+
+    def hypothesis_draft_accept(self, draft_id: str, decided_by: str) -> dict:
+        """HGEN-1: the authorship act -- the ONLY path from a quarantined
+        draft to the real registry. See
+        alphaos/hypotheses/proposer.py's accept_draft()."""
+        from alphaos.hypotheses import accept_draft
+
+        return accept_draft(self.journal, draft_id, decided_by)
+
+    def hypothesis_draft_reject(self, draft_id: str, decided_by: str, reason: str) -> dict:
+        """HGEN-1: record an operator rejection of a pending draft."""
+        from alphaos.hypotheses import reject_draft
+
+        return reject_draft(self.journal, draft_id, decided_by, reason)
+
+    def hypothesis_generate(self) -> dict:
+        """HGEN-1: one hypothesis-generation pass (operator-triggered only --
+        no scheduler job wires this). Default-off (HYPOTHESIS_GEN_SHADOW_
+        ENABLED), re-checks the G1 runtime gate every call, and refuses over
+        the unreviewed-draft ceiling / cost caps. See
+        alphaos/hypotheses/generator.py's run_hypothesis_generate()."""
+        from alphaos.hypotheses import run_hypothesis_generate
+
+        return run_hypothesis_generate(self.journal, self.settings)
+
     def autonomy_readiness_report(self) -> dict:
         """PR13 slice 2: every card-gating hypothesis's promotion precondition
         checklist. PURE READ. See alphaos/reports/autonomy_readiness.py."""

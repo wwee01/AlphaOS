@@ -18,6 +18,11 @@ PR14 adds ``agent_votes`` (the bear-debate agent) here AND a separate,
 TIGHTER ``check_debate_budget``/daily sub-cap -- nested INSIDE this shared
 cap, not a replacement for it, so a new shadow feature can never starve the
 live evaluator's own share of the shared 30-day budget.
+
+HGEN-1 adds ``hypothesis_drafts`` (the LLM hypothesis generator) here AND
+its own separate, TIGHTER ``check_hypothesis_gen_budget``/daily sub-cap --
+same nested-cap pattern as PR14's bear-debate, never a replacement for the
+shared cap.
 """
 
 from __future__ import annotations
@@ -30,11 +35,12 @@ _TRAILING_DAYS = 30
 
 
 def calls_in_last_30_days(journal) -> int:
-    """Count of real (non-mock) AI calls across all six call sites in the
+    """Count of real (non-mock) AI calls across all seven call sites in the
     trailing 30 days: the primary evaluator, the playbook labeller, the
     narrative-polarity classifier, EVAL-1's offline replay harness, CANARY's
-    weekly drift replay, and PR14's bear-debate agent -- each a separate
-    real API call that should count toward the same spend cap.
+    weekly drift replay, PR14's bear-debate agent, and HGEN-1's hypothesis
+    generator -- each a separate real API call that should count toward the
+    same spend cap.
 
     ``last30days_polarity`` has no ``is_mock`` column (a PR4-era omission,
     not reproduced here); ``model_provider`` is only ever populated by a real
@@ -74,7 +80,18 @@ def calls_in_last_30_days(journal) -> int:
     debate_votes = journal.count_rows(
         "agent_votes", "is_mock = 0 AND created_at_utc >= ?", (since,),
     )
-    return evaluations + labels + polarity + eval_replays + canary_replays + debate_votes
+    # hypothesis_drafts has no is_mock column (same rationale as
+    # last30days_polarity above): model_provider is only ever populated by
+    # HypothesisGenerator._live_generate()'s real API call -- every mock/
+    # error path leaves it NULL, so this is an equally precise real-call
+    # filter without a schema change.
+    hypothesis_gen_calls = journal.count_rows(
+        "hypothesis_drafts", "model_provider IS NOT NULL AND created_at_utc >= ?", (since,),
+    )
+    return (
+        evaluations + labels + polarity + eval_replays + canary_replays
+        + debate_votes + hypothesis_gen_calls
+    )
 
 
 def check_scan_budget(settings, journal) -> tuple[bool, str]:
@@ -125,6 +142,39 @@ def check_debate_budget(settings, journal) -> tuple[bool, str]:
         return (False, f"error checking debate daily cap: {exc}")
 
     detail = f"{used}/{cap} bear-debate calls used today"
+    if used >= cap:
+        return (False, f"{detail} -- cap reached")
+    return (True, detail)
+
+
+def hypothesis_gen_calls_today(journal) -> int:
+    """Real (non-mock, i.e. ``model_provider IS NOT NULL``) hypothesis-
+    generation calls since the start of the current trading day. Counts
+    GENERATION ATTEMPTS (one ``hypothesis_drafts`` row per candidate a live
+    LLM call actually produced -- accepted, rejected, or still pending
+    review all count, since the cost was already spent regardless of what
+    later happens to the draft), not accepted/reviewed drafts. Same
+    trading-day-aligned "today" boundary as ``debate_calls_today``."""
+    start = journal.start_of_trading_day_utc()
+    return journal.count_rows(
+        "hypothesis_drafts", "model_provider IS NOT NULL AND created_at_utc >= ?", (start,),
+    )
+
+
+def check_hypothesis_gen_budget(settings, journal) -> tuple[bool, str]:
+    """Whether today's hypothesis-generation sub-cap
+    (``settings.hypothesis_gen_max_calls_per_day``) still has room. A
+    SEPARATE, TIGHTER cap nested INSIDE the shared 30-day cap above --
+    passing this check does not imply the shared cap has room; a caller
+    that wants both must check both (mirrors ``check_debate_budget``'s own
+    docstring). Never raises; fails toward "don't run."""
+    cap = settings.hypothesis_gen_max_calls_per_day
+    try:
+        used = hypothesis_gen_calls_today(journal)
+    except Exception as exc:  # never crash the caller -- fail toward "don't run"
+        return (False, f"error checking hypothesis-generation daily cap: {exc}")
+
+    detail = f"{used}/{cap} hypothesis-generation calls used today"
     if used >= cap:
         return (False, f"{detail} -- cap reached")
     return (True, detail)

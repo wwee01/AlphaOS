@@ -271,3 +271,65 @@ def build_bear_user_prompt(candidate: "Union[dict, ScanContext]", proposal: dict
         f"PROPOSAL:\n{json.dumps(_public(proposal), default=str)}\n\n"
         "Give your adversarial verdict now."
     )
+
+
+# HGEN-1: the Hypothesis Proposer -- a shadow, registry-first candidate
+# generator. Every candidate this prompt produces still passes through
+# alphaos.hypotheses.proposer's own draft-quarantine intake pipeline
+# (schema validation, hard-block duplicate detection, mechanical risk
+# classification) before it can ever become a real hypothesis_proposals
+# row -- this prompt is asked for a BATCH of raw candidates, never for a
+# final, self-certifying registry entry.
+HYPOTHESIS_GEN_SYSTEM_PROMPT = (
+    "You are AlphaOS's hypothesis-generation research assistant for a "
+    "paper-trading system. You propose NEW candidate hypotheses about "
+    "trading-edge claims the system could test -- you do NOT trade, size, "
+    "approve, or execute anything, and nothing you propose is registered "
+    "automatically: every candidate you produce goes to a human operator "
+    "for review first. You may ONLY reuse an existing, already-computable "
+    "metric function from the given whitelist -- you must NEVER invent a "
+    "new metric, a new data source, or a new table. Each candidate must "
+    "state a clear, falsifiable claim and a direction (positive, negative, "
+    "or either). Prefer claims that are genuinely different from the "
+    "exemplars shown (a new direction on an existing metric, a narrower or "
+    "differently-scoped claim) over restating an exemplar's own claim. "
+    "Respond with a SINGLE JSON object ONLY. No prose, no markdown, no "
+    "code fences."
+)
+
+
+def build_hypothesis_gen_user_prompt(
+    exemplars: list[dict], card_summaries: list[dict], metric_whitelist: list[str], n: int,
+) -> str:
+    """User prompt for HGEN-1's generator. ``exemplars`` are resolved-
+    hypothesis rows (regardless of verdict -- see generator.py's own
+    ``select_exemplars()`` docstring for why no verdict filter is ever
+    applied here), ``card_summaries`` are the current card set's
+    (card_id, version, name, state) tuples, ``metric_whitelist`` is the
+    SAME list ``alphaos.hypotheses.proposer.METRIC_WHITELIST`` enforces at
+    intake (this prompt does not invent its own copy)."""
+    schema = {
+        "candidates": [
+            {
+                "title": "string, short",
+                "claim_text": "string: the falsifiable claim in one sentence",
+                "metric_fn_name": f"one of: {sorted(metric_whitelist)}",
+                "direction": "positive | negative | either",
+                "proposed_risk_class": "A | B | C (your own best guess -- the system will "
+                                       "mechanically re-derive the real class regardless)",
+                "card_id": "string or null -- ONLY set this if the claim is specifically "
+                          "about promoting/gating one of the given cards",
+            }
+        ],
+    }
+    return (
+        f"Propose up to {n} NEW candidate hypotheses. Return JSON ONLY matching the schema "
+        "(a single object with a 'candidates' array).\n\n"
+        f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
+        f"METRIC_WHITELIST:\n{json.dumps(sorted(metric_whitelist))}\n\n"
+        f"RESOLVED_HYPOTHESIS_EXEMPLARS (every resolved hypothesis regardless of verdict):\n"
+        f"{json.dumps(exemplars, default=str)}\n\n"
+        f"CURRENT_CARDS:\n{json.dumps(card_summaries, default=str)}\n\n"
+        "Rules: metric_fn_name MUST be from the whitelist -- never invent one. Do not restate "
+        "an exemplar's own claim verbatim. Output the JSON object now."
+    )

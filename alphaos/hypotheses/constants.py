@@ -56,6 +56,19 @@ class HypothesisStatus(StrEnum):
     WITHDRAWN = "withdrawn"
 
 
+class DraftStatus(StrEnum):
+    """HGEN-1: the DRAFT's own mechanical lifecycle -- 'draft' (awaiting
+    operator review) -> 'accepted' (registered into hypothesis_proposals via
+    accept_draft()) or 'rejected' (operator reject_draft(), or the intake
+    pipeline's own hard-block on a detected duplicate). Same non-semantic-
+    verdict posture as HypothesisStatus above: these describe the DRAFT's
+    fate, never a statistical verdict on the underlying claim."""
+
+    DRAFT = "draft"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 # Fable5 consult (2026-07-10): the frozen risk-class floor table. 30/28 is a
 # FLOOR, not a dial -- nothing gating promotion goes below Class A's own
 # number (matches attribution.py's existing MIN_RESOLVED_FOR_V2_AGGREGATE=30/
@@ -68,6 +81,20 @@ RISK_CLASS_FLOORS: dict[str, dict] = {
     RiskClass.A.value: {"min_sample": 30, "min_span_days": 28.0},
     RiskClass.B.value: {"min_sample": 40, "min_span_days": 42.0},
     RiskClass.C.value: {"min_sample": 60, "min_span_days": 90.0},
+}
+
+# HGEN-1: the step-up table the mechanical risk classifier
+# (alphaos.hypotheses.proposer.classify_risk()) uses when a generated/
+# manual candidate's blast radius is ambiguous -- "default UP a class"
+# always means "closer to C's stricter floors," never sideways or down.
+# C has no further class to step up to (it is already the strictest);
+# stepping "up" from C is a no-op, not an error, so an already-maximally-
+# strict base class can never be a KeyError just because it hit an
+# ambiguity trigger.
+RISK_CLASS_STEP_UP: dict[str, str] = {
+    RiskClass.A.value: RiskClass.B.value,
+    RiskClass.B.value: RiskClass.C.value,
+    RiskClass.C.value: RiskClass.C.value,
 }
 
 
