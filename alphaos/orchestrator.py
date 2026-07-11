@@ -209,6 +209,25 @@ class Orchestrator:
         scan_batch_id = new_id("scan")
         scheduler_run_id = new_id("schr")
         st = timeutils.stamp()
+
+        # Unattended close-window auto-approval (2026-07-11): eligibility is
+        # computed ONCE, HERE, at scan start -- never per-proposal later in
+        # _handle_proposal/consider() (Fable5 review: a slow AI-evaluation
+        # call can legitimately span the window's own end boundary; a
+        # consider-time wall-clock check would silently deny exactly the
+        # late candidates this mechanism exists to catch, and would also
+        # leak auto-approval to a manual test scan that happens to straddle
+        # the window). Requires BOTH: this run was SCHEDULER-triggered (a
+        # human-triggered scan, via CLI or the dashboard, means a human is
+        # already looking at the screen and can just click approve -- no
+        # unattended door needed) AND the scan-start wall-clock falls inside
+        # a configured UNATTENDED_APPROVE_WINDOWS window.
+        unattended = False
+        if trigger_source == TriggerSource.SCHEDULER.value and self.settings.unattended_approve_windows.strip():
+            from alphaos.scheduler.cadence import format_hhmm_et, market_now_et, parse_windows, window_containing
+
+            hhmm = format_hhmm_et(market_now_et())
+            unattended = window_containing(hhmm, parse_windows(self.settings.unattended_approve_windows)) is not None
         session = timeutils.market_session()
         if session.value == "regular":
             scan_type = ScanType.POST_OPEN.value
@@ -465,7 +484,9 @@ class Orchestrator:
                 continue
 
             # decision == propose
-            handled = self._handle_proposal(cand, evaluation, summary, scan_batch_id=scan_batch_id)
+            handled = self._handle_proposal(
+                cand, evaluation, summary, scan_batch_id=scan_batch_id, unattended=unattended,
+            )
             if not handled:
                 summary.rejected += 1
 
@@ -528,7 +549,7 @@ class Orchestrator:
         return summary
 
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
-                         scan_batch_id=None) -> bool:
+                         scan_batch_id=None, unattended: bool = False) -> bool:
         # EXP-0: guards the scan loop's two proposal-creation branches.
         # CORRECTION (scope/safety audit, F-1): this is NOT the one true
         # proposal-creation chokepoint -- _override_open_trade builds and
@@ -644,7 +665,7 @@ class Orchestrator:
             self._mark_proposal_expired(proposal.proposal_id, ReasonCode.PROPOSAL_EXPIRED.value)
             return True
 
-        outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True)
+        outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True, unattended=unattended)
         if outcome.approved:
             result = self._execute(proposal)
             if result.blocked:

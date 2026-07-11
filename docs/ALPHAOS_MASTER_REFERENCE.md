@@ -799,7 +799,14 @@ item specs under their canonical names in the specs doc):**
     pre-registered floors) + **COST-1** (gates ladder rung 2) →
     portfolio-risk gates (Class C: gross-notional/sector caps, live-equity sizing
     — kill the static 100k) → **PR15/L3** (evidence-gated; also blocked on the
-    CRO restore-drill law).
+    CRO restore-drill law). **Note:** a narrower, already-shipped mechanism
+    exists today — `UNATTENDED_APPROVE_WINDOWS`/`MAX_UNATTENDED_APPROVALS_PER_DAY`
+    (branch `feat/unattended-close-window-auto-approval`), a second door into
+    the existing `APPROVAL_MODE=auto` gate stack scoped to specific scan
+    windows the operator is asleep for, paper-only. It deliberately does NOT
+    claim `APPROVAL_MODE=auto_within_bounds` and is NOT PR15/L3 — if/when PR15
+    ships, it should **subsume** this mechanism rather than grow a second
+    parallel one (see `Settings.unattended_approve_windows`'s docstring).
 20a. 🔴 **UNIV-D** (floats, non-blocking, post-TEXT-0): retroactive market-cap
     tier derivation (U1/U2/U3) by date-join once TEXT-0's SEC company-facts
     data exists. UNIV-1 as originally drafted is SUPERSEDED — see §9 and the

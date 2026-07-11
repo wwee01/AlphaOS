@@ -57,6 +57,28 @@ def test_config_version_recorded(journal, settings):
     assert "openai_api_key" not in rows[0]["config_json"]  # secrets never stored
 
 
+def test_config_hash_changes_when_unattended_settings_change(journal):
+    """Correctness-audit MEDIUM: arming/re-tuning the unattended-approval
+    door (the first-ever autonomous-execution mechanism) must move
+    config_hash -- previously these two fields were absent from the
+    fingerprint entirely, so a reviewer reconstructing 'what was the config
+    at time T' from config_versions couldn't see this door's state."""
+    from alphaos.journal.journal_store import JournalStore
+
+    off = make_settings(UNATTENDED_APPROVE_WINDOWS="")
+    on = make_settings(UNATTENDED_APPROVE_WINDOWS="15:45-16:00", MAX_UNATTENDED_APPROVALS_PER_DAY="3")
+
+    j1, j2 = JournalStore(":memory:"), JournalStore(":memory:")
+    j1.record_config_version(off)
+    j2.record_config_version(on)
+
+    hash_off = j1.one("SELECT config_hash FROM config_versions")["config_hash"]
+    hash_on = j2.one("SELECT config_hash FROM config_versions")["config_hash"]
+    assert hash_off != hash_on
+    j1.close()
+    j2.close()
+
+
 def test_config_hash_is_deterministic_across_independent_journal_instances(settings):
     """PR9.5 fix: builtin hash() on a str is PYTHONHASHSEED-randomized (a
     security default since Python 3.3) -- the SAME config produced a

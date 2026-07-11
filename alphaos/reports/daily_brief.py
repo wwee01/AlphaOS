@@ -374,6 +374,21 @@ def _todays_activity(journal, since_sgt: str) -> dict:
     }
 
 
+def _unattended_approvals_today(journal, since_sgt: str) -> Optional[dict]:
+    """Unattended close-window auto-approvals (2026-07-11): a named,
+    always-visible line so this mechanism's drift is visible even if an
+    operator has tuned out individual fill alerts (Fable5 review's own
+    requirement). None on a quiet day -- omit, don't fabricate, same idiom
+    as every other health section here."""
+    rows = journal.query(
+        "SELECT symbol FROM approvals WHERE label = 'UNATTENDED_APPROVED' AND created_at_utc >= ?",
+        (since_sgt,),
+    )
+    if not rows:
+        return None
+    return {"count": len(rows), "symbols": [r["symbol"] for r in rows]}
+
+
 def _best_candidate_today(journal, since_sgt: str) -> Optional[dict]:
     """Top TQS-scored PROPOSE-decision candidate today. None on an empty/
     quiet day -- absence is a valid, expected state, not an error."""
@@ -590,6 +605,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution)
     todays_activity = _todays_activity(journal, since_sgt)
+    unattended_approvals = _unattended_approvals_today(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
     best_candidate = _best_candidate_today(journal, since_sgt)
     what_learned = _what_learned(journal, since_sgt)
@@ -621,6 +637,7 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
         "needs_you": needs_you,
         "positions_health": positions_health,
         "todays_activity": todays_activity,
+        "unattended_approvals": unattended_approvals,
         "text_archive_health": text_archive_health,
         "eval_health": eval_health,
         "canary_health": canary_health,
@@ -678,6 +695,11 @@ def render_markdown(brief: dict) -> str:
         ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
         milestone = " (registry's first-ever resolution)" if hyp_res["is_first_ever"] else ""
         lines.append(f"- Hypotheses resolved today: **{hyp_res['resolved_today_count']}** ({ids}){milestone}")
+    ua = brief.get("unattended_approvals")
+    if ua:
+        lines.append(
+            f"- Unattended-window approvals: **{ua['count']}** ({', '.join(ua['symbols'])})"
+        )
     lines.append("")
 
     ph = brief["positions_health"]

@@ -42,18 +42,29 @@ class ApprovalEngine:
         self.journal = journal
 
     # ------------------------------------------------------------- pipeline
-    def consider(self, proposal, risk_ok: bool, freshness_ok: bool) -> ApprovalOutcome:
+    def consider(self, proposal, risk_ok: bool, freshness_ok: bool, unattended: bool = False) -> ApprovalOutcome:
         """Called by the scan pipeline after risk + freshness are known.
 
-        Auto applies only when APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL is
-        off (effective_approval_mode); otherwise the proposal awaits manual
-        approval.
+        Auto applies when EITHER APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL
+        is off (effective_approval_mode), OR ``unattended`` is True -- a SECOND
+        DOOR into this exact same gate stack, added 2026-07-11 for the
+        market-close scan window the operator is asleep for (see
+        ``Settings.unattended_approve_windows``'s own docstring; this is NOT
+        PR15/L3 -- that remains separately gated). ``unattended`` is computed
+        ONCE at scan start (never per-proposal at consider-time -- a slow AI
+        evaluation call can legitimately span the window's own end boundary,
+        and re-checking wall-clock here would silently deny exactly the late
+        candidates the mechanism exists to catch) and threaded down through
+        ``Orchestrator._handle_proposal``. Neither door skips a single gate
+        below -- risk/freshness/daytrade/margin checks apply identically
+        either way, and the unattended door additionally passes its OWN cap
+        before the shared cap both doors share.
         """
-        if self.settings.effective_approval_mode != ApprovalMode.AUTO:
-            # Manual mode: never auto-submit. Await explicit user approval.
+        if self.settings.effective_approval_mode != ApprovalMode.AUTO and not unattended:
+            # Manual mode, no unattended window active: never auto-submit.
             return ApprovalOutcome(False, "pending_manual", reason=ReasonCode.APPROVAL_REQUIRED.value)
 
-        # --- AUTO mode: enforce every guardrail before approving. -----------
+        # --- AUTO/unattended: enforce every guardrail before approving. -----
         if not risk_ok:
             return self._deny(proposal, ReasonCode.RISK_OVERSIZED.value, "auto denied: risk gate not passed")
         if not freshness_ok:
@@ -65,23 +76,49 @@ class ApprovalEngine:
             return self._deny(proposal, ReasonCode.MARGIN_APPROVAL_REQUIRED.value,
                               "auto cannot enable margin/leverage or a short path needing margin")
 
+        # Count-then-insert below assumes the single-threaded, synchronous
+        # scan loop this codebase runs today (one candidate handled fully,
+        # including the journal insert, before the next is considered) --
+        # there is no DB-level UNIQUE backstop on either cap. If concurrent
+        # scan execution is ever introduced, this needs one.
+        if unattended:
+            # Own cap FIRST (an intersection of two caps, not two parallel
+            # additive budgets -- see Settings.max_unattended_approvals_per_day).
+            unattended_used = self.journal.count_unattended_approvals_today()
+            if unattended_used >= self.settings.max_unattended_approvals_per_day:
+                return self._deny(
+                    proposal, ReasonCode.AUTO_APPROVAL_LIMIT.value,
+                    f"unattended-approval cap reached "
+                    f"({unattended_used}/{self.settings.max_unattended_approvals_per_day})",
+                )
+
         used = self.journal.count_auto_approvals_today()
         if used >= self.settings.max_auto_approvals_per_day:
             return self._deny(proposal, ReasonCode.AUTO_APPROVAL_LIMIT.value,
                               f"auto-approval cap reached ({used}/{self.settings.max_auto_approvals_per_day})")
 
+        label = ApprovalLabel.UNATTENDED_APPROVED if unattended else ApprovalLabel.AUTO_APPROVED
+        approver = "window_auto" if unattended else "auto"
+        reason = (
+            "passed risk+freshness within the unattended-window + shared auto cap"
+            if unattended else "passed risk+freshness within auto cap"
+        )
         approval_id = self._record(
-            proposal, ApprovalLabel.AUTO_APPROVED, approved=True,
-            approver="auto", reason="passed risk+freshness within auto cap",
+            proposal, label, approved=True, approver=approver, reason=reason,
             freshness_ok=freshness_ok, risk_ok=risk_ok,
         )
+        # Log progress against the cap that actually gated THIS approval --
+        # the own cap for the unattended door, the shared cap otherwise.
+        if unattended:
+            progress = f"{unattended_used + 1}/{self.settings.max_unattended_approvals_per_day}"
+        else:
+            progress = f"{used + 1}/{self.settings.max_auto_approvals_per_day}"
         self.journal.log_system_event(
             Severity.INFO, "approval",
-            f"AUTO_APPROVED {proposal.symbol} ({used + 1}/{self.settings.max_auto_approvals_per_day}).",
+            f"{label.value} {proposal.symbol} ({progress}).",
             {"proposal_id": proposal.proposal_id},
         )
-        return ApprovalOutcome(True, "auto_approved", ApprovalLabel.AUTO_APPROVED.value,
-                               "auto approved", approval_id)
+        return ApprovalOutcome(True, "auto_approved", label.value, reason, approval_id)
 
     # ---------------------------------------------------------- manual API
     def approve_manually(self, proposal, approver: str = "user",

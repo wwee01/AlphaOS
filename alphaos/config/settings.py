@@ -102,41 +102,53 @@ def _parse_hhmm(value: str, key: str) -> tuple[int, int]:
     return hh, mm
 
 
-def _parse_scan_windows(value: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
-    """Parse "HH:MM-HH:MM,HH:MM-HH:MM,..." into (start,end) pairs, end after start.
-
-    Raises SettingsError on any malformed window instead of silently ignoring it —
-    a bad scan window would otherwise silently starve the scan job for that slot.
+def _parse_windows_strict(
+    value: str, setting_name: str, allow_empty: bool = False,
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """Parse "HH:MM-HH:MM,HH:MM-HH:MM,..." into (start,end) pairs, end after
+    start. Raises SettingsError on any malformed window instead of silently
+    ignoring it -- a bad window would otherwise silently starve whatever job
+    or mechanism it configures. ``allow_empty=True`` lets a totally blank
+    value through as "zero windows configured" (the "ship mechanism, arm
+    later" pattern -- e.g. UNATTENDED_APPROVE_WINDOWS defaults off), rather
+    than raising on the empty-string case the way SCHEDULER_SCAN_WINDOWS
+    (which must always name at least one window) does.
     """
+    if allow_empty and not value.strip():
+        return []
     windows: list[tuple[tuple[int, int], tuple[int, int]]] = []
     for raw_window in value.split(","):
         window = raw_window.strip()
         if not window:
             raise SettingsError(
-                f"SCHEDULER_SCAN_WINDOWS={value!r} contains an empty window. Expected a "
+                f"{setting_name}={value!r} contains an empty window. Expected a "
                 f"comma-separated list of 'HH:MM-HH:MM' ranges, e.g. "
                 f"'09:35-09:50,12:00-12:15,15:45-16:00'."
             )
         bounds = window.split("-")
         if len(bounds) != 2:
             raise SettingsError(
-                f"SCHEDULER_SCAN_WINDOWS={value!r} has a malformed window {window!r}. "
+                f"{setting_name}={value!r} has a malformed window {window!r}. "
                 f"Expected 'HH:MM-HH:MM', e.g. '09:35-09:50'."
             )
         start_raw, end_raw = bounds
-        start = _parse_hhmm(start_raw.strip(), "SCHEDULER_SCAN_WINDOWS")
-        end = _parse_hhmm(end_raw.strip(), "SCHEDULER_SCAN_WINDOWS")
+        start = _parse_hhmm(start_raw.strip(), setting_name)
+        end = _parse_hhmm(end_raw.strip(), setting_name)
         if end <= start:
             raise SettingsError(
-                f"SCHEDULER_SCAN_WINDOWS={value!r} has window {window!r} where the end "
+                f"{setting_name}={value!r} has window {window!r} where the end "
                 f"time is not after the start time."
             )
         windows.append((start, end))
     if not windows:
         raise SettingsError(
-            f"SCHEDULER_SCAN_WINDOWS={value!r} must contain at least one 'HH:MM-HH:MM' window."
+            f"{setting_name}={value!r} must contain at least one 'HH:MM-HH:MM' window."
         )
     return windows
+
+
+def _parse_scan_windows(value: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    return _parse_windows_strict(value, "SCHEDULER_SCAN_WINDOWS")
 
 
 def load_dotenv(path: str = ".env") -> dict:
@@ -247,6 +259,40 @@ class Settings:
     max_auto_approvals_per_day: int
     max_spread_pct: float
     min_dollar_volume: float
+
+    # --- Unattended close-window auto-approval (2026-07-11, operator request) ---
+    # NOT PR15/L3 autonomy promotion -- that remains explicitly gated on its
+    # own unmet preconditions (a real backup-restore drill, closed portfolio-
+    # risk gates; see docs/ALPHAOS_MASTER_REFERENCE.md's PR15 section) and
+    # reserves APPROVAL_MODE=auto_within_bounds, which this deliberately does
+    # NOT touch or claim. This is a narrower, TIME-scoped door into the
+    # EXISTING, already-shipped, already-tested APPROVAL_MODE=auto engine
+    # (alphaos/approval.py) -- for one specific reason: the operator is
+    # asleep during the market-close scan window and cannot manually approve
+    # within a proposal's ~30-minute TTL. Every other safety property of
+    # AUTO mode (risk/freshness re-checked, daytrade/margin gates, the TTL
+    # auto-path guard, the shared kill-switch/protection-watchdog chokepoint
+    # at _execute()) applies identically here -- this only adds a SECOND WAY
+    # IN to the same gate stack, never a bypass of any individual gate.
+    # PR15, if/when built, should SUBSUME this (treat unattended windows as
+    # one of its own bounds), not grow a second parallel mechanism.
+    #
+    # Defaults to "" (feature inert) -- an empty string means zero windows
+    # configured, matching CANARY_ENABLED/TEXT_ARCHIVE_ENABLED/
+    # SHADOW_TIER_ENABLED's own "ship mechanism, arm later" default-off.
+    # US Eastern time, same format/timezone as SCHEDULER_SCAN_WINDOWS (a
+    # settings-load WARN fires if a configured window doesn't line up with
+    # any configured scan-window start -- the single most likely operator
+    # error is entering an SGT time here instead of ET).
+    unattended_approve_windows: str
+    # Own cap, counted by UNATTENDED_APPROVED label ONLY -- checked in
+    # ADDITION to (not instead of) the existing shared max_auto_approvals_per_day
+    # (which counts AUTO_APPROVED + UNATTENDED_APPROVED together). An
+    # intersection of two caps, not two parallel additive budgets: a future
+    # operator raising the shared cap for a supervised global-auto
+    # experiment must not silently also raise this unattended-overnight
+    # mechanism's own, independently-set ceiling.
+    max_unattended_approvals_per_day: int
 
     # --- freshness ---
     max_data_age_seconds: float
@@ -807,6 +853,37 @@ class Settings:
             )
         )
 
+        # 7) Unattended-window misconfiguration trap (Fable5 review,
+        # 2026-07-11): the single most likely operator error is entering an
+        # SGT time here instead of ET (SCHEDULER_SCAN_WINDOWS/
+        # UNATTENDED_APPROVE_WINDOWS are both US Eastern) -- that would make
+        # the feature silently inert forever (no scan ever runs inside a
+        # window with no matching scan-window start), never a hard failure,
+        # so this is a WARNING, not ERROR/CRITICAL -- it must not block
+        # startup or flip startup_ok() for what is, at worst, a dead
+        # (never-firing) feature.
+        if self.unattended_approve_windows.strip():
+            from alphaos.scheduler.cadence import parse_windows
+
+            unattended_starts = {w[0] for w in parse_windows(self.unattended_approve_windows)}
+            scan_starts = {w[0] for w in parse_windows(self.scheduler_scan_windows)}
+            unmatched = unattended_starts - scan_starts
+            checks.append(
+                StartupCheck(
+                    "unattended_approve_windows_aligned",
+                    not unmatched,
+                    (
+                        "every configured unattended-approve window start matches a scan window"
+                        if not unmatched
+                        else f"UNATTENDED_APPROVE_WINDOWS start(s) {sorted(unmatched)} match no "
+                        f"SCHEDULER_SCAN_WINDOWS start ({sorted(scan_starts)}) -- both settings use "
+                        f"US Eastern time; a common mistake is entering an SGT time here instead. "
+                        f"This window will never fire until it lines up with a real scan window."
+                    ),
+                    Severity.WARNING,
+                )
+            )
+
         return checks
 
     def startup_ok(self) -> bool:
@@ -973,6 +1050,20 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
+
+    # Unattended close-window auto-approval: defaults empty (feature inert).
+    # Same "HH:MM-HH:MM,..." US-Eastern format as SCHEDULER_SCAN_WINDOWS;
+    # the ET-vs-SGT alignment check runs later, in validate_startup() (a
+    # WARNING, not a load-time raise -- a misaligned window is a silently
+    # dead feature, not a startup-blocking error).
+    unattended_approve_windows = _get(src, "UNATTENDED_APPROVE_WINDOWS", "")
+    _parse_windows_strict(unattended_approve_windows, "UNATTENDED_APPROVE_WINDOWS", allow_empty=True)
+
+    max_unattended_approvals_per_day = _get_int(src, "MAX_UNATTENDED_APPROVALS_PER_DAY", 1)
+    if max_unattended_approvals_per_day < 0:
+        raise SettingsError(
+            f"MAX_UNATTENDED_APPROVALS_PER_DAY={max_unattended_approvals_per_day!r} must be >= 0."
+        )
 
     scheduler_monitor_interval_minutes = _get_int(
         src, "SCHEDULER_MONITOR_INTERVAL_MINUTES", 15)
@@ -1209,6 +1300,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         max_daily_loss_pct=_get_float(src, "MAX_DAILY_LOSS_PCT", 0.03),
         paper_equity=_get_float(src, "PAPER_EQUITY", 100000.0),
         max_auto_approvals_per_day=_get_int(src, "MAX_AUTO_APPROVALS_PER_DAY", 1),
+        unattended_approve_windows=unattended_approve_windows,
+        max_unattended_approvals_per_day=max_unattended_approvals_per_day,
         max_spread_pct=_get_float(src, "MAX_SPREAD_PCT", 0.01),
         min_dollar_volume=_get_float(src, "MIN_DOLLAR_VOLUME", 2_000_000.0),
         max_data_age_seconds=_get_float(src, "MAX_DATA_AGE_SECONDS", 120.0),

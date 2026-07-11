@@ -46,15 +46,17 @@ class JobType(StrEnum):
     CARD_DEMOTION_CHECK = "card_demotion_check"
 
 
-def scan_windows(settings) -> list[tuple[str, str]]:
-    """Parse ``settings.scheduler_scan_windows`` into (start_hhmm, end_hhmm) pairs.
-
-    Format: "HH:MM-HH:MM,HH:MM-HH:MM,...". Settings has already validated this
-    string at load time (``_parse_scan_windows``); this is a light re-parse for
-    the cadence layer's own consumption and never raises on the same input.
+def parse_windows(raw: str) -> list[tuple[str, str]]:
+    """Parse a ``"HH:MM-HH:MM,HH:MM-HH:MM,..."`` string into (start_hhmm,
+    end_hhmm) pairs. Never raises on malformed input (a malformed segment is
+    silently dropped) -- callers that need to REJECT malformed input at load
+    time validate separately (e.g. settings.py's own ``_parse_scan_windows``);
+    this is the light, always-succeeds re-parse for runtime consumption.
+    Shared by every windows-shaped setting (``scheduler_scan_windows``,
+    ``unattended_approve_windows``) -- one parser, not one per setting.
     """
     windows: list[tuple[str, str]] = []
-    for raw_window in settings.scheduler_scan_windows.split(","):
+    for raw_window in raw.split(","):
         window = raw_window.strip()
         if not window:
             continue
@@ -67,11 +69,19 @@ def scan_windows(settings) -> list[tuple[str, str]]:
     return windows
 
 
-def _hhmm(dt: datetime) -> str:
+def scan_windows(settings) -> list[tuple[str, str]]:
+    """Parse ``settings.scheduler_scan_windows`` into (start_hhmm, end_hhmm)
+    pairs. Settings has already validated this string at load time
+    (``_parse_scan_windows``); this is a light re-parse for the cadence
+    layer's own consumption."""
+    return parse_windows(settings.scheduler_scan_windows)
+
+
+def format_hhmm_et(dt: datetime) -> str:
     return dt.strftime("%H:%M")
 
 
-def _market_now(now: Optional[datetime] = None) -> datetime:
+def market_now_et(now: Optional[datetime] = None) -> datetime:
     """Current market-local (US Eastern) instant, honoring an injected ``now``.
 
     Reuses ``timeutils.stamp()``'s ``market_et`` field (the same America/New_York
@@ -82,7 +92,7 @@ def _market_now(now: Optional[datetime] = None) -> datetime:
     return timeutils.parse_iso(market_et)
 
 
-def _window_containing(hhmm: str, windows: list[tuple[str, str]]) -> Optional[tuple[str, str]]:
+def window_containing(hhmm: str, windows: list[tuple[str, str]]) -> Optional[tuple[str, str]]:
     for start, end in windows:
         if start <= hhmm < end:
             return (start, end)
@@ -97,11 +107,11 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
       the interval>".
     - daily_digest: "daily_digest:<sgt-date>" (date only, SGT calendar day).
     """
-    market_dt_et = _market_now(now)
+    market_dt_et = market_now_et(now)
 
     if job_type == JobType.SCAN:
-        hhmm = _hhmm(market_dt_et)
-        window = _window_containing(hhmm, scan_windows(settings))
+        hhmm = format_hhmm_et(market_dt_et)
+        window = window_containing(hhmm, scan_windows(settings))
         start = window[0] if window else hhmm
         return f"{JobType.SCAN}:{market_dt_et.date().isoformat()}T{start}"
 
@@ -175,9 +185,9 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
 
 
 def _scan_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
-    market_dt_et = _market_now(now)
-    hhmm = _hhmm(market_dt_et)
-    window = _window_containing(hhmm, scan_windows(settings))
+    market_dt_et = market_now_et(now)
+    hhmm = format_hhmm_et(market_dt_et)
+    window = window_containing(hhmm, scan_windows(settings))
     if window is None:
         return (False, f"{hhmm} is outside all configured scan windows")
 
