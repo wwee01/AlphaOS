@@ -127,7 +127,19 @@ def trading_days_between(start: date, end: date) -> int:
     exact same convention -- the day after ``start`` is trading day 1 -- so a
     live position's ``trading_days_between(opened, now) >= max_days`` fires
     at precisely the point ``replay_bracket``'s ``bars[:max_days]`` window
-    would have fully resolved. See ``PositionManager._check_exit``."""
+    would have fully resolved. See ``PositionManager._check_exit``.
+
+    Two audit-recorded nuances (2026-07-12): (a) the candidate-outcomes
+    ledger path calls ``replay_bracket`` WITHOUT ``max_days`` (fixed
+    1/3/5-day forward stats, ``DEFAULT_REPLAY_WINDOW_DAYS``) by design --
+    the max-days alignment claim above applies to the live exit check and
+    ``baseline/tracker.py``, which do pass it; (b) quantizing to trading-day
+    granularity means a late-day entry in a window containing zero
+    weekends/holidays can exit up to ~one session EARLIER within the same
+    final calendar date than the old 24h-multiple rule (first fresh-data
+    tick of the expiry session vs. entry-time + N*24h). Bounded, exposure-
+    reducing, inherent to day-granularity semantics; every weekend/holiday-
+    spanning hold expires strictly LATER than before, which is the fix."""
     if end <= start:
         return 0
     count = 0
