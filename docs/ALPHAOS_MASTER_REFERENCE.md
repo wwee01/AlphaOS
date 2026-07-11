@@ -416,6 +416,18 @@ backup has been restored once (drill).* You cannot supervise what cannot page yo
 
 ## 5. The punch list (ordered; owner in brackets; struck when done)
 
+> **STATUS CORRECTION — founder review, 2026-07-12.** Every "committed, not
+> yet merged / holding for explicit operator merge instruction" phrase below
+> items 14–24 and Lane B is SUPERSEDED: on 2026-07-11 the operator ordered
+> and completed the merge of all nine held branches (BASELINE, EARN-1, PR12,
+> PR13 slices 1–2, PR13.5, PR14, CANARY, OPS-B, BRIEF-FIX-1), and later the
+> same day the hypothesis-resolution alert, immediate proposal/fill alerts,
+> unattended close-window auto-approval, NYSE trading-day calendar, HGEN-1,
+> and PR-UI-B1 console theme. The per-item prose is kept as historical
+> record; **main is the single source of truth for what is live.** See the
+> "2026-07-11/12 session" block appended at the end of Lane B for everything
+> that session added, and HANDOVER.md for the running checkpoint.
+
 **Tonight — before the first unattended scan (Mon 09:35 ET / 21:35 SGT):**
 1. ✅ **PR9.1 hotfix** — merged `b70ff2e` 2026-07-06, 810/3/0 post-merge. Done.
 
@@ -686,13 +698,18 @@ item specs under their canonical names in the specs doc):**
     operator merge instruction.
 19. 🟡 **EXP-1** — shadow small/mid catalyst universe (300–500 names, $5–50M ADV),
     cost-tiered scanning (deterministic pre-rank → AI top-K), effective-N
-    floors from day one. The payload. CANARY must be LIVE first (built +
-    audit-fixed, not yet live — see item 21). **Full build-ready spec
-    written 2026-07-10** (seven-lens Fable synthesis: founder/PM, quant
-    researcher, software engineer, ML engineer, quant trader, infra/devops,
-    CRO — see `docs/roadmap/alphaos-pr-implementation-specs.md`'s EXP-1
-    section) ahead of the CANARY gate clearing, so the eventual build
-    session starts from a real spec, not a blank page. **Not yet built.**
+    floors from day one. The payload. **CANARY gate update (2026-07-12
+    founder review): CANARY is now ARMED** — corpus seeded (20 clean
+    post-PR9.1 packets, 17 symbols, git-committed with sha256 MANIFEST),
+    baseline pinned same day against the operator's new primary model
+    gpt-5.6-luna (`canaryrun_de5814877cc1`, 20/20 replayed, 0 fail-safe,
+    mean confidence 0.7115), `CANARY_ENABLED=true`. The gate is now purely
+    a clock: 2 consecutive clean real weekly runs (≈2026-07-19 and
+    ≈2026-07-26) open the EXP-1 build window ≈2026-07-27, assuming no
+    drift alarm. **Full build-ready spec written 2026-07-10** (seven-lens
+    Fable synthesis — see `docs/roadmap/alphaos-pr-implementation-specs.md`'s
+    EXP-1 section), so the build session starts from a real spec, not a
+    blank page. **Not yet built.**
 20. 🟡 **PR12** (registry-first, 8 seeded hypotheses) — built + audit-fixed
     2026-07-10, branch `feat/pr12-hypothesis-engine` @ `0a96a86` (build
     `fec2945` + audit-fixup `0a96a86`). Two independent Opus audits:
@@ -921,6 +938,64 @@ item specs under their canonical names in the specs doc):**
     above referencing `PR15/L3`); these names are reserved separately.
     · 🔴 the operator's
     quarterly restore drill (user-only; blocks L3).
+
+**2026-07-11/12 session block (founder review, appended 2026-07-12):**
+
+*Shipped and merged to main this session:* hypothesis-resolution alert
+(daily digest pings when a hypothesis first resolves, prompting the
+LLM-generator go-ahead) · immediate proposal-pending + fill alerts (the
+only two `send_alert` call sites were previously the daily digest and an
+EDGAR check; now every new pending_approval batch and every real entry/
+exit fill pushes immediately) · scan-window shift (2nd window now
+11:30–12:00 ET = 23:30–00:00 SGT, operator-awake) · unattended
+close-window auto-approval (**ARMED**: `UNATTENDED_APPROVE_WINDOWS=
+15:45-16:00`, cap 1/day, paper-only, NOT PR15/L3 — a second door into the
+existing auto gate stack; PR15 must subsume it) · NYSE trading-day
+calendar (`alphaos/util/market_calendar.py`, stdlib-computed weekends +
+full closures wired into `market_session()` + `_scan_due()` — no more
+weekend scans; half-days deliberately not modeled, see HOL-2 below) ·
+HGEN-1 hypothesis proposer (draft-quarantined, G1-gated inert-by-data
+until the first real resolution ≈2026-08-07; recurring gate G2 = 3
+resolutions/2 verdicts; CDIFF-1 stays build-gated on the first MET,
+earliest ≈2026-08-21) · PR-UI-B1 console theme (styling-only, system
+fonts, zero behavior change) · config fingerprint now captures
+`OPENAI_PRIMARY_MODEL`/`OPENAI_REVIEW_MODEL` (operator switched to
+**gpt-5.6-luna** 2026-07-11 — hypothesis evidence now spans two models;
+August resolution analysis must slice pre/post-luna via lineage stamps) ·
+CANARY **ARMED** with luna baseline (see item 19) · hermetic-test fix for
+the Alpaca data path (operator-initiated background task).
+
+*In flight at review close:* **HOLD-1** — trading-day holding-period
+semantics (operator-caught: `max_holding_days` enforced in CALENDAR days
+while the replay engine measures TRADING days; a Thursday 3-day swing
+died Sunday at a stale weekend price with ~1.6 sessions of exposure, and
+every weekend-spanning live position got less thesis time than its
+replayed counterfactual twin — live-vs-replay asymmetry, instrument-
+contamination class; fix also corrects the earnings hold-window flag and
+journals `holding_trading_days` additively) · **PR-UI-B2** Learning tab ·
+**PR-UI-B3** Autonomy & Risk tab (queued after B2) · **PR-UI-M1** mobile
+responsive pass (queued; design at `alphaos-ui-ux-design.md` §16).
+
+*New Lane-B items from the founder review (2026-07-12):*
+- 🔴 **SLIP-1** — stop-overshoot / implementation-shortfall report. The
+  first real closed trade (META) realized **−1.35R on a −1R plan** (gapped
+  through the stop, MFE 0.0). Realized-R-vs-planned distribution is a
+  first-class execution metric; the data is already journaled
+  (`realized_r` vs −1.0). Floor-gated like every report; build when ~10
+  closed trades exist.
+- 🔴 **REJ-SEG-1** — segregate shadow-tier rejects in reporting. 430/434
+  distinct LOW_LIQUIDITY reject symbols last week were shadow-tier
+  small/mids (expected measurement noise); they inflate operator-facing
+  funnel counts in the digest/dashboard. Tag or split them so core-funnel
+  signal stays readable. Small, reporting-only.
+- 🔴 **HOL-2** — early-close (half-day) awareness. `market_calendar.py`
+  deliberately models full closures only; a half-day still reads as a
+  full trading day (documented). Deadline: before 2026-11-27 (day after
+  Thanksgiving, the next 1pm ET close), else the close-window scan and
+  the unattended door would run 13:45–14:00 into a closed market.
+- 🔴 the operator's quarterly restore drill — unchanged, user-only,
+  still the human gate on PR15/L3, now ALSO the only non-clock blocker
+  ahead of the autonomy ladder once EXP-1's data starts flowing.
 
 ---
 
