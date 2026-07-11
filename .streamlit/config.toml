@@ -14,3 +14,19 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+# PR-UI-B1: console theme pass (styling only). Dark "cockpit instrument"
+# palette per docs/roadmap/ported/stitch-design-tokens.md, adopted per the
+# Fable5 ruling 2026-07-11 ("adopt the skin, quarantine the script" -- only
+# the visual tokens are taken from the Stitch mockup's DESIGN.md; no mockup
+# TEXT/copy is used anywhere in this app). This is a global, app-wide theme
+# setting -- it necessarily reskins every tab, including the ones this PR
+# does not otherwise touch (System Health, Trade Packet, Scan Batches,
+# Scheduler Runs, System Events); their Python/data/behavior is unchanged,
+# only their inherited base colors are.
+[theme]
+base = "dark"
+backgroundColor = "#131313"
+secondaryBackgroundColor = "#1c1b1b"
+textColor = "#e5e2e1"
+primaryColor = "#4cd7f6"
