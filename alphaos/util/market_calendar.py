@@ -111,3 +111,48 @@ def is_trading_day(d: date) -> bool:
     if d.weekday() >= 5:  # Sat/Sun
         return False
     return not is_us_market_holiday(d)
+
+
+@lru_cache(maxsize=256)
+def trading_days_between(start: date, end: date) -> int:
+    """Count of trading dates in the half-open interval ``(start, end]`` --
+    i.e. how many NEW trading sessions have begun since ``start``. 0 when
+    ``end <= start``.
+
+    This is HOLD-1's alignment anchor: ``outcomes_engine.replay_bracket()``
+    replays a decision against ``bars[:N]`` where ``bars`` is already
+    filtered to strictly AFTER the decision day, so ``bars[0]`` is the first
+    trading day post-decision (trading day 1), ``bars[1]`` the second
+    (trading day 2), etc. ``trading_days_between(start, end)`` counts on the
+    exact same convention -- the day after ``start`` is trading day 1 -- so a
+    live position's ``trading_days_between(opened, now) >= max_days`` fires
+    at precisely the point ``replay_bracket``'s ``bars[:max_days]`` window
+    would have fully resolved. See ``PositionManager._check_exit``."""
+    if end <= start:
+        return 0
+    count = 0
+    d = start + timedelta(days=1)
+    while d <= end:
+        if is_trading_day(d):
+            count += 1
+        d += timedelta(days=1)
+    return count
+
+
+@lru_cache(maxsize=256)
+def nth_trading_day_after(start: date, n: int) -> date:
+    """The date of the ``n``-th trading day strictly AFTER ``start`` (n>=1).
+
+    Inverse-ish of ``trading_days_between``:
+    ``trading_days_between(start, nth_trading_day_after(start, n)) == n`` for
+    any ``n >= 1``. Used to turn an N-trading-day window (hold window,
+    earnings-proximity window) into a concrete calendar end date."""
+    if n <= 0:
+        raise ValueError("n must be >= 1")
+    d = start
+    count = 0
+    while count < n:
+        d += timedelta(days=1)
+        if is_trading_day(d):
+            count += 1
+    return d

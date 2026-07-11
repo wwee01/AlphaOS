@@ -921,6 +921,46 @@ item specs under their canonical names in the specs doc):**
     above referencing `PR15/L3`); these names are reserved separately.
     · 🔴 the operator's
     quarterly restore drill (user-only; blocks L3).
+22. 🟡 **HOLD-1** (trading-day holding-period semantics) — built 2026-07-12,
+    operator-reported: `max_holding_days` was enforced in CALENDAR days
+    (`PositionManager._check_exit`) while the replay engine that gives the
+    number its meaning (`outcomes_engine.replay_bracket`/
+    `outcomes_tracker`'s 1/3/5-day forward returns) has always indexed over
+    TRADING-day bars — a live 3-day swing entered Thursday could force-expire
+    Sunday against a stale weekend price (the monitor runs on weekends), and
+    the same gap silently biased attribution ΔR against live holds
+    (live got N calendar days of exposure, its counterfactual twin got N
+    trading days). **Ruling: `max_holding_days` means TRADING days,
+    matching the replay engine — live enforcement now equals replay
+    horizon semantics exactly**, verified by construction: the new
+    `market_calendar.trading_days_between(start, end)` counts the
+    half-open interval `(start, end]` on the identical convention
+    `replay_bracket`'s `bars[:max_days]` already uses (bars are pre-filtered
+    to strictly after the decision day, so `bars[0]`/day-1 lines up with
+    `trading_days_between()`'s first day-after-start), plus a same-calendar
+    cross-check test asserting both derive the identical expiry session.
+    `_check_exit` now fires `time_expiry` only when the current ET date is
+    itself a trading day (never a weekend/holiday fake fill against a stale
+    price) AND `trading_days_between(opened, now) >= max_days`. Additive
+    `trade_outcomes.holding_trading_days` column journaled alongside the
+    pre-existing `holding_days` (left calendar, unchanged, for continuity) —
+    **NULL on every row journaled before HOLD-1; never backfilled**, same
+    honesty convention as every other additive column in this codebase.
+    `earnings_enricher.compute_proximity_flags` now derives the hold-window
+    end date as the `max_holding_days`-th TRADING date after today
+    (`market_calendar.nth_trading_day_after`) rather than a calendar-day
+    cutoff — a Thursday entry with a 3-trading-day hold now correctly
+    flags a Monday earnings date (calendar day 4, but trading day 2) as
+    inside the hold window; `days_until_earnings`/the warning-window flag
+    stay calendar (informational only, not an enforcement boundary).
+    `position_health.assess_positions()`/the dashboard Positions card/the
+    daily-brief line now show trading days held as the PRIMARY number
+    (`trading_days_held`, labeled explicitly), calendar age retained as
+    secondary detail (`days_held`, unchanged field). Frozen hypothesis
+    definitions (H-TTL-1/H-WIN-1 etc.), proposal TTLs (seconds-based,
+    intraday, untouched), and stop/target checks (a stale weekend price
+    cannot newly cross a stop Friday's live price didn't) were explicitly
+    NOT touched — this is a holding-period-only fix.
 
 ---
 

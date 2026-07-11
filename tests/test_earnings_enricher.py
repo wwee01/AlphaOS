@@ -79,20 +79,54 @@ def test_flags_same_day_earnings_flagged():
     assert "earnings_within_hold_window" in flags["risk_tags"]
 
 
-def test_flags_exact_hold_boundary_inclusive():
-    """days_until == hold_days is INSIDE the hold window (inclusive upper
-    bound) -- guards the <= vs < boundary explicitly."""
+def test_flags_exact_trading_day_hold_boundary_inclusive():
+    """HOLD-1: the hold-window boundary is the hold_days-th TRADING date
+    after today, not a calendar-day cutoff. today=2026-01-01 is a Thursday
+    (see test_market_calendar.py's own note on this date); with hold_days=3
+    the trading-day window is Fri(1)/Mon(2)/Tue(3) = Jan 2/5/6, so the
+    boundary calendar date is Jan 6 even though that's 5 calendar days out
+    -- guards the <= vs < boundary explicitly on the NEW convention."""
     today = date(2026, 1, 1)
-    earnings_date = (today + timedelta(days=3)).isoformat()
+    earnings_date = date(2026, 1, 6).isoformat()  # 3rd trading day after today (Tue)
     flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
                                     hold_days=3, warning_days=7, today=today)
     assert flags["earnings_within_hold_window"] == 1
-    # one day past the hold boundary is OUT of the hold window (but still in warning)
-    earnings_date = (today + timedelta(days=4)).isoformat()
+    # one TRADING day past the boundary (Jan 7, Wed) is OUT of the hold window
+    earnings_date = date(2026, 1, 7).isoformat()
     flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
                                     hold_days=3, warning_days=7, today=today)
     assert flags["earnings_within_hold_window"] == 0
-    assert flags["earnings_within_warning_window"] == 1
+
+
+def test_flags_trading_day_hold_window_flags_earnings_that_calendar_days_would_miss():
+    """The exact HOLD-1 defect scenario: Thursday entry, 3-trading-day hold,
+    earnings on the following Monday -- 4 CALENDAR days out (outside a naive
+    calendar-day 3-day window, which is exactly the bug HOLD-1 fixes) but
+    only the 2nd TRADING day after entry, so it must be flagged as inside
+    the real hold. days_until_earnings itself stays calendar (informational)."""
+    today = date(2026, 1, 1)  # Thursday
+    earnings_date = date(2026, 1, 5).isoformat()  # Monday, 4 calendar days out
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["days_until_earnings"] == 4
+    assert flags["earnings_within_hold_window"] == 1
+
+
+def test_flags_hold_window_with_no_weekend_gap_stays_consistent():
+    """Same 3-trading-day hold, but with the earnings date landing on a run
+    of consecutive weekdays (no weekend in between) -- the trading-day and
+    calendar-day boundaries coincide here, so this is the control case
+    proving the hold-window math isn't just "always +1 vs calendar"."""
+    today = date(2026, 1, 5)  # Monday, no holiday nearby
+    earnings_date = date(2026, 1, 8).isoformat()  # Thursday, 3 calendar AND 3 trading days out
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["days_until_earnings"] == 3
+    assert flags["earnings_within_hold_window"] == 1
+    earnings_date = date(2026, 1, 9).isoformat()  # Friday, one trading day past the boundary
+    flags = compute_proximity_flags(earnings_date, EarningsDataStatus.OK.value,
+                                    hold_days=3, warning_days=7, today=today)
+    assert flags["earnings_within_hold_window"] == 0
 
 
 def test_flags_within_warning_but_outside_hold():

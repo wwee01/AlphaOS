@@ -431,7 +431,11 @@ def tab_positions_health(positions_health: list[dict]) -> None:
                 st.warning("Human decision required — AlphaOS does not auto-exit on health verdicts.")
             st.caption(
                 f"protection: {p['protection_status']} · freshness: {p['freshness_status']} · "
-                f"days held: {p['days_held']}/{p['max_holding_days']} · "
+                # HOLD-1: trading days held is PRIMARY -- max_holding_days now
+                # means trading days (matches the replay engine). Calendar
+                # age stays visible as secondary detail.
+                f"trading days held: {p['trading_days_held']}/{p['max_holding_days']} "
+                f"(calendar age: {p['days_held']}d) · "
                 f"earnings in hold window: {'yes' if p['earnings_within_hold_window'] else 'no'}"
             )
 

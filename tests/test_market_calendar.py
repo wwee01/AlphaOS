@@ -16,9 +16,17 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+import pytest
+
 from alphaos.constants import MarketSession
 from alphaos.util import timeutils
-from alphaos.util.market_calendar import is_trading_day, is_us_market_holiday, us_market_holidays
+from alphaos.util.market_calendar import (
+    is_trading_day,
+    is_us_market_holiday,
+    nth_trading_day_after,
+    trading_days_between,
+    us_market_holidays,
+)
 
 
 # --------------------------------------------------------------- known dates
@@ -101,6 +109,57 @@ def test_is_trading_day_false_on_a_weekday_holiday():
 def test_is_trading_day_true_the_day_before_and_after_a_holiday():
     assert is_trading_day(date(2026, 12, 24)) is True
     assert is_trading_day(date(2026, 12, 28)) is True  # next Monday after the holiday+weekend
+
+
+# ------------------------------------ trading_days_between / nth_trading_day_after (HOLD-1)
+def test_trading_days_between_the_thursday_entry_example():
+    """The exact HOLD-1 walkthrough: entered Thursday 2026-07-09, no holiday
+    in the window. Fri=1, Sat/Sun stay at 1 (not trading days), Mon=2, Tue=3
+    -- so a max_days=3 position expires Tuesday, never over the weekend."""
+    entered = date(2026, 7, 9)
+    assert trading_days_between(entered, date(2026, 7, 10)) == 1  # Fri
+    assert trading_days_between(entered, date(2026, 7, 11)) == 1  # Sat (unchanged)
+    assert trading_days_between(entered, date(2026, 7, 12)) == 1  # Sun (unchanged)
+    assert trading_days_between(entered, date(2026, 7, 13)) == 2  # Mon
+    assert trading_days_between(entered, date(2026, 7, 14)) == 3  # Tue
+
+
+def test_trading_days_between_same_date_is_zero():
+    d = date(2026, 7, 9)
+    assert trading_days_between(d, d) == 0
+
+
+def test_trading_days_between_end_before_start_is_zero():
+    assert trading_days_between(date(2026, 7, 9), date(2026, 7, 1)) == 0
+
+
+def test_trading_days_between_a_holiday_inside_the_window_extends_the_count():
+    """A holiday inside the window doesn't advance the count -- Good Friday
+    2026 is April 3rd. Entry Wednesday April 1: Thu Apr 2=1, Good Friday Apr
+    3 stays at 1 (not a trading day), Sat/Sun stay at 1, Monday Apr 6=2."""
+    entered = date(2026, 4, 1)
+    assert is_trading_day(date(2026, 4, 3)) is False  # Good Friday
+    assert trading_days_between(entered, date(2026, 4, 2)) == 1  # Thu
+    assert trading_days_between(entered, date(2026, 4, 3)) == 1  # Good Friday, no advance
+    assert trading_days_between(entered, date(2026, 4, 4)) == 1  # Sat, no advance
+    assert trading_days_between(entered, date(2026, 4, 6)) == 2  # Monday
+
+
+def test_nth_trading_day_after_matches_trading_days_between_inverse():
+    entered = date(2026, 7, 9)
+    for n in (1, 2, 3, 5):
+        d = nth_trading_day_after(entered, n)
+        assert trading_days_between(entered, d) == n
+
+
+def test_nth_trading_day_after_skips_weekend():
+    assert nth_trading_day_after(date(2026, 7, 9), 1) == date(2026, 7, 10)  # Fri
+    assert nth_trading_day_after(date(2026, 7, 9), 2) == date(2026, 7, 13)  # Mon, skips Sat/Sun
+
+
+def test_nth_trading_day_after_rejects_non_positive_n():
+    with pytest.raises(ValueError):
+        nth_trading_day_after(date(2026, 7, 9), 0)
 
 
 # --------------------------------------------------------- market_session()
