@@ -169,6 +169,38 @@ def test_intake_draft_raises_and_writes_nothing_on_schema_violation(journal):
     assert journal.count_rows("hypothesis_drafts") == 0  # never silently coerced or quarantined
 
 
+def test_validate_candidate_schema_accepts_a_real_card_id():
+    hyp_proposer.validate_candidate_schema(_valid_candidate(card_id="catalyst_momentum_v2"))  # must not raise
+
+
+def test_validate_candidate_schema_rejects_a_phantom_card_id():
+    """Audit fixup (scope/safety, LOW): card_id was previously validated for
+    TYPE only (str | None), never existence -- a hallucinated/phantom
+    card_id from the LLM generator could flow all the way to an accepted
+    hypothesis gating a card that doesn't actually exist. Checked against
+    the same alphaos.cards.registry.load_card_files() mechanism the rest of
+    the codebase already uses (get_default_card()/generator.card_summaries()),
+    never a second, independently-maintained card list."""
+    with pytest.raises(hyp_proposer.CandidateSchemaError) as exc_info:
+        hyp_proposer.validate_candidate_schema(_valid_candidate(card_id="totally_phantom_card_xyz"))
+    assert "card_id" in str(exc_info.value)
+    assert "totally_phantom_card_xyz" in str(exc_info.value)
+
+
+def test_intake_draft_raises_and_writes_nothing_on_phantom_card_id(journal):
+    """Same 'strict schema, reject at intake, never silently coerce' law as
+    every other schema violation (see
+    test_intake_draft_raises_and_writes_nothing_on_schema_violation above):
+    a phantom card_id fails loudly, no hypothesis_drafts row at all -- never
+    quarantined as a rejected row, since there is nothing valid to even
+    quarantine."""
+    with pytest.raises(hyp_proposer.CandidateSchemaError):
+        hyp_proposer.intake_draft(
+            journal, _valid_candidate(card_id="totally_phantom_card_xyz"), source="manual",
+        )
+    assert journal.count_rows("hypothesis_drafts") == 0
+
+
 def test_metric_whitelist_matches_resolver_dispatch_table():
     """'the same metric functions resolver.py can compute' -- never a second,
     independently-maintained list."""
@@ -727,6 +759,23 @@ def test_config_hash_changes_when_hgen_flags_change():
 
 # ================================================================ isolation
 def test_proposer_and_generator_never_imported_by_approval_or_risk_or_execution():
+    """Audit fixup (scope/safety, MEDIUM): the original grep checked only
+    three dotted-path tokens (hypotheses.proposer / hypotheses.generator /
+    hypothesis_drafts). But alphaos/hypotheses/__init__.py re-exports
+    run_hypothesis_generate/accept_draft/reject_draft/list_drafts at the
+    package top level, so `from alphaos.hypotheses import
+    run_hypothesis_generate` contains NONE of those three tokens and would
+    evade the check entirely. A blanket "this decision-path file never
+    touches the hypotheses package at all, in any import form" check is
+    more robust than a token whitelist that has to be kept in sync with
+    every new exported symbol -- confirmed safe today: approval.py/
+    risk_engine.py/order_manager.py contain zero references to
+    alphaos.hypotheses in any form. (PR12's registry/resolver modules are
+    legitimately imported elsewhere -- orchestrator.py's own hypothesis_seed/
+    hypothesis_resolve/hypothesis_generate registry/reporting methods --
+    never by these three decision-path files.) The hypothesis_drafts check
+    stays separate: it guards against a raw SQL/string table reference,
+    a different vector than a Python import statement."""
     import alphaos.approval as approval_mod
     import alphaos.execution.order_manager as order_mod
     import alphaos.risk.risk_engine as risk_mod
@@ -737,8 +786,8 @@ def test_proposer_and_generator_never_imported_by_approval_or_risk_or_execution(
         (order_mod, "order_manager.py"),
     ):
         text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-        assert "hypotheses.proposer" not in text, f"{name} references hypotheses.proposer"
-        assert "hypotheses.generator" not in text, f"{name} references hypotheses.generator"
+        assert "alphaos.hypotheses" not in text, f"{name} imports the hypotheses package"
+        assert "from alphaos import hypotheses" not in text, f"{name} imports the hypotheses package"
         assert "hypothesis_drafts" not in text, f"{name} references hypothesis_drafts"
 
 
@@ -746,12 +795,23 @@ def test_proposer_and_generator_never_referenced_by_orchestrator_decision_method
     """Orchestrator LEGITIMATELY references the hypotheses package elsewhere
     (hypothesis_seed/hypothesis_resolve/hypothesis_generate -- registry/
     reporting methods), so a whole-file grep would false-positive. This
-    scopes the check to the actual decision-path methods only."""
+    scopes the check to the actual decision-path methods only.
+
+    Audit fixup (correctness, LOW): the original list checked only 7 method
+    names. PR9's established sibling test
+    (test_decision_functions_never_reference_alerts_or_fuse_state in
+    tests/test_scheduler.py) checks a longer list for the same class of
+    concern -- match that SAME set of decision methods here (union of both
+    lists), not a narrower subset, so a future decision-path method doesn't
+    slip past this check just because HGEN-1's own list happened to omit
+    it."""
     import alphaos.orchestrator as orch_mod
 
     decision_methods = [
         "run_scan_once", "run_monitor_once", "approve_proposal", "reject_proposal",
         "_handle_proposal", "_execute", "_reject_candidate",
+        "_resolve_decision", "_combine_decision", "_real_decision_driver",
+        "_label_candidate", "_freeze_label",
     ]
     for name in decision_methods:
         fn = getattr(orch_mod.Orchestrator, name)

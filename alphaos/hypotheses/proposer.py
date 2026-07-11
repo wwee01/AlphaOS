@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.cards.registry import load_card_files
 from alphaos.constants import Severity
 from alphaos.hypotheses import queries as hyp_queries
 from alphaos.hypotheses.constants import (
@@ -123,7 +124,14 @@ def validate_candidate_schema(candidate: dict) -> None:
     hypothetical future H-AI-1-shaped row, but intake itself requires a
     real, computable metric; "do not invent new ones" per the build spec),
     ``proposed_risk_class`` (one of A/B/C), ``direction`` (one of positive/
-    negative/either). Optional: ``card_id`` (str or None).
+    negative/either). Optional: ``card_id`` (str or None) -- when provided,
+    it must name a REAL setup card (checked via ``alphaos.cards.registry.
+    load_card_files()``, the same disk-read mechanism ``get_default_card()``/
+    ``generator.card_summaries()`` already use -- never a second,
+    independently-maintained card list). A hallucinated/phantom card_id
+    (e.g. an LLM-generated candidate inventing a plausible-looking name)
+    must never reach an accepted hypothesis gating a card that does not
+    exist; caught here, at intake, not downstream.
 
     Raises ``CandidateSchemaError`` collecting EVERY violation found, never
     just the first -- an operator (or a generator producing a batch) should
@@ -160,6 +168,14 @@ def validate_candidate_schema(candidate: dict) -> None:
     card_id = candidate.get("card_id")
     if card_id is not None and not isinstance(card_id, str):
         violations.append(f"card_id: must be a string or None, got {type(card_id).__name__}")
+    elif isinstance(card_id, str):
+        known_card_ids = {c["card_id"] for c in load_card_files()}
+        if card_id not in known_card_ids:
+            violations.append(
+                f"card_id: {card_id!r} does not match any registered setup card "
+                f"{sorted(known_card_ids)} -- a draft may only link to a real, existing card, "
+                "never a hallucinated or as-yet-unregistered one"
+            )
 
     if violations:
         raise CandidateSchemaError(
