@@ -291,7 +291,57 @@ def _fused_jobs(journal, settings) -> list[dict]:
     return fused
 
 
-def _needs_you(journal, digest: dict, fused_jobs: list[dict]) -> dict:
+def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
+    """PR12 registry: which hypotheses resolved TODAY, and whether ANY of
+    them is the registry's first-ever resolution.
+
+    Both queries key off ``resolved_at_utc`` (an immutable timestamp,
+    stamped exactly once by the resolver's own one-shot
+    ``_mark_resolved()`` and never cleared or rewritten anywhere), NEVER
+    off the current ``status`` column. ``status`` is NOT a permanent
+    "has this ever resolved" ledger: PR13 slice 2's own
+    ``mark_hypothesis_status()`` -- a shipped, intended, promotion-gating
+    operator action -- moves a row from ``resolved`` to ``met``/``failed``/
+    ``withdrawn`` WITHOUT touching ``resolved_at_utc``. An earlier version
+    of this function counted ``status = 'resolved'`` rows, which silently
+    re-armed the "first ever" milestone (and, worse, could drop a same-day
+    adjudicated resolution from `resolved_today` entirely) the moment an
+    operator adjudicated a prior resolution -- caught by two independent
+    audits empirically reproducing exactly that sequence. Keying off
+    ``resolved_at_utc IS NOT NULL`` instead makes both counts immune to
+    any later status transition.
+
+    "First-ever" is detected as n_resolved_total == resolved_today_count
+    -- i.e. every hypothesis that has EVER resolved, resolved today,
+    meaning before today the registry had resolved nothing. Self-limiting
+    by construction: this fires once, on the day it happens, and stays
+    silent on every later day a routine (non-first) resolution occurs --
+    it never re-flags the "first" milestone twice, and never fires at all
+    on a quiet day.
+
+    Named per the master reference's own decision record (§9, "PR12 is
+    registry-first; the LLM hypothesis generator is v1.1 ... Generator
+    earns v1.1 when the registry demonstrates resolutions") -- the
+    operator asked to be pinged, in the SAME daily digest that already
+    pings for everything else, specifically at that trigger event, rather
+    than relying on a conversational reminder.
+    """
+    resolved_today = journal.query(
+        "SELECT hypothesis_id, last_verdict FROM hypothesis_proposals "
+        "WHERE resolved_at_utc >= ? ORDER BY resolved_at_utc",
+        (since_sgt,),
+    )
+    if not resolved_today:
+        return None
+    n_resolved_total = journal.count_rows("hypothesis_proposals", "resolved_at_utc IS NOT NULL")
+    return {
+        "resolved_today_count": len(resolved_today),
+        "resolved_today": resolved_today,
+        "is_first_ever": n_resolved_total == len(resolved_today),
+    }
+
+
+def _needs_you(journal, digest: dict, fused_jobs: list[dict], hypothesis_resolution: Optional[dict] = None) -> dict:
     pending = journal.open_proposals()
     for p in pending:
         p["seconds_remaining"] = seconds_remaining(p.get("proposal_expires_at_utc"))
@@ -302,6 +352,7 @@ def _needs_you(journal, digest: dict, fused_jobs: list[dict]) -> dict:
         "open_incidents": protection.get("open_incidents", []),
         "open_incident_count": protection.get("open_incident_count", 0),
         "fused_jobs": fused_jobs,
+        "hypothesis_resolution": hypothesis_resolution,
     }
 
 
@@ -469,7 +520,11 @@ MAX_SYMBOLS_IN_ONE_ACTION = 5
 
 def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict) -> str:
     """Priority order per spec: incident > fused job > expiring approval >
-    EXIT_REVIEW position > below-floor data note > "nothing needs you"."""
+    EXIT_REVIEW position > hypothesis resolution > below-floor data note >
+    "nothing needs you". Hypothesis resolution ranks above the routine
+    below-floor note (a rare, decision-relevant registry event beats a
+    near-daily "still gathering data" note) but below every safety/time-
+    critical item above it."""
     if needs_you["open_incident_count"] > 0:
         return f"{needs_you['open_incident_count']} open protection incident(s) -- review immediately."
     if needs_you["fused_jobs"]:
@@ -487,6 +542,16 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
         remaining = len(exit_review) - len(shown)
         syms = ", ".join(shown) + (f", +{remaining} more" if remaining > 0 else "")
         return f"{len(exit_review)} position(s) flagged EXIT_REVIEW ({syms}) -- a human should look at these."
+    hyp_res = needs_you.get("hypothesis_resolution")
+    if hyp_res:
+        ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
+        if hyp_res["is_first_ever"]:
+            return (
+                f"The hypothesis registry resolved for the first time ({ids}) -- ask Claude to start "
+                "building the LLM-based hypothesis generator (v1.1) if you want to proceed."
+            )
+        noun = "hypothesis" if hyp_res["resolved_today_count"] == 1 else "hypotheses"
+        return f"{hyp_res['resolved_today_count']} {noun} resolved today ({ids})."
     if moonshot_gap.get("status") == "below_sample_floor":
         return f"Nothing actionable yet -- still below the data floor ({moonshot_gap['data_progress']})."
     return "Nothing needs you right now."
@@ -522,7 +587,8 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     positions_health = assess_positions(journal, settings, market)
     regime = _regime_header(journal)
     fused_jobs = _fused_jobs(journal, settings)
-    needs_you = _needs_you(journal, digest, fused_jobs)
+    hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
+    needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution)
     todays_activity = _todays_activity(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
     best_candidate = _best_candidate_today(journal, since_sgt)
@@ -606,8 +672,13 @@ def render_markdown(brief: dict) -> str:
         f"- Pending approvals: **{ny['pending_approval_count']}**",
         f"- Open protection incidents: **{ny['open_incident_count']}**",
         f"- Fused (self-halted) jobs: **{len(ny['fused_jobs'])}**",
-        "",
     ]
+    hyp_res = ny.get("hypothesis_resolution")
+    if hyp_res:
+        ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
+        milestone = " (registry's first-ever resolution)" if hyp_res["is_first_ever"] else ""
+        lines.append(f"- Hypotheses resolved today: **{hyp_res['resolved_today_count']}** ({ids}){milestone}")
+    lines.append("")
 
     ph = brief["positions_health"]
     lines += [f"## Positions ({len(ph)} open)"]
