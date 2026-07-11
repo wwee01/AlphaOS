@@ -297,6 +297,72 @@ div[data-testid="stVerticalBlock"][class*="st-key-poscard_"] {{
     font-size: 12px;
     color: {_TEXT_DIM};
 }}
+
+/* ---- PR-UI-M1: mobile responsive pass (UI/UX doc §16). ONE media query,
+   scoped to <=480px -- every rule below is inert above that width, so the
+   desktop layout this whole file already renders is provably unchanged
+   (verified live at 1280px: no rule in this block matches). Same
+   selectors as the desktop rules above; narrower/denser VALUES only,
+   never new elements, never JS, never a viewport-meta hack. Streamlit
+   1.58's own st.columns() already stacks to a single column below its
+   internal breakpoint with no CSS help (verified live at 390px against
+   the annunciator's col_mode/col_ks columns before writing this block) --
+   so nothing here forces stacking, only condenses what stacking already
+   produced. ---- */
+@media (max-width: 480px) {{
+    /* Annunciator (§16 principle 4, "condenses, never disappears"): the
+       mode badge and kill-switch badge already stack full-width (see
+       above); shrink their padding/type so mode + kill state read as a
+       tight strip rather than two tall desktop-sized cards eating the
+       first screen. Same st.metric/st.alert content, denser box only. */
+    .st-key-annunciator_mode_badge [data-testid="stMetric"] {{
+        padding: 4px 10px;
+    }}
+    .st-key-annunciator_mode_badge [data-testid="stMetricValue"] {{
+        font-size: 1.15rem;
+    }}
+    .st-key-annunciator_mode_badge [data-testid="stMetricLabel"] {{
+        font-size: 10px;
+    }}
+    .st-key-annunciator_ks_badge [data-testid="stAlertContainer"] {{
+        padding: 6px 10px;
+    }}
+    .st-key-annunciator_ks_badge [data-testid="stAlertContainer"] p {{
+        font-size: 13px;
+        margin: 0;
+    }}
+
+    /* Touch targets >= 44px (§16 principle 6): controls grow, data density
+       is untouched (stDataFrame/st.dataframe rows, R-ladder tick text,
+       etc. are not targeted by this rule). stBaseButton covers every
+       st.button variant (primary/secondary/tertiary all share the
+       "stBaseButton-*" data-testid prefix in 1.58); stTab covers the tab
+       strip labels named in §16's touch-target line. */
+    [data-testid^="stBaseButton"] {{
+        min-height: 44px;
+    }}
+    [data-testid="stTab"] {{
+        min-height: 44px;
+        display: flex;
+        align-items: center;
+    }}
+
+    /* R-ladder + TTL bar at narrow width (§16 principle 5: "R-ladders stay
+       horizontal ... TTL bars keep their label text"). The r-ladder's
+       640px desktop cap never actually binds below 640px of available
+       width, so it already renders full-bleed on a 390px screen (verified
+       live) -- this rule just makes that explicit/future-proof rather
+       than relying on the accident of "480 < 640". The TTL bar's 260px
+       track cap DOES bind on mobile (verified live: a long gap of empty
+       space sat between the fill and its own label at 390px) -- relaxed
+       here so the bar uses the full available row width instead. */
+    .alphaos-r-ladder {{
+        max-width: 100%;
+    }}
+    .alphaos-ttl-bar-track {{
+        max-width: none;
+    }}
+}}
 </style>
 """
 

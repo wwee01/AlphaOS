@@ -161,3 +161,48 @@ def test_console_css_makes_no_external_font_cdn_call():
     now and going forward."""
     assert "fonts.googleapis.com" not in console_theme.CONSOLE_CSS
     assert "@import" not in console_theme.CONSOLE_CSS
+
+
+# --------------------------------------------------- PR-UI-M1: mobile responsive
+def test_console_css_has_a_max_width_480_media_query():
+    """UI/UX doc §16's implementation slice: ONE @media (max-width: 480px)
+    block, and only one -- a second/competing breakpoint would mean two
+    sources of truth for "what is mobile" in the same file."""
+    assert "@media (max-width: 480px)" in console_theme.CONSOLE_CSS
+    assert console_theme.CONSOLE_CSS.count("@media") == 1
+
+
+def test_console_css_44px_touch_target_rule_is_scoped_inside_the_media_query():
+    """§16 principle 6: touch targets >= 44px, mobile-only -- the 44px rule
+    must live INSIDE the media query block, not as a sitewide rule (that
+    would inflate desktop buttons too, which the live 1280px check must
+    show as unchanged)."""
+    media_start = console_theme.CONSOLE_CSS.index("@media (max-width: 480px)")
+    media_block = console_theme.CONSOLE_CSS[media_start:]
+    assert "min-height: 44px" in media_block
+    # Not present anywhere before the media query starts.
+    assert "min-height: 44px" not in console_theme.CONSOLE_CSS[:media_start]
+
+
+def test_console_css_mobile_pass_still_makes_no_external_call():
+    """Re-assert the audit-fixup 2026-07-11 discipline holds for the new
+    block too -- a mobile pass is exactly the kind of change that could
+    quietly reintroduce a CDN font import "just for legibility"."""
+    assert "fonts.googleapis.com" not in console_theme.CONSOLE_CSS
+    assert "@import" not in console_theme.CONSOLE_CSS
+
+
+def test_console_css_mobile_media_query_relaxes_r_ladder_and_ttl_bar_width_caps():
+    """§16 principle 5/implementation slice: at narrow width the R-ladder and
+    TTL bar must not be held to their desktop max-width caps (640px /
+    260px) -- verified live at 390px that the 260px TTL-bar cap left a
+    visible dead-space gap between the fill and its own label; this locks
+    in that both caps are relaxed inside the mobile block specifically."""
+    media_start = console_theme.CONSOLE_CSS.index("@media (max-width: 480px)")
+    media_block = console_theme.CONSOLE_CSS[media_start:]
+    assert ".alphaos-r-ladder {" in media_block
+    assert ".alphaos-ttl-bar-track {" in media_block
+    # The desktop caps themselves must be untouched outside the media query.
+    desktop_block = console_theme.CONSOLE_CSS[:media_start]
+    assert "max-width: 640px;" in desktop_block
+    assert "max-width: 260px;" in desktop_block
