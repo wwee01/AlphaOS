@@ -736,10 +736,17 @@ def test_no_decision_path_reads_brief_or_health_modules():
         (exit_rules_mod, "exit_rules.py"), (position_mod, "position_manager.py"),
         (watchdog_mod, "protection_watchdog.py"),
     )
+    # PR-UI-B2 audit fixup (MEDIUM-2): the guarded-strings list must grow with
+    # every new report module, or the ratchet silently stops covering them --
+    # tqs_report/journal_feed are B2's additions; promotion_history lives in
+    # cards/scoreboard.py (a mixed module), so its FUNCTION name is guarded
+    # rather than the module name.
+    banned = ("daily_brief", "position_health", "tqs_report", "journal_feed",
+              "promotion_history")
     for mod, name in modules:
         text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-        assert "daily_brief" not in text and "position_health" not in text, \
-            f"{name} references a PR11 report module"
+        for token in banned:
+            assert token not in text, f"{name} references report module/function {token!r}"
 
 
 # --------------------------------------------------------- job + alert wiring

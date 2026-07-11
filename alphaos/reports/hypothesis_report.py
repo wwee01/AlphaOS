@@ -22,7 +22,79 @@ text next to the raw verdict is the intended, safer interface.
 
 from __future__ import annotations
 
+from typing import Optional
+
+from alphaos.hypotheses.queries import METRIC_FUNCTIONS
+from alphaos.stats.effective_n import effective_n
 from alphaos.util import timeutils
+
+
+def _progress_for_row(journal, row: dict) -> Optional[dict]:
+    """PR-UI-B2: testing-status progress vs this hypothesis's own frozen
+    floor -- n/N effective-cluster count and days/span, for the Learning
+    tab's Hypotheses panel (UI/UX doc §5: "testing progress bars n/N and
+    days/span"). Computed FRESH via the SAME metric function + effective_n()
+    + reference-arm floor check ``alphaos.hypotheses.resolver._resolve_one``
+    itself uses -- never a second, separately-tuned notion of "close to
+    ready" that could silently disagree with what the resolver would
+    actually do on its next pass (one truth law).
+
+    PURE READ -- never writes, never calls evaluate_hypothesis(). Returns
+    None for a row that isn't 'testing', has no metric_fn_name (H-AI-1,
+    which links to BASELINE's own preregistration instead of computing
+    anything here), or has no prereg_id yet (nothing to floor-check
+    against)."""
+    if row.get("status") != "testing":
+        return None
+    metric_fn_name = row.get("metric_fn_name")
+    if not metric_fn_name:
+        return None
+    metric_fn = METRIC_FUNCTIONS.get(metric_fn_name)
+    if metric_fn is None or not row.get("prereg_id"):
+        return None
+    prereg = journal.one(
+        "SELECT floor_effective_n, floor_span_days FROM preregistrations WHERE prereg_id = ?",
+        (row["prereg_id"],),
+    )
+    if prereg is None:
+        return None
+
+    # PERF NOTE (audit MEDIUM-1, accepted for now): each testing hypothesis
+    # runs its full metric query + effective_n() per report build (~7 scans
+    # per Learning-panel render at today's table sizes -- milliseconds).
+    # Revisit with a cache/row-cap when EXP-1 multiplies data volume; a
+    # premature cache here would be a second source of truth to keep honest.
+    rows, _value_key, reference_arm_rows = metric_fn(journal)
+    en = effective_n(rows)
+    clears_floor = (
+        en["effective_n"] >= prereg["floor_effective_n"]
+        and (en["span_days"] or 0) >= prereg["floor_span_days"]
+    )
+    if reference_arm_rows is not None:
+        ref_en = effective_n(reference_arm_rows)
+        clears_floor = clears_floor and (
+            ref_en["effective_n"] >= prereg["floor_effective_n"]
+            and (ref_en["span_days"] or 0) >= prereg["floor_span_days"]
+        )
+    # Audit fixup (LOW-1): clears_floor alone could read as "resolver will
+    # act on its next pass" -- but the resolver ALSO enforces the
+    # analysis_not_before calendar floor, which this progress view
+    # deliberately ignores (it answers "how far along", not "due"). Surface
+    # the calendar state explicitly so the tab can never imply readiness
+    # before the pre-registered date.
+    from alphaos.util import timeutils
+
+    anb = row.get("analysis_not_before") or ""
+    calendar_floor_reached = bool(anb) and timeutils.stamp().local_sgt[:10] >= str(anb)
+    return {
+        "effective_n": en["effective_n"],
+        "floor_effective_n": prereg["floor_effective_n"],
+        "span_days": en["span_days"],
+        "floor_span_days": prereg["floor_span_days"],
+        "clears_floor": clears_floor,
+        "calendar_floor_reached": calendar_floor_reached,
+        "resolver_ready": clears_floor and calendar_floor_reached,
+    }
 
 
 def build_hypothesis_report(journal) -> dict:
@@ -38,6 +110,11 @@ def build_hypothesis_report(journal) -> dict:
             and row["analysis_not_before"] is not None
             and today >= row["analysis_not_before"]
         )
+        # PR-UI-B2: progress vs floor, display-only (see _progress_for_row's
+        # own docstring) -- added as an extra field on each row rather than a
+        # parallel list, so a caller iterating `rep["hypotheses"]` never has
+        # to zip two lists back together.
+        row["progress"] = _progress_for_row(journal, row)
     return {
         "as_of": today,
         "n_total": len(rows),

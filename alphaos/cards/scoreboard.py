@@ -139,6 +139,29 @@ def demoted_cards(journal) -> list[dict]:
     )
 
 
+def promotion_history(journal, limit: int = 200) -> list[dict]:
+    """PR-UI-B2: every manual card state-transition decision ever made
+    (``promotion_decisions`` -- both ``direction='promote'`` graduations and
+    ``direction='demote'`` manual overrides), most recent first. Deliberately
+    a SEPARATE query from ``demoted_cards()`` above -- ``promotion_decisions``
+    and ``card_demotions`` are two distinct tables by design (see
+    ``alphaos/journal/schema.py``'s own comment on ``promotion_decisions``:
+    "the full transition history is a reporting-level UNION of both tables,
+    not a shared one"). PURE READ, added for the Learning tab's Journal panel
+    (promotions/demotions with evidence links) -- never consulted by
+    ``build_card_scoreboard_report()`` itself, which only needs the automatic-
+    trigger-only demotion roster. LIMIT per the feed's own discipline
+    (audit LOW-2): manual decisions are rare events, but an unbounded
+    fetch-then-slice is the pattern the journal feed's other sources
+    already avoid."""
+    return journal.query(
+        "SELECT decision_id, card_id, card_version, from_state, to_state, direction, "
+        "trigger, hypothesis_id, preregistration_id, decided_by, research_ref, "
+        "decided_at_utc FROM promotion_decisions ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
+
+
 def build_card_scoreboard_report(journal) -> dict:
     """Every live_eligible, not-yet-demoted card's current scoreboard, PURE
     READ (does not consult or write ``card_scoreboard_snapshots`` -- that
