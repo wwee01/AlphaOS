@@ -1397,6 +1397,24 @@ class Orchestrator:
 
         return run_hypothesis_generate(self.journal, self.settings)
 
+    def tqs_shadow_report(self, limit: int = 1000) -> dict:
+        """PR-UI-B2: broader-window TQS shadow-scoring summary (bucket
+        histogram, mean data_confidence, per-component availability) for the
+        Learning tab's TQS panel. PURE READ. See
+        alphaos/reports/tqs_report.py."""
+        from alphaos.reports.tqs_report import build_tqs_report
+
+        return build_tqs_report(self.journal, limit=limit)
+
+    def learning_journal_feed(self, limit: int = 50) -> dict:
+        """PR-UI-B2: the Learning tab's Journal panel feed -- resolved
+        attribution events, hypothesis lifecycle transitions, and card
+        promotions/demotions, newest first. PURE READ. See
+        alphaos/reports/journal_feed.py."""
+        from alphaos.reports.journal_feed import build_journal_feed
+
+        return build_journal_feed(self.journal, limit=limit)
+
     def autonomy_readiness_report(self) -> dict:
         """PR13 slice 2: every card-gating hypothesis's promotion precondition
         checklist. PURE READ. See alphaos/reports/autonomy_readiness.py."""

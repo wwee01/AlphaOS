@@ -8,6 +8,10 @@ Tabs:
 * Approval Center — OpenAI eval, optional Claude review, approve/reject,
   and a "Request Claude second opinion" button (disabled without an Anthropic key).
 * Candidates / Proposals, Candidate Flow (decisions funnel + hindsight)
+* Learning (PR-UI-B2) — TQS / Attribution / Hypotheses / Journal, four
+  read-only sub-panels over PR7/PR8/PR12/HGEN-1/PR13 report data. Pure read;
+  the operator-only MET/FAILED/WITHDRAWN ruling and hypothesis_accept/
+  hypothesis_reject stay CLI-only actions (never a UI button here).
 * Open Trades / Closed Trades
 * System Health — mode, broker status, data freshness, kill switch.
 
@@ -1094,6 +1098,225 @@ def tab_candidate_flow(orch: Orchestrator) -> None:
             st.info("None.")
 
 
+def _hypothesis_status_label(row: dict) -> str:
+    """MET/FAILED/WITHDRAWN are reserved for an operator reading the
+    resolved evidence (alphaos.hypotheses.constants.HypothesisStatus's own
+    docstring / registry.mark_hypothesis_status()'s docstring) -- never set
+    by any automated path. Explicitly labeled 'operator ruling' wherever
+    shown so this tab never implies AlphaOS judged its own hypothesis."""
+    status = row.get("status")
+    if status in ("met", "failed", "withdrawn"):
+        return f"{status} (operator ruling)"
+    return status
+
+
+def _hypothesis_progress_label(progress: "Optional[dict]") -> str:
+    if progress is None:
+        return "—"
+    en, floor_en = progress["effective_n"], progress["floor_effective_n"]
+    span = progress.get("span_days")
+    floor_span = progress["floor_span_days"]
+    span_str = f"{span:.0f}" if span is not None else "0"
+    ready = "✓ clears floor" if progress["clears_floor"] else "below floor"
+    return f"n={en}/{floor_en} · span={span_str}/{floor_span:.0f}d · {ready}"
+
+
+def _attribution_v2_agg_row(label: str, agg: dict, floor_n: int, floor_span: int) -> dict:
+    # attribution.py's compute_attribution_v2() returns a hand-written
+    # "no rows at all" empty-case dict for the execution-gap slice that
+    # omits "effective_n" entirely (distinct from _floor_gated_v2_aggregate's
+    # own below-floor return, which always includes it) -- fall back to
+    # "resolved_count" (present on both shapes) rather than a KeyError, never
+    # fabricating a 0 for a value that's genuinely absent from one shape.
+    n = agg.get("effective_n", agg.get("resolved_count"))
+    if agg["status"] == "ok":
+        return {
+            "slice": label, "n (effective)": n,
+            "span_days": agg["span_days"], "mean_ΔR": agg["mean_delta_r"],
+            "sum_ΔR": agg["sum_delta_r"], "status": "✓ ok",
+        }
+    return {
+        "slice": label, "n (effective)": n, "span_days": agg["span_days"],
+        "mean_ΔR": None, "sum_ΔR": None,
+        "status": f"n={n}/{floor_n} below floor — counts only "
+                  f"(needs ≥{floor_span}d span)",
+    }
+
+
+def tab_learning(orch: Orchestrator) -> None:
+    """PR-UI-B2: the Learning tab (UI/UX doc §5/§14) -- four read-only
+    sub-panels: TQS, Attribution, Hypotheses, Journal. PURE READ, zero
+    writes, zero new orchestrator mutation calls, zero buttons that change
+    state -- every value comes from an existing report/query module (PR7
+    TQS, PR8 attribution v2, PR12 hypothesis registry, HGEN-1 drafts, PR13
+    promotion/demotion history), never a raw SQL query inline here.
+
+    Fable5 ruling (2026-07-11): the Stitch mockup for this screen depicted
+    an autonomous self-modifying learner -- the single most prohibited
+    misrepresentation this build must avoid. The banner below is the
+    anti-"ML adjustment feed" law; nothing on this tab may imply AlphaOS
+    adjusts its own weights or rules on its own."""
+    st.subheader("Learning")
+    st.warning(
+        "🧭 Hypothesis outcomes are ruled by the operator. AlphaOS never "
+        "adjusts its own weights or rules on its own — every MET/FAILED/"
+        "WITHDRAWN verdict below is a human judgment call, not a machine one."
+    )
+
+    tqs_tab, attr_tab, hyp_tab, journal_tab = st.tabs(
+        ["TQS", "Attribution", "Hypotheses", "Journal"]
+    )
+
+    with tqs_tab:
+        st.markdown(console_theme.render_section_label("TQS — evidence-weighted setup quality"),
+                   unsafe_allow_html=True)
+        st.caption(
+            "PR7 shadow measurement signal -- score is NEVER shown without its data-"
+            "confidence/coverage pairing. Never read by any gate/eval/risk/execution path."
+        )
+        tqs = orch.tqs_shadow_report()
+        if tqs["scored_count"] == 0:
+            st.info("No TQS scores yet (mock rows excluded).")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Scored (live)", tqs["scored_count"])
+            c2.metric("Mean data confidence", tqs["mean_data_confidence"])
+            c3.metric("Mock excluded", tqs["mock_excluded_count"])
+            st.caption("Bucket histogram (table, not a chart — a live-only distribution, no fixed sample floor applies here).")
+            st.dataframe(
+                [{"bucket": b, "n": n} for b, n in sorted(tqs["bucket_histogram"].items())],
+                width="stretch",
+            )
+            st.caption("Per-component availability (evidence coverage) — a missing component is greyed by its own reason elsewhere (Approval Center rung-3); here it's the aggregate rate.")
+            st.dataframe(
+                [
+                    {
+                        "component": name, "available": c["available"], "missing": c["missing"],
+                        "availability_rate": c["availability_rate"],
+                    }
+                    for name, c in tqs["component_availability"].items()
+                ],
+                width="stretch",
+            )
+
+    with attr_tab:
+        st.markdown(console_theme.render_section_label("Attribution — floor-gated ΔR aggregates"),
+                   unsafe_allow_html=True)
+        st.caption("ΔR>0 = the non-trade (or non-frozen-path) added value; ΔR<0 = it cost value.")
+        st.caption(ATTRIBUTION_V2_CAVEAT)
+        attr = orch.attribution_report()
+        v2 = attr["v2"]
+        c1, c2 = st.columns(2)
+        c1.metric("Total attribution records", v2["total_records"])
+        c2.metric("Mock excluded", v2["mock_excluded_count"])
+
+        rows = []
+        for atype, by_agent in v2["aggregate_delta_r_by_type_and_agent"].items():
+            for agent, agg in by_agent.items():
+                rows.append(_attribution_v2_agg_row(
+                    f"{atype} / {agent}", agg, v2["sample_floor_resolved"], v2["sample_floor_span_days"],
+                ))
+        if rows:
+            st.dataframe(rows, width="stretch")
+        else:
+            st.info("No attribution aggregates yet.")
+
+        with st.expander("By setup card"):
+            card_rows = [
+                _attribution_v2_agg_row(
+                    card_id, agg, v2["sample_floor_subslice_resolved"], v2["sample_floor_span_days"],
+                )
+                for card_id, agg in v2["aggregate_delta_r_by_card"].items()
+            ]
+            st.dataframe(card_rows, width="stretch") if card_rows else st.info("None.")
+
+        with st.expander("Execution gap (propose → approved → executed)"):
+            eg = v2["execution_gap_propose_approved_executed"]
+            st.dataframe(
+                [_attribution_v2_agg_row("execution_delta_r", eg, v2["sample_floor_resolved"],
+                                        v2["sample_floor_span_days"])],
+                width="stretch",
+            )
+
+    with hyp_tab:
+        st.markdown(console_theme.render_section_label("Hypotheses — PR12 registry"), unsafe_allow_html=True)
+        st.caption(
+            "Frozen claim text, mechanical status only (proposed → testing → resolved). "
+            "MET/FAILED/WITHDRAWN are operator rulings, never set automatically."
+        )
+        hyp = orch.hypothesis_report()
+        st.write(
+            f"{hyp['n_total']} total · {hyp['n_proposed']} proposed · "
+            f"{hyp['n_testing']} testing · {hyp['n_resolved']} resolved"
+        )
+        st.dataframe(
+            [
+                {
+                    "hypothesis_id": h["hypothesis_id"], "risk_class": h["risk_class"],
+                    "status": _hypothesis_status_label(h),
+                    "overdue": "yes" if h.get("overdue") else "",
+                    "progress": _hypothesis_progress_label(h.get("progress")),
+                    "analysis_not_before": h["analysis_not_before"],
+                    "last_verdict": h.get("last_verdict"), "last_q_value": h.get("last_q_value"),
+                    "claim": h["claim"],
+                }
+                for h in hyp["hypotheses"]
+            ],
+            width="stretch",
+        )
+
+        st.markdown(console_theme.render_section_label("HGEN-1 drafts — quarantined, awaiting operator review"),
+                   unsafe_allow_html=True)
+        st.caption(
+            "Read-only here. Accept/reject is an operator CLI action only "
+            "(`alphaos hypothesis_accept` / `hypothesis_reject`) -- a UI accept "
+            "button is explicitly out of scope for this PR and would need its own "
+            "gate review."
+        )
+        pending_drafts = orch.hypothesis_drafts_list(status="draft")
+        st.write(f"Pending drafts: **{len(pending_drafts)}**")
+        if pending_drafts:
+            st.dataframe(
+                [
+                    {
+                        "draft_id": d["draft_id"], "title": d["title"],
+                        "mechanical_risk_class": d["mechanical_risk_class"],
+                        "proposed_risk_class": d["proposed_risk_class"],
+                        "source": d["source"], "metric_fn_name": d["metric_fn_name"],
+                        "card_id": d.get("card_id"), "created_at_utc": d["created_at_utc"],
+                    }
+                    for d in pending_drafts
+                ],
+                width="stretch",
+            )
+            with st.expander("Draft checks (evidence availability + duplicate check)"):
+                for d in pending_drafts:
+                    st.markdown(f"**{d['draft_id']}** — {d['title']}")
+                    st.json({
+                        "evidence_check": d.get("evidence_check_json"),
+                        "duplicate_check": d.get("duplicate_check_json"),
+                    })
+        else:
+            st.info("No pending drafts.")
+
+    with journal_tab:
+        st.markdown(console_theme.render_section_label("Journal — newest first"), unsafe_allow_html=True)
+        st.caption(
+            "Resolved events, hypothesis lifecycle transitions, card promotions/"
+            "demotions -- three entry types only. ΔR>0 = the non-trade added value; "
+            "every entry shows its provenance ids as plain text."
+        )
+        feed = orch.learning_journal_feed()
+        if not feed["entries"]:
+            st.info("Nothing in the journal yet.")
+        else:
+            for e in feed["entries"]:
+                st.write(f"`{e['timestamp']}` — {e['text']}")
+                prov = ", ".join(f"{k}={v}" for k, v in e["provenance"].items() if v is not None)
+                if prov:
+                    st.caption(prov)
+
+
 def main(orch: Orchestrator | None = None) -> None:
     st.set_page_config(page_title="AlphaOS", layout="wide")
     if not _is_loopback_request():
@@ -1146,7 +1369,7 @@ def main(orch: Orchestrator | None = None) -> None:
     tabs = st.tabs(
         [
             "Tonight", "Positions", "Approval Center", "Candidates / Proposals",
-            "Candidate Flow", "Open Trades", "Closed Trades", "System Health",
+            "Candidate Flow", "Learning", "Open Trades", "Closed Trades", "System Health",
             "Trade Packet", "Scan Batches", "Scheduler Runs", "System Events",
         ]
     )
@@ -1161,18 +1384,20 @@ def main(orch: Orchestrator | None = None) -> None:
     with tabs[4]:
         tab_candidate_flow(orch)
     with tabs[5]:
-        tab_open_trades(orch)
+        tab_learning(orch)
     with tabs[6]:
-        tab_closed_trades(orch)
+        tab_open_trades(orch)
     with tabs[7]:
-        tab_system_health(orch)
+        tab_closed_trades(orch)
     with tabs[8]:
-        tab_trade_packet(orch)
+        tab_system_health(orch)
     with tabs[9]:
-        tab_scan_batches(orch)
+        tab_trade_packet(orch)
     with tabs[10]:
-        tab_scheduler_runs(orch)
+        tab_scan_batches(orch)
     with tabs[11]:
+        tab_scheduler_runs(orch)
+    with tabs[12]:
         tab_system_events(orch)
 
 
