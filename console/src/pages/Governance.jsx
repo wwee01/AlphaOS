@@ -3,8 +3,9 @@
 // tab_governance() layout (autonomy + hard limits side by side, kill
 // switch + real-money lock side by side, trading calendar full-width).
 // PURE READ, zero controls -- the only kill-switch CONTROL in this console
-// lives in the annunciator strip (Tonight page), unchanged from ND-1; this
-// page only EXPLAINS the same state, never a second control surface.
+// lives in the global annunciator strip (components/Annunciator.jsx,
+// rendered by App.jsx on every page as of ND-3; Tonight-only in ND-1/ND-2).
+// This page only EXPLAINS the same state, never a second control surface.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getGovernance } from '../api.js';
 import { Badge, Block } from '../components/ui.jsx';

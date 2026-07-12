@@ -1,46 +1,41 @@
-// ND-1 Tonight cockpit -- the one page this phase ships (docs/roadmap/
-// console-migration-nd.md ND-1 scope). Renders, from the API only: the
-// annunciator strip, then the brief blocks ①-⑦ in numeric order (matching
-// alphaos/dashboard/streamlit_app.py's tab_tonight() -- same order, same
-// data, same quiet-state handling). This component computes nothing
-// business-critical: every value shown comes straight from /api/v1/
-// annunciator and /api/v1/tonight; the only "logic" here is display
+// ND-1 Tonight cockpit -- the one page ND-1 shipped (docs/roadmap/
+// console-migration-nd.md ND-1 scope). Renders the brief blocks ①-⑦ in
+// numeric order (matching alphaos/dashboard/streamlit_app.py's
+// tab_tonight() -- same order, same data, same quiet-state handling). This
+// component computes nothing business-critical: every value shown comes
+// straight from /api/v1/tonight; the only "logic" here is display
 // formatting (see ../format.js) and which block to show.
+//
+// ND-3: the annunciator strip that used to live at the top of this page
+// moved to App.jsx (components/Annunciator.jsx, rendered globally on every
+// page -- see its own module docstring). This page also gains a small
+// "Actions" instrument block wiring the three ND-3 writes (scan/monitor/
+// report) that streamlit_app.render_sidebar() already exposes -- kill-switch
+// ENGAGE lives in the global annunciator strip instead, not here.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { getAnnunciator, getTonight, STREAMLIT_URL } from '../api.js';
-import { Badge, Block, StreamlitLink } from '../components/ui.jsx';
+import { getTonight, postMonitor, postReport, postScan, STREAMLIT_URL } from '../api.js';
+import { Block, StreamlitLink } from '../components/ui.jsx';
+import { PinPrompt } from '../components/PinPrompt.jsx';
 import {
-  describeUnreachable, formatAge, formatClockUTC, formatHeartbeat,
-  formatOpenR, formatR, formatSecondsRemaining,
+  describeUnreachable, formatClockUTC, formatR, formatSecondsRemaining,
 } from '../format.js';
 
 const POLL_MS = 10000;
 
-function AnnunciatorStrip({ data }) {
-  if (!data) {
-    return (
-      <div className="grid" style={{ marginBottom: 16 }}>
-        <div className="col-12 label-caps">loading annunciator…</div>
-      </div>
-    );
-  }
+function ActionsBlock({ onWriteSuccess }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 16 }}>
-      <Badge>mode: {data.mode ?? 'unknown'}</Badge>
-      <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'}>
-        {data.kill_switch_engaged
-          ? `● kill switch engaged — ${data.kill_switch_reason ?? 'no reason recorded'}`
-          : '● kill switch armed (not engaged)'}
-      </Badge>
-      <Badge>{data.autonomy_level_label ?? 'unknown'}</Badge>
-      <Badge>heartbeat: {formatHeartbeat(data.heartbeat_age_seconds)}</Badge>
-      <Badge>
-        open R ({data.open_position_count ?? 'n/a'} pos): {formatOpenR(data.total_open_r, data.unmeasurable_positions)}
-      </Badge>
-      <Badge tone={data.approvals_pending_count ? 'warn' : 'default'}>
-        approvals pending: {data.approvals_pending_count ?? 'n/a'}
-      </Badge>
-    </div>
+    <Block title="⚙ actions (console writes)">
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <PinPrompt label="run scan" onConfirm={(pin, nonce) => postScan(pin, nonce)} onDone={(ok) => ok && onWriteSuccess()} />
+        <PinPrompt label="run monitor" onConfirm={(pin, nonce) => postMonitor(pin, nonce)} onDone={(ok) => ok && onWriteSuccess()} />
+        <PinPrompt label="generate daily report" onConfirm={(pin, nonce) => postReport(pin, nonce)} onDone={(ok) => ok && onWriteSuccess()} />
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
+        Each action requires the console PIN (set with <code className="num">alphaos console set-pin</code>).
+        Approve/reject and kill-switch release still require the{' '}
+        <StreamlitLink href={STREAMLIT_URL}>Streamlit app</StreamlitLink> (ND-4).
+      </div>
+    </Block>
   );
 }
 
@@ -200,7 +195,6 @@ function MoonshotGap({ mg }) {
 }
 
 export default function Tonight() {
-  const [annunciator, setAnnunciator] = useState(null);
   const [brief, setBrief] = useState(null);
   const [unreachable, setUnreachable] = useState(false);
   const [lastGoodAsOf, setLastGoodAsOf] = useState(null);
@@ -208,12 +202,11 @@ export default function Tonight() {
 
   const poll = useCallback(async () => {
     try {
-      const [a, t] = await Promise.all([getAnnunciator(), getTonight()]);
+      const t = await getTonight();
       if (!mountedRef.current) return;
-      setAnnunciator(a);
       setBrief(t);
       setUnreachable(false);
-      setLastGoodAsOf(t.as_of ?? a.as_of ?? null);
+      setLastGoodAsOf(t.as_of ?? null);
     } catch {
       if (!mountedRef.current) return;
       // ND-1 plan doc §2.4: never silently show stale data as fresh -- flag
@@ -241,8 +234,6 @@ export default function Tonight() {
     <div className={dimClass} style={contentStyle}>
       {unreachableMsg && <div className="stale-banner">{unreachableMsg}</div>}
 
-      <AnnunciatorStrip data={annunciator} />
-
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>
         as of {formatClockUTC(brief?.as_of)}
       </div>
@@ -252,6 +243,9 @@ export default function Tonight() {
       ) : (
         <div className="grid">
           <div className="col-12">
+            <ActionsBlock onWriteSuccess={poll} />
+          </div>
+          <div className="col-12" style={{ marginTop: 4 }}>
             <OneAction brief={brief} />
           </div>
 

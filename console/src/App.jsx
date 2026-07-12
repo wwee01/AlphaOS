@@ -14,6 +14,7 @@ import Decisions from './pages/Decisions.jsx';
 import Learning from './pages/Learning.jsx';
 import Governance from './pages/Governance.jsx';
 import System from './pages/System.jsx';
+import Annunciator from './components/Annunciator.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 
 const VIEWS = [
@@ -42,8 +43,12 @@ export default function App() {
         <div className="num" style={{ fontSize: 18, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--primary)' }}>
           ALPHAOS
         </div>
-        <div className="label-caps">console · ND-2</div>
+        <div className="label-caps">console · ND-3</div>
       </header>
+
+      {/* ND-3: global, visible on every page -- see Annunciator.jsx's own
+          module docstring for why this moved out of Tonight-only. */}
+      <Annunciator />
 
       <nav className="nav-tabs">
         {VIEWS.map((v) => (

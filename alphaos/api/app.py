@@ -13,6 +13,15 @@ requires the frontend to have been built (tests, and a fresh checkout before
 No permissive CORS middleware is added (ND-1 plan doc §3): the built console
 is served same-origin by this same process, so none is needed, and adding
 one would defeat `ConsoleSecurityMiddleware`'s whole purpose.
+
+ND-3 adds `write_routes.router` (the four PIN-gated `/api/v1/actions/*`
+routes) alongside ND-1/ND-2's read-only `routes.router` -- registering a
+second router is still side-effect-free at creation time (it only adds
+route table entries; every write route's own dependencies -- PinStore,
+write-capable JournalStore, Orchestrator -- are still constructed per
+REQUEST, never here). `ConsoleSecurityMiddleware` needs no changes to cover
+the new routes: it matches on the `/api/*` URL prefix, not on which router
+registered a path.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ from fastapi.staticfiles import StaticFiles
 
 from alphaos.api.routes import router
 from alphaos.api.security import ConsoleSecurityMiddleware
+from alphaos.api.write_routes import router as write_router
 
 # alphaos/api/app.py -> alphaos/api -> alphaos -> <repo root> -> console/dist
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,6 +44,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="AlphaOS Console API", docs_url=None, redoc_url=None)
     app.add_middleware(ConsoleSecurityMiddleware)
     app.include_router(router)
+    app.include_router(write_router)
 
     # Mounted LAST (and only if built) so /api/v1/* above always wins route
     # matching over the static catch-all -- guarded so `import alphaos.api.app`

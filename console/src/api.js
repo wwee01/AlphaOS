@@ -35,9 +35,43 @@ export const getTradePacket = (params) => {
   return apiGet(`/system/trade-packet${qs ? `?${qs}` : ''}`);
 };
 
-// ND-1/ND-2 have zero write affordances (docs/roadmap/console-migration-nd.md
-// ND-1 non-goals: "no writes"; ND-2 Approvals is explicitly view-only). Every
-// action-suggesting element links out to the Streamlit app instead, which
-// still owns Approve/Reject/kill-switch/etc. until ND-3+ moves writes into
-// this console.
+// ND-3: still true for approve/reject and kill-switch RELEASE (ND-4 scope) --
+// every action-suggesting element for THOSE still links out to Streamlit.
+// scan/monitor/report and kill-switch ENGAGE move into this console below.
 export const STREAMLIT_URL = 'http://localhost:8502';
+
+// ND-3 write routes (docs/roadmap/console-migration-nd.md §4 ND-3 scope).
+// Every write POSTs `{ pin, nonce, ...extra }` in the request BODY (never a
+// URL param/query string -- ND-3 plan doc §5) and carries the same
+// X-AlphaOS-Console header every read already sends. A non-2xx response's
+// JSON `detail` (FastAPI's own error shape) becomes the thrown Error's
+// `.detail`/`.message`, and its HTTP status becomes `.status` -- callers
+// (PinPrompt.jsx) use `.status`/`.detail` to show a specific message
+// (invalid PIN / replay / locked out / PIN not configured) rather than a
+// generic "failed".
+export async function apiPost(path, body) {
+  const res = await fetch(`/api/v1${path}`, {
+    method: 'POST',
+    headers: { ...HEADERS, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {
+    /* a non-JSON error body (rare) still falls through to the generic message below */
+  }
+  if (!res.ok) {
+    const err = new Error(data.detail || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.detail = data.detail;
+    throw err;
+  }
+  return data;
+}
+
+export const postScan = (pin, nonce) => apiPost('/actions/scan', { pin, nonce });
+export const postMonitor = (pin, nonce) => apiPost('/actions/monitor', { pin, nonce });
+export const postReport = (pin, nonce) => apiPost('/actions/report', { pin, nonce });
+export const postKillSwitchEngage = (pin, nonce, reason) =>
+  apiPost('/actions/kill-switch/engage', { pin, nonce, reason });
