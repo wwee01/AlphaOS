@@ -108,12 +108,23 @@ def tonight(
     this endpoint hands `build_daily_brief()` the request's real read-only
     journal (as it must, for its many other journal reads), and that
     function constructs its OWN internal MarketDataClient from it -- so in
-    MOCK MODE, `brief['positions_health']`'s first position may show
-    `current_r=None` even when `/api/v1/positions` reports a real value for
-    the identical position. Not a bug in the sense of incorrect code; a
-    documented, tested (tests/test_api_console.py) consequence of reusing
-    daily_brief.py verbatim against a structurally read-only DB. Flagged for
-    a proper fix in ND-2."""
+    MOCK MODE the FIRST open position's snapshot fetch aborts, and (audit
+    correction 2026-07-12 -- the original note here understated this as
+    "current_r=None only") the degradation propagates through
+    `_thesis_status()`: that position shows `current_r=None`, null
+    `distance_to_stop_r`/`distance_to_target_r`, AND reads
+    `THESIS_INTACT -> HOLD` even where real prices would say
+    `AT_RISK/ATTENTION` -- i.e. the Tonight ③ open-risk block can
+    UNDER-report risk for that one position relative to `/api/v1/positions`
+    (which is unaffected and stays the authoritative per-position view).
+    Bounded: mock mode only; first position only (the once-per-instance
+    `_warned` flag is set before the failed write, so subsequent positions
+    fetch normally); degrades toward n/a/HOLD, never fabricates a value;
+    does not reach `one_action` or the quiet-state gate (both are
+    incident/approval-driven, price-independent). Not a bug in the sense of
+    incorrect code; a documented, tested (tests/test_api_console.py)
+    consequence of reusing daily_brief.py verbatim against a structurally
+    read-only DB. Flagged for a proper fix in ND-2."""
     brief = build_daily_brief(journal, settings, kill_switch)
     return {**brief, "as_of": _as_of()}
 

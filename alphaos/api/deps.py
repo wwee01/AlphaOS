@@ -73,9 +73,15 @@ def get_market(settings: Settings = Depends(get_settings)) -> MarketDataClient:
     ``except Exception: pass`` guard -- silently downgrading every position
     to ``current_r=None``/``freshness_status="no_snapshot"`` on every single
     request (a fresh MarketDataClient, and therefore a fresh unset
-    ``_warned`` flag, every time), never surfacing as an error. Passing
-    ``journal=None`` prevents the write attempt from ever happening, rather
-    than relying on that broad except to paper over it."""
+    ``_warned`` flag, every time), never surfacing as an error -- and,
+    because ``current_r`` feeds ``_thesis_status()``, suppressing every
+    AT_RISK/ATTENTION verdict down to INTACT/HOLD as well (audit note
+    2026-07-12: the degradation is verdicts and stop/target distances, not
+    just the raw R number). Passing ``journal=None`` prevents the write
+    attempt from ever happening, rather than relying on that broad except
+    to paper over it. ``/api/v1/tonight`` still carries a bounded
+    first-position version of this via build_daily_brief()'s own internal
+    client -- see routes.tonight()'s docstring."""
     return MarketDataClient(settings, journal=None)
 
 
