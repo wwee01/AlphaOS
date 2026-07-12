@@ -216,7 +216,11 @@ def test_positions_empty_journal_returns_empty_list(tmp_path):
 
 # ------------------------------------------------------------------- security
 
-@pytest.mark.parametrize("path", ["/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions"])
+@pytest.mark.parametrize("path", [
+    "/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions",
+    "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/governance",
+    "/api/v1/system", "/api/v1/system/trade-packet",
+])
 def test_disallowed_origin_returns_403(tmp_path, path):
     settings, journal, _ = _seed(tmp_path)
     r = _client(settings).get(path, headers={**HEADERS, "Origin": "http://evil.example"})
@@ -266,11 +270,18 @@ def test_write_verb_to_api_path_refused(tmp_path, method):
 # ---------------------------------------------------------------- read-only
 
 def test_serving_every_endpoint_writes_nothing(tmp_path):
+    """ND-2 extends this to every new read view too (docs/roadmap/
+    console-migration-nd.md ND-2 scope: still `mode=ro` throughout) -- same
+    guard, same journal handle, just a longer path list."""
     settings, journal, _ = _seed(tmp_path)
     before = _all_table_counts(journal)
 
     client = _client(settings)
-    for path in ("/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions"):
+    for path in (
+        "/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions",
+        "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/governance",
+        "/api/v1/system", "/api/v1/system/trade-packet",
+    ):
         r = client.get(path, headers=HEADERS)
         assert r.status_code == 200, f"{path} returned {r.status_code}: {r.text}"
 
