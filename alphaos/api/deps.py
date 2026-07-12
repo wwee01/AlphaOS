@@ -79,9 +79,12 @@ def get_market(settings: Settings = Depends(get_settings)) -> MarketDataClient:
     2026-07-12: the degradation is verdicts and stop/target distances, not
     just the raw R number). Passing ``journal=None`` prevents the write
     attempt from ever happening, rather than relying on that broad except
-    to paper over it. ``/api/v1/tonight`` still carries a bounded
-    first-position version of this via build_daily_brief()'s own internal
-    client -- see routes.tonight()'s docstring."""
+    to paper over it. ``/api/v1/tonight`` (ND-2) now depends on this same
+    dependency and threads it into ``build_daily_brief(..., market=market)``
+    instead of letting that function build its own client from the request's
+    read-only journal -- see routes.tonight()'s docstring and
+    build_daily_brief()'s own ``market`` parameter docstring in
+    alphaos/reports/daily_brief.py."""
     return MarketDataClient(settings, journal=None)
 
 

@@ -96,6 +96,7 @@ def annunciator(
 def tonight(
     settings: Settings = Depends(get_settings),
     journal: JournalStore = Depends(get_journal),
+    market: MarketDataClient = Depends(get_market),
     kill_switch: KillSwitch = Depends(get_kill_switch),
 ) -> dict:
     """`build_daily_brief(journal, settings, KillSwitch())`'s dict, verbatim
@@ -103,29 +104,22 @@ def tonight(
     and the `alphaos brief` CLI / scheduler digest alert already call.
     Every key/value is unchanged; only a top-level `as_of` is added.
 
-    Known ND-1 characteristic (see get_market()'s docstring in
-    alphaos/api/deps.py for the full mechanism): unlike `/api/v1/positions`,
-    this endpoint hands `build_daily_brief()` the request's real read-only
-    journal (as it must, for its many other journal reads), and that
-    function constructs its OWN internal MarketDataClient from it -- so in
-    MOCK MODE the FIRST open position's snapshot fetch aborts, and (audit
-    correction 2026-07-12 -- the original note here understated this as
-    "current_r=None only") the degradation propagates through
-    `_thesis_status()`: that position shows `current_r=None`, null
-    `distance_to_stop_r`/`distance_to_target_r`, AND reads
-    `THESIS_INTACT -> HOLD` even where real prices would say
-    `AT_RISK/ATTENTION` -- i.e. the Tonight ③ open-risk block can
-    UNDER-report risk for that one position relative to `/api/v1/positions`
-    (which is unaffected and stays the authoritative per-position view).
-    Bounded: mock mode only; first position only (the once-per-instance
-    `_warned` flag is set before the failed write, so subsequent positions
-    fetch normally); degrades toward n/a/HOLD, never fabricates a value;
-    does not reach `one_action` or the quiet-state gate (both are
-    incident/approval-driven, price-independent). Not a bug in the sense of
-    incorrect code; a documented, tested (tests/test_api_console.py)
-    consequence of reusing daily_brief.py verbatim against a structurally
-    read-only DB. Flagged for a proper fix in ND-2."""
-    brief = build_daily_brief(journal, settings, kill_switch)
+    ND-2 fix (previously a documented, tested ND-1 characteristic -- see
+    git history / tests/test_api_console.py for the prior mechanism): this
+    endpoint now passes build_daily_brief() the same `journal=None`-built
+    `market` dependency `/api/v1/positions` already uses (get_market() in
+    alphaos/api/deps.py), instead of letting that function construct its own
+    MarketDataClient from the request's read-only journal. Previously, in
+    MOCK MODE, that internal construction meant the FIRST open position's
+    snapshot fetch aborted (the client's one-time "market data is mocked"
+    notice attempted a write through the read-only journal), degrading that
+    position's current_r/verdict relative to `/api/v1/positions` for the
+    same DB state. Passing a pre-built, journal-less client removes the
+    write attempt entirely -- both endpoints now report identical current_r
+    for the same position, verified by
+    tests/test_api_console.py::test_tonight_matches_build_daily_brief_field_for_field
+    and test_tonight_positions_health_current_r_matches_positions_endpoint."""
+    brief = build_daily_brief(journal, settings, kill_switch, market=market)
     return {**brief, "as_of": _as_of()}
 
 

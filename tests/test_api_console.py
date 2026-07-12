@@ -133,23 +133,14 @@ def test_annunciator_returns_expected_fields(tmp_path):
 def test_tonight_matches_build_daily_brief_field_for_field(tmp_path):
     """'Expected' is computed on a SEPARATE read-only handle to the same DB
     file, not the write-capable seed handle -- apples-to-apples with what
-    the API itself does internally. This matters here specifically (unlike
-    positions/annunciator): build_daily_brief() constructs its OWN
-    MarketDataClient internally from whatever journal it is given
-    (alphaos/reports/daily_brief.py, unmodified/reused verbatim per the ND-1
-    plan doc -- this API never re-derives its logic), so in MOCK MODE the
-    client's one-time "market data is mocked" notice attempts a write
-    through that journal. Against a read-only journal that write fails and
-    is caught by assess_positions()'s own, pre-existing broad exception
-    handler (its docstring: "never raises... reports itself with
-    current_r=None" for ANY per-position measurement failure) -- so the
-    first position touched shows as briefly unmeasurable, consistently, on
-    every call with a read-only journal. This is a real, documented ND-1
-    characteristic (see alphaos/api/deps.py's get_market docstring for how
-    /api/v1/positions avoids it by constructing its MarketDataClient with
-    journal=None instead) -- comparing against a write-capable journal here
-    would silently pass a broken assertion by comparing non-equivalent
-    conditions."""
+    the API itself does internally. 'expected' also passes the same
+    `journal=None`-built MarketDataClient the API's `market` dependency
+    supplies (get_market() in alphaos/api/deps.py), matching routes.tonight()
+    exactly (ND-2 fix: build_daily_brief() now accepts an optional `market`
+    so this endpoint no longer needs to let it construct one from the
+    read-only journal -- see build_daily_brief()'s own `market` parameter
+    docstring in alphaos/reports/daily_brief.py for the prior mock-mode
+    write-attempt mechanism this replaced)."""
     settings, journal, _ = _seed(tmp_path)
     r = _client(settings).get("/api/v1/tonight", headers=HEADERS)
     assert r.status_code == 200
@@ -158,11 +149,44 @@ def test_tonight_matches_build_daily_brief_field_for_field(tmp_path):
 
     ro_journal = JournalStore(journal.db_path, read_only=True)
     try:
-        expected = build_daily_brief(ro_journal, settings, KillSwitch())
+        expected = build_daily_brief(
+            ro_journal, settings, KillSwitch(), market=MarketDataClient(settings, journal=None),
+        )
     finally:
         ro_journal.close()
     got = {k: v for k, v in body.items() if k != "as_of"}
     assert _round_seconds_remaining(got) == _round_seconds_remaining(_json_roundtrip(expected))
+    journal.close()
+
+
+def test_tonight_positions_health_current_r_matches_positions_endpoint(tmp_path):
+    """ND-2 regression test: /api/v1/tonight's positions_health and
+    /api/v1/positions must report an IDENTICAL current_r (and verdict/
+    thesis_status, which current_r feeds) for the same open position in the
+    same DB state, in mock mode. Before the ND-2 fix, build_daily_brief()
+    constructed its own MarketDataClient from the request's read-only
+    journal, and that client's one-time mock-mode "market data is mocked"
+    notice attempted a write through it -- failing silently inside
+    assess_positions()'s broad except handler and degrading the FIRST (here,
+    only) open position's current_r to None (and its verdict toward HOLD) on
+    /api/v1/tonight, while /api/v1/positions (already using a journal=None
+    client) stayed correct -- exactly the divergence this test pins shut."""
+    settings, journal, _ = _seed(tmp_path)
+    client = _client(settings)
+
+    tonight_body = client.get("/api/v1/tonight", headers=HEADERS).json()
+    positions_body = client.get("/api/v1/positions", headers=HEADERS).json()
+
+    tonight_by_symbol = {p["symbol"]: p for p in tonight_body["positions_health"]}
+    positions_by_symbol = {p["symbol"]: p for p in positions_body["positions"]}
+    assert tonight_by_symbol.keys() == positions_by_symbol.keys()
+    assert tonight_by_symbol, "expected at least one open position from _seed()"
+    for symbol, pos_from_positions in positions_by_symbol.items():
+        pos_from_tonight = tonight_by_symbol[symbol]
+        assert pos_from_tonight["current_r"] == pos_from_positions["current_r"], symbol
+        assert pos_from_tonight["current_r"] is not None, symbol
+        assert pos_from_tonight["thesis_status"] == pos_from_positions["thesis_status"], symbol
+        assert pos_from_tonight["verdict"] == pos_from_positions["verdict"], symbol
     journal.close()
 
 

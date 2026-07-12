@@ -594,8 +594,26 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
     return "Nothing needs you right now."
 
 
-def build_daily_brief(journal, settings, kill_switch) -> dict:
+def build_daily_brief(journal, settings, kill_switch, market: Optional[MarketDataClient] = None) -> dict:
     """The composed daily brief. Every key below is always present.
+
+    ``market``: optional pre-built MarketDataClient for this module's own
+    positions_health sweep below. Defaults to None, in which case one is
+    constructed from ``journal`` exactly as before -- every existing caller
+    (CLI, scheduler digest job, streamlit_app's Tonight tab, Orchestrator)
+    passes only 3 positional args and is unaffected. This exists so a caller
+    holding a STRUCTURALLY read-only journal (ND-1's console API) can supply
+    the same ``journal=None``-constructed client ``/api/v1/positions``
+    already uses (see alphaos/api/deps.py's get_market()) instead of letting
+    this function build one from the read-only journal -- MarketDataClient's
+    one-time mock-mode "market data is mocked" notice writes a system_events
+    row through whatever journal it holds, which fails against a read-only
+    DB and was previously swallowed by assess_positions()'s own broad
+    ``except Exception: pass``, silently degrading the first open position's
+    current_r/verdict on every /api/v1/tonight call (ND-2 fix; see
+    tests/test_api_console.py's tonight-vs-positions parity test). Callers
+    that pass their own journal-backed client unchanged (or rely on the
+    default) keep the mock-mode notice write exactly as before.
 
     Note: build_daily_digest() (below) computes its own position_health
     summary, so assess_positions() runs twice here (once nested, once for
@@ -619,7 +637,8 @@ def build_daily_brief(journal, settings, kill_switch) -> dict:
     now = timeutils.now_utc()
     since_sgt = _start_of_today_sgt_utc(now)
     digest = build_daily_digest(journal, settings, kill_switch)
-    market = MarketDataClient(settings, journal)
+    if market is None:
+        market = MarketDataClient(settings, journal)
 
     positions_health = assess_positions(journal, settings, market)
     regime = _regime_header(journal)
