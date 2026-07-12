@@ -121,7 +121,13 @@ class PinStore:
                 p=payload["p"],
                 dklen=payload["dklen"],
             )
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # audit-fixup (correctness L1): a syntactically-valid but
+            # type-confused hash file (e.g. "n" stored as a string) makes
+            # hashlib.scrypt raise TypeError, not caught by the original
+            # tuple -- confirmed live to 500 instead of failing closed as
+            # this method's own docstring promises. TypeError added so
+            # every corrupted-file shape verifies as False, never raises.
             return False
         # ND-3 plan doc §3 mandate: constant-time compare, never `==`, on a
         # secret comparison (a `==` here would leak timing information about

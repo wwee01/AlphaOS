@@ -34,14 +34,17 @@ below), whose `event_id` is echoed back in the response body under
 System & Audit's own event log (`/api/v1/system`'s `recent_events`). scan/
 monitor ALSO get this for free a second way: `trigger_source=
 TriggerSource.CONSOLE_API.value` threads straight through into
-`scan_batches.trigger_source` / `scheduler_runs.trigger_source` (both
-already surfaced in `/api/v1/system`'s `scan_batches`/`scheduler_runs`
-lists) -- see constants.py's `TriggerSource.CONSOLE_API` docstring for why
-that is a DIFFERENT value from `SCHEDULER`, not an alias of it. `generate_
-daily_report()` and the kill-switch route have no such trigger_source
-column to ride, so the explicit system_events write is the only marker they
-get -- which is exactly why every route gets the SAME uniform
-`_log_console_invocation` call rather than relying on the free channel
+`scheduler_runs.trigger_source` (audit-fixup, correctness L3: NOT
+`scan_batches.trigger_source` too, as an earlier version of this docstring
+claimed -- `run_scan_once()` hardcodes `scan_batches.source = "cli"`
+regardless of `trigger_source`, so `scheduler_runs` is the only table this
+value actually reaches; already surfaced in `/api/v1/system`'s
+`scheduler_runs` list) -- see constants.py's `TriggerSource.CONSOLE_API`
+docstring for why that is a DIFFERENT value from `SCHEDULER`, not an alias
+of it. `generate_daily_report()` and the kill-switch route have no such
+trigger_source column to ride, so the explicit system_events write is the
+only marker they get -- which is exactly why every route gets the SAME
+uniform `_log_console_invocation` call rather than relying on the free channel
 alone for two of the four.
 """
 

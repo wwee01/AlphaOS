@@ -19,6 +19,7 @@ button-press.
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Dict
 
@@ -37,20 +38,28 @@ class NonceStore:
     def __init__(self, ttl_seconds: float = 300.0):
         self.ttl_seconds = ttl_seconds
         self._seen: Dict[str, float] = {}
+        # audit-fixup (correctness L2): FastAPI/Starlette runs sync route
+        # handlers in a threadpool, not on one event-loop thread -- the
+        # original docstring's "atomic under the GIL" claim overstated the
+        # guarantee, since the GIL can switch between the `in` check and the
+        # `[]=` insert across two OS threads. An explicit lock makes the
+        # check-and-record genuinely atomic rather than relying on that
+        # (real but narrower) CPython bytecode-level property.
+        self._lock = threading.Lock()
 
     def check_and_record(self, nonce: str) -> bool:
         """Returns True and records `nonce` as seen (now) if it is fresh.
         Returns False -- WITHOUT re-recording it -- if `nonce` was already
-        recorded within the TTL window (a replay). Single dict lookup +
-        insert, executed under the GIL as one atomic step from the caller's
-        perspective, so two concurrent requests carrying the SAME nonce
-        cannot both observe "fresh" (no separate check-then-record race)."""
+        recorded within the TTL window (a replay). Lock-protected so two
+        concurrent requests carrying the SAME nonce cannot both observe
+        "fresh" (no separate check-then-record race)."""
         now = time.monotonic()
-        self._purge_expired(now)
-        if nonce in self._seen:
-            return False
-        self._seen[nonce] = now
-        return True
+        with self._lock:
+            self._purge_expired(now)
+            if nonce in self._seen:
+                return False
+            self._seen[nonce] = now
+            return True
 
     def _purge_expired(self, now: float) -> None:
         expired = [n for n, seen_at in self._seen.items() if now - seen_at > self.ttl_seconds]
