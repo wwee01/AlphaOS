@@ -9,6 +9,14 @@
 #   deploy/install_launchagent.sh scheduler     # just com.ck.alphaos.scheduler
 #   deploy/install_launchagent.sh heartbeat     # just com.ck.alphaos.heartbeat
 #   deploy/install_launchagent.sh backup        # just com.ck.alphaos.backup
+#   deploy/install_launchagent.sh console       # just com.ck.alphaos.console (ND-2)
+#
+# "console" (the ND-2 read-only API + built frontend, com.ck.alphaos.console.plist)
+# is deliberately NOT part of the bare `all` target above -- it's a newer,
+# separate-lifecycle surface (docs/roadmap/console-migration-nd.md), and
+# `npm ci && npm run build` in console/ must have already produced
+# console/dist/ before this is worth loading (see console/README.md).
+# Request it explicitly once you're ready.
 #
 # Safe to re-run: unload is best-effort (ignores "not loaded" errors), then
 # every install always (re)loads from the copy just placed in LaunchAgents.
@@ -71,8 +79,11 @@ case "$TARGET" in
   backup)
     install_agent "com.ck.alphaos.backup"
     ;;
+  console)
+    install_agent "com.ck.alphaos.console"
+    ;;
   *)
-    echo "Usage: $0 [all|scheduler|heartbeat|backup]" >&2
+    echo "Usage: $0 [all|scheduler|heartbeat|backup|console]" >&2
     exit 1
     ;;
 esac

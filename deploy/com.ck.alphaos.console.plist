@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- ND-2: AlphaOS console API (alphaos/api, FastAPI + uvicorn) -- a
+       persistent loopback-only server, unlike the scheduler/heartbeat/backup
+       agents above which are periodic ticks (com.ck.alphaos.scheduler.plist
+       et al. in this same directory). KeepAlive restarts it if it ever
+       exits; RunAtLoad starts it on login -- mirrors the sibling SG Card
+       Tracker / NightDesk LaunchAgent pattern this migration is explicitly
+       modeled on (docs/roadmap/console-migration-nd.md §0 precedent).
+
+       Serves the built console/dist/ (run `npm ci && npm run build` in
+       console/ first -- see console/README.md) same-origin on port 8601,
+       loopback-only, hardcoded in alphaos/api/__main__.py (no flag/env
+       override exists by design). `python -m alphaos.api` is
+       side-effect-free at startup (no scheduler, no provider call, no scan
+       -- see alphaos/api/app.py's module docstring): it only binds and
+       serves.
+
+       NOT installed by this build (ND-2 scope note: loading a LaunchAgent
+       is an operator action, not the build agent's). To install:
+         deploy/install_launchagent.sh console
+       (add a `console` case there first, mirroring the existing
+       scheduler/heartbeat/backup cases -- deliberately left to the operator
+       alongside the actual `launchctl load`, not bundled into this file). -->
+  <key>Label</key>
+  <string>com.ck.alphaos.console</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
+    <string>-m</string>
+    <string>alphaos.api</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ck/Documents/Claude Playground/AlphaOS</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ck</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Persistent logs, not /tmp -- same convention as the other AlphaOS
+       LaunchAgents in this directory (macOS purges /tmp; ~/Library/Logs/ is
+       visible in Console.app and covered by most backup tools). -->
+  <key>StandardOutPath</key>
+  <string>/Users/ck/Library/Logs/alphaos/console.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ck/Library/Logs/alphaos/console-error.log</string>
+</dict>
+</plist>

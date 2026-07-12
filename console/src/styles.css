@@ -125,3 +125,197 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   .col-4, .col-6, .col-8, .col-12 { grid-column: span 12; }
   #root { padding: 20px 12px 40px; }
 }
+
+/* ND-2: a plain data table for list-shaped API payloads (Decisions/Learning/
+   System pages) -- Tonight/Positions/Approvals never needed one (card
+   layout). Horizontal scroll WITHIN the bordered block at narrow widths
+   (UX doc §16 item 6: "reading density is a desktop virtue worth keeping on
+   mobile for tables"), never a layout that forces the page itself to
+   scroll sideways. */
+.dtable-wrap { overflow-x: auto; }
+.dtable { border-collapse: collapse; width: 100%; font-size: 12px; }
+.dtable th, .dtable td {
+  text-align: left;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.dtable th {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.dtable td.num { font-family: var(--mono); }
+
+/* ND-2: nav tab strip -- App.jsx's plain useState-based view switcher (no
+   router library, matches this project's "don't over-engineer" house
+   style). Touch target height meets the UX doc §16 44px minimum at every
+   width, not just under the mobile media query below. */
+.nav-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0;
+}
+.nav-tab {
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  padding: 10px 12px;
+  min-height: 44px;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab-active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+
+/* ND-2: R-ladder (Positions page) -- ports console_theme.render_r_ladder()'s
+   VISUAL CONCEPT (a horizontal bordered track with stop/entry/target ticks
+   + a current-price marker), not its generated HTML. Percentage math lives
+   in positions.js:computeRLadder(), pure and tested; this is layout only.
+   Stays horizontal at every width (UX doc §16 item 5: "R-ladders stay
+   horizontal -- they compress well"). */
+.r-ladder-unavailable {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding: 10px 0;
+}
+.r-ladder-track {
+  position: relative;
+  height: 40px;
+  margin: 22px 4px 20px;
+  border-top: 1px solid var(--border);
+}
+.r-ladder-tick {
+  position: absolute;
+  top: -2px;
+  height: 8px;
+  border-left: 2px solid var(--text-dim);
+  transform: translateX(-1px);
+}
+.r-ladder-tick-label {
+  position: absolute;
+  top: -18px;
+  left: 0;
+  transform: translateX(-50%);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.r-ladder-tick-value {
+  position: absolute;
+  top: 10px;
+  left: 0;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.r-ladder-current {
+  position: absolute;
+  top: -6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--primary);
+  transform: translateX(-5px);
+}
+.r-ladder-current-value {
+  position: absolute;
+  top: -22px;
+  left: 5px;
+  transform: translateX(-50%);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--primary);
+  white-space: nowrap;
+}
+
+/* ND-2: TTL bar (Approvals page) -- ports console_theme.render_ttl_bar()'s
+   visual concept (a horizontal fill bar + always-visible label text, never
+   icon-only -- UX doc §16 item 5). No @keyframes/animation -- §13
+   calm-console rule: the fill % is computed once per poll
+   (approvals.js:computeTtlBar()), never a client-side ticking countdown. */
+.ttl-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+.ttl-bar-tag {
+  flex: none;
+}
+.ttl-bar-track {
+  flex: 1;
+  height: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-low);
+}
+.ttl-bar-fill {
+  height: 100%;
+  background: var(--primary);
+}
+.ttl-bar-low .ttl-bar-fill { background: var(--amber); }
+.ttl-bar-expired .ttl-bar-fill { background: var(--red); }
+.ttl-bar-label {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.ttl-bar-unknown {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ND-2 mobile pass (UX doc §16, "Design, by principle") -- 480px is the
+   doc's own chosen breakpoint. Principles ported, Streamlit's M1
+   implementation NOT copied (different substrate): the annunciator
+   condenses (smaller badges, tighter gaps) but every field stays present,
+   never hidden; nav tabs keep their >=44px touch target (already true
+   above, unchanged here); R-ladders/TTL bars keep full label text at every
+   width (no icon-only state introduced here). Zero new elements, zero new
+   JS -- CSS only. */
+@media (max-width: 480px) {
+  #root { padding: 12px 10px 32px; }
+
+  .badge {
+    font-size: 11px;
+    padding: 3px 7px;
+    gap: 4px;
+  }
+
+  .nav-tabs {
+    gap: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+  .nav-tab {
+    padding: 10px 8px;
+    font-size: 11px;
+  }
+
+  .block { padding: 10px 10px; }
+
+  .r-ladder-tick-label,
+  .r-ladder-tick-value,
+  .r-ladder-current-value {
+    font-size: 9px;
+  }
+
+  .ttl-bar-label { font-size: 10px; }
+}

@@ -19,15 +19,30 @@ console/src/format.js).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from typing import Optional, cast
+
 from fastapi import APIRouter, Depends
 
+from alphaos.ai.labeller_health import evaluate_failsafe_health
 from alphaos.api.deps import get_journal, get_kill_switch, get_market, get_settings
 from alphaos.config.settings import Settings
+from alphaos.constants import PLAYBOOK_V1
 from alphaos.dashboard.streamlit_app import AUTONOMY_LEVEL_LABEL, _heartbeat_age_seconds
 from alphaos.data.market_data import MarketDataClient
+from alphaos.execution.protection_watchdog import status_report as protection_status_report
+from alphaos.hypotheses import list_drafts
 from alphaos.journal.journal_store import JournalStore
+from alphaos.orchestrator import Orchestrator
+from alphaos.reports.attribution import build_attribution_report
 from alphaos.reports.daily_brief import build_daily_brief
+from alphaos.reports.governance_report import build_governance_report
+from alphaos.reports.hypothesis_report import build_hypothesis_report
+from alphaos.reports.journal_feed import build_journal_feed
+from alphaos.reports.metrics import compute_metrics
 from alphaos.reports.position_health import assess_positions
+from alphaos.reports.tqs_report import build_tqs_report
+from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
 from alphaos.util import timeutils
 
@@ -139,3 +154,305 @@ def positions(
     streamlit_app.tab_positions_health() renders from (verdicts, R fields,
     symbol, days held, etc.). No reshaping."""
     return {"positions": assess_positions(journal, settings, market), "as_of": _as_of()}
+
+
+# ============================================================== ND-2 routes
+#
+# Same discipline as ND-1 above: every handler wraps the exact function/query
+# streamlit_app.py's corresponding tab already calls -- see each handler's
+# docstring for its Streamlit call site. VIEW-ONLY (docs/roadmap/
+# console-migration-nd.md §4 ND-2): the Approvals endpoint below returns the
+# same proposal-queue data streamlit_app.tab_approval_center() renders, but
+# this API defines no POST/approve/reject route at all -- the frontend that
+# consumes it deep-links to the Streamlit Approval Center for the actual
+# decision (ND-3/ND-4 scope), matching Tonight's existing StreamlitLink
+# pattern from ND-1.
+
+
+@router.get("/approvals")
+def approvals(journal: JournalStore = Depends(get_journal)) -> dict:
+    """The open-proposal queue, verbatim -- the exact data
+    streamlit_app.tab_approval_center() renders (TTL fields, TQS shadow
+    score, exit plan, margin flag), enriched exactly the way
+    `Orchestrator.list_open_proposals()` already does (TTL seconds-remaining
+    computed fresh per call, freshness/TQS looked up per proposal). VIEW-ONLY:
+    no approve/reject route exists anywhere in this API (see module docstring
+    above) -- the console deep-links to Streamlit for the actual decision.
+
+    `list_open_proposals()` is defined on `Orchestrator`, but reading its
+    body (alphaos/orchestrator.py) shows it touches only `self.journal` --
+    no AI client, no market data, no order manager. Rather than construct a
+    full `Orchestrator` (its __init__ builds OpenAIClient, ClaudeReviewer,
+    NewsService, OrderManager, etc. -- exactly the constructor cost ND-1's
+    `deps.py` module docstring already flags as a reason to avoid it), this
+    calls the unbound method against a minimal `SimpleNamespace(journal=...)`
+    stand-in that provides the one attribute it actually reads. This reuses
+    the exact function body (same TTL math, same TQS join, same sort-free
+    ordering) with zero logic re-derived, at zero Orchestrator constructor
+    cost -- the same "avoid the heavy object, verify what's really needed
+    first" reasoning `get_market()` documents in deps.py, applied to a
+    method instead of a class swap. `cast()` below is a type-only lie for
+    mypy (the shim is not really an `Orchestrator`) -- verified true at
+    runtime because `list_open_proposals`'s body is read above, not assumed."""
+    shim = cast(Orchestrator, SimpleNamespace(journal=journal))
+    proposals = Orchestrator.list_open_proposals(shim)
+    return {"proposals": proposals, "as_of": _as_of()}
+
+
+def _candidate_id_str(row: dict) -> str:
+    """`row["candidate_id"]` as `str`, or `""` if absent/non-string --
+    `""` never collides with a real candidate_id (`new_id("cand")` always
+    mints a non-empty prefixed id), so `hindsight.get(_candidate_id_str(row))`
+    safely misses (`None`) for a row with no candidate_id, matching
+    streamlit_app.py's own `hindsight.get(x.get("candidate_id"))` for that
+    same case -- typed narrowly here only because `JournalStore.
+    attribution_by_candidate()` (unlike streamlit_app.py) is in mypy's fully
+    checked set."""
+    value = row.get("candidate_id")
+    return value if isinstance(value, str) else ""
+
+
+@router.get("/decisions")
+def decisions(journal: JournalStore = Depends(get_journal)) -> dict:
+    """The decision funnel (candidates -> proposed/watch -> rejected/blocked
+    -> filled) + the trade ledger -- the same journal reads
+    streamlit_app.tab_candidate_flow() (labels summary, proposed/watch/
+    rejected/blocked sections) and tab_open_trades()/tab_closed_trades()
+    already use. Scope note: tab_candidate_flow() also renders several
+    separate research-layer summaries (catalyst enrichment, last30days,
+    narrative polarity, decision-adjustment, user-override detail) that are
+    a distinct concern from "the decision funnel and the trade ledger" this
+    endpoint's name promises -- each candidate row already carries its own
+    catalyst_status/last30days_status/sentiment_label/etc. fields verbatim
+    (unchanged from the journal row), so that context isn't lost, just not
+    separately re-aggregated here. Rejected/blocked rows carry the same
+    per-candidate hindsight join tab_candidate_flow() performs
+    (`attribution_by_candidate`), as the RAW attribution row (or None) under
+    `hindsight_raw` -- formatting it into the "pending" / "+N.NNR (mock)"
+    string is display logic, done client-side by
+    console/src/decisions.js:formatHindsight(), mirroring
+    streamlit_app._hindsight_cell() exactly (same "never show 0 for an
+    unresolved replay" rule) rather than re-deriving it here."""
+    label_summary = journal.label_summary()
+    proposed = journal.proposed_candidates(100)
+    watch = journal.watch_candidates(200)
+    rejected = journal.rejected_candidates_recent(200)
+    blocked = journal.blocked_proposals(200)
+    rejected_hindsight = journal.attribution_by_candidate(
+        [cid for c in rejected if (cid := _candidate_id_str(c))]
+    )
+    blocked_hindsight = journal.attribution_by_candidate(
+        [cid for c in blocked if (cid := _candidate_id_str(c))]
+    )
+    closed_trades = journal.closed_outcomes(500)
+    return {
+        "label_summary": label_summary,
+        "proposed": proposed,
+        "watch": watch,
+        "rejected": [
+            {**c, "hindsight_raw": rejected_hindsight.get(_candidate_id_str(c))} for c in rejected
+        ],
+        "blocked": [
+            {**c, "hindsight_raw": blocked_hindsight.get(_candidate_id_str(c))} for c in blocked
+        ],
+        "open_trades": journal.open_positions(),
+        "closed_trades": closed_trades,
+        "closed_trade_metrics": compute_metrics(closed_trades),
+        "as_of": _as_of(),
+    }
+
+
+@router.get("/learning")
+def learning(settings: Settings = Depends(get_settings), journal: JournalStore = Depends(get_journal)) -> dict:
+    """The Learning tab's four read-only sub-panels (TQS / Attribution /
+    Hypotheses / Journal), verbatim -- the exact report-builder functions
+    streamlit_app.tab_learning() calls via `orch.tqs_shadow_report()` /
+    `orch.attribution_report()` / `orch.hypothesis_report()` /
+    `orch.hypothesis_drafts_list(status="draft")` /
+    `orch.learning_journal_feed()`. Every one of those Orchestrator methods
+    is itself a one-line delegate to a free function taking only
+    `journal`/`settings` (see alphaos/orchestrator.py lines ~1336-1417) --
+    called directly here for the same reason `/approvals` avoids
+    constructing a full Orchestrator.
+
+    Reporting-law discipline (streamlit_app._learned_sentence()'s own
+    docstring calls this "the reporting law": aggregate tone, no
+    moralizing, and -- audit C4 -- never a per-event raw number standing in
+    for a verdict): `build_attribution_report()`'s v2 aggregates already
+    bake in the floor gate at the SOURCE (`_floor_gated_v2_aggregate()` in
+    alphaos/reports/attribution.py sets `mean_delta_r`/`sum_delta_r` to
+    `None` and `status` to `"below_sample_floor"` whenever the effective-N
+    or span-day floor isn't cleared) -- this endpoint passes that dict
+    through unchanged, so a floor-gated aggregate is STRUCTURALLY incapable
+    of reaching the console with a populated mean/sum ΔR. The frontend
+    (console/src/pages/Learning.jsx) renders the row exactly the way
+    streamlit_app._attribution_v2_agg_row() does: mean/sum ΔR only when
+    `status == "ok"`, otherwise a "n=X/floor below floor" status string --
+    ported as a pure, tested function (console/src/learning.js:
+    formatAttributionRow()) rather than re-derived inline in JSX. TQS scores
+    are passed through paired with `data_confidence`/`bucket_histogram`
+    exactly as `build_tqs_report()` already shapes them (score is never
+    shown alone anywhere in this codebase; the frontend inherits that by
+    rendering the same dict, not by recomputing it)."""
+    return {
+        "tqs": build_tqs_report(journal, limit=1000),
+        "attribution": build_attribution_report(journal, settings, limit=1000),
+        "hypotheses": build_hypothesis_report(journal),
+        "hypothesis_drafts": list_drafts(journal, status="draft"),
+        "journal_feed": build_journal_feed(journal, limit=50),
+        "as_of": _as_of(),
+    }
+
+
+@router.get("/governance")
+def governance(
+    settings: Settings = Depends(get_settings),
+    journal: JournalStore = Depends(get_journal),
+    kill_switch: KillSwitch = Depends(get_kill_switch),
+) -> dict:
+    """`build_governance_report()`'s full dict, verbatim -- the exact
+    function streamlit_app.tab_governance() renders from via
+    `orch.governance_report(autonomy_level_label=AUTONOMY_LEVEL_LABEL)`
+    (itself a one-line delegate, called directly here). Autonomy may/may-not
+    panel, kill-switch explanation, hard limits, real-money lock, trading
+    calendar -- every string is generated by that module from live
+    settings/journal/kill-switch state, never hand-written here (see
+    governance_report.py's own module docstring for the content rulings
+    this preserves: no fake L2 criteria, no liquidation language, no LIVE
+    badge, no unlock affordance). The only kill-switch CONTROL in this
+    console is the annunciator strip (`/api/v1/annunciator`, unchanged from
+    ND-1); this endpoint only explains the same state, exactly like the
+    Streamlit tab it mirrors."""
+    rep = build_governance_report(journal, settings, kill_switch, autonomy_level_label=AUTONOMY_LEVEL_LABEL)
+    return {**rep, "as_of": _as_of()}
+
+
+def _labeller_failsafe(journal: JournalStore, settings: Settings) -> dict:
+    """Mirrors `Orchestrator._labeller_failsafe_health()` exactly
+    (alphaos/orchestrator.py lines ~2638-2660) -- that method only touches
+    `self.journal`/`self.settings`, so it's reproduced here call-for-call
+    against the request's own journal/settings rather than requiring an
+    Orchestrator instance."""
+    summary = journal.labeller_source_summary(limit=50)
+    health = evaluate_failsafe_health(
+        summary,
+        settings.labeller_failsafe_warn_rate,
+        settings.labeller_failsafe_critical_rate,
+        settings.labeller_failsafe_min_sample,
+    )
+    return {
+        "level": health["level"],
+        "message": health["message"],
+        "total": summary["total"],
+        "openai": summary["openai"],
+        "mock": summary["mock"],
+        "fail_safe": summary["fail_safe"],
+        "fail_safe_rate": summary["fail_safe_rate"],
+        "by_source": summary["by_source"],
+        "by_failsafe_reason": summary["by_failsafe_reason"],
+        "top_reason": health.get("top_reason"),
+    }
+
+
+@router.get("/system")
+def system(
+    settings: Settings = Depends(get_settings),
+    journal: JournalStore = Depends(get_journal),
+    kill_switch: KillSwitch = Depends(get_kill_switch),
+) -> dict:
+    """System Health + Scan Batches + Scheduler Runs + System Events,
+    consolidated into one payload (ND-2 plan doc: "5 Streamlit tabs collapse
+    into System & Audit's... concept" -- these four plus a recent-candidates
+    list for the trade-packet picker below).
+
+    Deliberate deviation from `orch.system_health()`: that method reads
+    `self.orders.broker_connected`, which requires constructing an
+    `OrderManager` (itself needing a `PositionManager` + `KillSwitch`) --
+    but `OrderManager.__init__` sets `broker_connected` from nothing but
+    `settings.is_paper and settings.has_alpaca_keys` (alphaos/execution/
+    order_manager.py line ~71), no I/O, no provider call. Every other line
+    of `system_health()`'s dict is already a pure `self.settings`/
+    `self.journal`/`self.kill_switch` read or a call to a free function
+    (`evaluate_failsafe_health`, `protection_watchdog.status_report`) --
+    so this reproduces that same dict, field for field, against this
+    request's own settings/journal/kill_switch plus the one inlined boolean
+    expression, instead of constructing an `OrderManager` (or a full
+    `Orchestrator`) whose only other job here would be exposing that one
+    field. Same "avoid the heavy constructor, the value underneath is
+    side-effect-free" reasoning as `/approvals` and `deps.get_market()`."""
+    s = settings
+    last_snap = journal.one(
+        "SELECT freshness_status, market_session FROM price_snapshots ORDER BY id DESC LIMIT 1"
+    )
+    freshness = (last_snap or {}).get("freshness_status") or "n/a"
+    health = {
+        "playbook": PLAYBOOK_V1,
+        "ai_primary": f"openai / {'configured' if s.has_openai_key else 'missing key (mock)'}",
+        "ai_reviewer": f"anthropic / optional / {'configured' if s.has_anthropic_key else 'missing key'}",
+        "market_data_provider": s.data_provider,
+        "market_data_feed": s.market_data_feed,
+        "market_data_mode": s.market_data_mode,
+        "market_data_limited": "free/IEX — limited-market data",
+        "market_data_freshness": freshness,
+        "news_provider": "disabled_v1",
+        "benzinga": "deferred_v1",
+        "web_scraper": "disabled_v1",
+        "massive": "deferred_v1",
+        "last30days_research": (
+            "disabled_v1" if not s.last30days_enabled
+            else f"{s.last30days_provider} (keyless, context-only)"
+        ),
+        "labeller_decision_override": (
+            "downgrade_only" if not s.labeller_decision_override_enabled
+            else ("armed (symmetric)" if (s.has_openai_key and not s.is_mock)
+                  else "enabled_inert_while_mock")
+        ),
+        "last30days_polarity": (
+            "disabled_v1" if not s.last30days_polarity_enabled
+            else (f"{s.last30days_polarity_model} (arming "
+                  f"{'on' if s.last30days_polarity_arming_allowed else 'off'})"
+                  + ("" if (s.has_openai_key and not s.is_mock) else ", mock"))
+        ),
+        "execution_provider": s.execution_provider,
+        "real_alpaca_paper_execution": "enabled" if s.real_paper_execution else "not_enabled_v1",
+        "real_money_trading": "unreachable",
+        "manual_approval": "required" if s.effective_approval_mode.value == "manual" else "auto (capped)",
+        "kill_switch": "ENGAGED" if kill_switch.is_engaged() else "off",
+        "broker_connected": s.is_paper and s.has_alpaca_keys,
+        "open_positions": journal.count_open_positions(),
+        "labeller_failsafe": _labeller_failsafe(journal, settings),
+        "protection_watchdog": protection_status_report(journal),
+    }
+    return {
+        "health": health,
+        "startup_checks": [c.as_dict() for c in settings.validate_startup()],
+        "recent_snapshots": journal.query(
+            "SELECT symbol, provider, freshness_status, is_usable, data_delay_seconds, source_timestamp "
+            "FROM price_snapshots ORDER BY id DESC LIMIT 20"
+        ),
+        "recent_events": journal.recent_system_events(50),
+        "scan_batches": journal.recent_scan_batches(50),
+        "scheduler_runs": journal.recent_scheduler_runs(50),
+        "recent_candidates": journal.recent_candidates(100),
+        "as_of": _as_of(),
+    }
+
+
+@router.get("/system/trade-packet")
+def system_trade_packet(
+    candidate_id: Optional[str] = None,
+    trade_id: Optional[str] = None,
+    journal: JournalStore = Depends(get_journal),
+) -> dict:
+    """The Trade Packet drill-down -- `assemble_trade_packet()` verbatim,
+    the exact function streamlit_app.tab_trade_packet() calls once an
+    operator picks a candidate_id/trade_id from its selectbox. This is a
+    separate endpoint (not folded into `/system` above) because it's the
+    one System & Audit sub-view that takes real user input rather than
+    rendering a fixed recent-N list; `/system`'s own `recent_candidates`
+    list supplies the ids an operator can pick from. Neither id given ->
+    `packet: null` (an honest "nothing selected yet", not an error)."""
+    if not candidate_id and not trade_id:
+        return {"packet": None, "as_of": _as_of()}
+    packet = assemble_trade_packet(journal, candidate_id=candidate_id, trade_id=trade_id)
+    return {"packet": packet, "as_of": _as_of()}
