@@ -93,8 +93,28 @@ function PositionCard({ p }) {
       <StatFooter
         stats={[
           {
+            // audit-fixup (correctness LOW-2): the shield previously
+            // rendered neutral-colored for every status including
+            // UNPROTECTED/DEGRADED, which could read as reassuring next to
+            // a bad status. Tinted by reusing Badge's own tone->color
+            // mapping (icons.jsx's stroke="currentColor" means Badge's
+            // `color` CSS tints both the icon and the text together,
+            // never disagreeing) rather than duplicating that lookup table
+            // here -- chrome (border/background/padding) stripped via
+            // inline style so it still reads as plain footer text, not a
+            // second pill nested inside the stat row.
             label: 'protection',
-            value: <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}><IconShield size={12} />{p.protection_status}</span>,
+            value: (
+              <Badge
+                tone={badgeTone(p.protection_status)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  border: 'none', background: 'none', padding: 0,
+                }}
+              >
+                <IconShield size={12} />{p.protection_status}
+              </Badge>
+            ),
           },
           { label: 'freshness', value: p.freshness_status },
           { label: 'trading days held', value: `${p.trading_days_held}/${p.max_holding_days ?? 'n/a'}` },
