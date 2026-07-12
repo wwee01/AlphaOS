@@ -9,28 +9,35 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getApprovals, STREAMLIT_URL } from '../api.js';
 import { computeTtlBar, sortByTtl } from '../approvals.js';
-import { Badge, Block, StreamlitLink } from '../components/ui.jsx';
+import { Badge, Block, StreamlitLink, badgeTone } from '../components/ui.jsx';
+import { ProgressBar } from '../components/ProgressBar.jsx';
+import { IconClock, IconWarningTriangle } from '../components/icons.jsx';
 import { describeUnreachable, formatClockUTC, formatSecondsRemaining } from '../format.js';
 
 const POLL_MS = 10000;
+
+// bar.state ('ok'/'low'/'expired', from approvals.js:computeTtlBar() --
+// UNCHANGED math) -> ProgressBar tone. Presentation-only lookup, mirrors
+// the ND-2 CSS's own .ttl-bar-low/.ttl-bar-expired color choice exactly.
+const TTL_TONE = { ok: 'primary', low: 'warning', expired: 'danger' };
 
 function TtlBar({ secondsRemaining, totalTtlSeconds, label }) {
   const bar = computeTtlBar(secondsRemaining, totalTtlSeconds);
   if (bar.state === 'unknown') {
     return (
-      <div className="ttl-bar">
-        <span className="label-caps ttl-bar-tag">TTL</span>
-        <span className="ttl-bar-unknown">{label}</span>
+      <div className="ttl-row">
+        <span className="label-caps"><IconClock size={12} /> TTL</span>
+        <span className="ttl-row-unknown">{label}</span>
       </div>
     );
   }
   return (
-    <div className={`ttl-bar ttl-bar-${bar.state}`}>
-      <span className="label-caps ttl-bar-tag">TTL</span>
-      <div className="ttl-bar-track">
-        <div className="ttl-bar-fill" style={{ width: `${bar.pct}%` }} />
+    <div className="ttl-row">
+      <span className="label-caps"><IconClock size={12} /> TTL</span>
+      <div className="ttl-row-track">
+        <ProgressBar pct={bar.pct} tone={TTL_TONE[bar.state]} height={10} />
       </div>
-      <span className="ttl-bar-label">{label}</span>
+      <span className="ttl-row-label">{label}</span>
     </div>
   );
 }
@@ -38,7 +45,11 @@ function TtlBar({ secondsRemaining, totalTtlSeconds, label }) {
 function ProposalCard({ v }) {
   return (
     <Block
-      title={`${v.symbol} · ${v.side} · qty ${v.qty ?? 'n/a'}`}
+      title={(
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          {v.symbol} <Badge tone={badgeTone(v.side)} caps>{v.side}</Badge> qty {v.qty ?? 'n/a'}
+        </span>
+      )}
       right={<StreamlitLink href={STREAMLIT_URL}>Decide in Streamlit</StreamlitLink>}
       style={{ marginBottom: 10, borderColor: v.proposal_is_stale ? 'var(--red)' : 'var(--border)' }}
     >
@@ -48,8 +59,8 @@ function ProposalCard({ v }) {
         label={formatSecondsRemaining(v.proposal_seconds_remaining)}
       />
       {v.proposal_is_stale && (
-        <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
-          ⚠ This proposal's TTL has expired — approval will be rejected. A fresh scan is needed for a current proposal.
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--red)', marginBottom: 8 }}>
+          <IconWarningTriangle size={13} /> This proposal's TTL has expired — approval will be rejected. A fresh scan is needed for a current proposal.
         </div>
       )}
 
@@ -72,9 +83,9 @@ function ProposalCard({ v }) {
       {/* TQS: score is never shown without its confidence pairing (UI/UX
           doc §9) -- shown together or not at all, exactly like Approval
           Center's dataframe columns. */}
-      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-dim)' }}>
         {v.tqs_score !== null && v.tqs_score !== undefined ? (
-          <>TQS (shadow): {v.tqs_score} · {v.tqs_bucket} · confidence {v.tqs_data_confidence}</>
+          <>TQS (shadow): {v.tqs_score} · <Badge tone={badgeTone(v.tqs_bucket)} caps>{v.tqs_bucket}</Badge> · confidence {v.tqs_data_confidence}</>
         ) : (
           <>TQS (shadow): n/a</>
         )}

@@ -16,7 +16,9 @@ const POLL_MS = 15000;
 function AutonomyPanel({ autonomy }) {
   return (
     <Block title="Autonomy">
-      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Level: {autonomy.level_label}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
+        Level: <Badge tone="ok" caps>{autonomy.level_label}</Badge>
+      </div>
       <div style={{ fontSize: 13, marginBottom: 4 }}>{autonomy.may_alone}</div>
       <div style={{ fontSize: 13, marginBottom: 8 }}>{autonomy.may_not_alone}</div>
       {autonomy.unattended_exception ? (

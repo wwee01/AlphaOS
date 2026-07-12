@@ -8,6 +8,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getSystem, getTradePacket } from '../api.js';
 import { Badge, Block, DataTable } from '../components/ui.jsx';
+import { IconCheck, IconWarningTriangle } from '../components/icons.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 
 const POLL_MS = 15000;
@@ -62,18 +63,24 @@ function HealthPanel({ health, startupChecks }) {
           <span className="badge num">open incidents {pw.open_incident_count}</span>
         </div>
         {pw.blocking ? (
-          <div style={{ fontSize: 12, color: 'var(--red)' }}>NEW ENTRIES BLOCKED: {pw.blocking_detail}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--red)' }}>
+            <IconWarningTriangle size={13} /> NEW ENTRIES BLOCKED: {pw.blocking_detail}
+          </div>
         ) : pw.degraded > 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--amber)' }}>{pw.degraded} position(s) degraded (target leg missing, stop still live) — not blocking.</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--amber)' }}>
+            <IconWarningTriangle size={13} /> {pw.degraded} position(s) degraded (target leg missing, stop still live) — not blocking.
+          </div>
         ) : (
-          <div style={{ fontSize: 12, color: 'var(--primary)' }}>{pw.summary_label ?? 'all protected'}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--primary)' }}>
+            <IconCheck size={13} /> {pw.summary_label ?? 'all protected'}
+          </div>
         )}
       </Block>
 
       <Block title="Startup safety checks" style={{ marginTop: 4 }}>
         {startupChecks.map((c) => (
-          <div key={c.name} style={{ fontSize: 12, color: c.ok ? 'var(--primary)' : 'var(--red)', padding: '2px 0' }}>
-            {c.ok ? '✓' : '✗'} {c.name}: {c.detail}
+          <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: c.ok ? 'var(--primary)' : 'var(--red)', padding: '2px 0' }}>
+            {c.ok ? <IconCheck size={13} /> : <IconWarningTriangle size={13} />} {c.name}: {c.detail}
           </div>
         ))}
       </Block>

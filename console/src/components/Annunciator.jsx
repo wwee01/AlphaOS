@@ -16,6 +16,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getAnnunciator, postKillSwitchEngage } from '../api.js';
 import { Badge } from './ui.jsx';
 import { PinPrompt } from './PinPrompt.jsx';
+import { IconClock, IconShield, IconWarningTriangle } from './icons.jsx';
 import { formatHeartbeat, formatOpenR } from '../format.js';
 
 const POLL_MS = 10000;
@@ -51,22 +52,23 @@ export default function Annunciator() {
 
   if (!data) {
     return (
-      <div style={{ marginBottom: 16 }}>
+      <div className="annunciator-strip">
         <span className="label-caps">loading annunciator…</span>
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+    <div className="annunciator-strip">
       <Badge>mode: {data.mode ?? 'unknown'}</Badge>
       <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'}>
+        {data.kill_switch_engaged ? <IconWarningTriangle size={12} /> : <IconShield size={12} />}
         {data.kill_switch_engaged
-          ? `● kill switch engaged — ${data.kill_switch_reason ?? 'no reason recorded'}`
-          : '● kill switch armed (not engaged)'}
+          ? `kill switch engaged — ${data.kill_switch_reason ?? 'no reason recorded'}`
+          : 'kill switch armed (not engaged)'}
       </Badge>
       <Badge>{data.autonomy_level_label ?? 'unknown'}</Badge>
-      <Badge>heartbeat: {formatHeartbeat(data.heartbeat_age_seconds)}</Badge>
+      <Badge><IconClock size={12} /> heartbeat: {formatHeartbeat(data.heartbeat_age_seconds)}</Badge>
       <Badge>
         open R ({data.open_position_count ?? 'n/a'} pos): {formatOpenR(data.total_open_r, data.unmeasurable_positions)}
       </Badge>

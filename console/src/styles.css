@@ -83,21 +83,39 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 
 /* Static badges only -- no @keyframes, no pulse/blink anywhere in this file
    (UX doc §13 calm-console rule, carried into ND-1 by the plan doc §2.4:
-   "no flashing/pulsing; live updates are honest... a visible as-of stamp"). */
+   "no flashing/pulsing; live updates are honest... a visible as-of stamp").
+   ND-visual: given more visual weight (background tint + heavier weight)
+   to close the gap against the Stitch mockups' filled-pill treatment --
+   same border/tone tokens as before, this pass only thickens them. See
+   components/Badge.jsx for the React component + tone lookup. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-family: var(--mono);
   font-size: 12px;
-  padding: 3px 10px;
+  font-weight: 600;
+  padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 4px;
   color: var(--text-dim);
+  background: var(--surface-low);
 }
-.badge-ok { color: var(--primary); border-color: rgba(76, 215, 246, 0.4); }
-.badge-warn { color: var(--amber); border-color: rgba(255, 184, 115, 0.4); }
+.badge-ok { color: var(--primary); border-color: rgba(76, 215, 246, 0.5); background: rgba(76, 215, 246, 0.1); }
+.badge-warn { color: var(--amber); border-color: rgba(255, 184, 115, 0.5); background: rgba(255, 184, 115, 0.1); }
 .badge-danger { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.08); }
+
+/* Opt-in label-caps treatment for single-word status pills (verdict/
+   thesis/direction/bucket) -- left off the base .badge rule so the many
+   existing mixed word+number badges ("heartbeat: 12s ago") keep their
+   current mono look; see Badge.jsx's `caps` prop. */
+.badge-caps {
+  font-family: var(--sans);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
 
 .stale-banner {
   border: 1px solid rgba(239, 68, 68, 0.5);
@@ -163,6 +181,9 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   padding-bottom: 0;
 }
 .nav-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-family: var(--sans);
   font-size: 12px;
   font-weight: 600;
@@ -179,31 +200,51 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   border-bottom-color: var(--primary);
 }
 
-/* ND-2: R-ladder (Positions page) -- ports console_theme.render_r_ladder()'s
-   VISUAL CONCEPT (a horizontal bordered track with stop/entry/target ticks
-   + a current-price marker), not its generated HTML. Percentage math lives
-   in positions.js:computeRLadder(), pure and tested; this is layout only.
-   Stays horizontal at every width (UX doc §16 item 5: "R-ladders stay
-   horizontal -- they compress well"). */
-.r-ladder-unavailable {
+/* ND-visual: shared thick progress-bar track, replacing ND-2's thin
+   .r-ladder-track top-border-only treatment and 8px .ttl-bar-track with the
+   mockups' heavier bar weight (components/ProgressBar.jsx renders these
+   classes). Percentage math is UNCHANGED -- still positions.js:
+   computeRLadder() / approvals.js:computeTtlBar(), both pure and tested;
+   this is layout only. Stays horizontal at every width (UX doc §16 item 5:
+   "R-ladders stay horizontal -- they compress well"). No @keyframes/
+   animation -- §13 calm-console rule: a fill/marker paints once per poll,
+   never a client-side ticking transition. */
+.pbar-unavailable {
   font-size: 12px;
   color: var(--text-dim);
   padding: 10px 0;
 }
-.r-ladder-track {
-  position: relative;
-  height: 40px;
-  margin: 22px 4px 20px;
-  border-top: 1px solid var(--border);
+.pbar-wrap {
+  margin: 24px 4px 24px;
 }
-.r-ladder-tick {
+.pbar-track {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-low);
+  overflow: visible;
+}
+.pbar-fill {
   position: absolute;
-  top: -2px;
-  height: 8px;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 5px;
+  background: var(--primary);
+}
+.pbar-track-primary .pbar-fill { background: var(--primary); }
+.pbar-track-warning .pbar-fill { background: var(--amber); }
+.pbar-track-danger .pbar-fill { background: var(--red); }
+.pbar-track-neutral .pbar-fill { background: var(--text-dim); }
+
+.pbar-mark {
+  position: absolute;
+  top: -6px;
+  bottom: -6px;
   border-left: 2px solid var(--text-dim);
   transform: translateX(-1px);
 }
-.r-ladder-tick-label {
+.pbar-mark-label {
   position: absolute;
   top: -18px;
   left: 0;
@@ -211,9 +252,9 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   font-size: 9px;
   white-space: nowrap;
 }
-.r-ladder-tick-value {
+.pbar-mark-value {
   position: absolute;
-  top: 10px;
+  bottom: -18px;
   left: 0;
   transform: translateX(-50%);
   font-family: var(--mono);
@@ -221,65 +262,118 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   color: var(--text-dim);
   white-space: nowrap;
 }
-.r-ladder-current {
+.pbar-marker {
   position: absolute;
-  top: -6px;
-  width: 10px;
-  height: 10px;
+  top: 50%;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
-  background: var(--primary);
-  transform: translateX(-5px);
+  background: var(--surface-container);
+  border: 2px solid var(--primary);
+  transform: translate(-50%, -50%);
 }
-.r-ladder-current-value {
+.pbar-marker-label {
   position: absolute;
   top: -22px;
-  left: 5px;
+  left: 50%;
   transform: translateX(-50%);
-  font-family: var(--mono);
   font-size: 11px;
   font-weight: 700;
   color: var(--primary);
   white-space: nowrap;
 }
 
-/* ND-2: TTL bar (Approvals page) -- ports console_theme.render_ttl_bar()'s
-   visual concept (a horizontal fill bar + always-visible label text, never
-   icon-only -- UX doc §16 item 5). No @keyframes/animation -- §13
-   calm-console rule: the fill % is computed once per poll
-   (approvals.js:computeTtlBar()), never a client-side ticking countdown. */
-.ttl-bar {
+/* ND-visual: TTL row wrapper -- the clock icon + thick ProgressBar + label
+   sitting on one line (Approvals page). */
+.ttl-row {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 6px 0;
 }
-.ttl-bar-tag {
-  flex: none;
-}
-.ttl-bar-track {
-  flex: 1;
-  height: 8px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-  background: var(--surface-low);
-}
-.ttl-bar-fill {
-  height: 100%;
-  background: var(--primary);
-}
-.ttl-bar-low .ttl-bar-fill { background: var(--amber); }
-.ttl-bar-expired .ttl-bar-fill { background: var(--red); }
-.ttl-bar-label {
+.ttl-row-track { flex: 1; }
+.ttl-row-label {
   flex: none;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-dim);
   white-space: nowrap;
 }
-.ttl-bar-unknown {
+.ttl-row-unknown {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* ND-visual: small N-column paired-stat row (components/StatFooter.jsx) --
+   the mockups' "label over value" stat-block treatment, used wherever this
+   console already renders a run of small labelled numbers inline. */
+.stat-footer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 10px 16px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 8px;
+}
+.stat-footer-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.stat-footer-value {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ND-visual: masthead -- wordmark + compact system-status readout (the
+   existing Annunciator, restyled in place, not refetched) + the nav tab
+   strip, wrapped as one visually cohesive top bar (mockups' top-bar weight)
+   instead of ND-2's bare flex header. */
+.masthead {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.masthead-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.masthead-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.wordmark {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--primary);
+}
+/* nav-tabs sits nested inside .masthead here -- the masthead's own
+   border-bottom/padding-bottom already closes the unit, so the tab strip's
+   standalone border/margin (used when .nav-tabs appears alone, e.g. none
+   currently, kept for CSS-class reuse) is suppressed in this context. */
+.masthead .nav-tabs {
+  margin-bottom: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* ND-3's annunciator strip (components/Annunciator.jsx) -- unchanged
+   fields/polling, now nested in the masthead unit above the nav tabs. */
+.annunciator-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
 }
 
 /* ND-2 mobile pass (UX doc §16, "Design, by principle") -- 480px is the
@@ -307,15 +401,20 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   .nav-tab {
     padding: 10px 8px;
     font-size: 11px;
+    gap: 4px;
   }
 
   .block { padding: 10px 10px; }
 
-  .r-ladder-tick-label,
-  .r-ladder-tick-value,
-  .r-ladder-current-value {
+  .pbar-mark-label,
+  .pbar-mark-value,
+  .pbar-marker-label {
     font-size: 9px;
   }
 
-  .ttl-bar-label { font-size: 10px; }
+  .ttl-row-label { font-size: 10px; }
+
+  .wordmark { font-size: 15px; }
+
+  .stat-footer { grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 8px 12px; }
 }
