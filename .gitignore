@@ -19,6 +19,10 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/backup_status.json
+# ND-3: the console API's PIN hash (alphaos/api/pin.py) -- a local operator
+# secret (scrypt hash + salt, never plaintext), set via `alphaos console
+# set-pin`. Never committed, same posture as data/KILL_SWITCH.
+data/console_pin.hash
 *.enc
 *.db
 *.sqlite

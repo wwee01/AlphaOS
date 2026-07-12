@@ -1,5 +1,5 @@
-"""alphaos/api/deps.py -- per-request FastAPI dependencies for the ND-1
-read-only console API.
+"""alphaos/api/deps.py -- per-request FastAPI dependencies for the console
+API (ND-1/ND-2 read-only views, ND-3 write plumbing).
 
 Side-effect-free startup (ND-1 plan doc §2.1) means none of these are built
 at app-creation/import time: every dependency below constructs a lightweight
@@ -12,9 +12,16 @@ KillSwitch (a marker-file check, no I/O at construction). This mirrors
 Orchestrator" pattern -- the plan doc explicitly calls out checking whether a
 needed function requires the full Orchestrator (which has non-trivial
 constructor work: OpenAIClient, ClaudeReviewer, NewsService, etc.) and, if
-so, sourcing the data a lighter way instead. None of ND-1's four endpoints
-need anything Orchestrator-only provides, so Orchestrator is never
-constructed by this API.
+so, sourcing the data a lighter way instead. None of ND-1/ND-2's read
+endpoints need anything Orchestrator-only provides, so Orchestrator is never
+constructed for a read request.
+
+ND-3 (below the "ND-3 (writes)" divider) is the first phase that
+deliberately breaks that "never construct Orchestrator" rule -- write_routes.
+py's four routes exist specifically to trigger real Orchestrator work (a
+scan, a monitor pass, a report), so constructing one per write request is
+the point, not a cost to avoid. Every read dependency above is completely
+unaffected: still `mode=ro`, still Orchestrator-free.
 """
 
 from __future__ import annotations
@@ -23,6 +30,8 @@ from typing import Iterator
 
 from fastapi import Depends
 
+from alphaos.api.nonce import NonceStore, default_nonce_store
+from alphaos.api.pin import PinRateLimiter, PinStore, default_rate_limiter
 from alphaos.config.settings import Settings, load_settings
 from alphaos.data.market_data import MarketDataClient
 from alphaos.journal.journal_store import JournalStore
@@ -92,3 +101,55 @@ def get_kill_switch() -> KillSwitch:
     """A marker-file check (alphaos/safety.py) -- no I/O at construction,
     only when is_engaged()/reason() are actually called."""
     return KillSwitch()
+
+
+# ============================================================== ND-3 (writes)
+#
+# Everything below is new in ND-3 (docs/roadmap/console-migration-nd.md §4
+# ND-3 scope) -- ND-1/ND-2 are read-only and never construct a write-capable
+# journal or a real Orchestrator at all. These deps back ONLY the named
+# write routes in alphaos/api/write_routes.py; every ND-1/ND-2 read route
+# above is completely unaffected (still `mode=ro`, still no PIN/nonce).
+
+
+def get_write_journal(settings: Settings = Depends(get_settings)) -> Iterator[JournalStore]:
+    """A READ-WRITE JournalStore (SQLite opened WITHOUT `mode=ro`), opened
+    fresh per request and always closed after, even on error -- same
+    generator-with-finally shape as get_journal() above, with the one
+    deliberate difference being `read_only` defaults to False here. This is
+    the ONLY dependency in this module capable of a write; every ND-1/ND-2
+    read route keeps depending on get_journal (still structurally
+    read-only), and this dependency is wired into ONLY the four named write
+    routes (docs/roadmap/console-migration-nd.md §4 ND-3: "DB connection
+    becomes read-write for named routes only")."""
+    journal = JournalStore(settings.db_path, read_only=False)
+    try:
+        yield journal
+    finally:
+        journal.close()
+
+
+def get_pin_store() -> PinStore:
+    """A fresh PinStore per request, pointed at the default on-disk hash
+    path (alphaos/api/pin.py). Cheap (no I/O at construction; only
+    is_configured()/verify() touch the filesystem) -- tests substitute a
+    tmp_path-backed instance via app.dependency_overrides[get_pin_store],
+    the same pattern get_settings/get_journal already use."""
+    return PinStore()
+
+
+def get_rate_limiter() -> PinRateLimiter:
+    """Returns the process-wide PinRateLimiter singleton (alphaos/api/
+    pin.py) -- deliberately NOT a fresh instance per request, since a
+    consecutive-failure lockout must persist ACROSS requests to mean
+    anything. Tests that need isolation from this shared, cross-test state
+    override this dependency with a fresh PinRateLimiter() instance instead
+    of relying on the real singleton (see tests/test_api_console_nd3.py)."""
+    return default_rate_limiter()
+
+
+def get_nonce_store() -> NonceStore:
+    """Returns the process-wide NonceStore singleton (alphaos/api/nonce.py)
+    -- same "must persist across requests, tests override for isolation"
+    reasoning as get_rate_limiter above."""
+    return default_nonce_store()

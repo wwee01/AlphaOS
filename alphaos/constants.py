@@ -278,6 +278,20 @@ class TriggerSource(StrEnum):
     TEST = "test"
     CLI = "cli"
     SCHEDULER = "scheduler"
+    # ND-3: a write triggered via the console API's PIN-gated /api/v1/
+    # actions/* routes (alphaos/api/write_routes.py) -- distinct from
+    # SCHEDULER on purpose: run_scan_once()'s own unattended-approval-window
+    # eligibility check is gated on `trigger_source == TriggerSource.
+    # SCHEDULER.value` (alphaos/orchestrator.py), and a console-triggered
+    # scan must never inherit that scheduler-only privilege just because a
+    # human clicked a button instead of typing a CLI command. Threading this
+    # value through to scheduler_runs.trigger_source (audit-fixup,
+    # correctness L3: NOT scan_batches too -- run_scan_once() hardcodes
+    # scan_batches.source = "cli" regardless of trigger_source) also makes
+    # console-triggered scheduler runs distinguishable from Streamlit/CLI
+    # ones in System & Audit's own scheduler_runs table, for free, without a
+    # separate system_events write for that one signal.
+    CONSOLE_API = "console_api"
 
 
 class BaselineType(StrEnum):

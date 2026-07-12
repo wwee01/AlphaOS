@@ -840,6 +840,57 @@ def cmd_dashboard(_: Orchestrator) -> int:
     return 0
 
 
+def cmd_console_set_pin() -> int:
+    """ND-3: set/replace the console API's write-PIN (docs/roadmap/
+    console-migration-nd.md §3, §4 ND-3 scope). Deliberately does NOT take
+    an Orchestrator -- unlike every other command in this file, `console
+    set-pin` is handled in `main()` BEFORE `load_settings()`/`Orchestrator(
+    ...)` are constructed (see main()'s own early-return for `args.command
+    == "console"`), since setting a local operator secret has no business
+    needing a scheduler-capable Orchestrator's full constructor cost (or its
+    side effects) -- it only ever touches one file (alphaos/api/pin.py's
+    PinStore, `data/console_pin.hash` by default), the same "no
+    Orchestrator needed, source the one thing you actually need" reasoning
+    alphaos/api/deps.py already documents for its own dependencies.
+
+    getpass.getpass() never echoes the PIN to the terminal. A PIN is
+    confirmed by re-entry (typo protection) and refused if empty."""
+    import getpass
+
+    from alphaos.api.pin import PinStore
+
+    store = PinStore()
+    if store.is_configured():
+        answer = input(
+            f"A console PIN is already configured at {store.path!r}. Overwrite? [y/N]: "
+        ).strip().lower()
+        if answer != "y":
+            print("Cancelled — PIN unchanged.")
+            return 1
+
+    pin = getpass.getpass("New console PIN: ")
+    if not pin or not pin.strip():
+        print("Refused: PIN must not be empty.")
+        return 1
+    confirm = getpass.getpass("Confirm console PIN: ")
+    if pin != confirm:
+        print("Refused: PINs did not match.")
+        return 1
+
+    store.set_pin(pin)
+    print(
+        f"Console PIN set (scrypt hash stored at {store.path!r}, file mode 0600). "
+        "Every POST /api/v1/actions/* write now requires it."
+    )
+    return 0
+
+
+def cmd_console(args) -> int:
+    if args.console_action == "set-pin":
+        return cmd_console_set_pin()
+    return 1  # pragma: no cover -- unreachable, argparse's `required=True` + `choices` already gate this
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m alphaos", description="AlphaOS v1 CLI")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1054,11 +1105,28 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
+    console = sub.add_parser(
+        "console", help="ND-3: console API operator actions (currently: PIN management)"
+    )
+    console_sub = console.add_subparsers(dest="console_action", required=True)
+    console_sub.add_parser(
+        "set-pin",
+        help="set/replace the console write-PIN (prompted via getpass, hashed with scrypt; "
+             "required before ANY /api/v1/actions/* write is accepted -- see docs/roadmap/"
+             "console-migration-nd.md ND-3)",
+    )
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    # ND-3: handled BEFORE load_settings()/Orchestrator(...) below --
+    # `console set-pin` needs neither (see cmd_console_set_pin's own
+    # docstring) and every other command in this file already pays that
+    # construction cost unconditionally, which this one deliberately opts
+    # out of rather than inheriting.
+    if args.command == "console":
+        return cmd_console(args)
     try:
         settings = load_settings()
     except SettingsError as exc:
