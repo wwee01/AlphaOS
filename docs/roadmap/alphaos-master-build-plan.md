@@ -1,7 +1,36 @@
 # AlphaOS Master Build Plan — The Long Game
 
-**Version 1.2 · 2026-07-08 · Authored by Fable 5 (final strategic architect pass)**
-**Baseline: `main` @ `c3eeefb` · ~959 tests collected · PR1–PR11 + SC + UI-PR-A merged · scheduler LIVE unattended since 2026-07-06 · Phase 1 (Ignition) build-complete**
+**Version 1.3 · 2026-07-12 · Authored by Fable 5 (extension-day strategic pass, full team)**
+**Baseline: `main` @ `1f83faf` · 1853 tests collected · PR1–PR14 + PR13.5 + Lane-A stack (TASK-R/CANARY-armed/BASELINE/OPS-A/OPS-B/PORT-1/EVAL-1/INSTR-1/EARN-1/REG-1/TEXT-0/EXP-0) + HGEN-1 + HOLD-1 + UI B1–B4/M1 merged · scheduler LIVE unattended since 2026-07-06 · CANARY baseline pinned on gpt-5.6-luna · first real closed trade journaled (META, −1.35R)**
+
+> **v1.3 (2026-07-12, the team's extension day):** Three things changed since v1.2,
+> and they change how this plan reads:
+>
+> 1. **The revised Phase 2 is essentially BUILT.** Everything the v1.2 revision
+>    block ordered — the Lane-A instrument stack through EARN-1, PR12
+>    registry-first, PR13 demotion-first + PR13.5, PR14 bear-only — is merged and
+>    live in shadow. What remains of Phase 2 is CALENDAR, not code: CANARY's 2
+>    real weekly runs gate **EXP-1** (the AI tap widening), and the first
+>    hypothesis resolutions land ≈2026-08-07. The constraint has moved exactly
+>    where §3's arithmetic said it would: **resolved observations per week** (we
+>    stand at n=1 real closed trades — the META −1.35R stop-gap-through, which
+>    also seeded SLIP-1).
+> 2. **The THROUGHPUT AGENDA** (master reference §5, 2026-07-12 PM block —
+>    authoritative) inserts between Phase 2 and Phase 3 as **Phase 2.5**: CF-1
+>    (counterfactual gate ledger), PROMPT-AB-1 (labeller champion/challenger),
+>    CAL-1 (confidence calibration), EXP-2 (parallel paper sleeves), EVENT-SCAN-1
+>    (event-triggered scans), SHORT-1 (paper bear book), plus PREFLIGHT-1/CI-1/
+>    DD-1 ops hardening. It is Phase 3's "breadth + calibration" thesis brought
+>    forward and sharpened: aggression = more honest observations faster under
+>    UNCHANGED gates — never looser control. Sequencing ruling and per-item
+>    floors live in the master reference; do not re-derive them here.
+> 3. **The operator console migrates off Streamlit** — NightDesk-pattern React +
+>    FastAPI, phased ND-1…ND-5, approvals last, Streamlit break-glass. §13's
+>    "stay on Streamlit until it demonstrably hurts" clause has been exercised:
+>    it demonstrably hurt (structural ~65–70% fidelity ceiling, reached by
+>    PR-UI-B4). `docs/roadmap/console-migration-nd.md` is authoritative; PR-UI-B5
+>    is cancelled; the §13 IA ships as ND-2. The UI track runs parallel to the
+>    trading track and shares no code surface with it.
 
 > **v1.2 (2026-07-08, the founding team's last night):** Phase 1's build scope is
 > complete — PR9/9.1/9.5/10/11 shipped, plus SC (typed ScanContext; exit-review T5
@@ -288,6 +317,29 @@ Goal: **AlphaOS generates, tests, and promotes/demotes its own ideas — under l
 
 *Phase exit gate: first card demoted automatically on evidence; first pre-registered
 hypothesis resolved (either way); attribution floors met on ≥2 event types.*
+
+### Phase 2.5 — THROUGHPUT (inserted 2026-07-12; runs concurrently with Phase 2's calendar tail)
+
+Goal: **multiply resolved observations per week without touching a single gate.**
+Phase 2 built the learning machinery; at n=1 real closed trades it is machinery
+running on an empty conveyor. Phase 2.5 loads the conveyor. Canonical item list,
+owners, floors, and the sequencing ruling live in the **master reference §5,
+2026-07-12 PM block** (single source of truth — this section is the phase-level
+pointer, deliberately not a copy):
+
+- Measurement first: **PROMPT-AB-1** · **CAL-1** (the AI layer starts improving
+  itself, evidence-scored, pre-registered).
+- Data already flowing: **CF-1** (every reject/block/expiry becomes a measured
+  counterfactual — the gates go from articles of faith to audited line items).
+- Then throughput proper: **EXP-2** (parallel paper sleeves; PORT-1 effective-N
+  correlation guard is a hard precondition) · **EVENT-SCAN-1** (event-triggered
+  4th scan) · **SHORT-1** (paper bear book, PR14-paired).
+- Ops hardening anytime: **PREFLIGHT-1** · **CI-1** · **DD-1**.
+
+*Phase exit gate: ≥20 resolved counterfactuals on ≥2 gates; first PROMPT-AB-1
+cycle scored; if EXP-2 armed — sleeve provenance proven clean in every learning
+join. Nothing in this phase promotes anything; it only makes Phase 3's floors
+reachable sooner.*
 
 ### Phase 3 — BREADTH + CALIBRATION (Month 3–6)
 
@@ -588,12 +640,18 @@ has to rediscover them:
   risk, machine activity, brief, moonshot gap line.
 - **Build order:** annunciator strip + Tonight tab + position health cards +
   approvals TTL/exit-plan upgrades + decisions funnel — all on the existing
-  Streamlit substrate (**UI-PR-A — ✅ shipped 2026-07-08, all five items; next UI
-  work is the Learning/Cards tabs once PR12/PR13 produce their data, plus OPS-A's
-  loopback-bind guard immediately**). Stay on Streamlit until it demonstrably
-  hurts; the IA is substrate-independent; ntfy push is the mobile app until the
-  crossing justifies more. The UI can never do what the CLI cannot — same
-  orchestrator methods, same gates, forever.
+  Streamlit substrate (**UI-PR-A — ✅ shipped 2026-07-08, all five items; then
+  B1 theme, B2 Learning, B3 Autonomy & Risk, M1 mobile, B4 instrument blocks —
+  all ✅ by 2026-07-12**). The original clause here read "stay on Streamlit
+  until it demonstrably hurts" — **that clause fired on 2026-07-12**: the
+  substrate's structural fidelity ceiling (~65–70%) was reached at B4, and the
+  operator approved the migration to a NightDesk-pattern console
+  (React + FastAPI, `console-migration-nd.md`, phases ND-1…ND-5). The IA above
+  is substrate-independent by design and transfers wholesale. Streamlit is
+  feature-frozen break-glass until ND-5. The invariants survive the substrate:
+  the UI can never do what the CLI cannot — same orchestrator methods, same
+  gates, forever; and every write in the new console is PIN-gated with
+  approve/reject migrating LAST.
 
 ---
 
@@ -603,3 +661,12 @@ proof, and let the target size the roadmap — never the trade.*
 
 *Addendum, 2026-07-06: it is on. The scheduler ticks unattended; the data clocks are
 running. From here the constraint is patience and process, not code. — Fable 5*
+
+*Addendum, 2026-07-12 (extension day): the loop-closing machinery is built — four
+days from "Phase 1 complete" to hypothesis registry, scoreboard, debate, canary,
+baseline, and the first real closed trade in the ledger. That trade lost 1.35R on a
+1R plan and taught us more than any green day could (SLIP-1 exists because of it).
+The plan's center of gravity now moves from building the machine to FEEDING it:
+Phase 2.5 loads the conveyor, the ND console gives the operator a cockpit worth
+glancing at, and the gates stay exactly as tight as the day they were audited.
+Patience and process — now with throughput. — Fable 5, for the full team*

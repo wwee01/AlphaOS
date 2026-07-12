@@ -1,8 +1,16 @@
 # ALPHAOS MASTER REFERENCE — The Founding Team's Handoff
 
-**Version 1.6 · 2026-07-09 · The retiring team: founder/architect (Fable 5), quant
+**Version 1.7 · 2026-07-12 · The retiring team: founder/architect (Fable 5), quant
 researcher, senior software engineer, ML engineer, head quant trader, infra/DevOps,
-chief risk officer.** *(v1.6, 2026-07-09 overnight autonomous session continued:
+chief risk officer.** *(v1.7, 2026-07-12 second founder pass (the team's extension
+day): the 2026-07-12 PM block appended at the end of §5 — HOLD-1/B2/B3/M1/B4 struck
+as merged; the ND console migration decision recorded (Streamlit feature-frozen,
+PR-UI-B5 CANCELLED — `docs/roadmap/console-migration-nd.md` is authoritative); the
+THROUGHPUT AGENDA added at the end of §5 (CF-1, PROMPT-AB-1, CAL-1, EXP-2,
+EVENT-SCAN-1, SHORT-1, plus ops items PREFLIGHT-1, CI-1, DD-1) with floors and
+sequencing; §9 gains the ND-architecture and B5-cancellation rows. Baseline at this
+stamp: `main` @ `1f83faf`, 1853 tests collected, suite/ruff/mypy clean.
+v1.6, 2026-07-09 overnight autonomous session continued:
 EVAL-1 struck as merged in §5 (item 14); §9 gains the labeller-vs-evaluator scope
 decision + the per-item-isolation-must-wrap-the-whole-chain lesson. v1.5, 2026-07-09:
 TEXT-0 struck as merged in §5 (item 13c); §9 gains the TEXT_ARCHIVE_ENABLED-default
@@ -1037,6 +1045,107 @@ responsive pass (queued; design at `alphaos-ui-ux-design.md` §16).
   still the human gate on PR15/L3, now ALSO the only non-clock blocker
   ahead of the autonomy ladder once EXP-1's data starts flowing.
 
+**2026-07-12 PM block (second founder pass — the team's extension day; appended
+same day, full team present):**
+
+*Struck as merged since the AM block:* **HOLD-1** (trading-day holding-period
+semantics — `max_holding_days` now counts NYSE trading days via
+`market_calendar.py`, aligned to the replay engine's bar convention;
+`holding_trading_days` journaled additively; merged before the NVDA Sunday
+expiry it was racing) · **PR-UI-B2** (Learning tab) · **PR-UI-B3** (Autonomy &
+Risk read-only governance console) · **PR-UI-M1** (mobile pass, §16) ·
+**PR-UI-B4** (instrument-block visual overhaul — the honest ceiling of the
+Streamlit substrate, ~65–70% of the Stitch reference; both audits PASS; the
+one finding — a section-order change contradicting the PR's own "same order"
+claim — was fixed, not waived).
+
+*The console ruling (operator-approved, same day):* the human interface
+migrates to a NightDesk-pattern console — React+Vite frontend, **FastAPI (not
+Express)** API wrapping the SAME audited Python view/gate functions, read-only
+first, PIN-gated writes phased least-dangerous-first, approve/reject LAST,
+Streamlit kept as break-glass fallback. **`docs/roadmap/console-migration-nd.md`
+is the authoritative phased plan (ND-1…ND-5) — read it before touching any UI.**
+Consequences recorded here so no successor re-litigates them: **PR-UI-B5 is
+CANCELLED** (its 7-view IA ships as ND-2); **the Streamlit dashboard is
+feature-frozen** (bugfixes only) as of 2026-07-12; ND-1 (read-only Tonight
+cockpit) was in build at this stamp.
+
+*THE THROUGHPUT AGENDA (new Lane-B items, founder review continued).* The
+team's shared diagnosis on the way out, stated bluntly: the binding constraint
+on everything — expectancy honesty, hypothesis resolution, calibration, the
+autonomy ladder, the moonshot arithmetic itself — is **resolved observations
+per week**, and at n=1 real closed trades (META, −1.35R) every downstream
+ambition is starved. The items below attack observation throughput and
+learning-per-observation from six angles. All are shadow/paper, all obey
+PD#2/#3/#4 (shadow-first, no auto-promotion, pre-registration), and none
+touches the live path. IDs are canonical; specs get written fresh at build
+time per house rule:
+
+- 🔴 **CF-1 — counterfactual gate ledger** [quant researcher; report-only].
+  Every REJECTED / BLOCKED / EXPIRED proposal gets its hypothetical outcome
+  replayed (entry at proposal price, existing replay engine, existing
+  instrument stack) into a `counterfactuals` table → per-gate cost/benefit:
+  "the freshness gate saved/cost X R over N rejects." Extends REJ-SEG-1's
+  segregation into outcome measurement. Floor: no per-gate verdict below 20
+  resolved counterfactuals. **Never auto-loosens a gate** — gates tighten
+  automatically, loosen only by operator decision reading this report.
+- 🔴 **PROMPT-AB-1 — labeller champion/challenger in shadow** [ML engineer].
+  Run a challenger labeller prompt-version against the incumbent on the same
+  packets (CANARY's corpus/runner infra reused), score both against
+  resolutions via EVAL-1. Pre-registered promotion criteria BEFORE the first
+  A/B night. This is the system's own self-improvement loop applied to its AI
+  layer — the most leveraged learning-per-dollar item on this list. Gated on:
+  EXP-1 live + ≥30 resolved labels.
+- 🔴 **CAL-1 — confidence calibration report** [ML engineer; report-only].
+  Predicted-confidence vs realized-outcome curve per model version + per
+  label class. Deliverable: the `LABELLER_DECISION_OVERRIDE` min-confidence
+  (hand-set 0.55 today) gets an evidence-derived value. Floor: n≥30 resolved.
+- 🔴 **EXP-2 — parallel paper sleeves** [head quant trader + CRO joint].
+  2–3 concurrently-journaled paper books with distinct parameterizations
+  (e.g. base momentum · wider-stop variant · earnings-drift probe), every
+  row sleeve-tagged, shared kill switch, per-sleeve caps. Multiplies
+  observations per market-day without touching cadence. **CRO conditions,
+  non-negotiable:** gated on EXP-1 stable ≥2 weeks AND PORT-1's effective-N
+  correlation handling proven on real data first (sleeves trading the same
+  symbols are correlated observations — counting them as independent would
+  poison every downstream floor); primary-book learning provenance stays
+  uncontaminated (sleeve id in every join).
+- 🔴 **EVENT-SCAN-1 — event-triggered opportunistic scan** [head quant
+  trader]. A 4th scan trigger fired by deterministic events (gap ≥ threshold
+  at open on universe names; earnings-day names at open), not by clock. Max 1
+  extra scan/day, identical gate stack, identical caps — attacks the
+  trade-count binding constraint the Moonshot Gap Report keeps naming, at
+  zero new decision surface.
+- 🔴 **SHORT-1 — bear book, paper** [head quant trader]. A small short-side
+  card pairing PR14's bear-debate data with the existing `requires_margin`
+  short flow — symmetric learning across regimes instead of long-only
+  blindness. Gate: PR14 bear votes joined to ≥20 outcomes first. CRO cap:
+  short-sleeve risk ≤ half the long book until n≥30 shorts resolved.
+- 🔴 **PREFLIGHT-1 — pre-open self-test** [infra/DevOps; small]. One nightly
+  check before the first scan window: providers reachable, data freshness,
+  canary staleness, disk, backup age, LaunchAgent liveness → one digest line;
+  alert on any fail. Turns silent degradation into a ping.
+- 🔴 **CI-1 — GitHub Actions gate** [senior software engineer; small]. Push-
+  to-main runs suite+ruff+mypy in a clean env. Direct response to the
+  false-green lesson (a cadence-dependent flake shipped to main on a lucky
+  local run, 2026-07-07) — a second, environment-independent set of eyes.
+- 🔴 **DD-1 — monthly paper drawdown breaker** [CRO; small]. −10% month-to-
+  date on the paper book pauses NEW entries until operator ack (existing
+  daily-loss gate is the pattern; NightDesk's −10%/−20% discipline is the
+  precedent). Paper governance should rehearse live governance.
+
+*Founder's sequencing ruling (so nobody re-derives it):* Lane A's critical
+path is UNCHANGED — CANARY's 2 real weekly runs gate EXP-1; nothing above
+jumps that queue. After EXP-1: measurement first (PROMPT-AB-1, CAL-1), then
+CF-1 (uses data already flowing), then throughput (EXP-2, EVENT-SCAN-1), then
+SHORT-1. PREFLIGHT-1 / CI-1 / DD-1 are small and slot into any idle session.
+The ND console track (ND-1…ND-5) runs in parallel throughout — it shares no
+code surface with the trading path. **What we deliberately did NOT add:**
+more agents (PR14's expansion rule stands — bear must earn the triad), more
+models, more universes (EXP-0's tier is still accruing), or any relaxation of
+approval gates — aggression here means MORE HONEST OBSERVATIONS FASTER, never
+looser control.
+
 ---
 
 ## 6. Operating manual
@@ -1155,6 +1264,10 @@ belongs in these documents, not in any session's memory.
 | TTL enforced at `_execute()` chokepoint | PR6 audit caught an auto-approval bypass; the chokepoint is the only honest place | Never |
 | ntfy for alerts (single channel) | Zero-dep stdlib POST; one channel until it hurts | When it hurts |
 | Streamlit dashboard, read-only render | UI must never do what the CLI cannot; same orchestrator, same gates | When it demonstrably hurts |
+| Console migrates to NightDesk pattern; API is **FastAPI, never Express** (2026-07-12) | Streamlit's fidelity ceiling is structural (~65–70%); operator wants glance-and-check for near-autonomous ops. Python API wraps the SAME audited gate/view functions — a Node API would fork exactly the logic that must never fork. Frontend displays; it computes nothing business-critical | Never re-litigate the language split; phasing per `console-migration-nd.md` |
+| PR-UI-B5 cancelled; Streamlit feature-frozen (2026-07-12) | The 7-view IA ships once, in ND-2, not twice; the fallback stays stable by being untouched | ND-5 retirement criteria met |
+| Writes migrate least-dangerous-first; approve/reject LAST; kill-switch ENGAGE early but DISENGAGE late (ND-3/ND-4 split) | False engage = system pauses = safe; false disengage or false approve = the two failure modes that matter. Order the migration by failure-mode severity, not by convenience | Never |
+| Aggression = observation throughput, never looser gates (2026-07-12 throughput agenda) | At n=1 real closed trades every ambition is starved; the fix is CF-1/EXP-2/EVENT-SCAN-1-style honest-observation multipliers under unchanged gates, with PORT-1 effective-N guarding against correlated-observation double-counting | If a floor is met and a gate provably costs more R than it saves (CF-1 evidence, operator decision) |
 | gpt-5.4-mini both roles | Cost floor while N≈0; quality upgrades are champion-challenger material later | Eval harness exists + floors met |
 | Megacap 20-name universe v1 | Deliberate training wheels: liquid, cheap data, low blowup risk while plumbing matured | NOW — it's the control group; Phase 3 builds the real habitat (§3 T3) |
 | `MAX_PAPER_TRADES_PER_DAY=1000000` (uncapped) | **Operator's deliberate choice** ("removed per operator request", per the `.env` comment) — manual approval on every trade already bounds real action; a daily proposal-count cap adds no safety here, only friction. Confirmed 2026-07-06 after an AI session mis-flagged it as drift and briefly "corrected" it to 5 before being told to revert — see the memory lesson `feedback_check_env_comments_before_correcting.md`. **Do not re-flag this without new evidence from the operator.** | If proposal volume ever becomes operationally overwhelming to review daily |
