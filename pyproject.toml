@@ -17,7 +17,12 @@ dependencies = [
 # streamlit>=1.42: OPS-A's dashboard loopback guard reads st.context.ip_address
 # (added ~1.42) as its primary signal; the floor guarantees the attribute exists.
 live = ["streamlit>=1.42", "openai>=1.0", "anthropic>=0.25", "alpaca-py>=0.20", "requests>=2.31"]
-test = ["pytest>=7.0", "tzdata>=2023.3"]
+# ND-1 console migration (docs/roadmap/console-migration-nd.md): the
+# read-only FastAPI API in alphaos/api/. Separate from `live` since the API
+# has nothing to do with live trading connectors.
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+# httpx is fastapi.testclient.TestClient's own transport dependency (ND-1).
+test = ["pytest>=7.0", "tzdata>=2023.3", "httpx>=0.27"]
 lint = ["ruff>=0.15", "mypy>=2.1"]
 
 [tool.setuptools.packages.find]

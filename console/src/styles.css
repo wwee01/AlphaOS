@@ -1,0 +1,127 @@
+/* AlphaOS Console (ND-1) design tokens.
+   Source: docs/roadmap/ported/stitch-design-tokens.md (Stitch mockup's own
+   DESIGN.md, ported "skin only" per the Fable5 "adopt the skin, quarantine
+   the script" ruling) + the constants already in production use in
+   alphaos/dashboard/console_theme.py (_BORDER/_TEXT_DIM/_PRIMARY/_AMBER/
+   _RED/background) -- this file keeps those exact hex values so the console
+   and the Streamlit dashboard read as the same visual system.
+
+   System font stacks ONLY -- no @font-face, no @import, no CDN, no Google
+   Fonts (ND-1 plan doc §2.2, "zero external browser calls"; console_theme.py
+   already established this discipline for the dashboard, this file mirrors
+   it). Component layout stays inline in JSX (matches NightDesk's own
+   convention, adapted here for AlphaOS's own palette/type scale). */
+:root {
+  --bg: #131313;
+  --surface: #131313;
+  --surface-lowest: #0e0e0e;
+  --surface-low: #1c1b1b;
+  --surface-container: #201f1f;
+  --surface-high: #2a2a2a;
+  --surface-bright: #3a3939;
+
+  --border: #27272a;
+  --outline-variant: #3d494c;
+
+  --text: #e5e2e1;
+  --text-dim: #869397;
+
+  --primary: #4cd7f6;
+  --on-primary: #003640;
+  --amber: #ffb873;
+  --red: #ef4444;
+
+  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  min-height: 100vh;
+}
+
+#root { max-width: 1200px; margin: 0 auto; padding: 40px 16px 48px; }
+
+a { color: var(--primary); text-decoration: none; }
+button { cursor: pointer; border: none; background: none; font-family: inherit; color: inherit; }
+
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* label-caps typography token: 11px/700/uppercase/0.08em (ported doc). */
+.label-caps {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* "Instrument block" -- elevation via 1px border line-work, never shadows
+   (ported doc: "Elevation & Depth... Avoid all blur-based shadows"). */
+.block {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-container);
+  padding: 12px 14px;
+}
+
+.block-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* Static badges only -- no @keyframes, no pulse/blink anywhere in this file
+   (UX doc §13 calm-console rule, carried into ND-1 by the plan doc §2.4:
+   "no flashing/pulsing; live updates are honest... a visible as-of stamp"). */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+}
+.badge-ok { color: var(--primary); border-color: rgba(76, 215, 246, 0.4); }
+.badge-warn { color: var(--amber); border-color: rgba(255, 184, 115, 0.4); }
+.badge-danger { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.08); }
+
+.stale-banner {
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.08);
+  color: var(--red);
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.dim { opacity: 0.5; filter: saturate(0.6); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 4px;
+}
+.col-4 { grid-column: span 4; }
+.col-6 { grid-column: span 6; }
+.col-8 { grid-column: span 8; }
+.col-12 { grid-column: span 12; }
+
+@media (max-width: 720px) {
+  .col-4, .col-6, .col-8, .col-12 { grid-column: span 12; }
+  #root { padding: 20px 12px 40px; }
+}

@@ -29,9 +29,42 @@ from alphaos.util.ids import new_id
 
 
 class JournalStore:
-    def __init__(self, db_path: str = "data/alphaos.db", jsonl_mirror: bool = False):
+    def __init__(
+        self, db_path: str = "data/alphaos.db", jsonl_mirror: bool = False, read_only: bool = False,
+    ):
         self.db_path = db_path
         self.jsonl_mirror = jsonl_mirror
+        self.read_only = read_only
+        self._columns: dict[str, set[str]] = {}
+        if read_only:
+            # ND-1 (console read-only API): SQLite's own `mode=ro` URI -- writes
+            # are structurally impossible at the driver level (any INSERT/
+            # UPDATE/DDL raises sqlite3.OperationalError), not merely absent by
+            # caller discipline. Schema init/migration is deliberately skipped
+            # here: a read-only connection must never attempt a DDL write, and
+            # the writer process (scheduler/dashboard/CLI, which always opens
+            # non-read-only) already owns keeping the schema current before any
+            # read-only client connects.
+            #
+            # check_same_thread=False: FastAPI runs sync dependencies/route
+            # handlers via Starlette's threadpool (anyio.to_thread.run_sync),
+            # which does NOT guarantee a single request's dependency chain and
+            # endpoint body execute on the same OS thread -- confirmed live
+            # (boot-check against alphaos/api/__main__.py): a connection opened
+            # in alphaos/api/deps.py's get_journal() was then used from a
+            # different worker thread inside the SAME request, and sqlite3's
+            # default check_same_thread=True raised ProgrammingError. Safe to
+            # disable here specifically: each read_only connection is opened
+            # fresh per request (see get_journal's generator-with-finally) and
+            # never shared across concurrent requests, so this only relaxes an
+            # over-strict same-thread check on a connection that is (a)
+            # structurally incapable of writing and (b) used strictly
+            # sequentially within one request's lifecycle, never genuinely
+            # concurrently from two threads at once.
+            uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            return
         if db_path not in (":memory:", "") and not db_path.startswith("file:"):
             os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(db_path)
@@ -41,7 +74,6 @@ class JournalStore:
                 self.conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.Error:
             pass
-        self._columns: dict[str, set[str]] = {}
         self.init_schema()
 
     # ------------------------------------------------------------------ setup

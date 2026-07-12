@@ -40,3 +40,10 @@ uv.lock
 .DS_Store
 .idea/
 .vscode/
+
+# ND-1 console (React/Vite) -- source only; build output and deps are
+# reproducible from console/package.json + `npm run build`. (dist/ above
+# already matches console/dist/ at any depth; listed explicitly too so this
+# is unambiguous for anyone grepping .gitignore for "console".)
+console/node_modules/
+console/dist/
