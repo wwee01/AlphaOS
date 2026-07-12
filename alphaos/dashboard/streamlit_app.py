@@ -272,7 +272,21 @@ def tab_tonight(orch: Orchestrator) -> None:
     st.subheader("Tonight")
     brief = build_daily_brief(orch.journal, orch.settings, KillSwitch())
 
-    st.markdown(f"### ▶ {brief['one_action']}")
+    # PR-UI-B4 (2026-07-12 fidelity-gap fixup): the Tonight tab restructured
+    # into the instrument-block grid the Fable5 ruling of the same date
+    # specifies -- st.container(border=True, key="blk_tonight_*") panels
+    # replacing the prior plain paragraphs + st.divider() rules. Every
+    # string/value below is BYTE-IDENTICAL to what rendered before this PR;
+    # only the container structure changed -- same data, same order (hero
+    # line, then kill switch, then ②③, then ④⑤⑥ in numeric order), no new
+    # computation, no new query, no new column pairing (audit-fixup: an
+    # earlier draft paired ④+⑥ side-by-side and moved the hero line below
+    # the kill-switch banner -- both independently flagged by the T4
+    # correctness and scope/safety audits as contradicting this PR's own
+    # "same order" claim; reverted to the original linear order here).
+    with st.container(border=True, key="blk_tonight_one_action"):
+        st.markdown(f"### ▶ {brief['one_action']}")
+
     if brief["kill_switch_engaged"]:
         st.error(f"🔴 KILL SWITCH ENGAGED — {brief['kill_switch_reason']}")
 
@@ -283,11 +297,13 @@ def tab_tonight(orch: Orchestrator) -> None:
         ny["pending_approval_count"] == 0 and ny["open_incident_count"] == 0
         and not ny["fused_jobs"] and not exit_review
     )
+
     if quiet:
-        st.success("✓ Nothing needs you right now.")
+        with st.container(border=True, key="blk_tonight_quiet"):
+            st.success("✓ Nothing needs you right now.")
     else:
         c1, c2 = st.columns(2)
-        with c1:
+        with c1, st.container(border=True, key="blk_tonight_needs_you"):
             st.markdown(console_theme.render_section_label("② Needs you"), unsafe_allow_html=True)
             for p in ny["pending_approvals"]:
                 remaining = _format_seconds_remaining(p.get("seconds_remaining"))
@@ -300,7 +316,7 @@ def tab_tonight(orch: Orchestrator) -> None:
                 st.write(f"- {p['symbol']} position EXIT_REVIEW — human decision required (see Positions)")
             if not (ny["pending_approvals"] or ny["open_incidents"] or ny["fused_jobs"] or exit_review):
                 st.write("(nothing here)")
-        with c2:
+        with c2, st.container(border=True, key="blk_tonight_open_risk"):
             st.markdown(console_theme.render_section_label("③ Open risk now"), unsafe_allow_html=True)
             r_values = [p["current_r"] for p in ph if p.get("current_r") is not None]
             if ph:
@@ -313,57 +329,57 @@ def tab_tonight(orch: Orchestrator) -> None:
             else:
                 st.write("No open positions.")
 
-    st.divider()
-    ta = brief["todays_activity"]
-    st.markdown(console_theme.render_section_label("④ Today's machine activity"), unsafe_allow_html=True)
-    st.write(
-        f"Candidates: {ta['candidates_today']} · Proposed: {ta['proposed_today']} · "
-        f"Blocked: {ta['blocked_today']} · Rejected: {ta['rejected_today']}"
-    )
-
-    st.divider()
-    st.markdown(console_theme.render_section_label("⑤ Tonight's brief"), unsafe_allow_html=True)
-    mc = brief["market_condition"]
-    if mc.get("excess_return_pct") is not None:
+    with st.container(border=True, key="blk_tonight_activity"):
+        ta = brief["todays_activity"]
+        st.markdown(console_theme.render_section_label("④ Today's machine activity"), unsafe_allow_html=True)
         st.write(
-            f"Market: excess return **{mc['excess_return_pct']:+.2f}%** vs S&P "
-            f"(paired {mc['paired_trading_days']} trading days)"
+            f"Candidates: {ta['candidates_today']} · Proposed: {ta['proposed_today']} · "
+            f"Blocked: {ta['blocked_today']} · Rejected: {ta['rejected_today']}"
         )
-    else:
-        st.write(f"Market: {mc.get('note', 'not yet measurable')}")
-    st.caption(f"⚠️ {mc['caveat']}")
 
-    bc = brief["best_candidate"]
-    if bc:
-        st.write(
-            f"Best candidate today: **{bc['symbol']}** — TQS {bc['tqs_score']} ({bc['tqs_bucket']}), "
-            f"interest {bc['interest_score']}, confidence {bc['label_confidence']}"
-        )
-    else:
-        st.write("Best candidate today: (none)")
+    with st.container(border=True, key="blk_tonight_brief"):
+        st.markdown(console_theme.render_section_label("⑤ Tonight's brief"), unsafe_allow_html=True)
+        mc = brief["market_condition"]
+        if mc.get("excess_return_pct") is not None:
+            st.write(
+                f"Market: excess return **{mc['excess_return_pct']:+.2f}%** vs S&P "
+                f"(paired {mc['paired_trading_days']} trading days)"
+            )
+        else:
+            st.write(f"Market: {mc.get('note', 'not yet measurable')}")
+        st.caption(f"⚠️ {mc['caveat']}")
 
-    wl = brief["what_learned"]
-    st.write(f"Learned today ({wl['total_resolved_today']} resolved):")
-    if wl["sentences"]:
-        for sentence in wl["sentences"]:
-            st.write(f"- {sentence}")
-    else:
-        st.write("- (nothing newly resolved today)")
-    st.caption(f"⚠️ {wl['caveat']}")
+        bc = brief["best_candidate"]
+        if bc:
+            st.write(
+                f"Best candidate today: **{bc['symbol']}** — TQS {bc['tqs_score']} ({bc['tqs_bucket']}), "
+                f"interest {bc['interest_score']}, confidence {bc['label_confidence']}"
+            )
+        else:
+            st.write("Best candidate today: (none)")
 
-    st.divider()
-    st.markdown(console_theme.render_section_label("⑥ Moonshot gap (10% MoM target)"), unsafe_allow_html=True)
-    mg = brief["moonshot_gap"]
-    if mg["status"] == "ok":
-        st.write(
-            f"Implied monthly: **{mg['implied_monthly_pct']}%** vs target {mg['target_monthly_pct']}% "
-            f"(expectancy {mg['expectancy_r']}R × {mg['trades_this_month']} trades × "
-            f"{mg['risk_per_trade_pct'] * 100:.2f}% risk/trade)"
-        )
-        st.write(f"Binding constraint: **{mg['binding_constraint']}**")
-    else:
-        st.write(mg["note"])
-    st.caption(mg["data_progress"])
+        wl = brief["what_learned"]
+        st.write(f"Learned today ({wl['total_resolved_today']} resolved):")
+        if wl["sentences"]:
+            for sentence in wl["sentences"]:
+                st.write(f"- {sentence}")
+        else:
+            st.write("- (nothing newly resolved today)")
+        st.caption(f"⚠️ {wl['caveat']}")
+
+    with st.container(border=True, key="blk_tonight_moonshot"):
+        st.markdown(console_theme.render_section_label("⑥ Moonshot gap (10% MoM target)"), unsafe_allow_html=True)
+        mg = brief["moonshot_gap"]
+        if mg["status"] == "ok":
+            st.write(
+                f"Implied monthly: **{mg['implied_monthly_pct']}%** vs target {mg['target_monthly_pct']}% "
+                f"(expectancy {mg['expectancy_r']}R × {mg['trades_this_month']} trades × "
+                f"{mg['risk_per_trade_pct'] * 100:.2f}% risk/trade)"
+            )
+            st.write(f"Binding constraint: **{mg['binding_constraint']}**")
+        else:
+            st.write(mg["note"])
+        st.caption(mg["data_progress"])
 
     with st.expander("Full brief (same content as the `alphaos brief` CLI / digest alert)"):
         st.markdown(render_markdown(brief))
@@ -1359,7 +1375,7 @@ def tab_governance(orch: Orchestrator) -> None:
 
     col_autonomy, col_limits = st.columns(2)
     with col_autonomy:
-        with st.container(border=True):
+        with st.container(border=True, key="blk_gov_autonomy"):
             st.markdown(console_theme.render_section_label("Autonomy"), unsafe_allow_html=True)
             auto = rep["autonomy"]
             st.markdown(f"**Level: {auto['level_label']}**")
@@ -1376,7 +1392,7 @@ def tab_governance(orch: Orchestrator) -> None:
             st.caption(f"L2: {auto['l2_status']}")
 
     with col_limits:
-        with st.container(border=True):
+        with st.container(border=True, key="blk_gov_limits"):
             st.markdown(console_theme.render_section_label("Hard limits (read-only)"), unsafe_allow_html=True)
             hl = rep["hard_limits"]
             # Literal "$" is escaped as "\$" throughout this panel -- Streamlit's
@@ -1418,7 +1434,7 @@ def tab_governance(orch: Orchestrator) -> None:
 
     col_ks, col_lock = st.columns(2)
     with col_ks:
-        with st.container(border=True):
+        with st.container(border=True, key="blk_gov_kill_switch"):
             st.markdown(console_theme.render_section_label("Kill switch"), unsafe_allow_html=True)
             ks = rep["kill_switch"]
             if ks["engaged"]:
@@ -1429,7 +1445,7 @@ def tab_governance(orch: Orchestrator) -> None:
             st.caption(ks["control_note"])
 
     with col_lock:
-        with st.container(border=True):
+        with st.container(border=True, key="blk_gov_lock"):
             st.markdown(console_theme.render_section_label("Real-money lock"), unsafe_allow_html=True)
             lock = rep["real_money_lock"]
             st.write(f"🔒 {lock['structural_statement']}")
@@ -1439,7 +1455,7 @@ def tab_governance(orch: Orchestrator) -> None:
             )
             st.caption(lock["no_unlock_note"])
 
-    with st.container(border=True):
+    with st.container(border=True, key="blk_gov_calendar"):
         st.markdown(console_theme.render_section_label("Trading calendar"), unsafe_allow_html=True)
         cal = rep["trading_calendar"]
         day_state = "a trading day" if cal["is_trading_day"] else "MARKET CLOSED"

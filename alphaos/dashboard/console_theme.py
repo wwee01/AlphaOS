@@ -143,13 +143,187 @@ div[data-testid="stVerticalBlock"][class*="st-key-poscard_"] {{
 /* ---- tabs: Streamlit's own theme.primaryColor (config.toml) already
    colors baseweb's TabHighlight (the active-tab underline) cyan -- no CSS
    needed for that. This adds the matching label treatment so the active
-   tab's TEXT also reads as active, not just its underline. ---- */
+   tab's TEXT also reads as active, not just its underline. ----
+   PR-UI-B4 (2026-07-12 fidelity-gap fixup): also compacts the whole strip
+   into the mockup's dense caps-nav language -- tighter gap, smaller
+   uppercase-tracked labels -- so it stops reading as a default Streamlit
+   widget. */
+[data-testid="stTabs"] [data-baseweb="tab-list"] {{
+    gap: 4px;
+    border-bottom: 1px solid {_BORDER};
+}}
+[data-testid="stTabs"] button[data-baseweb="tab"] {{
+    padding: 6px 10px;
+    height: auto;
+}}
+[data-testid="stTabs"] button p {{
+    font-family: {_SANS_STACK};
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}}
 [data-testid="stTabs"] button[aria-selected="true"] p {{
     color: {_PRIMARY};
     font-weight: 700;
 }}
 [data-testid="stTabs"] button[aria-selected="false"] p {{
     color: {_TEXT_DIM};
+}}
+
+/* =========================================================================
+   PR-UI-B4 (2026-07-12): closing the fidelity gap the operator caught --
+   B1 shipped palette + two isolated components ("the skin"); this adds the
+   typographic hierarchy, the instrument-block grid convention, sidebar
+   identity, and chrome suppression ("the body") per the Fable5 ruling of
+   the same date. Zero data/action change -- selectors and properties only.
+   ========================================================================= */
+
+/* ---- 1. Site-wide typography: st.title/subheader (page titles, wrapped in
+   stHeading) get the mono-caps "page title" treatment; markdown-authored
+   headings (wrapped in stMarkdown/stMarkdownContainer -- a DIFFERENT
+   wrapper, verified live) get the smaller sans "content headline" or
+   label-caps treatment instead, so the Tonight hero line doesn't scream
+   like a page title and page titles don't whisper like body text. ---- */
+[data-testid="stHeading"] h1 {{
+    font-family: {_MONO_STACK};
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}}
+[data-testid="stHeading"] h3 {{
+    font-family: {_MONO_STACK};
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: 0.2rem;
+}}
+[data-testid="stMarkdown"] h3 {{
+    font-family: {_SANS_STACK};
+    font-size: 18px;
+    line-height: 24px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    text-transform: none;
+}}
+[data-testid="stMarkdown"] h4 {{
+    font-family: {_SANS_STACK};
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: {_TEXT_DIM};
+}}
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li {{
+    font-size: 14px;
+    line-height: 20px;
+}}
+[data-testid="stCaptionContainer"] p {{
+    font-size: 12px;
+    color: {_TEXT_DIM};
+}}
+/* inline `code` spans (the "Mode: paper" key-value lines) become machine-
+   layer chips -- family/size/chrome only, never display/white-space (that
+   would break real code blocks on System Health). */
+[data-testid="stMarkdownContainer"] code {{
+    font-family: {_MONO_STACK};
+    font-size: 12.5px;
+    background: #201f1f;
+    border: 1px solid {_BORDER};
+    border-radius: 2px;
+    padding: 1px 5px;
+}}
+[data-testid="stMetricValue"] {{
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+}}
+[data-testid="stMainBlockContainer"] hr {{
+    border-color: {_BORDER};
+    margin: 0.6rem 0;
+}}
+
+/* ---- 2. Instrument-block grid: the generic convention every new bordered
+   section uses -- st.container(border=True, key="blk_<tab>_<section>") --
+   scoped the same documented way as the poscard_/annunciator_ rules above.
+   One rule buys every future block; poscard_ keeps its own rule (it
+   predates this one and additive changes there are B4's own diff, done
+   separately) but now shares this block's background/padding language. ---- */
+div[data-testid="stVerticalBlock"][class*="st-key-blk_"] {{
+    border-color: {_BORDER} !important;
+    border-radius: 4px;
+    background: #1a1a1a;
+    padding: 12px 14px;
+}}
+div[data-testid="stVerticalBlock"][class*="st-key-poscard_"] {{
+    background: #1a1a1a;
+    padding: 12px 14px;
+}}
+
+/* ---- 3. Sidebar: deliberately NOT a copy of the mockup's nav rail (this
+   sidebar fires ledger WRITES, the mockup's rail is navigation -- styling
+   it to look like nav would be a mode-confusion trap). Same content,
+   rack-mounted look: dark backplane, mono-caps title, bordered full-width
+   action buttons, no hover state (DESIGN.md: "no hover effects; only
+   active/focus states"). ---- */
+section[data-testid="stSidebar"] {{
+    background-color: #0e0e0e;
+    border-right: 1px solid {_BORDER};
+}}
+section[data-testid="stSidebar"] [data-testid="stHeading"] h1 {{
+    font-size: 16px;
+    letter-spacing: 0.1em;
+}}
+section[data-testid="stSidebar"] [data-testid^="stBaseButton"] {{
+    width: 100%;
+    background: transparent;
+    border: 1px solid #3d494c;
+    border-radius: 2px;
+    font-family: {_MONO_STACK};
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #bcc9cd;
+    min-height: 38px;
+}}
+section[data-testid="stSidebar"] [data-testid^="stBaseButton"]:focus-within {{
+    border-color: {_PRIMARY};
+}}
+
+/* ---- 4. Streamlit host chrome: the Deploy button and hamburger menu are
+   dev-tool affordances with zero data/action/audit role -- hidden
+   individually (NOT the whole toolbar: stExpandSidebarButton lives in the
+   same stToolbar and must stay functional, and a future stStatusWidget
+   "running..." indicator -- confirmed a TOOLBAR SIBLING, not a child, so
+   unaffected either way -- is the only in-flight-write signal and must
+   never be hidden). ---- */
+[data-testid="stAppDeployButton"], [data-testid="stMainMenu"] {{
+    display: none !important;
+}}
+header[data-testid="stHeader"] {{
+    background: transparent;
+    height: 2.5rem;
+}}
+
+/* ---- 5. Expander-as-instrument-block: st.expander is a REAL interaction
+   (collapse/expand), never converted to a plain container -- but its
+   chrome is restyled to read as a bordered panel with a mono-caps header,
+   matching the block language above without touching the interaction
+   itself. Used today by the Approval Center's per-proposal cards. Global
+   (every st.expander site-wide), since every existing expander site-wide
+   already wants this treatment and none currently relies on the default
+   Streamlit look. ---- */
+[data-testid="stExpander"] {{
+    border: 1px solid {_BORDER} !important;
+    border-radius: 4px;
+    background: #1a1a1a;
+}}
+[data-testid="stExpander"] summary {{
+    font-family: {_MONO_STACK};
+    font-size: 13px;
 }}
 
 /* ---- annunciator badges (mode + kill-switch state), scoped via
