@@ -14,8 +14,10 @@
 // ENGAGE lives in the global annunciator strip instead, not here.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getTonight, postMonitor, postReport, postScan, STREAMLIT_URL } from '../api.js';
-import { Block, StreamlitLink } from '../components/ui.jsx';
+import { Block, StreamlitLink, Badge } from '../components/ui.jsx';
 import { PinPrompt } from '../components/PinPrompt.jsx';
+import { StatFooter } from '../components/StatFooter.jsx';
+import { IconWarningTriangle } from '../components/icons.jsx';
 import {
   describeUnreachable, formatClockUTC, formatR, formatSecondsRemaining,
 } from '../format.js';
@@ -44,8 +46,10 @@ function OneAction({ brief }) {
     <Block title="① one action" style={{ borderColor: 'var(--primary)' }}>
       <div style={{ fontSize: 16, fontWeight: 600 }}>{brief.one_action}</div>
       {brief.kill_switch_engaged && (
-        <div style={{ marginTop: 10, fontSize: 13, color: 'var(--red)' }}>
-          ● KILL SWITCH ENGAGED — {brief.kill_switch_reason ?? 'no reason recorded'}
+        <div style={{ marginTop: 10 }}>
+          <Badge tone="danger" caps>
+            <IconWarningTriangle size={12} /> kill switch engaged — {brief.kill_switch_reason ?? 'no reason recorded'}
+          </Badge>
         </div>
       )}
     </Block>
@@ -63,8 +67,8 @@ function NeedsYou({ needsYou, exitReview }) {
   }
   for (const inc of needsYou.open_incidents ?? []) {
     rows.push(
-      <div key={`inc_${inc.check_id ?? inc.symbol}`} style={{ fontSize: 13, padding: '4px 0', color: 'var(--red)' }}>
-        ⚠ open incident: {inc.symbol ?? '?'} — {inc.protection_status ?? '?'}
+      <div key={`inc_${inc.check_id ?? inc.symbol}`} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, padding: '4px 0', color: 'var(--red)' }}>
+        <IconWarningTriangle size={13} /> open incident: {inc.symbol ?? '?'} — {inc.protection_status ?? '?'}
       </div>,
     );
   }
@@ -128,9 +132,14 @@ function Quiet() {
 function TodaysActivity({ ta }) {
   return (
     <Block title="④ today's machine activity">
-      <div className="num" style={{ fontSize: 13 }}>
-        candidates: {ta.candidates_today} · proposed: {ta.proposed_today} · blocked: {ta.blocked_today} · rejected: {ta.rejected_today}
-      </div>
+      <StatFooter
+        stats={[
+          { label: 'candidates', value: ta.candidates_today },
+          { label: 'proposed', value: ta.proposed_today },
+          { label: 'blocked', value: ta.blocked_today, tone: ta.blocked_today ? 'warning' : undefined },
+          { label: 'rejected', value: ta.rejected_today },
+        ]}
+      />
     </Block>
   );
 }

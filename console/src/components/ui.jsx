@@ -3,6 +3,13 @@
 // adopted for AlphaOS's own palette/type scale per the ND-1 plan doc).
 import React from 'react';
 
+// ND-visual: Badge moved to its own module (components/Badge.jsx) as part
+// of the visual-fidelity component library -- re-exported here so every
+// existing `import { Badge } from '../components/ui.jsx'` call site across
+// the 7 views keeps working unchanged. See Badge.jsx's own docstring for
+// the tone vocabulary and the legacy tone-name aliasing.
+export { Badge, badgeTone } from './Badge.jsx';
+
 // An "instrument block" -- a bordered, labelled panel (docs/roadmap/ported/
 // stitch-design-tokens.md: "Instrument Blocks -- self-contained modules that
 // behave like physical rack-mounted hardware").
@@ -18,19 +25,6 @@ export function Block({ title, right, children, style }) {
       {children}
     </div>
   );
-}
-
-// A static status badge. Deliberately no @keyframes/animation prop --
-// §13 calm-console rule (no flashing/pulsing), carried into ND-1 by the
-// plan doc §2.4.
-export function Badge({ tone = 'default', children }) {
-  const cls = {
-    default: 'badge',
-    ok: 'badge badge-ok',
-    warn: 'badge badge-warn',
-    danger: 'badge badge-danger',
-  }[tone] || 'badge';
-  return <span className={cls}>{children}</span>;
 }
 
 // A plain link out to the Streamlit app -- ND-1 has zero write affordances,

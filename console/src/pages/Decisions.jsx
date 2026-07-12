@@ -7,7 +7,8 @@
 // decisions.js:formatHindsight() (mirrors _hindsight_cell() exactly).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getDecisions } from '../api.js';
-import { Block, DataTable } from '../components/ui.jsx';
+import { Block, DataTable, Badge } from '../components/ui.jsx';
+import { StatFooter } from '../components/StatFooter.jsx';
 import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
 import { formatHindsight } from '../decisions.js';
 
@@ -89,13 +90,21 @@ function LabelSummary({ labelSummary }) {
 
 function ClosedTradeMetrics({ m }) {
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
-      <span className="badge num">net P&amp;L {m.net_pnl}</span>
-      <span className="badge num">win rate {m.win_rate ?? 'n/a'}</span>
-      <span className="badge num">expectancy {m.expectancy ?? 'n/a'}</span>
-      <span className="badge num">profit factor {m.profit_factor ?? 'n/a'}</span>
-      {m.small_sample && <span className="badge badge-warn">{m.note}</span>}
-    </div>
+    <>
+      <StatFooter
+        stats={[
+          { label: 'net P&L', value: m.net_pnl },
+          { label: 'win rate', value: m.win_rate ?? 'n/a' },
+          { label: 'expectancy', value: m.expectancy ?? 'n/a' },
+          { label: 'profit factor', value: m.profit_factor ?? 'n/a' },
+        ]}
+      />
+      {m.small_sample && (
+        <div style={{ marginTop: 8 }}>
+          <Badge tone="warn">{m.note}</Badge>
+        </div>
+      )}
+    </>
   );
 }
 

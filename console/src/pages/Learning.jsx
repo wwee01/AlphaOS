@@ -13,7 +13,8 @@
 // and the ND-2 build report).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getLearning } from '../api.js';
-import { Block, DataTable } from '../components/ui.jsx';
+import { Block, DataTable, Badge, badgeTone } from '../components/ui.jsx';
+import { StatFooter } from '../components/StatFooter.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 import { formatAttributionRow, formatHypothesisProgress, formatHypothesisStatus } from '../learning.js';
 
@@ -30,12 +31,14 @@ function TqsPanel({ tqs }) {
   const buckets = Object.entries(tqs.bucket_histogram).sort(([a], [b]) => a.localeCompare(b));
   return (
     <Block title="TQS — evidence-weighted setup quality">
-      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span className="badge num">scored (live) {tqs.scored_count}</span>
-        <span className="badge num">mean confidence {tqs.mean_data_confidence}</span>
-        <span className="badge num">mock excluded {tqs.mock_excluded_count}</span>
-      </div>
-      <div className="label-caps" style={{ marginBottom: 6 }}>bucket histogram</div>
+      <StatFooter
+        stats={[
+          { label: 'scored (live)', value: tqs.scored_count },
+          { label: 'mean confidence', value: tqs.mean_data_confidence },
+          { label: 'mock excluded', value: tqs.mock_excluded_count },
+        ]}
+      />
+      <div className="label-caps" style={{ margin: '10px 0 6px' }}>bucket histogram</div>
       <DataTable
         columns={[{ key: 'bucket', label: 'bucket' }, { key: 'n', label: 'n', numeric: true }]}
         rows={buckets.map(([bucket, n]) => ({ bucket, n }))}
@@ -81,10 +84,13 @@ function AttributionPanel({ attribution }) {
   return (
     <Block title="Attribution — floor-gated ΔR aggregates">
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{v2.caveat}</div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span className="badge num">total records {v2.total_records}</span>
-        <span className="badge num">mock excluded {v2.mock_excluded_count}</span>
-      </div>
+      <StatFooter
+        stats={[
+          { label: 'total records', value: v2.total_records },
+          { label: 'mock excluded', value: v2.mock_excluded_count },
+        ]}
+      />
+      <div style={{ marginTop: 10 }} />
       <DataTable columns={ATTR_ROW_COLUMNS} rows={rows} emptyText="No attribution aggregates yet." />
       <div className="label-caps" style={{ margin: '10px 0 6px' }}>by setup card</div>
       <DataTable columns={ATTR_ROW_COLUMNS} rows={cardRows} emptyText="None." />
@@ -97,20 +103,27 @@ function AttributionPanel({ attribution }) {
 function HypothesesPanel({ hypotheses, drafts }) {
   const rows = hypotheses.hypotheses.map((h) => ({
     ...h,
-    status_label: formatHypothesisStatus(h.status),
     overdue_label: h.overdue ? 'yes' : '',
     progress_label: formatHypothesisProgress(h.progress),
   }));
   return (
     <Block title="Hypotheses — PR12 registry">
-      <div style={{ fontSize: 13, marginBottom: 8 }}>
-        {hypotheses.n_total} total · {hypotheses.n_proposed} proposed · {hypotheses.n_testing} testing · {hypotheses.n_resolved} resolved
-      </div>
+      <StatFooter
+        stats={[
+          { label: 'total', value: hypotheses.n_total },
+          { label: 'proposed', value: hypotheses.n_proposed },
+          { label: 'testing', value: hypotheses.n_testing },
+          { label: 'resolved', value: hypotheses.n_resolved },
+        ]}
+      />
+      <div style={{ marginTop: 10 }} />
       <DataTable
         columns={[
           { key: 'hypothesis_id', label: 'id' },
           { key: 'risk_class', label: 'risk class' },
-          { key: 'status_label', label: 'status' },
+          {
+            key: 'status', label: 'status', render: (r) => <Badge tone={badgeTone(r.status)}>{formatHypothesisStatus(r.status)}</Badge>,
+          },
           { key: 'overdue_label', label: 'overdue' },
           { key: 'progress_label', label: 'progress' },
           { key: 'analysis_not_before', label: 'not before' },

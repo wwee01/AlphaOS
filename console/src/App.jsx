@@ -16,15 +16,18 @@ import Governance from './pages/Governance.jsx';
 import System from './pages/System.jsx';
 import Annunciator from './components/Annunciator.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
+import {
+  IconBars, IconBook, IconCheckShield, IconFunnel, IconGear, IconMoon, IconShield,
+} from './components/icons.jsx';
 
 const VIEWS = [
-  { key: 'tonight', label: 'Tonight', Component: Tonight },
-  { key: 'positions', label: 'Positions', Component: Positions },
-  { key: 'approvals', label: 'Approvals', Component: Approvals },
-  { key: 'decisions', label: 'Decisions', Component: Decisions },
-  { key: 'learning', label: 'Learning', Component: Learning },
-  { key: 'governance', label: 'Autonomy & Risk', Component: Governance },
-  { key: 'system', label: 'System & Audit', Component: System },
+  { key: 'tonight', label: 'Tonight', Icon: IconMoon, Component: Tonight },
+  { key: 'positions', label: 'Positions', Icon: IconBars, Component: Positions },
+  { key: 'approvals', label: 'Approvals', Icon: IconCheckShield, Component: Approvals },
+  { key: 'decisions', label: 'Decisions', Icon: IconFunnel, Component: Decisions },
+  { key: 'learning', label: 'Learning', Icon: IconBook, Component: Learning },
+  { key: 'governance', label: 'Autonomy & Risk', Icon: IconShield, Component: Governance },
+  { key: 'system', label: 'System & Audit', Icon: IconGear, Component: System },
 ];
 
 export default function App() {
@@ -34,34 +37,34 @@ export default function App() {
 
   return (
     <>
-      <header
-        style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          marginBottom: 20, paddingBottom: 12, borderBottom: '1px solid var(--border)',
-        }}
-      >
-        <div className="num" style={{ fontSize: 18, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--primary)' }}>
-          ALPHAOS
+      {/* ND-visual: the masthead -- wordmark + the ND-3 global annunciator
+          (restyled in place below, not refetched -- see Annunciator.jsx's
+          own docstring) + the nav tab strip, wrapped as one visually
+          cohesive top bar instead of ND-2's bare flex header. */}
+      <header className="masthead">
+        <div className="masthead-top">
+          <div className="masthead-brand">
+            <span className="wordmark">ALPHAOS</span>
+            <span className="label-caps">console · ND-3</span>
+          </div>
         </div>
-        <div className="label-caps">console · ND-3</div>
+
+        <Annunciator />
+
+        <nav className="nav-tabs">
+          {VIEWS.map((v) => (
+            <button
+              key={v.key}
+              type="button"
+              className={`nav-tab${v.key === view ? ' nav-tab-active' : ''}`}
+              onClick={() => setView(v.key)}
+            >
+              <v.Icon size={13} />
+              {v.label}
+            </button>
+          ))}
+        </nav>
       </header>
-
-      {/* ND-3: global, visible on every page -- see Annunciator.jsx's own
-          module docstring for why this moved out of Tonight-only. */}
-      <Annunciator />
-
-      <nav className="nav-tabs">
-        {VIEWS.map((v) => (
-          <button
-            key={v.key}
-            type="button"
-            className={`nav-tab${v.key === view ? ' nav-tab-active' : ''}`}
-            onClick={() => setView(v.key)}
-          >
-            {v.label}
-          </button>
-        ))}
-      </nav>
 
       <ErrorBoundary key={active.key}>
         <ActiveComponent />

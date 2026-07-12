@@ -74,7 +74,7 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone }) {
     return (
       <button
         type="button"
-        className="badge"
+        className="badge badge-caps"
         style={{ cursor: 'pointer', minHeight: 36 }}
         onClick={() => { setOpen(true); setMessage(null); }}
       >
@@ -102,14 +102,14 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone }) {
       <div style={{ display: 'flex', gap: 6 }}>
         <button
           type="button"
-          className="badge badge-ok"
+          className="badge badge-ok badge-caps"
           style={{ cursor: pin && !busy ? 'pointer' : 'default', opacity: pin && !busy ? 1 : 0.5 }}
           disabled={busy || !pin}
           onClick={submit}
         >
           {busy ? 'working…' : 'confirm'}
         </button>
-        <button type="button" className="badge" style={{ cursor: 'pointer' }} disabled={busy} onClick={cancel}>
+        <button type="button" className="badge badge-caps" style={{ cursor: 'pointer' }} disabled={busy} onClick={cancel}>
           cancel
         </button>
       </div>
