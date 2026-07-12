@@ -206,3 +206,77 @@ def test_console_css_mobile_media_query_relaxes_r_ladder_and_ttl_bar_width_caps(
     desktop_block = console_theme.CONSOLE_CSS[:media_start]
     assert "max-width: 640px;" in desktop_block
     assert "max-width: 260px;" in desktop_block
+
+
+# ----------------------------------------------- PR-UI-B4: fidelity-gap fixup
+def test_console_css_page_titles_and_markdown_headings_get_distinct_treatment():
+    """Fable5 ruling 2026-07-12: st.title/st.subheader (wrapped in
+    stHeading -- PAGE titles) and markdown-authored headers (wrapped in
+    stMarkdown -- CONTENT headlines, e.g. Tonight's "### thought" hero line)
+    must get DIFFERENT typographic treatment, or the hero line either
+    screams like a page title or page titles whisper like body text. Both
+    wrapper selectors must exist, and they must not render identically (a
+    copy-paste that made them the same rule would silently defeat the whole
+    point of the split)."""
+    assert '[data-testid="stHeading"] h3' in console_theme.CONSOLE_CSS
+    assert '[data-testid="stMarkdown"] h3' in console_theme.CONSOLE_CSS
+    heading_start = console_theme.CONSOLE_CSS.index('[data-testid="stHeading"] h3')
+    heading_rule = console_theme.CONSOLE_CSS[heading_start:heading_start + 260]
+    markdown_start = console_theme.CONSOLE_CSS.index('[data-testid="stMarkdown"] h3')
+    markdown_rule = console_theme.CONSOLE_CSS[markdown_start:markdown_start + 260]
+    assert heading_rule != markdown_rule
+    assert "text-transform: uppercase" in heading_rule
+    assert "text-transform: uppercase" not in markdown_rule
+
+
+def test_console_css_instrument_block_convention_targets_the_bare_key_prefix():
+    """The generic blk_ convention (every future bordered section) must be
+    scoped by the SAME st-key-<key> mechanism as the pre-existing poscard_/
+    annunciator_ rules -- a class*= substring selector on "st-key-blk_",
+    never requiring a full-string match against one specific key."""
+    assert 'class*="st-key-blk_"' in console_theme.CONSOLE_CSS
+
+
+def test_console_css_expander_gets_a_real_border_not_just_a_color():
+    """Regression guard (caught live during B4's own build): st.expander has
+    NO default border to recolor, unlike st.container(border=True) -- a rule
+    setting only `border-color` computes to a 0px-wide, invisible border.
+    The rule must set the full `border` shorthand (width + style + color) so
+    this exact bug can't silently come back."""
+    exp_start = console_theme.CONSOLE_CSS.index('[data-testid="stExpander"] {')
+    exp_rule = console_theme.CONSOLE_CSS[exp_start:exp_start + 200]
+    assert "border: 1px solid" in exp_rule
+    assert "border-color:" not in exp_rule
+
+
+def test_console_css_hides_deploy_and_menu_but_never_the_whole_toolbar():
+    """Streamlit chrome suppression (Fable5 ruling): the Deploy button and
+    hamburger menu are dev-tool affordances with no data/action/audit role
+    and may be hidden -- but stExpandSidebarButton (the sidebar collapse
+    toggle, a real functional control) lives in the same stToolbar and must
+    stay visible, so the fix targets the two elements individually, never
+    `[data-testid="stToolbar"] { display: none }` wholesale."""
+    assert '[data-testid="stAppDeployButton"]' in console_theme.CONSOLE_CSS
+    assert '[data-testid="stMainMenu"]' in console_theme.CONSOLE_CSS
+    assert '[data-testid="stToolbar"] {' not in console_theme.CONSOLE_CSS
+    assert '[data-testid="stExpandSidebarButton"]' not in console_theme.CONSOLE_CSS
+
+
+def test_console_css_sidebar_gets_a_dark_rail_treatment_without_mockup_copy():
+    """Sidebar diverges deliberately from the mockup's nav-rail copy (this
+    sidebar fires ledger WRITES; styling it to look like navigation would be
+    a mode-confusion trap) -- restyled via CSS only, and the mockup's own
+    fabricated identity strings must never appear anywhere in this file
+    (quarantine-the-script still governs new CSS, not just the original B1
+    pass)."""
+    assert 'section[data-testid="stSidebar"]' in console_theme.CONSOLE_CSS
+    assert "CONSOLE_01" not in console_theme.CONSOLE_CSS
+    assert "OPERATOR_ACTIVE" not in console_theme.CONSOLE_CSS
+
+
+def test_console_css_b4_additions_still_make_no_external_call():
+    """Same re-assertion as the mobile pass -- every new CSS section this
+    session (typography/chrome/sidebar/expander) is exactly as easy a place
+    to slip a 'just this one font' CDN import back in."""
+    assert "fonts.googleapis.com" not in console_theme.CONSOLE_CSS
+    assert "@import" not in console_theme.CONSOLE_CSS
