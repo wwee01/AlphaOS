@@ -81,7 +81,7 @@ function GateFunnel({ labelSummary }) {
       )}
       <div className="label-caps" style={{ margin: '16px 0 6px' }}>by primary label</div>
       <DataTable
-        columns={[{ key: 'primary_label', label: 'label' }, { key: 'n', label: 'n', numeric: true }]}
+        columns={[{ key: 'label', label: 'label' }, { key: 'n', label: 'n', numeric: true }]}
         rows={labelSummary.by_primary_label}
         emptyText="No labels yet — run an interest scan."
       />
