@@ -35,9 +35,14 @@ export const getTradePacket = (params) => {
   return apiGet(`/system/trade-packet${qs ? `?${qs}` : ''}`);
 };
 
-// ND-3: still true for approve/reject and kill-switch RELEASE (ND-4 scope) --
-// every action-suggesting element for THOSE still links out to Streamlit.
-// scan/monitor/report and kill-switch ENGAGE move into this console below.
+// The Streamlit app's own address -- kept as a deep link for the general
+// "open the full app" affordance (Tonight's footer link) and as the
+// documented break-glass fallback (docs/roadmap/console-migration-nd.md §2
+// item 8: "Streamlit stays runnable and unmodified... until ND-5
+// retirement"). As of ND-4, no write-capable action in this console still
+// requires following this link -- scan/monitor/report and kill-switch
+// ENGAGE moved here in ND-3; approve/reject and kill-switch DISENGAGE move
+// here in ND-4 (postApprove/postReject/postKillSwitchDisengage below).
 export const STREAMLIT_URL = 'http://localhost:8502';
 
 // ND-3 write routes (docs/roadmap/console-migration-nd.md §4 ND-3 scope).
@@ -75,3 +80,20 @@ export const postMonitor = (pin, nonce) => apiPost('/actions/monitor', { pin, no
 export const postReport = (pin, nonce) => apiPost('/actions/report', { pin, nonce });
 export const postKillSwitchEngage = (pin, nonce, reason) =>
   apiPost('/actions/kill-switch/engage', { pin, nonce, reason });
+
+// ND-4 write routes (docs/roadmap/console-migration-nd.md §4 ND-4 scope).
+// Same envelope discipline as the ND-3 writes above: pin/nonce in the POST
+// body, never a URL param. `approveMargin` is passed straight through to
+// `POST /actions/approve`'s `approve_margin` field -- the server neither
+// invents nor defaults it away from what the caller (Approvals.jsx's
+// per-proposal checkbox state) explicitly supplies.
+export const postApprove = (pin, nonce, proposalId, approveMargin) =>
+  apiPost('/actions/approve', { pin, nonce, proposal_id: proposalId, approve_margin: approveMargin });
+// `reason` may be omitted (undefined) -- JSON.stringify drops an undefined
+// field entirely, so the server sees no `reason` key at all and applies
+// its own "user rejected" default (see write_routes.py's actions_reject),
+// exactly matching Streamlit's own no-required-reason "Reject" button.
+export const postReject = (pin, nonce, proposalId, reason) =>
+  apiPost('/actions/reject', { pin, nonce, proposal_id: proposalId, reason });
+export const postKillSwitchDisengage = (pin, nonce) =>
+  apiPost('/actions/kill-switch/disengage', { pin, nonce });

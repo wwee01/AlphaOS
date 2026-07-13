@@ -24,8 +24,17 @@ consecutive failures -> 429 (this build's chosen status -- documented in
 alphaos/api/write_routes.py's _authorize_write docstring), and recovers
 after the cooldown elapses; security middleware (origin allowlist + custom
 header) still enforced on every new route; PIN comparison is constant-time
-(hmac.compare_digest, never `==`); kill-switch release/approve/reject exist
-NOWHERE in this API (404, not merely "not tested").
+(hmac.compare_digest, never `==`).
+
+ND-4 note: this file used to also assert kill-switch release/approve/reject
+existed NOWHERE in this API (404) -- true for ND-3's own scope, but ND-4
+adds exactly those three routes (alphaos/api/write_routes.py), so those
+"absent-by-design" assertions moved to, and are superseded by,
+tests/test_api_console_nd4.py's own full contract-test matrix for them
+(status codes, DB-state assertions, the double-approve race, and the
+kill-switch disengage no-op-when-already-disengaged case). Nothing else in
+this file changed: the original four ND-3 routes keep every assertion below
+unmodified.
 """
 
 from __future__ import annotations
@@ -402,6 +411,17 @@ def test_pin_verify_rejects_wrong_pin_and_accepts_right_one(tmp_path):
 # NO WRITE was accepted, which is the actual property under test. Same
 # acceptance already used by tests/test_api_console.py::
 # test_write_verb_to_api_path_refused for the identical reason.
+#
+# ND-4 note: this used to also cover `/api/v1/actions/approve` and
+# `.../reject` (both absent-by-design in ND-3) -- ND-4 adds those two
+# routes for real, so those two assertions moved to (and are superseded
+# by) tests/test_api_console_nd4.py's own PIN/nonce/rate-limit and outcome
+# coverage for them. The route below is UNAFFECTED by ND-4: the disengage
+# route ND-4 actually adds is named `/api/v1/actions/kill-switch/disengage`
+# (see write_routes.py's `actions_kill_switch_disengage`), not
+# `.../release` -- `release` is only the underlying `KillSwitch` method
+# name, never a route path in this API -- so this specific path remains
+# genuinely absent-by-design and this assertion is still correct.
 
 def test_no_kill_switch_release_route_exists(tmp_path):
     settings, _ = _seed(tmp_path)
@@ -411,14 +431,6 @@ def test_no_kill_switch_release_route_exists(tmp_path):
         json={"pin": "x", "nonce": "n"},
         headers=HEADERS,
     )
-    assert r.status_code in (404, 405)
-
-
-@pytest.mark.parametrize("path", ["/api/v1/actions/approve", "/api/v1/actions/reject"])
-def test_no_approve_or_reject_route_exists(tmp_path, path):
-    settings, _ = _seed(tmp_path)
-    client = _client(settings, tmp_path)
-    r = client.post(path, json={"pin": "x", "nonce": "n"}, headers=HEADERS)
     assert r.status_code in (404, 405)
 
 

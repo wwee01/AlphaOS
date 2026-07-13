@@ -156,11 +156,12 @@ def positions(
 # streamlit_app.py's corresponding tab already calls -- see each handler's
 # docstring for its Streamlit call site. VIEW-ONLY (docs/roadmap/
 # console-migration-nd.md §4 ND-2): the Approvals endpoint below returns the
-# same proposal-queue data streamlit_app.tab_approval_center() renders, but
-# this API defines no POST/approve/reject route at all -- the frontend that
-# consumes it deep-links to the Streamlit Approval Center for the actual
-# decision (ND-3/ND-4 scope), matching Tonight's existing StreamlitLink
-# pattern from ND-1.
+# same proposal-queue data streamlit_app.tab_approval_center() renders, and
+# this module (routes.py) still defines no POST/approve/reject route of its
+# own -- as of ND-4, that write surface exists in a SEPARATE module
+# (alphaos/api/write_routes.py's PIN-gated `/api/v1/actions/approve` and
+# `.../reject`), keeping this file's routes uniformly read-only rather than
+# mixing a write route in among them.
 
 
 @router.get("/approvals")
@@ -169,9 +170,11 @@ def approvals(journal: JournalStore = Depends(get_journal)) -> dict:
     streamlit_app.tab_approval_center() renders (TTL fields, TQS shadow
     score, exit plan, margin flag), enriched exactly the way
     `Orchestrator.list_open_proposals()` already does (TTL seconds-remaining
-    computed fresh per call, freshness/TQS looked up per proposal). VIEW-ONLY:
-    no approve/reject route exists anywhere in this API (see module docstring
-    above) -- the console deep-links to Streamlit for the actual decision.
+    computed fresh per call, freshness/TQS looked up per proposal). This
+    route itself remains READ-ONLY (still `mode=ro`, still no PIN/nonce) --
+    as of ND-4, `POST /api/v1/actions/approve` and `.../reject`
+    (alphaos/api/write_routes.py) exist as separate, PIN-gated routes that
+    act on the same rows this endpoint lists; this handler only ever reads.
 
     `list_open_proposals()` is defined on `Orchestrator`, but reading its
     body (alphaos/orchestrator.py) shows it touches only `self.journal` --
