@@ -34,8 +34,7 @@ function ActionsBlock({ onWriteSuccess }) {
       </div>
       <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>
         Each action requires the console PIN (set with <code className="num">alphaos console set-pin</code>).
-        Approve/reject and kill-switch release still require the{' '}
-        <StreamlitLink href={STREAMLIT_URL}>Streamlit app</StreamlitLink> (ND-4).
+        Approve/Reject live on the Approvals tab; kill-switch engage/release lives in the strip above (ND-4).
       </div>
     </Block>
   );
@@ -87,7 +86,11 @@ function NeedsYou({ needsYou, exitReview }) {
     );
   }
   return (
-    <Block title="② needs you" right={<StreamlitLink href={STREAMLIT_URL}>Approval Center</StreamlitLink>}>
+    // ND-4: the "Approval Center" deep link that used to point at
+    // Streamlit here is gone -- Approve/Reject now live natively on this
+    // console's own Approvals tab (App.jsx's nav strip), so there is no
+    // separate app to deep-link to for this specific action anymore.
+    <Block title="② needs you">
       {rows.length ? rows : <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>(nothing here)</div>}
     </Block>
   );
@@ -295,7 +298,13 @@ export default function Tonight() {
       )}
 
       <div style={{ marginTop: 20, fontSize: 11 }}>
-        <StreamlitLink href={STREAMLIT_URL}>Open the full Streamlit app (writes, approvals, kill switch)</StreamlitLink>
+        {/* ND-4: every write-capable action in this app now has a console
+            equivalent (scan/monitor/report/kill-switch here, approve/
+            reject on the Approvals tab, kill-switch release in the strip
+            above) -- this link stays only as the documented break-glass
+            fallback (docs/roadmap/console-migration-nd.md §2 item 8),
+            never as the only place to reach a write action. */}
+        <StreamlitLink href={STREAMLIT_URL}>Open the full Streamlit app (break-glass fallback)</StreamlitLink>
       </div>
     </div>
   );

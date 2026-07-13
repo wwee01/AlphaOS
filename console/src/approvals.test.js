@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { computeTtlBar, sortByTtl } from './approvals.js';
+import {
+  canApprove, computeTtlBar, marginApprovalRequired, shouldShowProposalActions, sortByTtl,
+} from './approvals.js';
 
 describe('computeTtlBar', () => {
   it('renders "unknown" (null pct) when seconds_remaining or total_ttl_seconds is unmeasurable', () => {
@@ -53,5 +55,39 @@ describe('sortByTtl', () => {
     const originalOrder = input.map((p) => p.symbol);
     sortByTtl(input);
     expect(input.map((p) => p.symbol)).toEqual(originalOrder);
+  });
+});
+
+describe('marginApprovalRequired', () => {
+  it('is true only when requires_margin is exactly truthy', () => {
+    expect(marginApprovalRequired({ requires_margin: true })).toBe(true);
+    expect(marginApprovalRequired({ requires_margin: false })).toBe(false);
+    expect(marginApprovalRequired({})).toBe(false);
+  });
+
+  it('treats a missing proposal as "not required" rather than throwing', () => {
+    expect(marginApprovalRequired(null)).toBe(false);
+    expect(marginApprovalRequired(undefined)).toBe(false);
+  });
+});
+
+describe('canApprove', () => {
+  it('is always approvable when margin is not required, regardless of checkbox state', () => {
+    expect(canApprove({ requires_margin: false }, false)).toBe(true);
+    expect(canApprove({ requires_margin: false }, true)).toBe(true);
+  });
+
+  it('requires the explicit checkbox when margin is required -- never silently approved by omission', () => {
+    expect(canApprove({ requires_margin: true }, false)).toBe(false);
+    expect(canApprove({ requires_margin: true }, undefined)).toBe(false);
+    expect(canApprove({ requires_margin: true }, true)).toBe(true);
+  });
+});
+
+describe('shouldShowProposalActions', () => {
+  it('stays true regardless of staleness -- client-side checks are advisory only, never hide the button preemptively', () => {
+    expect(shouldShowProposalActions({ proposal_is_stale: true })).toBe(true);
+    expect(shouldShowProposalActions({ proposal_is_stale: false })).toBe(true);
+    expect(shouldShowProposalActions(null)).toBe(true);
   });
 });

@@ -12,8 +12,14 @@
 // action alongside it." Governance.jsx's Kill Switch panel remains PURE
 // READ/explanation-only (its own docstring is updated to point here); this
 // stays the console's one and only kill-switch CONTROL surface.
+//
+// ND-4 adds the DISENGAGE counterpart alongside ND-3's engage, gated the
+// same way (PIN-prompted) and shown only when the switch is currently
+// engaged -- mirrors render_annunciator()'s own engage/disengage toggle in
+// streamlit_app.py exactly (one button or the other is visible, never
+// both, never neither).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { getAnnunciator, postKillSwitchEngage } from '../api.js';
+import { getAnnunciator, postKillSwitchDisengage, postKillSwitchEngage } from '../api.js';
 import { Badge } from './ui.jsx';
 import { PinPrompt } from './PinPrompt.jsx';
 import { IconClock, IconShield, IconWarningTriangle } from './icons.jsx';
@@ -76,9 +82,12 @@ export default function Annunciator() {
         approvals pending: {data.approvals_pending_count ?? 'n/a'}
       </Badge>
 
-      {/* ND-3: the ONLY kill-switch control in this console. Release is
-          ND-4 -- deliberately absent here and everywhere else. */}
-      {!data.kill_switch_engaged && (
+      {/* The ONLY kill-switch control in this console: engage (ND-3) and
+          disengage (ND-4) are mutually exclusive, matching Streamlit's own
+          toggle -- exactly one of these two PinPrompts renders at a time,
+          keyed off the same `data.kill_switch_engaged` read this strip
+          already displays. */}
+      {!data.kill_switch_engaged ? (
         <PinPrompt
           label="engage kill switch"
           extraFields={(
@@ -100,6 +109,12 @@ export default function Annunciator() {
               poll(); // ND-3 plan doc §5: refetch immediately on a successful write
             }
           }}
+        />
+      ) : (
+        <PinPrompt
+          label="release kill switch"
+          onConfirm={(pin, nonce) => postKillSwitchDisengage(pin, nonce)}
+          onDone={(ok) => ok && poll()} // ND-3 plan doc §5: refetch immediately on a successful write
         />
       )}
     </div>

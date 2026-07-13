@@ -37,7 +37,17 @@ const INPUT_STYLE = {
 //   the kill-switch engage reason text box) -- kept as a render prop rather
 //   than a second, action-specific component, so there is exactly one PIN-
 //   handling implementation in this app.
-export function PinPrompt({ label, extraFields, onConfirm, onDone }) {
+// `disabled`: optional (default false) -- ND-4 addition. Disables the
+//   trigger button WITHOUT hiding it, e.g. Approvals.jsx's "approve"
+//   button while a proposal `requires_margin` and its checkbox is
+//   unchecked (docs/roadmap/console-migration-nd.md §4 ND-4: "never
+//   silently defaults to approved OR silently blocks without
+//   explanation" -- the button stays visible, just inert, alongside the
+//   checkbox that explains why). Never used to hide a button for a
+//   server-side-only condition (e.g. TTL expiry) -- those stay enabled so
+//   the operator sees the server's own authoritative message instead of a
+//   client-side guess (see approvals.js:shouldShowProposalActions).
+export function PinPrompt({ label, extraFields, onConfirm, onDone, disabled = false }) {
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
@@ -75,7 +85,8 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone }) {
       <button
         type="button"
         className="badge badge-caps"
-        style={{ cursor: 'pointer', minHeight: 36 }}
+        style={{ cursor: disabled ? 'default' : 'pointer', minHeight: 36, opacity: disabled ? 0.5 : 1 }}
+        disabled={disabled}
         onClick={() => { setOpen(true); setMessage(null); }}
       >
         {label}

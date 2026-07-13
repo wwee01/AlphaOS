@@ -41,3 +41,51 @@ export function sortByTtl(proposals) {
     return av - bv;
   });
 }
+
+// ND-4 pure logic for the Approve/Reject write affordance (docs/roadmap/
+// console-migration-nd.md §4 ND-4 scope). No DOM/React dependency, same
+// "pure module, tested with vitest" pattern as computeTtlBar/sortByTtl
+// above -- Approvals.jsx just calls these rather than re-deriving the
+// logic inline in the component.
+
+// True iff `proposal` needs the explicit margin/borrow checkbox before
+// Approve may be submitted -- mirrors streamlit_app.tab_approval_center()'s
+// `if v["requires_margin"]:` gate exactly. `proposal` may be null/undefined
+// (a render can race a poll clearing the list); treated as "not required"
+// rather than throwing.
+export function marginApprovalRequired(proposal) {
+  return Boolean(proposal?.requires_margin);
+}
+
+// Whether the Approve button should be enabled right now, given the
+// per-card checkbox state `marginApproved`. When margin approval isn't
+// required this is always true (nothing gates it); when it IS required,
+// Approve stays disabled until the operator has explicitly checked the
+// box -- never silently approved by omission, never blocked without the
+// checkbox being visible to explain why (ND-4 plan doc: "must be checked
+// before Approve is enabled... never silently defaults to approved OR
+// silently blocks without explanation"). The server re-validates this
+// exact condition independently (orch.approve_proposal()'s own
+// `requires_margin`/`approve_margin` gate) -- this function only controls
+// the BUTTON's enabled state, it is never the sole gate.
+export function canApprove(proposal, marginApproved) {
+  if (marginApprovalRequired(proposal)) {
+    return Boolean(marginApproved);
+  }
+  return true;
+}
+
+// Whether Approve/Reject should be VISIBLE for a proposal at all. Always
+// true, deliberately -- TTL expiry is never a client-side gate on button
+// visibility (ND-4 plan doc: "TTL-expired proposals: still show Approve/
+// Reject... clicking Approve on an expired one will get the ok:False
+// 'expired' message back from the server -- surface that clearly, don't
+// hide the button preemptively, since... client-side staleness checks are
+// advisory only"). Kept as a named function (not just "always render the
+// buttons" inlined in the component) so this is one documented,
+// independently-testable invariant rather than an implicit omission that
+// a future change could silently regress by adding a hide-when-stale
+// condition.
+export function shouldShowProposalActions(_proposal) {
+  return true;
+}

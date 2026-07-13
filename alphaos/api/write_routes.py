@@ -1,31 +1,40 @@
-"""alphaos/api/write_routes.py -- ND-3 write plumbing + first writes
-(docs/roadmap/console-migration-nd.md §4 ND-3 scope).
+"""alphaos/api/write_routes.py -- ND-3 write plumbing + first writes, ND-4
+crown-jewel writes (docs/roadmap/console-migration-nd.md §4 ND-3/ND-4
+scope).
 
-Every route below wraps the EXACT Orchestrator method the Streamlit sidebar
-already calls (alphaos/dashboard/streamlit_app.py:render_sidebar) -- no
-business logic is re-derived here, same discipline as routes.py's read
-endpoints (module docstring: "the frontend computes nothing
-business-critical, ever"). What IS new here, and genuinely new surface, is
-the authorization gate every route shares (``_authorize_write``): PIN
-(alphaos/api/pin.py) + nonce replay guard (alphaos/api/nonce.py), on top of
-the ND-1 origin-allowlist + ``X-AlphaOS-Console`` header middleware, which
-already applies to every ``/api/*`` path (including these -- no extra wiring
+Every route below wraps the EXACT Orchestrator method (or, for the
+kill-switch routes, the exact KillSwitch method) the Streamlit sidebar/
+Approval Center already calls (alphaos/dashboard/streamlit_app.py:
+render_sidebar, render_annunciator, tab_approval_center) -- no business
+logic is re-derived here, same discipline as routes.py's read endpoints
+(module docstring: "the frontend computes nothing business-critical,
+ever"). What IS new here, and genuinely new surface, is the authorization
+gate every route shares (``_authorize_write``): PIN (alphaos/api/pin.py) +
+nonce replay guard (alphaos/api/nonce.py), on top of the ND-1
+origin-allowlist + ``X-AlphaOS-Console`` header middleware, which already
+applies to every ``/api/*`` path (including these -- no extra wiring
 needed; ``ConsoleSecurityMiddleware`` matches on the URL prefix, not on
 which router registered the route).
 
-Four routes exist. Exactly four:
+Seven routes exist. Exactly seven:
 
-* ``POST /api/v1/actions/scan``    -> ``orch.run_scan_once()``
-* ``POST /api/v1/actions/monitor`` -> ``orch.run_monitor_once()``
-* ``POST /api/v1/actions/report``  -> ``orch.generate_daily_report()``
-* ``POST /api/v1/actions/kill-switch/engage`` -> ``KillSwitch.engage(reason)``
+* ``POST /api/v1/actions/scan``    -> ``orch.run_scan_once()``                  (ND-3)
+* ``POST /api/v1/actions/monitor`` -> ``orch.run_monitor_once()``               (ND-3)
+* ``POST /api/v1/actions/report``  -> ``orch.generate_daily_report()``          (ND-3)
+* ``POST /api/v1/actions/kill-switch/engage``    -> ``KillSwitch.engage(reason)``   (ND-3)
+* ``POST /api/v1/actions/approve`` -> ``orch.approve_proposal(...)``            (ND-4)
+* ``POST /api/v1/actions/reject``  -> ``orch.reject_proposal(...)``             (ND-4)
+* ``POST /api/v1/actions/kill-switch/disengage`` -> ``KillSwitch.release()``        (ND-4)
 
-Deliberately ABSENT, both here and anywhere else in this API: kill-switch
-RELEASE, and proposal APPROVE/REJECT. Streamlit's sidebar/Approval Center
-keep sole ownership of those until ND-4 (plan doc: "Disengage does NOT land
-here"; "ND-4 -- The crown jewels, last"). "Seed demo trade" is also
-deliberately not ported -- it is a dev/demo convenience, not one of the
-three named ND-3 writes.
+ND-4 closes the loop the original (ND-3) version of this docstring left
+open: kill-switch RELEASE and proposal APPROVE/REJECT were "deliberately
+ABSENT... Streamlit's sidebar/Approval Center keep sole ownership of those
+until ND-4" -- this module is that phase. After this change, no
+write-capable action anywhere in this app remains Streamlit-only (docs/
+roadmap/console-migration-nd.md §4 ND-4: "the crown jewels, last"); "Seed
+demo trade" remains the one deliberate, permanent exception -- it is a
+dev/demo convenience never named as an ND-1..ND-5 phase deliverable at all,
+so its continued absence here is not a gap ND-4 needed to close.
 
 Every successful write lands an audit record: a `system_events` row tagged
 `source: "console_api"` in its `detail_json` (see `_log_console_invocation`
@@ -41,11 +50,23 @@ regardless of `trigger_source`, so `scheduler_runs` is the only table this
 value actually reaches; already surfaced in `/api/v1/system`'s
 `scheduler_runs` list) -- see constants.py's `TriggerSource.CONSOLE_API`
 docstring for why that is a DIFFERENT value from `SCHEDULER`, not an alias
-of it. `generate_daily_report()` and the kill-switch route have no such
-trigger_source column to ride, so the explicit system_events write is the
-only marker they get -- which is exactly why every route gets the SAME
-uniform `_log_console_invocation` call rather than relying on the free channel
-alone for two of the four.
+of it. `generate_daily_report()`, `approve_proposal()`/`reject_proposal()`,
+and both kill-switch routes have no such trigger_source column to ride, so
+the explicit system_events write is the only marker they get -- which is
+exactly why every route gets the SAME uniform `_log_console_invocation`
+call rather than relying on the free channel alone for the routes that lack
+a free one.
+
+approve/reject add NO new idempotency logic beyond the shared nonce guard
+above: `approve_proposal()`'s own pre-existing belt-and-suspenders check
+(an existing live, non-dead entry order for the proposal blocks a second
+approval outright, regardless of which nonce carried the second request --
+see its docstring in alphaos/orchestrator.py, around the "Idempotency
+(belt-and-suspenders on top of the status guard)" comment) is trusted and
+verified by test here, never duplicated. `tests/test_api_console_nd4.py`
+proves this holds across two DIFFERENT nonces for the same proposal_id (a
+genuine double-click racing ahead of any client-side debounce), not merely
+a byte-identical replay (which the nonce guard alone already catches).
 """
 
 from __future__ import annotations
@@ -101,6 +122,34 @@ class KillSwitchEngageRequest(WriteAuth):
     server never fabricates a reason on the operator's behalf."""
 
     reason: str
+
+
+class ProposalApproveRequest(WriteAuth):
+    """`proposal_id` identifies the target row. `approve_margin` mirrors
+    `orch.approve_proposal()`'s own keyword of the exact same name and
+    defaults to ``False`` -- same as the method itself, and same as
+    Streamlit's checkbox (`st.checkbox(...)` defaults unchecked) -- a
+    proposal's margin/short requirement is NEVER silently approved by
+    omitting the field. The value is passed straight through to
+    `approve_proposal()` unexamined; this route invents no additional
+    margin-gating logic of its own (docs/roadmap/console-migration-nd.md §4
+    ND-4: "do not invent new blocking logic in the API layer, just pass the
+    flag through and assert the existing behavior surfaces correctly")."""
+
+    proposal_id: str
+    approve_margin: bool = False
+
+
+class ProposalRejectRequest(WriteAuth):
+    """`proposal_id` identifies the target row. `reason` is OPTIONAL --
+    `orch.reject_proposal()` itself defaults to `"user rejected"` when its
+    own `reason` keyword is omitted, and this route matches that default
+    exactly (see `actions_reject` below) rather than forcing the operator
+    to type something Streamlit's own "Reject" button doesn't require
+    either."""
+
+    proposal_id: str
+    reason: Optional[str] = None
 
 
 def _authorize_write(
@@ -234,22 +283,23 @@ def actions_kill_switch_engage(
     nonce_store: NonceStore = Depends(get_nonce_store),
     kill_switch: KillSwitch = Depends(get_kill_switch),
 ) -> dict:
-    """`KillSwitch.engage(reason)` -- ENGAGE only (docs/roadmap/console-
-    migration-nd.md §4 ND-3: "Kill-switch ENGAGE also lands here --
+    """`KillSwitch.engage(reason)` -- ENGAGE half of the pair (docs/roadmap/
+    console-migration-nd.md §4 ND-3: "Kill-switch ENGAGE also lands here --
     deliberately early, because its failure mode is safety-increasing
-    (false engage = system pauses). Disengage does NOT land here."). There
-    is deliberately no corresponding release/disengage route anywhere in
-    this API -- that is ND-4 (approve/reject land alongside it, same phase,
-    same reasoning: those failure modes are NOT safety-increasing, so they
-    get the heaviest audit pass of the migration instead of shipping early).
-    Mirrors alphaos/__main__.py's `cmd_kill(orch, "engage")` CLI path:
-    engage the file-backed marker, then log a CRITICAL system_event (same
-    severity `cmd_kill` uses for the CLI path) -- unlike scan/monitor/report
-    above, engaging the kill switch is not an Orchestrator method at all
+    (false engage = system pauses). Disengage does NOT land here."). ND-3
+    shipped this route alone, on purpose, for that asymmetric-risk reason;
+    the DISENGAGE counterpart (`actions_kill_switch_disengage` below) is
+    ND-4 scope -- same reasoning in reverse: a disengage's failure mode is
+    NOT safety-increasing, so it waits for the heaviest audit pass of the
+    migration instead of shipping early alongside this one. Mirrors
+    alphaos/__main__.py's `cmd_kill(orch, "engage")` CLI path: engage the
+    file-backed marker, then log a CRITICAL system_event (same severity
+    `cmd_kill` uses for the CLI path) -- unlike scan/monitor/report above,
+    engaging the kill switch is not an Orchestrator method at all
     (`KillSwitch` is independent of `Orchestrator` on purpose -- alphaos/
     safety.py's own module docstring: "intentionally independent of the
     order manager so that no single bug can quietly bypass them"), so this
-    route is the only one of the four that does not construct an
+    route (like its disengage counterpart) does not construct an
     Orchestrator."""
     _authorize_write(auth, pin_store, rate_limiter, nonce_store)
     reason = auth.reason.strip()
@@ -263,6 +313,129 @@ def actions_kill_switch_engage(
     return {
         "kill_switch_engaged": kill_switch.is_engaged(),
         "kill_switch_reason": kill_switch.reason(),
+        "audit": {"event_id": event_id},
+        "as_of": _as_of(),
+    }
+
+
+# ================================================================== ND-4
+#
+# The crown jewels (docs/roadmap/console-migration-nd.md §4 ND-4): proposal
+# approve/reject and kill-switch disengage. Everything above this divider is
+# unchanged from ND-3 except the two docstring corrections noting these
+# routes now exist.
+
+
+@router.post("/approve")
+def actions_approve(
+    auth: ProposalApproveRequest,
+    settings: Settings = Depends(get_settings),
+    write_journal: JournalStore = Depends(get_write_journal),
+    pin_store: PinStore = Depends(get_pin_store),
+    rate_limiter: PinRateLimiter = Depends(get_rate_limiter),
+    nonce_store: NonceStore = Depends(get_nonce_store),
+) -> dict:
+    """`orch.approve_proposal(proposal_id, approve_margin=...)` -- the exact
+    call streamlit_app.tab_approval_center()'s "Approve + submit (paper)"
+    button makes. `approve_proposal()` re-validates TTL/freshness/price-
+    drift/risk/kill-switch/protection-incident state INTERNALLY and returns
+    `(ok, message)`; this route does not re-derive or shortcut any of that
+    -- see its docstring in alphaos/orchestrator.py (unmodified by this
+    build, per this phase's own instruction).
+
+    A `False` `ok` (expired proposal, margin required but not approved,
+    risk-blocked, stale data, kill switch engaged, already-approved, ...)
+    is NOT translated into an HTTP error status -- it is a normal, expected
+    outcome the operator needs to see verbatim, exactly as Streamlit shows
+    it inline (`(st.success if ok else st.error)(msg)`) rather than as a
+    page error. The route still returns HTTP 200 either way; `ok`/`message`
+    in the body is the only signal of the underlying outcome.
+
+    Idempotency: no NEW guard is added here beyond the shared nonce replay
+    check in `_authorize_write` above. `approve_proposal()`'s own
+    pre-existing idempotency guard (an existing live entry order for this
+    proposal blocks a second approval outright) is what actually prevents a
+    double-click-with-two-nonces from creating two orders -- proven by
+    `tests/test_api_console_nd4.py`'s double-approve race test, not
+    reimplemented here."""
+    _authorize_write(auth, pin_store, rate_limiter, nonce_store)
+    orch = Orchestrator(settings=settings, journal=write_journal)
+    ok, message = orch.approve_proposal(auth.proposal_id, approve_margin=auth.approve_margin)
+    event_id = _log_console_invocation(
+        write_journal, "console_api",
+        f"approve_proposal invoked via console API (proposal_id={auth.proposal_id}, "
+        f"ok={ok}): {message}",
+        {"proposal_id": auth.proposal_id, "ok": ok, "approve_margin": auth.approve_margin, "message": message},
+    )
+    return {"ok": ok, "message": message, "audit": {"event_id": event_id}, "as_of": _as_of()}
+
+
+@router.post("/reject")
+def actions_reject(
+    auth: ProposalRejectRequest,
+    settings: Settings = Depends(get_settings),
+    write_journal: JournalStore = Depends(get_write_journal),
+    pin_store: PinStore = Depends(get_pin_store),
+    rate_limiter: PinRateLimiter = Depends(get_rate_limiter),
+    nonce_store: NonceStore = Depends(get_nonce_store),
+) -> dict:
+    """`orch.reject_proposal(proposal_id, reason=...)` -- the exact call
+    streamlit_app.tab_approval_center()'s "Reject" button makes. `reason`
+    defaults to `"user rejected"` -- the SAME default `reject_proposal()`
+    itself already has -- when the operator submits without typing one (see
+    `ProposalRejectRequest`'s own docstring); an empty-string `reason` is
+    treated the same as an omitted one, never journaled as a blank
+    rejection reason."""
+    _authorize_write(auth, pin_store, rate_limiter, nonce_store)
+    orch = Orchestrator(settings=settings, journal=write_journal)
+    reason = (auth.reason or "").strip() or "user rejected"
+    ok, message = orch.reject_proposal(auth.proposal_id, reason=reason)
+    event_id = _log_console_invocation(
+        write_journal, "console_api",
+        f"reject_proposal invoked via console API (proposal_id={auth.proposal_id}, "
+        f"ok={ok}): {message}",
+        {"proposal_id": auth.proposal_id, "ok": ok, "reason": reason},
+    )
+    return {"ok": ok, "message": message, "audit": {"event_id": event_id}, "as_of": _as_of()}
+
+
+@router.post("/kill-switch/disengage")
+def actions_kill_switch_disengage(
+    auth: WriteAuth,
+    write_journal: JournalStore = Depends(get_write_journal),
+    pin_store: PinStore = Depends(get_pin_store),
+    rate_limiter: PinRateLimiter = Depends(get_rate_limiter),
+    nonce_store: NonceStore = Depends(get_nonce_store),
+    kill_switch: KillSwitch = Depends(get_kill_switch),
+) -> dict:
+    """`KillSwitch.release()` -- the disengage counterpart to ND-3's engage
+    route above, and the mirror of `render_annunciator()`'s "Release kill
+    switch" button (`ks.release()`). Takes NO `reason` field -- `release()`
+    itself takes none (unlike `engage(reason)`), so the wire contract is
+    plain `WriteAuth` (pin + nonce only); inventing a reason field here
+    would be exactly the kind of API-layer embellishment this build is
+    instructed not to add.
+
+    `release()` is a harmless no-op when the switch is already disengaged
+    (its own `try/except FileNotFoundError: pass`) -- this route does not
+    special-case that, it just calls `release()` and reports whatever
+    `is_engaged()` reads afterward (always `False` either way), matching
+    `release()`'s own documented behavior rather than re-deriving an
+    "already disengaged" error this method was explicitly written not to
+    raise. Logged CRITICAL, same severity as ND-3's engage route -- a
+    disengage is exactly as safety-relevant an event as an engage, even
+    though its failure mode differs (this docstring, and the module
+    docstring above, are explicit that "not safety-increasing" governed
+    when this route could SHIP, not how loudly it is logged once it does).
+    Unlike engage, there is no `reason` to fold into the audit message."""
+    _authorize_write(auth, pin_store, rate_limiter, nonce_store)
+    kill_switch.release()
+    event_id = _log_console_invocation(
+        write_journal, "kill_switch", "Kill switch DISENGAGED via console API.",
+        severity=Severity.CRITICAL,
+    )
+    return {
+        "kill_switch_engaged": kill_switch.is_engaged(),
         "audit": {"event_id": event_id},
         "as_of": _as_of(),
     }
