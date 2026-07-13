@@ -10,11 +10,18 @@
 // aggregate's own `status === "ok"` -- i.e. unless alphaos/reports/
 // attribution.py's sample-floor gate has already cleared. This is the one
 // guard on this page that was swap-tested (see console/src/learning.test.js
-// and the ND-2 build report).
+// and the ND-2 build report). ND-6 does NOT touch this gate.
+//
+// ND-6: ALL of this view is shadow-tier (design ruling §5/§8 hard
+// constraint #5) -- every InstrumentBlock below carries `tone="shadow"`
+// (the dim indigo border/tint + "shadow" tag), so no number here is ever
+// mistakable for a live value or control. The hero StatTile is hypotheses
+// resolved-N (design ruling §3.2's own example).
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getLearning } from '../api.js';
 import { Block, DataTable, Badge, badgeTone } from '../components/ui.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
+import { StatTile } from '../components/StatTile.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 import { formatAttributionRow, formatHypothesisProgress, formatHypothesisStatus } from '../learning.js';
 
@@ -23,14 +30,14 @@ const POLL_MS = 15000;
 function TqsPanel({ tqs }) {
   if (tqs.scored_count === 0) {
     return (
-      <Block title="TQS — evidence-weighted setup quality">
+      <Block title="TQS — evidence-weighted setup quality" tone="shadow">
         <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No TQS scores yet (mock rows excluded).</div>
       </Block>
     );
   }
   const buckets = Object.entries(tqs.bucket_histogram).sort(([a], [b]) => a.localeCompare(b));
   return (
-    <Block title="TQS — evidence-weighted setup quality">
+    <Block title="TQS — evidence-weighted setup quality" tone="shadow">
       <StatFooter
         stats={[
           { label: 'scored (live)', value: tqs.scored_count },
@@ -82,8 +89,8 @@ function AttributionPanel({ attribution }) {
     : [];
 
   return (
-    <Block title="Attribution — floor-gated ΔR aggregates">
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{v2.caveat}</div>
+    <Block title="Attribution — floor-gated ΔR aggregates" tone="shadow">
+      <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{v2.caveat}</div>
       <StatFooter
         stats={[
           { label: 'total records', value: v2.total_records },
@@ -107,16 +114,9 @@ function HypothesesPanel({ hypotheses, drafts }) {
     progress_label: formatHypothesisProgress(h.progress),
   }));
   return (
-    <Block title="Hypotheses — PR12 registry">
-      <StatFooter
-        stats={[
-          { label: 'total', value: hypotheses.n_total },
-          { label: 'proposed', value: hypotheses.n_proposed },
-          { label: 'testing', value: hypotheses.n_testing },
-          { label: 'resolved', value: hypotheses.n_resolved },
-        ]}
-      />
-      <div style={{ marginTop: 10 }} />
+    <Block title="Hypotheses — PR12 registry" tone="shadow">
+      <StatTile label="resolved" value={hypotheses.n_resolved} tone="shadow" size="md" context={`of ${hypotheses.n_total} total · ${hypotheses.n_testing} testing · ${hypotheses.n_proposed} proposed`} />
+      <div style={{ marginTop: 14 }} />
       <DataTable
         columns={[
           { key: 'hypothesis_id', label: 'id' },
@@ -158,13 +158,13 @@ function HypothesesPanel({ hypotheses, drafts }) {
 function JournalPanel({ feed }) {
   if (!feed.entries.length) {
     return (
-      <Block title="Journal — newest first">
+      <Block title="Journal — newest first" tone="shadow">
         <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>Nothing in the journal yet.</div>
       </Block>
     );
   }
   return (
-    <Block title="Journal — newest first">
+    <Block title="Journal — newest first" tone="shadow">
       {feed.entries.map((e, i) => {
         const prov = Object.entries(e.provenance ?? {})
           .filter(([, v]) => v !== null && v !== undefined)
@@ -215,9 +215,14 @@ export default function Learning() {
   return (
     <div className={unreachable ? 'dim' : ''}>
       {unreachableMsg && <div className="stale-banner">{unreachableMsg}</div>}
-      <div className="stale-banner" style={{ borderColor: 'rgba(255,184,115,0.5)', background: 'rgba(255,184,115,0.08)', color: 'var(--amber)' }}>
-        🧭 Hypothesis outcomes are ruled by the operator. AlphaOS never adjusts its own weights or rules on its
-        own — every MET/FAILED/WITHDRAWN verdict below is a human judgment call, not a machine one.
+      <div
+        className="stale-banner"
+        style={{ borderColor: 'var(--shadow-tier-border)', background: 'var(--shadow-tier-bg)', color: 'var(--shadow-tier)' }}
+      >
+        <span className="shadow-tag" style={{ marginRight: 8 }}>shadow</span>
+        This whole view is measurement-only. Hypothesis outcomes are ruled by the operator — AlphaOS never
+        adjusts its own weights or rules on its own; every MET/FAILED/WITHDRAWN verdict below is a human
+        judgment call, not a machine one, and nothing here is a live control.
       </div>
 
       {!data ? (
@@ -225,13 +230,13 @@ export default function Learning() {
       ) : (
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
-          <div className="grid">
+          <div className="grid reveal-stagger">
             <div className="col-12"><TqsPanel tqs={data.tqs} /></div>
-            <div className="col-12" style={{ marginTop: 4 }}><AttributionPanel attribution={data.attribution} /></div>
-            <div className="col-12" style={{ marginTop: 4 }}>
+            <div className="col-12"><AttributionPanel attribution={data.attribution} /></div>
+            <div className="col-12">
               <HypothesesPanel hypotheses={data.hypotheses} drafts={data.hypothesis_drafts} />
             </div>
-            <div className="col-12" style={{ marginTop: 4 }}><JournalPanel feed={data.journal_feed} /></div>
+            <div className="col-12"><JournalPanel feed={data.journal_feed} /></div>
           </div>
         </>
       )}

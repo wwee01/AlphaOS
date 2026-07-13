@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatHindsight } from './decisions.js';
+import { buildDecisionFunnelStages, formatHindsight } from './decisions.js';
 
 describe('formatHindsight', () => {
   it('reads "pending" when there is no attribution row at all (unknown-never-zero)', () => {
@@ -22,5 +22,31 @@ describe('formatHindsight', () => {
 
   it('tags a mock delta with "(mock)" so it is never styled like a real one', () => {
     expect(formatHindsight({ resolved_status: 'resolved', delta_r: 1.1, is_mock: 1 })).toBe('+1.10R (mock)');
+  });
+});
+
+describe('buildDecisionFunnelStages', () => {
+  it('prepends a "candidates" stage totalling every decision bucket (real API row shape: `decision`, not `label_decision`)', () => {
+    const stages = buildDecisionFunnelStages([
+      { decision: 'propose', n: 3 },
+      { decision: 'watch', n: 6 },
+      { decision: 'reject', n: 2 },
+    ]);
+    expect(stages[0]).toEqual({ label: 'candidates', value: 11 });
+    expect(stages.slice(1)).toEqual([
+      { label: 'propose', value: 3 },
+      { label: 'watch', value: 6 },
+      { label: 'reject', value: 2 },
+    ]);
+  });
+
+  it('returns an empty array when there is no label data yet (never a fabricated stage)', () => {
+    expect(buildDecisionFunnelStages([])).toEqual([]);
+    expect(buildDecisionFunnelStages(undefined)).toEqual([]);
+  });
+
+  it('falls back to "unknown" for a missing decision field, never dropping the row silently', () => {
+    const stages = buildDecisionFunnelStages([{ decision: null, n: 4 }]);
+    expect(stages[1].label).toBe('unknown');
   });
 });

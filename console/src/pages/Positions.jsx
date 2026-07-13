@@ -1,17 +1,22 @@
-// ND-2 Positions page -- renders /api/v1/positions (ND-1 endpoint, unchanged;
-// this is the first frontend consumer of it beyond Tonight's summary count).
-// Mirrors streamlit_app.tab_positions_health() field-for-field: same verdict
-// icon, same R-ladder-or-plain-text fallback, same EXIT_REVIEW human-decision
-// warning, same protection/freshness/trading-days caption. This component
-// computes nothing business-critical -- assess_positions() already decided
-// every verdict/R value server-side; the R-ladder's pixel placement
-// (positions.js:computeRLadder()) is presentation math only, same category
-// as format.js's formatting helpers.
+// ND-2 Positions page -- renders /api/v1/positions (ND-1 endpoint,
+// unchanged). Mirrors streamlit_app.tab_positions_health() field-for-field:
+// same verdict icon, same R-ladder-or-plain-text fallback, same EXIT_REVIEW
+// human-decision warning, same protection/freshness/trading-days caption.
+// This component computes nothing business-critical -- assess_positions()
+// already decided every verdict/R value server-side; the R-ladder's pixel
+// placement (positions.js:computeRLadder()) is presentation math only.
+//
+// ND-6: the R-ladder is the design ruling's own "single most characteristic
+// visual in the whole product" (§2) -- given full width as each card's
+// centerpiece, a 2-up InstrumentBlock grid on desktop (stacked on mobile),
+// and a total-open-R StatTile hero above the list. Zero data/verdict logic
+// changed.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getPositions } from '../api.js';
 import { Block, Badge, badgeTone } from '../components/ui.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
+import { StatTile } from '../components/StatTile.jsx';
 import { IconArrowDownRight, IconArrowUpRight, IconShield, IconWarningTriangle } from '../components/icons.jsx';
 import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
 import { computeRLadder, verdictIcon } from '../positions.js';
@@ -20,8 +25,8 @@ const POLL_MS = 10000;
 
 // Verdict -> the tone-bearing marker color used for the R-ladder's ticks
 // (stop always reads danger, target always reads primary/success -- that
-// part is fixed regardless of verdict, same as ND-2's inline literals
-// below). Presentation-only lookup, mirrors Badge.jsx's tone table.
+// part is fixed regardless of verdict). Presentation-only lookup, mirrors
+// Badge.jsx's tone table.
 const MARK_COLOR = { stop: 'var(--red)', target: 'var(--primary)', entry: 'var(--text-dim)' };
 
 function RLadder({ stopR, entryR, currentR, targetR, verdict }) {
@@ -34,6 +39,7 @@ function RLadder({ stopR, entryR, currentR, targetR, verdict }) {
       withLabels
       tone={badgeTone(verdict)}
       pct={ladder.current.pct}
+      height={14}
       marks={ladder.ticks.map((t) => ({
         name: t.name, pct: t.pct, value: formatR(t.value), label: t.name, color: MARK_COLOR[t.name],
       }))}
@@ -52,10 +58,10 @@ function PositionCard({ p }) {
 
   return (
     <Block
-      title={null}
-      style={{ marginBottom: 10, borderColor: p.verdict === 'EXIT_REVIEW' ? 'var(--red)' : 'var(--border)' }}
+      reveal
+      style={{ height: '100%', borderColor: p.verdict === 'EXIT_REVIEW' ? 'var(--red)' : 'var(--border)' }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 15, fontWeight: 600, marginBottom: 10 }}>
         <span>{verdictIcon(p.verdict)} {p.symbol}</span>
         <Badge tone={badgeTone(p.direction)} caps><DirIcon size={12} />{p.direction}</Badge>
         <span style={{ fontSize: 12, color: 'var(--text-dim)', fontWeight: 400 }}>verdict</span>
@@ -80,7 +86,7 @@ function PositionCard({ p }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginTop: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, marginTop: 10 }}>
         thesis: <Badge tone={badgeTone(p.thesis_status)} caps>{p.thesis_status}</Badge>
       </div>
 
@@ -93,16 +99,10 @@ function PositionCard({ p }) {
       <StatFooter
         stats={[
           {
-            // audit-fixup (correctness LOW-2): the shield previously
-            // rendered neutral-colored for every status including
-            // UNPROTECTED/DEGRADED, which could read as reassuring next to
-            // a bad status. Tinted by reusing Badge's own tone->color
-            // mapping (icons.jsx's stroke="currentColor" means Badge's
-            // `color` CSS tints both the icon and the text together,
-            // never disagreeing) rather than duplicating that lookup table
-            // here -- chrome (border/background/padding) stripped via
-            // inline style so it still reads as plain footer text, not a
-            // second pill nested inside the stat row.
+            // audit-fixup (correctness LOW-2): the shield is tinted by
+            // reusing Badge's own tone->color mapping rather than a
+            // duplicate lookup, so protection never reads reassuring next
+            // to a bad status.
             label: 'protection',
             value: (
               <Badge
@@ -159,6 +159,9 @@ export default function Positions() {
 
   const unreachableMsg = describeUnreachable(unreachable, lastGoodAsOf);
 
+  const measurable = (positions ?? []).filter((p) => p.current_r !== null && p.current_r !== undefined);
+  const totalR = measurable.length ? measurable.reduce((sum, p) => sum + p.current_r, 0) : null;
+
   return (
     <div className={unreachable ? 'dim' : ''}>
       {unreachableMsg && <div className="stale-banner">{unreachableMsg}</div>}
@@ -171,7 +174,27 @@ export default function Positions() {
           <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No open positions.</div>
         </Block>
       ) : (
-        positions.map((p) => <PositionCard key={p.position_id} p={p} />)
+        <>
+          <div className="grid reveal-stagger" style={{ marginBottom: 4 }}>
+            <div className="col-12">
+              <Block>
+                <StatTile
+                  label="total open R"
+                  value={formatR(totalR)}
+                  context={`${positions.length} open position(s)${measurable.length !== positions.length ? ` · ${positions.length - measurable.length} unmeasurable` : ''}`}
+                />
+              </Block>
+            </div>
+          </div>
+
+          <div className="grid reveal-stagger">
+            {positions.map((p) => (
+              <div className="col-6" key={p.position_id}>
+                <PositionCard p={p} />
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

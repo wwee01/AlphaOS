@@ -7,7 +7,33 @@
 // is sent in the POST body (api.js's apiPost, never a URL param), and is
 // cleared via actions.js:clearedPinState() the instant a request settles,
 // success OR failure.
+//
+// ND-6: the SUBMIT logic below (nonce minting, PIN clearing on cancel/
+// success/failure, the onConfirm/onDone contract, the POST-body
+// construction happening one level up in api.js) is byte-identical to
+// ND-3/ND-4 -- design ruling §8 hard constraint #8. This pass only restyles
+// the open panel: on a narrow viewport it becomes a proper bottom sheet
+// (design ruling §6) -- a backdrop + a fixed bottom panel with a big
+// numeric PIN input and full-width confirm/cancel -- via the
+// `pin-sheet-backdrop`/`pin-sheet-panel` CSS classes (styles.css's
+// >=768px media query leaves both inert on desktop, where this renders
+// exactly as the ND-3/ND-4 inline panel always did). Touch targets bumped
+// to 44px (design ruling §6/§8 hard constraint #9) at every width.
+//
+// Rendered via a `createPortal` into `document.body` rather than inline
+// where the trigger button sits: a PinPrompt can be nested inside an
+// InstrumentBlock that opts into the one-shot reveal animation (`reveal`
+// prop, design ruling §3.5), and a CSS `transform` -- even one an
+// `animation-fill-mode` leaves frozen at `translateY(0)` after the
+// animation completes -- makes that block a new *containing block* for any
+// `position: fixed` descendant (CSS Transforms spec), which broke this
+// panel's `bottom: 0` sheet positioning on mobile (it anchored to the
+// animated card instead of the viewport). Portaling to `document.body`
+// sidesteps that entirely, on every viewport, regardless of what ancestor
+// styling exists now or later -- a pure DOM-target change, not a submit-
+// logic change.
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { clearedPinState, generateNonce } from '../actions.js';
 
 const INPUT_STYLE = {
@@ -15,9 +41,9 @@ const INPUT_STYLE = {
   color: 'var(--text)',
   border: '1px solid var(--border)',
   borderRadius: 4,
-  padding: '8px 10px',
-  fontSize: 12,
-  minHeight: 36,
+  padding: '10px 12px',
+  fontSize: 13,
+  minHeight: 44,
 };
 
 // `label`: the trigger button's text.
@@ -85,7 +111,7 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone, disabled = fa
       <button
         type="button"
         className="badge badge-caps"
-        style={{ cursor: disabled ? 'default' : 'pointer', minHeight: 36, opacity: disabled ? 0.5 : 1 }}
+        style={{ cursor: disabled ? 'default' : 'pointer', minHeight: 44, opacity: disabled ? 0.5 : 1 }}
         disabled={disabled}
         onClick={() => { setOpen(true); setMessage(null); }}
       >
@@ -94,37 +120,44 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone, disabled = fa
     );
   }
 
-  return (
-    <div
-      className="block"
-      style={{ display: 'inline-flex', flexDirection: 'column', gap: 6, padding: 8, minWidth: 180 }}
-    >
-      <div className="label-caps">{label}</div>
-      {extraFields}
-      <input
-        type="password"
-        inputMode="numeric"
-        autoComplete="off"
-        placeholder="PIN"
-        value={pin}
-        onChange={(e) => setPin(e.target.value)}
-        style={{ ...INPUT_STYLE, width: '100%' }}
-      />
-      <div style={{ display: 'flex', gap: 6 }}>
-        <button
-          type="button"
-          className="badge badge-ok badge-caps"
-          style={{ cursor: pin && !busy ? 'pointer' : 'default', opacity: pin && !busy ? 1 : 0.5 }}
-          disabled={busy || !pin}
-          onClick={submit}
-        >
-          {busy ? 'working…' : 'confirm'}
-        </button>
-        <button type="button" className="badge badge-caps" style={{ cursor: 'pointer' }} disabled={busy} onClick={cancel}>
-          cancel
-        </button>
+  return createPortal(
+    <>
+      {/* Inert on desktop (styles.css only gives this a visual treatment
+          under the mobile media query); tapping it cancels, same as the
+          Cancel button. */}
+      <div className="pin-sheet-backdrop" onClick={cancel} aria-hidden="true" />
+      <div
+        className="block pin-sheet-panel"
+        style={{ display: 'inline-flex', flexDirection: 'column', gap: 8, padding: 10, minWidth: 200 }}
+      >
+        <div className="label-caps">{label}</div>
+        {extraFields}
+        <input
+          type="password"
+          inputMode="numeric"
+          autoComplete="off"
+          placeholder="PIN"
+          value={pin}
+          onChange={(e) => setPin(e.target.value)}
+          style={{ ...INPUT_STYLE, width: '100%' }}
+        />
+        <div className="pin-sheet-actions" style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            className="badge badge-ok badge-caps"
+            style={{ cursor: pin && !busy ? 'pointer' : 'default', opacity: pin && !busy ? 1 : 0.5, minHeight: 44 }}
+            disabled={busy || !pin}
+            onClick={submit}
+          >
+            {busy ? 'working…' : 'confirm'}
+          </button>
+          <button type="button" className="badge badge-caps" style={{ cursor: 'pointer', minHeight: 44 }} disabled={busy} onClick={cancel}>
+            cancel
+          </button>
+        </div>
+        {message && <div style={{ fontSize: 11, color: 'var(--red)' }}>{message}</div>}
       </div>
-      {message && <div style={{ fontSize: 11, color: 'var(--red)' }}>{message}</div>}
-    </div>
+    </>,
+    document.body,
   );
 }

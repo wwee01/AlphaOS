@@ -31,8 +31,35 @@
   --amber: #ffb873;
   --red: #ef4444;
 
+  /* ND-6: the two permitted new tokens (design ruling §3.1) -- a dim
+     indigo/violet "shadow-tier" accent used ONLY to tint measurement-only
+     surfaces (TQS/attribution/hypotheses/canary; hard constraint #5), and a
+     single very-faint radial ambient wash behind the page (never a second
+     competing gradient, low enough alpha that body-text contrast is
+     untouched -- verified against WCAG AA below). Semantic meaning of the
+     LOCKED palette is unchanged: cyan=good/armed-safe, amber=attention,
+     red=critical/stop. */
+  --shadow-tier: #8b8bd9;
+  --shadow-tier-border: rgba(139, 139, 217, 0.4);
+  --shadow-tier-bg: rgba(139, 139, 217, 0.07);
+
   --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+
+  /* ND-6 spacing scale (design ruling §3.3) -- consistent gap steps used via
+     flex/grid `gap`, replacing ad-hoc margins in new composition. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  /* ND-6 type scale (design ruling §3.2) -- the "display numeral" hero
+     moment shared by every view's StatTile. */
+  --fs-display: 40px;
+  --fs-headline: 18px;
+  --fs-body: 14px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -44,10 +71,46 @@ html, body {
   min-height: 100vh;
 }
 
-#root { max-width: 1200px; margin: 0 auto; padding: 40px 16px 48px; }
+/* ND-6 ambient depth (design ruling §3.1) -- one faint radial wash anchored
+   behind the masthead, fixed so it never scrolls with content, alpha low
+   enough (0.05) that it reads as atmosphere, not a second visible gradient
+   competing with instrument-block borders. `background-attachment: fixed`
+   is dropped on narrow/touch viewports below (perf + iOS Safari quirks),
+   the wash itself stays identical. */
+body {
+  background-image: radial-gradient(ellipse 1400px 700px at 50% -8%, rgba(76, 215, 246, 0.055), transparent 60%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* ND-6: widen the desktop canvas (design ruling §3.3) -- a Mac mini external
+   display comfortably fills 1440-1600px; the old 1200px cap stranded a huge
+   gutter. Content padding still keyed to the spacing scale. */
+#root { max-width: 1600px; margin: 0 auto; padding: var(--sp-8) var(--sp-4) 80px; }
 
 a { color: var(--primary); text-decoration: none; }
 button { cursor: pointer; border: none; background: none; font-family: inherit; color: inherit; }
+
+/* ND-6 accessibility (hard constraint #9) -- a visible keyboard focus ring
+   on every interactive element, using the primary token so it reads as
+   "armed/active" rather than a generic browser blue. `:focus-visible` so a
+   mouse click never shows the ring, only keyboard/assistive navigation. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+h1, h2, h3 { text-wrap: balance; }
+
+/* ND-6 reading measure (design ruling §3.2) -- prose blocks (Tonight's
+   brief sentences, invalidation reasons) are capped so a wide desktop
+   instrument block never runs a paragraph the full width of a 27" display. */
+.prose { max-width: 68ch; }
 
 .num {
   font-family: var(--mono);
@@ -70,15 +133,15 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--surface-container);
-  padding: 12px 14px;
+  padding: var(--sp-3) var(--sp-4);
 }
 
 .block-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
 }
 
 /* Static badges only -- no @keyframes, no pulse/blink anywhere in this file
@@ -132,7 +195,7 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 .grid {
   display: grid;
   grid-template-columns: repeat(12, 1fr);
-  gap: 4px;
+  gap: var(--sp-4) var(--sp-3);
 }
 .col-4 { grid-column: span 4; }
 .col-6 { grid-column: span 6; }
@@ -141,7 +204,6 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 
 @media (max-width: 720px) {
   .col-4, .col-6, .col-8, .col-12 { grid-column: span 12; }
-  #root { padding: 20px 12px 40px; }
 }
 
 /* ND-2: a plain data table for list-shaped API payloads (Decisions/Learning/
@@ -328,26 +390,40 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   text-overflow: ellipsis;
 }
 
-/* ND-visual: masthead -- wordmark + compact system-status readout (the
-   existing Annunciator, restyled in place, not refetched) + the nav tab
-   strip, wrapped as one visually cohesive top bar (mockups' top-bar weight)
-   instead of ND-2's bare flex header. */
+/* ND-6: the masthead (design ruling §4) -- a real sticky top bar. Left:
+   wordmark + live clock. Then the annunciator (components/Annunciator.jsx,
+   now presentational -- data/poll owned by useAnnunciator.js and rendered
+   once here) carrying the ONE kill-switch control in this console. Then the
+   nav tab strip. Sticky so mode/kill-switch/nav stay reachable without
+   scrolling on a long System/Learning page. A whisper of shadow is
+   permitted here (design ruling §3.1 "a whisper of shadow is fine for the
+   masthead and modals") -- the only shadow-bearing surface in this file. */
 .masthead {
-  margin-bottom: 16px;
-  padding-bottom: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  margin: calc(-1 * var(--sp-8)) calc(-1 * var(--sp-4)) var(--sp-4);
+  padding: var(--sp-3) var(--sp-4) var(--sp-3);
+  /* Fully opaque, deliberately -- this bar carries the kill-switch control,
+     so scrolled content must never show through it even faintly (a
+     translucent/blurred header here would be exactly the kind of "fancy at
+     the expense of legibility" the design ruling's §7 guardrail forbids on
+     a safety-critical control). */
+  background: var(--bg);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
 }
 .masthead-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 10px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
 }
 .masthead-brand {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: var(--sp-3);
 }
 .wordmark {
   font-family: var(--mono);
@@ -355,6 +431,18 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   font-weight: 700;
   letter-spacing: 0.08em;
   color: var(--primary);
+}
+.masthead-clock {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+/* The mobile "expand full annunciator" toggle -- hidden entirely on
+   desktop, where the full strip is always visible (see the >=769px rule
+   overriding .annunciator-shell below). */
+.masthead-expand-toggle {
+  display: none;
 }
 /* nav-tabs sits nested inside .masthead here -- the masthead's own
    border-bottom/padding-bottom already closes the unit, so the tab strip's
@@ -367,13 +455,300 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 }
 
 /* ND-3's annunciator strip (components/Annunciator.jsx) -- unchanged
-   fields/polling, now nested in the masthead unit above the nav tabs. */
+   fields/polling logic (now sourced from hooks/useAnnunciator.js), restyled
+   here into a primary/secondary hierarchy (design ruling §4: "mode and
+   kill-switch are primary... then autonomy, heartbeat, open-R,
+   approvals-pending as secondary chips"). */
 .annunciator-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
-  margin-bottom: 10px;
+}
+.annunciator-primary {
+  font-size: 13px;
+  padding: 6px 12px;
+  font-weight: 700;
+}
+.annunciator-secondary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  width: 100%;
+  margin-top: var(--sp-1);
+}
+
+/* ND-6 shadow-tier treatment (design ruling §3.4/§8 hard constraint #5) --
+   applied to any InstrumentBlock with tone="shadow" (Learning's whole view;
+   Approvals' TQS line stays plain text, per that view's own direction).
+   Distinguishes "being measured, not acted on" from a live control/value
+   at a glance: dim indigo border + a faint indigo tint, never the cyan/
+   amber/red vocabulary reserved for live state. */
+.block-shadow {
+  border-color: var(--shadow-tier-border);
+  background: linear-gradient(var(--shadow-tier-bg), var(--shadow-tier-bg)), var(--surface-container);
+}
+.shadow-tag {
+  font-family: var(--sans);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--shadow-tier);
+  border: 1px solid var(--shadow-tier-border);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+.block-footer {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+
+/* ND-6 StatTile (design ruling §3.4) -- the big-number hero moment, one per
+   view. Mono/tabular per the type scale; the label sits above in
+   label-caps, an optional context line below. */
+.stat-tile { display: flex; flex-direction: column; gap: 2px; }
+.stat-tile-label { margin-bottom: 2px; }
+.stat-tile-value {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.05;
+}
+.stat-tile-lg { font-size: var(--fs-display); }
+.stat-tile-md { font-size: 24px; }
+.stat-tile-unit {
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-dim);
+  margin-left: 6px;
+}
+.stat-tile-context {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* ND-6 Funnel (design ruling §3.4/§5 Decisions) -- horizontal proportional
+   bars, widest-stage-relative (funnel.js:computeFunnelStages), never a bare
+   count table. */
+.funnel { display: flex; flex-direction: column; gap: var(--sp-2); }
+.funnel-row {
+  display: grid;
+  grid-template-columns: 120px 1fr 56px;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.funnel-row-track {
+  height: 20px;
+  background: var(--surface-low);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+.funnel-row-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: none; /* §13 calm console -- fill paints once per poll, no ticking transition */
+}
+.funnel-row-unknown {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 8px;
+  line-height: 18px;
+}
+.funnel-row-value { text-align: right; font-size: 12px; }
+
+/* ND-6 Sparkline (design ruling §3.4) -- tiny inline SVG, ONLY where a real
+   series exists (sparkline.js:computeSparklinePoints returns null otherwise
+   -- the component then renders the honest text fallback below, never a
+   fabricated flat line). */
+.sparkline { display: block; overflow: visible; }
+.sparkline-unavailable { font-size: 11px; color: var(--text-dim); padding: 6px 0; }
+
+/* ND-6 motion (design ruling §3.5) -- tasteful ONE-SHOT only, all gated on
+   prefers-reduced-motion below. Page-load stagger reveal on instrument
+   blocks (React remounts each view via App.jsx's `key={active.key}`, so
+   this replays once per view-switch -- a discrete user-caused transition,
+   never a continuous idle animation) and a one-shot value-change flash
+   (components/StatTile.jsx toggles `.value-flash` for 600ms then removes
+   it -- it never loops). Explicitly no @keyframes anywhere else in this
+   file: no pulse, no blink, no breathing glow. */
+@keyframes reveal-fade-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.reveal {
+  animation: reveal-fade-rise 220ms ease-out both;
+}
+.reveal-stagger > * { animation: reveal-fade-rise 220ms ease-out both; }
+.reveal-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.reveal-stagger > *:nth-child(2) { animation-delay: 30ms; }
+.reveal-stagger > *:nth-child(3) { animation-delay: 60ms; }
+.reveal-stagger > *:nth-child(4) { animation-delay: 90ms; }
+.reveal-stagger > *:nth-child(5) { animation-delay: 120ms; }
+.reveal-stagger > *:nth-child(6) { animation-delay: 150ms; }
+.reveal-stagger > *:nth-child(n+7) { animation-delay: 180ms; }
+
+@keyframes value-flash-anim {
+  from { background-color: rgba(76, 215, 246, 0.22); border-radius: 4px; }
+  to { background-color: rgba(76, 215, 246, 0); border-radius: 4px; }
+}
+.value-flash { animation: value-flash-anim 600ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .reveal-stagger > *,
+  .value-flash {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ND-6: PinPrompt's open panel is portaled to `document.body` (see
+   PinPrompt.jsx's own docstring for why -- a `position:fixed` descendant
+   inside a `reveal`-animated InstrumentBlock was anchoring to that block
+   instead of the viewport), so it needs a real position at EVERY width, not
+   only under the mobile media query below. Desktop/tablet default: a small
+   centered modal (backdrop + a fixed, vertically-centered panel). The
+   >=768px mobile query further down overrides this into the bottom-sheet
+   treatment (design ruling §6). */
+.pin-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 49;
+}
+.pin-sheet-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 50;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  max-width: calc(100vw - 32px);
+}
+
+/* ND-6 mobile bottom tab bar + PIN bottom sheet + masthead collapse
+   (design ruling §6). 768px is the tablet/phone split -- Mac mini external
+   display stays >=1440px in practice, this breakpoint only ever engages on
+   an actual phone/narrow-window viewport. */
+@media (max-width: 768px) {
+  #root { padding: var(--sp-3) var(--sp-3) calc(72px + env(safe-area-inset-bottom) + var(--sp-3)); }
+
+  .masthead {
+    margin: calc(-1 * var(--sp-3)) calc(-1 * var(--sp-3)) var(--sp-3);
+    padding: calc(var(--sp-2) + env(safe-area-inset-top)) var(--sp-3) var(--sp-2);
+  }
+  .masthead-expand-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 32px;
+    padding: 4px 10px;
+  }
+  /* Collapsed by default on mobile: the full annunciator (and the ONE
+     kill-switch control it carries) is one tap away via the toggle above,
+     never hidden behind more than that single tap (design ruling §4:
+     "kill-switch stays reachable without scrolling"). */
+  .annunciator-shell {
+    max-height: 0;
+    overflow: hidden;
+  }
+  .annunciator-shell-expanded {
+    max-height: 600px;
+    overflow: visible;
+    margin-top: var(--sp-2);
+  }
+
+  /* Nav tabs move to a fixed bottom bar -- thumb-reachable, horizontally
+     scrollable (7 tabs at a comfortable touch width don't all fit at
+     390px), safe-area-aware. The masthead's own top-of-page nav-tabs are
+     hidden on mobile (App.jsx renders the SAME tab data twice -- top strip
+     for desktop, bottom bar for mobile -- CSS chooses which is visible). */
+  .masthead .nav-tabs.nav-tabs-top { display: none; }
+  .nav-tabs-bottom {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 45;
+    display: flex;
+    overflow-x: auto;
+    scroll-snap-type: x proximity;
+    gap: 0;
+    /* Fully opaque -- same reasoning as .masthead above: this bar is the
+       mobile nav (and sits directly above the kill-switch-bearing
+       masthead's expand toggle), never a translucent surface a scrolled
+       value could show through. */
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
+  }
+  .nav-tab-bottom {
+    scroll-snap-align: start;
+    flex: none;
+    min-width: 68px;
+    min-height: 52px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim);
+    padding: 6px 4px;
+    border-radius: 6px;
+  }
+  .nav-tab-bottom.nav-tab-active { color: var(--primary); }
+
+  /* PIN prompt becomes a proper bottom sheet (design ruling §6): big
+     numeric input, large confirm/cancel, safe-area padding. Logic in
+     PinPrompt.jsx is untouched -- these classes only reposition/resize the
+     SAME markup. Overrides the centered-modal base above: anchor to the
+     bottom edge instead of vertical-center. */
+  .pin-sheet-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    transform: none;
+    border-radius: 14px 14px 0 0;
+    padding: var(--sp-4) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom)) !important;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.45);
+    min-width: 0 !important;
+    max-width: none;
+    width: 100%;
+  }
+  .pin-sheet-panel input[type='password'] {
+    font-size: 20px !important;
+    min-height: 52px !important;
+    text-align: center;
+    letter-spacing: 0.3em;
+  }
+  .pin-sheet-panel .pin-sheet-actions {
+    flex-direction: column !important;
+  }
+  .pin-sheet-panel .pin-sheet-actions button {
+    min-height: 48px !important;
+    width: 100%;
+    justify-content: center;
+    font-size: 13px !important;
+  }
+}
+
+/* >=769px: the mobile collapse/expand classes never apply -- the full
+   annunciator (masthead) is always visible, and the bottom tab bar never
+   renders visually (App.jsx still emits it in the DOM for a11y/consistency,
+   this just keeps it off-screen on anything wider than a phone). */
+@media (min-width: 769px) {
+  .annunciator-shell,
+  .annunciator-shell-expanded { max-height: none; overflow: visible; }
+  .nav-tabs-bottom { display: none; }
 }
 
 /* ND-2 mobile pass (UX doc §16, "Design, by principle") -- 480px is the
@@ -382,25 +757,11 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
    condenses (smaller badges, tighter gaps) but every field stays present,
    never hidden; nav tabs keep their >=44px touch target (already true
    above, unchanged here); R-ladders/TTL bars keep full label text at every
-   width (no icon-only state introduced here). Zero new elements, zero new
-   JS -- CSS only. */
+   width (no icon-only state introduced here). */
 @media (max-width: 480px) {
-  #root { padding: 12px 10px 32px; }
-
   .badge {
     font-size: 11px;
     padding: 3px 7px;
-    gap: 4px;
-  }
-
-  .nav-tabs {
-    gap: 0;
-    overflow-x: auto;
-    flex-wrap: nowrap;
-  }
-  .nav-tab {
-    padding: 10px 8px;
-    font-size: 11px;
     gap: 4px;
   }
 
@@ -416,5 +777,9 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 
   .wordmark { font-size: 15px; }
 
+  .stat-tile-lg { font-size: 30px; }
+
   .stat-footer { grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 8px 12px; }
+
+  .funnel-row { grid-template-columns: 84px 1fr 44px; gap: var(--sp-2); }
 }

@@ -138,6 +138,15 @@ export function IconBook(props) {
   );
 }
 
+// ND-6: masthead mobile "expand full annunciator" toggle chevron.
+export function IconChevronDown(props) {
+  return (
+    <Svg {...props}>
+      <path d="M5 8.5 12 15.5 19 8.5" />
+    </Svg>
+  );
+}
+
 export function IconGear(props) {
   return (
     <Svg {...props}>
