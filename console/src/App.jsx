@@ -14,7 +14,7 @@ import Decisions from './pages/Decisions.jsx';
 import Learning from './pages/Learning.jsx';
 import Governance from './pages/Governance.jsx';
 import System from './pages/System.jsx';
-import Annunciator from './components/Annunciator.jsx';
+import Masthead from './components/Masthead.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import {
   IconBars, IconBook, IconCheckShield, IconFunnel, IconGear, IconMoon, IconShield,
@@ -37,35 +37,16 @@ export default function App() {
 
   return (
     <>
-      {/* ND-visual: the masthead -- wordmark + the ND-3 global annunciator
-          (restyled in place below, not refetched -- see Annunciator.jsx's
-          own docstring) + the nav tab strip, wrapped as one visually
-          cohesive top bar instead of ND-2's bare flex header. */}
-      <header className="masthead">
-        <div className="masthead-top">
-          <div className="masthead-brand">
-            <span className="wordmark">ALPHAOS</span>
-            <span className="label-caps">console · ND-3</span>
-          </div>
-        </div>
+      {/* ND-6: the masthead -- wordmark + live clock, the annunciator (mode/
+          kill-switch as primary lamps, everything else secondary -- design
+          ruling §4), and the nav tab strip (desktop top rail + mobile
+          bottom tab bar), composed in components/Masthead.jsx. */}
+      <Masthead views={VIEWS} activeKey={view} onSelect={setView} />
 
-        <Annunciator />
-
-        <nav className="nav-tabs">
-          {VIEWS.map((v) => (
-            <button
-              key={v.key}
-              type="button"
-              className={`nav-tab${v.key === view ? ' nav-tab-active' : ''}`}
-              onClick={() => setView(v.key)}
-            >
-              <v.Icon size={13} />
-              {v.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-
+      {/* Each page's own `.grid` (or card list) carries the
+          `reveal-stagger` class (design ruling §3.5) -- remounting via
+          `key={active.key}` on every tab switch replays the one-shot
+          page-load reveal once per switch, never continuously. */}
       <ErrorBoundary key={active.key}>
         <ActiveComponent />
       </ErrorBoundary>

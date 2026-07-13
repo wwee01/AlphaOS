@@ -3,12 +3,19 @@
 // tab_governance() layout (autonomy + hard limits side by side, kill
 // switch + real-money lock side by side, trading calendar full-width).
 // PURE READ, zero controls -- the only kill-switch CONTROL in this console
-// lives in the global annunciator strip (components/Annunciator.jsx,
-// rendered by App.jsx on every page as of ND-3; Tonight-only in ND-1/ND-2).
-// This page only EXPLAINS the same state, never a second control surface.
+// lives in the masthead (components/Annunciator.jsx, rendered by
+// components/Masthead.jsx on every page). This page only EXPLAINS the same
+// state, never a second control surface (hard constraint #6).
+//
+// ND-6: recomposed as an authoritative "spec sheet" (design ruling §5) --
+// same five panels, restyled with the instrument-block hierarchy and an
+// autonomy-level StatTile hero. The real-money lock panel deliberately has
+// NO interactive element anywhere in it (hard constraint #6: "no unlock
+// affordance").
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getGovernance } from '../api.js';
 import { Badge, Block } from '../components/ui.jsx';
+import { StatTile } from '../components/StatTile.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 
 const POLL_MS = 15000;
@@ -16,11 +23,9 @@ const POLL_MS = 15000;
 function AutonomyPanel({ autonomy }) {
   return (
     <Block title="Autonomy">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
-        Level: <Badge tone="ok" caps>{autonomy.level_label}</Badge>
-      </div>
-      <div style={{ fontSize: 13, marginBottom: 4 }}>{autonomy.may_alone}</div>
-      <div style={{ fontSize: 13, marginBottom: 8 }}>{autonomy.may_not_alone}</div>
+      <StatTile label="level" value={autonomy.level_label} size="md" tone="primary" />
+      <div className="prose" style={{ fontSize: 13, margin: '12px 0 4px' }}>{autonomy.may_alone}</div>
+      <div className="prose" style={{ fontSize: 13, marginBottom: 8 }}>{autonomy.may_not_alone}</div>
       {autonomy.unattended_exception ? (
         <div className="stale-banner" style={{ borderColor: 'var(--border)', background: 'var(--surface-low)', color: 'var(--text)' }}>
           {autonomy.unattended_exception.text}
@@ -30,14 +35,17 @@ function AutonomyPanel({ autonomy }) {
           No unattended close-window exception armed (UNATTENDED_APPROVE_WINDOWS unset or its daily cap is 0).
         </div>
       )}
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>L2: {autonomy.l2_status}</div>
+      <div className="block-footer" style={{ fontSize: 11, color: 'var(--text-dim)' }}>L2: {autonomy.l2_status}</div>
     </Block>
   );
 }
 
 function HardLimitsPanel({ hl }) {
   const row = (label, value) => (
-    <div style={{ fontSize: 13, marginBottom: 4 }}>{label}: <span className="num">{value}</span></div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 13, padding: '4px 0', borderBottom: '1px solid var(--border)' }}>
+      <span style={{ color: 'var(--text-dim)' }}>{label}</span>
+      <span className="num" style={{ textAlign: 'right' }}>{value}</span>
+    </div>
   );
   return (
     <Block title="Hard limits (read-only)">
@@ -52,17 +60,19 @@ function HardLimitsPanel({ hl }) {
       {row('Bear-debate calls', `${hl.debate_calls_used_today}/${hl.debate_calls_cap_today} today`)}
       {row('Hypothesis-gen calls', `${hl.hypothesis_gen_calls_used_today}/${hl.hypothesis_gen_calls_cap_today} today`)}
       {row('Max paper trades/day', `${hl.max_paper_trades_per_day_display} (used ${hl.paper_trades_used_today} today)`)}
-      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 8 }}>{hl.changes_note}</div>
+      <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10 }}>{hl.changes_note}</div>
     </Block>
   );
 }
 
 function KillSwitchPanel({ ks }) {
   return (
-    <Block title="Kill switch">
-      <Badge tone={ks.engaged ? 'danger' : 'ok'}>● {ks.state_label}{ks.engaged ? ` — ${ks.reason ?? 'no reason recorded'}` : ''}</Badge>
-      <div style={{ fontSize: 13, margin: '8px 0' }}>{ks.explanation}</div>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{ks.control_note}</div>
+    <Block title="Kill switch (state only — control is in the masthead)">
+      <Badge tone={ks.engaged ? 'danger' : 'ok'} style={{ fontSize: 13, padding: '6px 12px' }}>
+        ● {ks.state_label}{ks.engaged ? ` — ${ks.reason ?? 'no reason recorded'}` : ''}
+      </Badge>
+      <div className="prose" style={{ fontSize: 13, margin: '10px 0' }}>{ks.explanation}</div>
+      <div className="block-footer" style={{ fontSize: 11, color: 'var(--text-dim)' }}>{ks.control_note}</div>
     </Block>
   );
 }
@@ -70,11 +80,13 @@ function KillSwitchPanel({ ks }) {
 function RealMoneyLockPanel({ lock }) {
   return (
     <Block title="Real-money lock">
-      <div style={{ fontSize: 13, marginBottom: 6 }}>🔒 {lock.structural_statement}</div>
-      <div className="num" style={{ fontSize: 12, marginBottom: 8 }}>
+      <div style={{ fontSize: 13, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Badge tone="danger" caps>locked</Badge> {lock.structural_statement}
+      </div>
+      <div className="num" style={{ fontSize: 12, marginBottom: 8, color: 'var(--text-dim)' }}>
         REAL_TRADING_ENABLED={lock.real_trading_enabled_raw} · ALLOW_REAL_ORDERS={lock.allow_real_orders_raw} · mode={lock.mode}
       </div>
-      <div style={{ fontSize: 11, color: 'var(--text-dim)' }}>{lock.no_unlock_note}</div>
+      <div className="block-footer" style={{ fontSize: 11, color: 'var(--text-dim)' }}>{lock.no_unlock_note}</div>
     </Block>
   );
 }
@@ -84,7 +96,7 @@ function TradingCalendarPanel({ cal }) {
   return (
     <Block title="Trading calendar">
       <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-        Today ({cal.today_et} ET): {dayState} · scan windows: {cal.scan_windows_label} · {cal.note}
+        Today ({cal.today_et} ET): <span style={{ color: cal.is_trading_day ? 'var(--primary)' : 'var(--text)' }}>{dayState}</span> · scan windows: {cal.scan_windows_label} · {cal.note}
       </div>
     </Block>
   );
@@ -129,12 +141,12 @@ export default function Governance() {
       ) : (
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
-          <div className="grid">
+          <div className="grid reveal-stagger">
             <div className="col-6"><AutonomyPanel autonomy={data.autonomy} /></div>
             <div className="col-6"><HardLimitsPanel hl={data.hard_limits} /></div>
-            <div className="col-6" style={{ marginTop: 4 }}><KillSwitchPanel ks={data.kill_switch} /></div>
-            <div className="col-6" style={{ marginTop: 4 }}><RealMoneyLockPanel lock={data.real_money_lock} /></div>
-            <div className="col-12" style={{ marginTop: 4 }}><TradingCalendarPanel cal={data.trading_calendar} /></div>
+            <div className="col-6"><KillSwitchPanel ks={data.kill_switch} /></div>
+            <div className="col-6"><RealMoneyLockPanel lock={data.real_money_lock} /></div>
+            <div className="col-12"><TradingCalendarPanel cal={data.trading_calendar} /></div>
           </div>
         </>
       )}

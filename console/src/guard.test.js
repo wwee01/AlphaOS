@@ -75,6 +75,19 @@ describe('quarantine-the-script guard (ND-visual pass) -- console/src', () => {
     expect(srcFiles.length).toBeGreaterThan(5);
   });
 
+  // ND-6: the walk is recursive (walk() above calls itself into every
+  // subdirectory) so it automatically covers new surfaces without a
+  // per-directory allowlist -- this sanity check pins that down explicitly
+  // for the new components/hooks added this pass (Masthead, InstrumentBlock,
+  // StatTile, Funnel, Sparkline, hooks/useAnnunciator), so a future refactor
+  // of walk() that accidentally stops recursing gets caught here.
+  it('the recursive walk covers the ND-6 components/ and hooks/ additions', () => {
+    const names = srcFiles.map((f) => path.basename(f));
+    for (const expected of ['Masthead.jsx', 'InstrumentBlock.jsx', 'StatTile.jsx', 'Funnel.jsx', 'Sparkline.jsx', 'useAnnunciator.js']) {
+      expect(names).toContain(expected);
+    }
+  });
+
   for (const banned of BANNED_STRINGS) {
     it(`never contains the fabricated mockup string "${banned}"`, () => {
       const hits = readAll(srcFiles).filter(({ text }) => text.includes(banned)).map((h) => h.file);

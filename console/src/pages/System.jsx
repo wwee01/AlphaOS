@@ -1,13 +1,20 @@
 // ND-2 System & Audit page -- renders /api/v1/system (+ the trade-packet
 // drill-down at /api/v1/system/trade-packet). Consolidates the 5 Streamlit
-// tabs the plan doc names (tab_system_health, tab_trade_packet,
-// tab_scan_batches, tab_scheduler_runs, tab_system_events) into ONE view
-// with a simple segmented sub-view selector -- plain useState, no router,
-// matching this project's "don't over-engineer" house style (ND-2 plan doc:
-// "a simple sub-tab or segmented selector within the one page is fine").
+// tabs the plan doc names into ONE view with a simple segmented sub-view
+// selector -- plain useState, no router, matching this project's "don't
+// over-engineer" house style.
+//
+// ND-6: adds a Sparkline of scan-batch cadence (candidates_found per batch)
+// to the Batches panel -- the one place on this console a real ordered
+// series exists (design ruling §3.4/§5). `scan_batches` is returned
+// newest-first (same convention as recent_events/the Journal feed
+// elsewhere in this app), so the series is reversed to chronological
+// (oldest-to-newest, left-to-right) purely for the chart; the table below
+// it keeps the API's own newest-first row order unchanged.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getSystem, getTradePacket } from '../api.js';
 import { Badge, Block, DataTable } from '../components/ui.jsx';
+import { Sparkline } from '../components/Sparkline.jsx';
 import { IconCheck, IconWarningTriangle } from '../components/icons.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 
@@ -23,137 +30,162 @@ function HealthPanel({ health, startupChecks }) {
   const lf = health.labeller_failsafe;
   const pw = health.protection_watchdog;
   return (
-    <>
-      <Block title="System Health">
-        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>Playbook: {health.playbook}</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
-          <span className="badge num">approval {health.manual_approval}</span>
-          <span className="badge num">real-money {health.real_money_trading}</span>
-          <span className="badge num">market data {health.market_data_provider}/{health.market_data_feed} ({health.market_data_mode})</span>
-          <span className="badge num">freshness {health.market_data_freshness}</span>
-          <span className="badge num">execution {health.execution_provider}</span>
-          <Badge tone={health.kill_switch === 'ENGAGED' ? 'danger' : 'ok'}>kill switch {health.kill_switch}</Badge>
-          <span className="badge num">open positions {health.open_positions}</span>
-          <span className="badge num">broker connected {health.broker_connected ? 'yes' : 'no'}</span>
-        </div>
-        <div className="label-caps" style={{ marginBottom: 6 }}>layers (mocked / deferred / disabled / live)</div>
-        <div className="num" style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.8 }}>
-          AI primary: {health.ai_primary} · AI reviewer: {health.ai_reviewer} · News: {health.news_provider} ·
-          Benzinga: {health.benzinga} · Web scraper: {health.web_scraper} · Massive: {health.massive} ·
-          last30days: {health.last30days_research} · label override: {health.labeller_decision_override} ·
-          last30days polarity: {health.last30days_polarity} · real Alpaca paper: {health.real_alpaca_paper_execution}
-        </div>
-      </Block>
+    <div className="grid reveal-stagger">
+      <div className="col-12">
+        <Block title="System Health">
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>Playbook: {health.playbook}</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+            <span className="badge num">approval {health.manual_approval}</span>
+            <span className="badge num">real-money {health.real_money_trading}</span>
+            <span className="badge num">market data {health.market_data_provider}/{health.market_data_feed} ({health.market_data_mode})</span>
+            <span className="badge num">freshness {health.market_data_freshness}</span>
+            <span className="badge num">execution {health.execution_provider}</span>
+            <Badge tone={health.kill_switch === 'ENGAGED' ? 'danger' : 'ok'}>kill switch {health.kill_switch}</Badge>
+            <span className="badge num">open positions {health.open_positions}</span>
+            <span className="badge num">broker connected {health.broker_connected ? 'yes' : 'no'}</span>
+          </div>
+          <div className="label-caps" style={{ marginBottom: 6 }}>layers (mocked / deferred / disabled / live)</div>
+          <div className="num" style={{ fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.8 }}>
+            AI primary: {health.ai_primary} · AI reviewer: {health.ai_reviewer} · News: {health.news_provider} ·
+            Benzinga: {health.benzinga} · Web scraper: {health.web_scraper} · Massive: {health.massive} ·
+            last30days: {health.last30days_research} · label override: {health.labeller_decision_override} ·
+            last30days polarity: {health.last30days_polarity} · real Alpaca paper: {health.real_alpaca_paper_execution}
+          </div>
+        </Block>
+      </div>
 
-      <Block title="AI labeller health" style={{ marginTop: 4 }}>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-          <span className="badge num">labels (recent) {lf.total}</span>
-          <span className="badge num">fail-safe {lf.fail_safe}</span>
-          <span className="badge num">fail-safe rate {Math.round((lf.fail_safe_rate ?? 0) * 100)}%</span>
-        </div>
-        {lf.message && (
-          <div style={{ fontSize: 12, color: lf.level === 'critical' ? 'var(--red)' : 'var(--amber)' }}>{lf.message}</div>
-        )}
-      </Block>
+      <div className="col-6">
+        <Block title="AI labeller health" style={{ height: '100%' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+            <span className="badge num">labels (recent) {lf.total}</span>
+            <span className="badge num">fail-safe {lf.fail_safe}</span>
+            <span className="badge num">fail-safe rate {Math.round((lf.fail_safe_rate ?? 0) * 100)}%</span>
+          </div>
+          {lf.message && (
+            <div style={{ fontSize: 12, color: lf.level === 'critical' ? 'var(--red)' : 'var(--amber)' }}>{lf.message}</div>
+          )}
+        </Block>
+      </div>
 
-      <Block title="Protection watchdog" style={{ marginTop: 4 }}>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-          <span className="badge num">broker-managed positions {pw.checked}</span>
-          <span className="badge num">unprotected/mismatched {pw.unprotected + pw.closed_mismatch}</span>
-          <span className="badge num">open incidents {pw.open_incident_count}</span>
-        </div>
-        {pw.blocking ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--red)' }}>
-            <IconWarningTriangle size={13} /> NEW ENTRIES BLOCKED: {pw.blocking_detail}
+      <div className="col-6">
+        <Block title="Protection watchdog" style={{ height: '100%' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+            <span className="badge num">broker-managed positions {pw.checked}</span>
+            <span className="badge num">unprotected/mismatched {pw.unprotected + pw.closed_mismatch}</span>
+            <span className="badge num">open incidents {pw.open_incident_count}</span>
           </div>
-        ) : pw.degraded > 0 ? (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--amber)' }}>
-            <IconWarningTriangle size={13} /> {pw.degraded} position(s) degraded (target leg missing, stop still live) — not blocking.
-          </div>
-        ) : (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--primary)' }}>
-            <IconCheck size={13} /> {pw.summary_label ?? 'all protected'}
-          </div>
-        )}
-      </Block>
+          {pw.blocking ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--red)' }}>
+              <IconWarningTriangle size={13} /> NEW ENTRIES BLOCKED: {pw.blocking_detail}
+            </div>
+          ) : pw.degraded > 0 ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--amber)' }}>
+              <IconWarningTriangle size={13} /> {pw.degraded} position(s) degraded (target leg missing, stop still live) — not blocking.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--primary)' }}>
+              <IconCheck size={13} /> {pw.summary_label ?? 'all protected'}
+            </div>
+          )}
+        </Block>
+      </div>
 
-      <Block title="Startup safety checks" style={{ marginTop: 4 }}>
-        {startupChecks.map((c) => (
-          <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: c.ok ? 'var(--primary)' : 'var(--red)', padding: '2px 0' }}>
-            {c.ok ? <IconCheck size={13} /> : <IconWarningTriangle size={13} />} {c.name}: {c.detail}
-          </div>
-        ))}
-      </Block>
-    </>
+      <div className="col-12">
+        <Block title="Startup safety checks">
+          {startupChecks.map((c) => (
+            <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: c.ok ? 'var(--primary)' : 'var(--red)', padding: '3px 0' }}>
+              {c.ok ? <IconCheck size={13} /> : <IconWarningTriangle size={13} />} {c.name}: {c.detail}
+            </div>
+          ))}
+        </Block>
+      </div>
+    </div>
   );
 }
 
 function EventsPanel({ snapshots, events }) {
   return (
-    <>
-      <Block title="Recent data freshness">
-        <DataTable
-          columns={[
-            { key: 'symbol', label: 'symbol' },
-            { key: 'provider', label: 'provider' },
-            { key: 'freshness_status', label: 'freshness' },
-            { key: 'is_usable', label: 'usable', numeric: true },
-            { key: 'data_delay_seconds', label: 'delay (s)', numeric: true },
-            { key: 'source_timestamp', label: 'source ts' },
-          ]}
-          rows={snapshots}
-        />
-      </Block>
-      <Block title="Recent system events" style={{ marginTop: 4 }}>
-        <DataTable
-          columns={[
-            { key: 'created_at_utc', label: 'time (UTC)' },
-            { key: 'severity', label: 'severity' },
-            { key: 'category', label: 'category' },
-            { key: 'message', label: 'message' },
-          ]}
-          rows={events}
-        />
-      </Block>
-    </>
+    <div className="grid reveal-stagger">
+      <div className="col-12">
+        <Block title="Recent data freshness">
+          <DataTable
+            columns={[
+              { key: 'symbol', label: 'symbol' },
+              { key: 'provider', label: 'provider' },
+              { key: 'freshness_status', label: 'freshness' },
+              { key: 'is_usable', label: 'usable', numeric: true },
+              { key: 'data_delay_seconds', label: 'delay (s)', numeric: true },
+              { key: 'source_timestamp', label: 'source ts' },
+            ]}
+            rows={snapshots}
+          />
+        </Block>
+      </div>
+      <div className="col-12">
+        <Block title="Recent system events">
+          <DataTable
+            columns={[
+              { key: 'created_at_utc', label: 'time (UTC)' },
+              { key: 'severity', label: 'severity' },
+              { key: 'category', label: 'category' },
+              { key: 'message', label: 'message' },
+            ]}
+            rows={events}
+          />
+        </Block>
+      </div>
+    </div>
   );
 }
 
 function BatchesPanel({ scanBatches, schedulerRuns }) {
+  const cadenceSeries = [...(scanBatches ?? [])].reverse().map((b) => b.candidates_found);
   return (
-    <>
-      <Block title="Scan batches">
-        <DataTable
-          columns={[
-            { key: 'scan_batch_id', label: 'batch_id' },
-            { key: 'scan_type', label: 'type' },
-            { key: 'status', label: 'status' },
-            { key: 'candidates_found', label: 'found', numeric: true },
-            { key: 'proposals_created', label: 'proposed', numeric: true },
-            { key: 'rejected_count', label: 'rejected', numeric: true },
-            { key: 'blocked_count', label: 'blocked', numeric: true },
-            { key: 'started_at_utc', label: 'started (UTC)' },
-          ]}
-          rows={scanBatches}
-          emptyText="No scan batches yet."
-        />
-      </Block>
-      <Block title="Scheduler runs" style={{ marginTop: 4 }}>
-        <DataTable
-          columns={[
-            { key: 'scheduler_run_id', label: 'run_id' },
-            { key: 'run_type', label: 'type' },
-            { key: 'trigger_source', label: 'trigger' },
-            { key: 'status', label: 'status' },
-            { key: 'positions_touched', label: 'positions', numeric: true },
-            { key: 'error_count', label: 'errors', numeric: true },
-            { key: 'started_at_utc', label: 'started (UTC)' },
-          ]}
-          rows={schedulerRuns}
-          emptyText="No scheduler runs recorded yet."
-        />
-      </Block>
-    </>
+    <div className="grid reveal-stagger">
+      <div className="col-12">
+        <Block
+          title="Scan batches"
+          right={(
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="label-caps" style={{ fontSize: 9 }}>candidates/batch</span>
+              <Sparkline values={cadenceSeries} label="candidates found per scan batch, oldest to newest" />
+            </div>
+          )}
+        >
+          <DataTable
+            columns={[
+              { key: 'scan_batch_id', label: 'batch_id' },
+              { key: 'scan_type', label: 'type' },
+              { key: 'status', label: 'status' },
+              { key: 'candidates_found', label: 'found', numeric: true },
+              { key: 'proposals_created', label: 'proposed', numeric: true },
+              { key: 'rejected_count', label: 'rejected', numeric: true },
+              { key: 'blocked_count', label: 'blocked', numeric: true },
+              { key: 'started_at_utc', label: 'started (UTC)' },
+            ]}
+            rows={scanBatches}
+            emptyText="No scan batches yet."
+          />
+        </Block>
+      </div>
+      <div className="col-12">
+        <Block title="Scheduler runs">
+          <DataTable
+            columns={[
+              { key: 'scheduler_run_id', label: 'run_id' },
+              { key: 'run_type', label: 'type' },
+              { key: 'trigger_source', label: 'trigger' },
+              { key: 'status', label: 'status' },
+              { key: 'positions_touched', label: 'positions', numeric: true },
+              { key: 'error_count', label: 'errors', numeric: true },
+              { key: 'started_at_utc', label: 'started (UTC)' },
+            ]}
+            rows={schedulerRuns}
+            emptyText="No scheduler runs recorded yet."
+          />
+        </Block>
+      </div>
+    </div>
   );
 }
 
@@ -188,7 +220,7 @@ function TradePacketPanel({ recentCandidates }) {
           onChange={(e) => { setCandidateId(e.target.value); lookup(e.target.value); }}
           style={{
             background: 'var(--surface-low)', color: 'var(--text)', border: '1px solid var(--border)',
-            borderRadius: 4, padding: '8px 10px', fontSize: 12, minHeight: 44,
+            borderRadius: 4, padding: '10px 12px', fontSize: 13, minHeight: 44,
           }}
         >
           <option value="">— pick a recent candidate —</option>
@@ -259,7 +291,7 @@ export default function System() {
                   type="button"
                   onClick={() => setSubview(sv.key)}
                   className={`nav-tab${subview === sv.key ? ' nav-tab-active' : ''}`}
-                  style={{ padding: '6px 10px', minHeight: 36 }}
+                  style={{ padding: '6px 10px', minHeight: 44 }}
                 >
                   {sv.label}
                 </button>

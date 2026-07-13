@@ -4,13 +4,20 @@
 // proposed/watch/rejected/blocked sections and tab_open_trades()/
 // tab_closed_trades(). Every candidate/trade field is the raw journal
 // column, unreshaped; the only formatting done client-side is
-// decisions.js:formatHindsight() (mirrors _hindsight_cell() exactly).
+// decisions.js:formatHindsight() (mirrors _hindsight_cell() exactly) and
+// buildDecisionFunnelStages() (a pure aggregation of already-shown counts).
+//
+// ND-6: the design ruling's Funnel component (§3.4/§5) replaces the old
+// plain by_label_decision table as this view's hero -- "understand, not
+// operate": dense but scannable, an attrition VISUAL instead of a count
+// table. Zero API/logic change.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getDecisions } from '../api.js';
 import { Block, DataTable, Badge } from '../components/ui.jsx';
+import { Funnel } from '../components/Funnel.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
-import { formatHindsight } from '../decisions.js';
+import { buildDecisionFunnelStages, formatHindsight } from '../decisions.js';
 
 const POLL_MS = 15000;
 
@@ -63,27 +70,21 @@ const CLOSED_TRADE_COLUMNS = [
   { key: 'created_at_utc', label: 'closed (UTC)' },
 ];
 
-function LabelSummary({ labelSummary }) {
+function GateFunnel({ labelSummary }) {
+  const stages = buildDecisionFunnelStages(labelSummary.by_label_decision);
   return (
-    <Block title="Labels summary">
-      <div className="grid">
-        <div className="col-6">
-          <div className="label-caps" style={{ marginBottom: 6 }}>by primary label</div>
-          <DataTable
-            columns={[{ key: 'primary_label', label: 'label' }, { key: 'n', label: 'n', numeric: true }]}
-            rows={labelSummary.by_primary_label}
-            emptyText="No labels yet — run an interest scan."
-          />
-        </div>
-        <div className="col-6">
-          <div className="label-caps" style={{ marginBottom: 6 }}>by advisory decision</div>
-          <DataTable
-            columns={[{ key: 'label_decision', label: 'decision' }, { key: 'n', label: 'n', numeric: true }]}
-            rows={labelSummary.by_label_decision}
-            emptyText="No labels yet."
-          />
-        </div>
-      </div>
+    <Block title="Gate funnel" reveal>
+      {stages.length === 0 ? (
+        <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No labels yet — run an interest scan.</div>
+      ) : (
+        <Funnel stages={stages} />
+      )}
+      <div className="label-caps" style={{ margin: '16px 0 6px' }}>by primary label</div>
+      <DataTable
+        columns={[{ key: 'primary_label', label: 'label' }, { key: 'n', label: 'n', numeric: true }]}
+        rows={labelSummary.by_primary_label}
+        emptyText="No labels yet — run an interest scan."
+      />
     </Block>
   );
 }
@@ -149,37 +150,37 @@ export default function Decisions() {
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
 
-          <div className="grid">
-            <div className="col-12"><LabelSummary labelSummary={data.label_summary} /></div>
+          <div className="grid reveal-stagger">
+            <div className="col-12"><GateFunnel labelSummary={data.label_summary} /></div>
 
-            <div className="col-6" style={{ marginTop: 4 }}>
+            <div className="col-6">
               <Block title="Proposed candidates">
                 <DataTable columns={CANDIDATE_COLUMNS} rows={data.proposed} emptyText="No proposed candidates." />
               </Block>
             </div>
-            <div className="col-6" style={{ marginTop: 4 }}>
+            <div className="col-6">
               <Block title="Watch candidates">
                 <DataTable columns={CANDIDATE_COLUMNS} rows={data.watch} emptyText="No watch candidates." />
               </Block>
             </div>
 
-            <div className="col-6" style={{ marginTop: 4 }}>
+            <div className="col-6">
               <Block title="Rejected candidates">
                 <DataTable columns={REJECTED_COLUMNS} rows={data.rejected} emptyText="None." />
               </Block>
             </div>
-            <div className="col-6" style={{ marginTop: 4 }}>
+            <div className="col-6">
               <Block title="Blocked by gate">
                 <DataTable columns={BLOCKED_COLUMNS} rows={data.blocked} emptyText="None." />
               </Block>
             </div>
 
-            <div className="col-12" style={{ marginTop: 4 }}>
+            <div className="col-12">
               <Block title="Open trades (paper, simulated)">
                 <DataTable columns={OPEN_TRADE_COLUMNS} rows={data.open_trades} emptyText="No open positions." />
               </Block>
             </div>
-            <div className="col-12" style={{ marginTop: 4 }}>
+            <div className="col-12">
               <Block title="Closed trades (paper) — net of modelled costs">
                 <ClosedTradeMetrics m={data.closed_trade_metrics} />
                 <DataTable columns={CLOSED_TRADE_COLUMNS} rows={data.closed_trades} emptyText="No closed trades yet." />

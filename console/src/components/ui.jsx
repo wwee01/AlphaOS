@@ -10,22 +10,13 @@ import React from 'react';
 // the tone vocabulary and the legacy tone-name aliasing.
 export { Badge, badgeTone } from './Badge.jsx';
 
-// An "instrument block" -- a bordered, labelled panel (docs/roadmap/ported/
-// stitch-design-tokens.md: "Instrument Blocks -- self-contained modules that
-// behave like physical rack-mounted hardware").
-export function Block({ title, right, children, style }) {
-  return (
-    <div className="block" style={style}>
-      {(title || right) && (
-        <div className="block-title">
-          {title ? <span className="label-caps">{title}</span> : <span />}
-          {right}
-        </div>
-      )}
-      {children}
-    </div>
-  );
-}
+// ND-6: Block moved to its own module (components/InstrumentBlock.jsx,
+// formalized with a `footer` slot and the `tone="shadow"` treatment) as
+// part of the ND-6 component library -- re-exported here under its
+// original name so every existing `import { Block } from
+// '../components/ui.jsx'` call site keeps working unchanged (same
+// re-export pattern as Badge above).
+export { InstrumentBlock as Block } from './InstrumentBlock.jsx';
 
 // A plain link out to the Streamlit app -- ND-1 has zero write affordances,
 // so every action-suggesting element in this console is one of these
