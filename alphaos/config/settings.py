@@ -523,6 +523,24 @@ class Settings:
     shadow_tier_target_count: int          # ~300 names, builder soft target
     shadow_tier_max_count: int             # 500 hard cap
 
+    # --- EXP-1: shadow-tier AI labelling (the arming event for EXP-0's
+    # previously-latent capture). SEPARATE from shadow_tier_enabled: EXP-0's
+    # flag controls deterministic capture (snapshot/candidate/universe_days
+    # rows, zero AI calls); this flag controls whether ANY real AI-labeller
+    # spend ever happens against a shadow-tier candidate. Defaults false at
+    # merge (operator decision, master reference doc §9, 2026-07-16): the
+    # spec's own mechanism-3 saturation audit needs real accumulated instr1
+    # shadow data to set interest_score_shadow_v1's literals from evidence,
+    # not a guess -- arming is a deliberate, later, explicit operator flip,
+    # never a side effect of shipping the mechanism (mirrors shadow_tier_
+    # enabled's own on-merge posture exactly).
+    shadow_labelling_enabled: bool
+    shadow_label_top_k: int                 # per-window shortlist size (founder-owned dial)
+    shadow_explore_fraction: float           # fraction of K drawn from below the rank cut (default 0.2)
+    shadow_ai_cap_calls_per_30d: int         # <= 25% of scheduler_ai_cost_cap_calls_per_30d
+    shadow_ai_cap_calls_per_day: int         # independent of both 30-day caps (default 3*K)
+    shadow_label_min_feed_coverage: float    # trailing-14-day median feed_coverage arming gate
+
     # --- REG-1: regime classifier + packet stamping ---
     # Shadow/measurement only -- no arming, no gating, no allocation changes.
     # Defaults ON (unlike shadow_tier_enabled): unlike EXP-0's shadow tier,
@@ -1117,6 +1135,61 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             "wired in this build regardless -- this flag is a future arming, inert today.)"
         )
 
+    # --- EXP-1: shadow-tier AI labelling caps (mirrors DEBATE_MAX_CALLS_PER_DAY's
+    # nested-cap validation pattern above exactly: an individually-sane bound
+    # PLUS a joint 25%-of-shared-pool bound, so shadow labelling alone can
+    # never starve the live evaluator's own share of the shared 30-day cap).
+    shadow_label_top_k = _get_int(src, "SHADOW_LABEL_TOP_K", 5)
+    if not (1 <= shadow_label_top_k <= 25):
+        raise SettingsError(
+            f"SHADOW_LABEL_TOP_K={shadow_label_top_k!r} must be between 1 and 25 (spec's own "
+            f"validated range, mirroring the cost cap's own 50-100000 pattern). Raising K past "
+            f"this build's launch value is a founder-only decision gated on remaining global "
+            f"AI-cost headroom -- see docs/roadmap/alphaos-pr-implementation-specs.md's EXP-1 "
+            f"mechanism 7."
+        )
+
+    shadow_explore_fraction = _get_float(src, "SHADOW_EXPLORE_FRACTION", 0.2)
+    if not (0.0 <= shadow_explore_fraction <= 1.0):
+        raise SettingsError(
+            f"SHADOW_EXPLORE_FRACTION={shadow_explore_fraction!r} must be between 0.0 and 1.0 -- "
+            f"it is a fraction of SHADOW_LABEL_TOP_K drawn from below the interest-rank cut "
+            f"(mechanism 2's below-cut-recall law), never a raw count."
+        )
+
+    shadow_ai_cap_calls_per_30d = _get_int(src, "SHADOW_AI_CAP_CALLS_PER_30D", 500)
+    if not (0 <= shadow_ai_cap_calls_per_30d <= 100000):
+        raise SettingsError(
+            f"SHADOW_AI_CAP_CALLS_PER_30D={shadow_ai_cap_calls_per_30d!r} must be between 0 and "
+            f"100000. 0 disables real shadow-labelling calls entirely; too high defeats the "
+            f"purpose of a sub-cap nested inside the shared 30-day AI cost cap."
+        )
+    if shadow_ai_cap_calls_per_30d > 0.25 * scheduler_ai_cost_cap_calls_per_30d:
+        raise SettingsError(
+            f"SHADOW_AI_CAP_CALLS_PER_30D={shadow_ai_cap_calls_per_30d!r} must not exceed 25% of "
+            f"SCHEDULER_AI_COST_CAP_CALLS_PER_30D={scheduler_ai_cost_cap_calls_per_30d!r} "
+            f"(max {int(0.25 * scheduler_ai_cost_cap_calls_per_30d)!r} here) -- the CRO's named "
+            f"priority-inversion risk: the pool's first duty is the live evaluator, and shadow "
+            f"labelling must never starve it of its own share of the shared budget."
+        )
+
+    shadow_ai_cap_calls_per_day = _get_int(src, "SHADOW_AI_CAP_CALLS_PER_DAY", 3 * shadow_label_top_k)
+    if not (0 <= shadow_ai_cap_calls_per_day <= 100000):
+        raise SettingsError(
+            f"SHADOW_AI_CAP_CALLS_PER_DAY={shadow_ai_cap_calls_per_day!r} must be between 0 and "
+            f"100000."
+        )
+
+    shadow_label_min_feed_coverage = _get_float(src, "SHADOW_LABEL_MIN_FEED_COVERAGE", 0.80)
+    if not (0.0 <= shadow_label_min_feed_coverage <= 1.0):
+        raise SettingsError(
+            f"SHADOW_LABEL_MIN_FEED_COVERAGE={shadow_label_min_feed_coverage!r} must be between "
+            f"0.0 and 1.0 (defensible band 0.7-0.9 per the spec; 0.80 is the ML/infra/CRO-"
+            f"converged default)."
+        )
+
+    shadow_labelling_enabled = _get_bool(src, "SHADOW_LABELLING_ENABLED", False)
+
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
@@ -1453,6 +1526,12 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         shadow_tier_adv_lookback_days=_get_int(src, "SHADOW_TIER_ADV_LOOKBACK_DAYS", 20),
         shadow_tier_target_count=_get_int(src, "SHADOW_TIER_TARGET_COUNT", 300),
         shadow_tier_max_count=_get_int(src, "SHADOW_TIER_MAX_COUNT", 500),
+        shadow_labelling_enabled=shadow_labelling_enabled,
+        shadow_label_top_k=shadow_label_top_k,
+        shadow_explore_fraction=shadow_explore_fraction,
+        shadow_ai_cap_calls_per_30d=shadow_ai_cap_calls_per_30d,
+        shadow_ai_cap_calls_per_day=shadow_ai_cap_calls_per_day,
+        shadow_label_min_feed_coverage=shadow_label_min_feed_coverage,
         regime_enabled=_get_bool(src, "REGIME_ENABLED", True),
         regime_backfill_lookback_days=_get_int(src, "REGIME_BACKFILL_LOOKBACK_DAYS", 900),
         text_archive_enabled=_get_bool(src, "TEXT_ARCHIVE_ENABLED", False),

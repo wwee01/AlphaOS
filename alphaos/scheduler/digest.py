@@ -20,7 +20,9 @@ from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 from alphaos.reports.position_health import assess_positions
+from alphaos.safety import ShadowLabelSuspendSwitch
 from alphaos.scheduler import cost_guard
+from alphaos.scheduler import shadow_label as shadow_label_module
 from alphaos.tqs import TQS_VERSION
 from alphaos.util import timeutils
 
@@ -360,6 +362,45 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "feed_coverage_today": round(shadow_fresh / shadow_scanned, 4) if shadow_scanned else None,
     }
 
+    # EXP-1 mechanism 9(d)/12: shadow-tier AI LABELLING visibility. Counts +
+    # health only, floor-gated the same way tqs_shadow/attribution_shadow
+    # are above -- NO shadow symbol names, ever (mechanism 9(e): the trap is
+    # an operator manually trading a surfaced small-cap, contaminating the
+    # shadow ledger). Segmented `shadow_tier = 1` labeller health (parse/
+    # fail-safe rate, validation_status mix, confidence histogram) per
+    # mechanism 12.
+    shadow_label_rows_today = journal.query(
+        "SELECT validation_status, label_source, label_confidence, primary_label, is_mock "
+        "FROM candidate_labels WHERE shadow_tier = 1 AND created_at_utc >= ?",
+        (since_sgt,),
+    )
+    shadow_label_status_histogram: dict = {}
+    for r in shadow_label_rows_today:
+        key = r["validation_status"] or "unknown"
+        shadow_label_status_histogram[key] = shadow_label_status_histogram.get(key, 0) + 1
+    shadow_fail_safe_today = sum(1 for r in shadow_label_rows_today if r["label_source"] == "fail_safe")
+    shadow_confidences = [r["label_confidence"] for r in shadow_label_rows_today if r["label_confidence"] is not None]
+    shadow_label_other_today = sum(1 for r in shadow_label_rows_today if r["primary_label"] == "Other/Unclassified")
+    shadow_suspend_engaged = ShadowLabelSuspendSwitch().is_engaged()
+    shadow_labelling = {
+        "enabled": bool(settings.shadow_labelling_enabled),
+        "auto_suspended": shadow_suspend_engaged,
+        "labelled_today": len(shadow_label_rows_today),
+        "fail_safe_count_today": shadow_fail_safe_today,
+        "fail_safe_rate_today": (
+            round(shadow_fail_safe_today / len(shadow_label_rows_today), 4) if shadow_label_rows_today else None
+        ),
+        "validation_status_histogram_today": shadow_label_status_histogram,
+        "other_unclassified_count_today": shadow_label_other_today,
+        "mean_confidence_today": (
+            round(sum(shadow_confidences) / len(shadow_confidences), 3) if shadow_confidences else None
+        ),
+        "calls_in_last_30_days": shadow_label_module.shadow_calls_in_last_30_days(journal),
+        "cap_per_30d": settings.shadow_ai_cap_calls_per_30d,
+        "calls_today": shadow_label_module.shadow_calls_today(journal),
+        "cap_per_day": settings.shadow_ai_cap_calls_per_day,
+    }
+
     from alphaos.util.market_calendar import is_trading_day
 
     return {
@@ -385,4 +426,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "attribution_shadow": attribution_shadow,
         "position_health": position_health,
         "shadow_tier": shadow_tier,
+        "shadow_labelling": shadow_labelling,
     }

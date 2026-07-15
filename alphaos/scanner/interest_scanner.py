@@ -56,10 +56,24 @@ class InterestSignals:
 
 
 class InterestScanner:
-    """Scores a snapshot for tradeable interest. Stateless apart from config."""
+    """Scores a snapshot for tradeable interest. Stateless apart from config.
 
-    def __init__(self, settings):
+    ``change_scale``/``rel_vol_scale``/``day_range_min`` default to the
+    original megacap-calibrated literals (0.06 / 2.0 / 0.02) so every
+    existing core-tier caller stays byte-identical. EXP-1 mechanism 3:
+    these are the ONLY thing a tier-scoped caller (the shadow-tier scan
+    pass) may override -- same formula shape, no fork, no new code path;
+    "recalibrate the pre-rank, never redesign it."
+    """
+
+    def __init__(
+        self, settings, change_scale: float = 0.06, rel_vol_scale: float = 2.0,
+        day_range_min: float = 0.02,
+    ):
         self.s = settings
+        self.change_scale = change_scale
+        self.rel_vol_scale = rel_vol_scale
+        self.day_range_min = day_range_min
 
     def score(self, snapshot: dict, spy: Optional[dict] = None,
               qqq: Optional[dict] = None) -> InterestSignals:
@@ -88,7 +102,7 @@ class InterestScanner:
         rs_spy = (change - _f(spy.get("change_pct"))) if (change is not None and spy and spy.get("change_pct") is not None) else None
         rs_qqq = (change - _f(qqq.get("change_pct"))) if (change is not None and qqq and qqq.get("change_pct") is not None) else None
         day_range = ((high - low) / last) if (high and low and last) else None
-        tradeable_vol = bool(day_range is not None and day_range >= 0.02)
+        tradeable_vol = bool(day_range is not None and day_range >= self.day_range_min)
 
         # --- structure classification (deterministic, conservative) ---
         if near_high and (change or 0) > 0 and (rel_vol or 1.0) >= 1.3:
@@ -106,8 +120,8 @@ class InterestScanner:
 
         # --- weighted interest score (0..1) ---
         score = (
-            0.30 * _norm(change, 0.06)
-            + 0.20 * _norm((rel_vol - 1.0) if rel_vol is not None else None, 2.0)
+            0.30 * _norm(change, self.change_scale)
+            + 0.20 * _norm((rel_vol - 1.0) if rel_vol is not None else None, self.rel_vol_scale)
             + 0.15 * _norm(gap, 0.05)
             + 0.15 * _norm(rs_spy, 0.05)
             + 0.10 * (1.0 if (near_high or near_low) else 0.0)

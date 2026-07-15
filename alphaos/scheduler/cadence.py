@@ -44,6 +44,12 @@ class JobType(StrEnum):
     HYPOTHESIS_RESOLVE = "hypothesis_resolve"
     # PR13 slice 1: once-daily per-card scoreboard snapshot + demotion check.
     CARD_DEMOTION_CHECK = "card_demotion_check"
+    # EXP-1: shadow-tier AI labelling. Own job type (never rides inside SCAN
+    # -- K sequential OpenAI calls inside SCAN's slot would delay MONITOR,
+    # the protection watchdog, on every labelling tick), own per-window lock
+    # key sharing SCAN's exact window-keyed shape (see default_lock_key),
+    # rides the SAME existing 300s tick (no new LaunchAgent).
+    SHADOW_LABEL = "shadow_label"
 
 
 def parse_windows(raw: str) -> list[tuple[str, str]]:
@@ -109,11 +115,11 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
     """
     market_dt_et = market_now_et(now)
 
-    if job_type == JobType.SCAN:
+    if job_type in (JobType.SCAN, JobType.SHADOW_LABEL):
         hhmm = format_hhmm_et(market_dt_et)
         window = window_containing(hhmm, scan_windows(settings))
         start = window[0] if window else hhmm
-        return f"{JobType.SCAN}:{market_dt_et.date().isoformat()}T{start}"
+        return f"{job_type}:{market_dt_et.date().isoformat()}T{start}"
 
     if job_type == JobType.MONITOR:
         interval = max(1, int(settings.scheduler_monitor_interval_minutes))
@@ -179,6 +185,8 @@ def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> 
             return _hypothesis_resolve_due(settings, journal, now)
         if job_type == JobType.CARD_DEMOTION_CHECK:
             return _card_demotion_check_due(settings, journal, now)
+        if job_type == JobType.SHADOW_LABEL:
+            return _shadow_label_due(settings, journal, now)
         return (False, f"unknown job_type: {job_type!r}")
     except Exception as exc:  # never crash the caller -- fail toward "don't run"
         return (False, f"error checking cadence: {exc}")
@@ -204,6 +212,34 @@ def _scan_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
     )
     if existing:
         return (False, f"scan window {window[0]}-{window[1]} already run (lock_key={lock_key})")
+    return (True, f"within scan window {window[0]}-{window[1]}")
+
+
+def _shadow_label_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    """EXP-1: same window-gating shape as ``_scan_due`` (own lock key, same
+    ``scan_windows`` -- this job reads the durable pre-rank rows SCAN
+    already wrote THIS window, so it can only ever be usefully due when SCAN
+    itself is/was due). Unlike SCAN, this does NOT check ``is_trading_day``
+    itself -- SCAN's own row simply won't exist on a non-trading day, so the
+    downstream selection step naturally finds zero shadow-tier candidates
+    and no-ops (zero calls), rather than duplicating the calendar check
+    here. Never checks ``shadow_labelling_enabled`` -- that gate lives in
+    the job function itself (mirrors ``run_canary_run_job``'s own
+    ``canary_enabled`` gate living in jobs.py, not cadence.py)."""
+    market_dt_et = market_now_et(now)
+    hhmm = format_hhmm_et(market_dt_et)
+    window = window_containing(hhmm, scan_windows(settings))
+    if window is None:
+        return (False, f"{hhmm} is outside all configured scan windows")
+
+    lock_key = default_lock_key(JobType.SHADOW_LABEL, settings, now)
+    existing = journal.count_rows(
+        "job_runs",
+        "job_type = ? AND lock_key = ? AND status IN ('started', 'completed')",
+        (JobType.SHADOW_LABEL, lock_key),
+    )
+    if existing:
+        return (False, f"shadow_label window {window[0]}-{window[1]} already run (lock_key={lock_key})")
     return (True, f"within scan window {window[0]}-{window[1]}")
 
 

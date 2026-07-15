@@ -216,7 +216,11 @@ def h_int_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
         "FROM candidates c "
         "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="c.candidate_id") + " "
         "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="c.candidate_id") + " "
-        "WHERE c.interest_score IS NOT NULL AND co.replay_r IS NOT NULL"
+        # EXP-1: H-INT-1 is a CORE hypothesis -- shadow_tier=0 excludes
+        # shadow-tier rows from pooling into it (its own twin,
+        # H-INT-SHADOW-1, is the preregistered home for the shadow-tier
+        # version of this exact claim; never the same row population).
+        "WHERE c.shadow_tier = 0 AND c.interest_score IS NOT NULL AND co.replay_r IS NOT NULL"
     )
     scores = [r["interest_score"] for r in rows]
     if len(scores) < 10:
@@ -251,7 +255,9 @@ def h_win_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
         "JOIN scan_batches sb ON sb.scan_batch_id = c.scan_batch_id "
         "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="c.candidate_id") + " "
         "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="c.candidate_id") + " "
-        "WHERE sb.market_session = 'regular' AND co.replay_r IS NOT NULL "
+        # EXP-1: H-WIN-1 is a CORE hypothesis -- exclude shadow-tier rows
+        # (same rationale as h_int_1_rows above).
+        "WHERE c.shadow_tier = 0 AND sb.market_session = 'regular' AND co.replay_r IS NOT NULL "
         "AND sb.started_at_sgt IS NOT NULL"
     )
     def _hour(r):

@@ -156,7 +156,7 @@ def write_corpus(corpus_dir: str, new_packets: list, as_of_date: str) -> tuple:
     return manifest, written
 
 
-def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT) -> list:
+def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT, include_shadow: bool = False) -> list:
     """Selects up to ``limit`` real, clean (post-PR9.1), already-labelled
     candidate_packets rows for an operator to review before committing to
     ``data/canary/``. Packets with a TASK-R relabel (``candidate_labels.
@@ -164,12 +164,20 @@ def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT) -> list:
     the spec's own "prefer TASK-R's relabelled seven" guidance -- then a
     spread across distinct symbols, then the next-oldest clean rows filling
     any remaining slots. This function only selects; it never adjudicates or
-    writes anything."""
+    writes anything.
+
+    EXP-1 mechanism 9(f)/12: defaults to EXCLUDING shadow-tier packets (LEFT
+    JOINed via candidate_id -> candidates.shadow_tier) -- CANARY's golden
+    corpus stays megacap-weighted for now (small/mids are harder to
+    adjudicate confidently); a future dedicated shadow slice is an explicit
+    corpus_version bump the spec defers, not a side effect of this default."""
+    shadow_clause = "" if include_shadow else "AND COALESCE(c.shadow_tier, 0) = 0 "
     rows = journal.query(
         "SELECT cp.packet_id, cp.candidate_id, cp.interest_rank, cp.packet_json, cp.symbol, "
         "cp.created_at_utc, cl.primary_label, cl.label_decision, cl.relabel_of "
         "FROM candidate_packets cp JOIN candidate_labels cl ON cl.packet_id = cp.packet_id "
-        "WHERE cl.is_mock = 0 AND cp.created_at_utc >= ? "
+        "LEFT JOIN candidates c ON c.candidate_id = cp.candidate_id "
+        f"WHERE cl.is_mock = 0 AND cp.created_at_utc >= ? {shadow_clause}"
         # Same most-recent-label-per-packet pin as EVAL-1's select_seed_packets
         # (alphaos/eval/corpus.py) -- candidate_labels has no uniqueness
         # constraint on packet_id, so pin to the highest id per packet rather

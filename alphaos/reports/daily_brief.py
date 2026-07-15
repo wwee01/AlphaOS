@@ -413,13 +413,21 @@ def _unattended_approvals_today(journal, since_sgt: str) -> Optional[dict]:
 
 def _best_candidate_today(journal, since_sgt: str) -> Optional[dict]:
     """Top TQS-scored PROPOSE-decision candidate today. None on an empty/
-    quiet day -- absence is a valid, expected state, not an error."""
+    quiet day -- absence is a valid, expected state, not an error.
+
+    EXP-1 mechanism 9: ``shadow_tier = 0`` is REQUIRED here, not cosmetic.
+    Before EXP-1, every ``label_decision='propose'`` row was structurally a
+    core-tier candidate (shadow-tier candidates never reached the labeller).
+    EXP-1 gives shadow-tier candidates a real AI label -- including a real
+    'propose' label_decision -- so without this filter a shadow-tier
+    small/mid name could surface here as the brief's own "best candidate
+    today", by symbol, indistinguishable from an actionable one."""
     row = journal.one(
         "SELECT c.candidate_id, c.symbol, c.interest_score, c.label_confidence, "
         "t.tqs_score, t.tqs_bucket, t.missing_components_json "
         "FROM candidates c JOIN tqs_scores t "
         "ON t.candidate_id = c.candidate_id AND t.source_type = 'candidate' "
-        "WHERE c.label_decision = 'propose' AND c.created_at_utc >= ? "
+        "WHERE c.label_decision = 'propose' AND c.shadow_tier = 0 AND c.created_at_utc >= ? "
         "ORDER BY t.tqs_score DESC LIMIT 1",
         (since_sgt,),
     )

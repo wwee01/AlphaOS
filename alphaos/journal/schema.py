@@ -236,6 +236,42 @@ SCHEMA: list[tuple[str, str]] = [
             lineage_id TEXT,
             shadow_tier INTEGER DEFAULT 0,
             instrument_version TEXT,
+            -- EXP-1 mechanism 10: liquidity instrumentation -- RECORD, NEVER
+            -- GATE. Persisted for every shadow-tier candidate row regardless
+            -- of core_gate_verdict; NULL for core-tier rows (additive,
+            -- shadow-only fields). See alphaos/scanner/candidate_scanner.py's
+            -- scan_shadow_tier for the write path.
+            bid_size REAL,
+            ask_size REAL,
+            quote_age_seconds REAL,
+            spread_pct_mid REAL,
+            adv_20d_dollar REAL,
+            volume_today_pct_of_adv REAL,
+            scan_window TEXT,
+            data_feed TEXT,
+            crossed_or_locked_quote INTEGER,
+            -- What the CORE tradeability gate (MIN_DOLLAR_VOLUME/MAX_SPREAD_PCT/
+            -- crossed-quote) would have decided -- computed but NEVER applied to
+            -- shadow capture/selection eligibility (invariant, mechanism 10).
+            core_gate_verdict TEXT,
+            liquidity_instrumentation_version TEXT,
+            -- EXP-1 mechanism 2: selection-arm stamping (top_k|explore) +
+            -- the selection formula/version, so retuning K/fraction/formula
+            -- without a version bump is detectable as selection p-hacking.
+            selection_arm TEXT,
+            selection_version TEXT,
+            -- EXP-1 mechanism 8: per-row feed-coverage-at-scan-time (NOT the
+            -- trailing 14-day aggregate the arming gate uses) + why a
+            -- selected shadow candidate was never sent to the labeller
+            -- (e.g. 'stale') -- NULL when a real AI call was made or the
+            -- candidate was never selected at all.
+            feed_coverage_at_scan REAL,
+            label_skipped_reason TEXT,
+            -- EXP-1 mechanism 11: parameterization-only placeholder for a
+            -- future sector-clustering key (no sector metadata exists yet
+            -- anywhere in this codebase -- UNIV-D/TEXT-0 owns populating
+            -- this later). Nullable; no logic reads it yet.
+            sector_cluster_key TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1076,6 +1112,15 @@ SCHEMA: list[tuple[str, str]] = [
             -- original row is NEVER modified (append-only law) -- this is
             -- purely a forward pointer from the new row to the old one.
             relabel_of TEXT,
+            -- EXP-1 mechanism 6: the cost-accounting design, not a storage
+            -- choice. Stamped 1 at insert time for every shadow-tier label
+            -- (see Orchestrator._label_candidate's caller in
+            -- alphaos/scheduler/shadow_label.py); 0 for every core-tier
+            -- label. Rows still land in cost_guard.calls_in_last_30_days()
+            -- UNMODIFIED (is_mock=0 -> counted) -- this column exists so a
+            -- live-aggregate report can grep-exclude shadow_tier=1 rather
+            -- than needing a fragile join back to candidates.
+            shadow_tier INTEGER DEFAULT 0,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )

@@ -27,15 +27,27 @@ from alphaos.scheduler import cost_guard
 from alphaos.util import timeutils
 
 
-def _packets_in_range(journal, date_from: str, date_to: str) -> list:
+def _packets_in_range(journal, date_from: str, date_to: str, include_shadow: bool = False) -> list:
     """candidate_packets rows whose SGT calendar date falls within
     [date_from, date_to] inclusive -- matches this codebase's own
     "which day did this happen" convention (market_date()/created_at_sgt),
-    not raw UTC, which can straddle a calendar day either side of SGT."""
+    not raw UTC, which can straddle a calendar day either side of SGT.
+
+    EXP-1 mechanism 9(f): defaults to EXCLUDING shadow-tier packets (LEFT
+    JOINed via candidate_id -> candidates.shadow_tier, since candidate_packets
+    carries no shadow_tier column of its own) -- a plain date-sweep would
+    otherwise silently ingest hundreds of shadow packets/day into a
+    one-off retro-relabel run. ``include_shadow=True`` is the explicit,
+    named opt-in the spec requires. LEFT (not INNER) JOIN deliberately: a
+    packet with no matching candidates row (e.g. a hand-built fixture in a
+    test) can never be shadow-tier by construction and must still be
+    selectable, never silently dropped by the join itself."""
+    shadow_clause = "" if include_shadow else "AND COALESCE(c.shadow_tier, 0) = 0 "
     return journal.query(
-        "SELECT packet_id, candidate_id, interest_rank, packet_json, symbol, scan_batch_id "
-        "FROM candidate_packets WHERE substr(created_at_sgt, 1, 10) BETWEEN ? AND ? "
-        "ORDER BY created_at_utc ASC",
+        "SELECT cp.packet_id, cp.candidate_id, cp.interest_rank, cp.packet_json, cp.symbol, cp.scan_batch_id "
+        "FROM candidate_packets cp LEFT JOIN candidates c ON c.candidate_id = cp.candidate_id "
+        f"WHERE substr(cp.created_at_sgt, 1, 10) BETWEEN ? AND ? {shadow_clause}"
+        "ORDER BY cp.created_at_utc ASC",
         (date_from, date_to),
     )
 
@@ -48,6 +60,7 @@ def _latest_label_for_packet(journal, packet_id: str) -> Optional[dict]:
 
 def relabel_candidates(
     journal, settings, date_from: str, date_to: str, dry_run: bool = False,
+    include_shadow: bool = False,
 ) -> dict:
     """Retro-relabel every candidate_packets row in [date_from, date_to].
     ``dry_run=True`` composes and returns the prompts with ZERO network
@@ -55,15 +68,19 @@ def relabel_candidates(
     NEW candidate_labels rows via the real ``PlaybookClassifier`` -- the
     standard client path, so cost_guard counts these calls exactly the
     way it counts any other real labeller call. Never raises; returns a
-    result dict (with an ``"error"`` key on failure)."""
+    result dict (with an ``"error"`` key on failure).
+
+    EXP-1 mechanism 9(f): ``include_shadow`` defaults to False -- see
+    ``_packets_in_range``'s own docstring."""
     import json
 
     result: dict[str, Any] = {
         "date_from": date_from, "date_to": date_to, "dry_run": dry_run,
+        "include_shadow": include_shadow,
         "n_packets": 0, "n_relabelled": 0, "n_corpus_errors": 0, "prompts": [], "diffs": [],
     }
 
-    rows = _packets_in_range(journal, date_from, date_to)
+    rows = _packets_in_range(journal, date_from, date_to, include_shadow=include_shadow)
     result["n_packets"] = len(rows)
     if not rows:
         return result

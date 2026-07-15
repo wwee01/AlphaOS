@@ -101,11 +101,20 @@ def _alert_new_pending_approvals(orch, scan_batch_id) -> None:
 def run_scan_job(orch, runner) -> dict:
     """Scheduler wrapper around ``orch.run_scan_once()``.
 
-    Adds a NEW scheduler-level gate: when the kill switch is engaged or the AI
-    cost cap is exceeded, ``run_scan_once`` is not called AT ALL (full-skip,
-    not a partial/AI-only degrade) -- the existing ``run_scan_once`` only logs
-    a WARNING and keeps scanning; skipping the call entirely is this stage's
-    job.
+    Kill switch engaged: ``run_scan_once`` is not called AT ALL (full-skip)
+    -- unlike a cost-cap breach, an engaged kill switch is a full stop, not
+    a "keep capturing, skip AI" degrade.
+
+    AI cost cap exceeded (EXP-1 mechanism 13's degrade-law fix, 2026-07-16):
+    previously a full-skip too, exactly like the kill switch -- but this
+    silently punched a survivorship hole in "prune nothing, this IS the
+    dataset" every time the cap was breached (candidate/snapshot/EXP-0
+    shadow-tier universe_days rows all silently stopped being written on a
+    cap-breach day). Reclassified a bug: the scan now still runs, in
+    DETERMINISTIC-CAPTURE-ONLY mode (``ai_degraded=True`` -- see
+    ``Orchestrator.run_scan_once``'s own docstring) -- only AI evaluation/
+    labelling (core AND shadow) is skipped, never the deterministic capture
+    itself.
     """
     if orch.kill_switch.is_engaged():
         return {
@@ -117,11 +126,14 @@ def run_scan_job(orch, runner) -> dict:
 
     within_budget, detail = cost_guard.check_scan_budget(orch.settings, orch.journal)
     if not within_budget:
+        scan_summary = orch.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value, ai_degraded=True)
         return {
-            "status": "skipped",
+            "status": "completed",
             "reason": detail,
             "kill_switch_engaged": False,
             "cost_cap_exceeded": True,
+            "degraded": True,
+            "scan_summary": scan_summary.as_dict(),
         }
 
     scan_summary = orch.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value)
@@ -212,6 +224,17 @@ def run_earnings_calendar_pull_job(orch, runner) -> dict:
 
     result = update_earnings_calendar(orch.journal, orch.settings)
     return {"status": "completed", "earnings_calendar_result": result}
+
+
+def run_shadow_label_job(orch, runner) -> dict:
+    """Scheduler wrapper around ``shadow_label.run_shadow_label()`` (EXP-1).
+    Thin by design -- every gate (SHADOW_LABELLING_ENABLED, kill switch,
+    auto-suspend, feed-coverage arming, the shadow AI-cost sub-cap) lives in
+    ``shadow_label.py`` itself, mirroring ``run_canary_run_job``'s own
+    enabled-gate-lives-in-the-domain-function pattern."""
+    from alphaos.scheduler import shadow_label
+
+    return shadow_label.run_shadow_label(orch)
 
 
 def run_canary_run_job(orch, runner) -> dict:

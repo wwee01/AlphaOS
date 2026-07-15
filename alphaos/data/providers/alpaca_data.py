@@ -121,6 +121,12 @@ class AlpacaDataProvider(MarketDataProvider):
 
         bid = quote.get("bp")
         ask = quote.get("ap")
+        # EXP-1 mechanism 10: Alpaca's quote payload carries size fields the
+        # mapper previously dropped entirely -- "spread without depth is half
+        # the fill story." Additive only: nothing reads these keys yet
+        # outside the shadow-tier liquidity instrumentation this PR adds.
+        bid_size = quote.get("bs")
+        ask_size = quote.get("as")
         last = trade.get("p") or daily_bar.get("c")
         prev_close = prev_bar.get("c")
         volume = daily_bar.get("v")
@@ -149,6 +155,8 @@ class AlpacaDataProvider(MarketDataProvider):
             "prev_close": prev_close,
             "bid": bid,
             "ask": ask,
+            "bid_size": bid_size,
+            "ask_size": ask_size,
             "spread": round(spread, 4) if spread is not None else None,
             "spread_pct": round(spread_pct, 6) if spread_pct is not None else None,
             "volume": volume,
@@ -177,6 +185,8 @@ class AlpacaDataProvider(MarketDataProvider):
             "prev_close": None,
             "bid": None,
             "ask": None,
+            "bid_size": None,
+            "ask_size": None,
             "spread": None,
             "spread_pct": None,
             "volume": None,

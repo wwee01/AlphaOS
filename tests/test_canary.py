@@ -196,6 +196,7 @@ def test_run_canary_refuses_when_cost_cap_reached(tmp_path, journal, monkeypatch
     settings = make_settings(
         OPENAI_API_KEY="sk-test", ALPHAOS_MODE="paper",
         SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+        SHADOW_AI_CAP_CALLS_PER_30D="12",  # EXP-1's own joint-validation must clear this cap too
     )
     corpus_dir = str(tmp_path / "corpus")
     write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-10")
