@@ -31,7 +31,13 @@
 
   --ink: #eef2ff;
   --ink-2: #c3ccf2;
-  --ink-dim: #7d88b8;
+  /* audit-fixup (ND-7 correctness LOW): was #7d88b8, which measured ~3.7:1
+     for small label text in the worst case (lit glass panel directly over
+     the brightest aurora blob) -- below the 4.5:1 AA small-text bar.
+     Lightened to clear AA with margin in that same worst case while
+     staying clearly tertiary next to --ink-2. Ruling §3's value is
+     superseded by this fixup for exactly this reason. */
+  --ink-dim: #9aa4d2;
 
   /* brand light (aurora) -- interactive/active/identity, NOT a semantic */
   --cy: #5be3d6;
@@ -397,11 +403,12 @@ h1, h2, h3 { text-wrap: balance; }
    floated above in matching tone (ruling §4.3). Cyan/brand by default (the
    ladder's own "current marker" reservation, §3); a track carrying a
    warning/danger tone (badgeTone(verdict) -- ATTENTION/EXIT_REVIEW etc.)
-   shifts the orb to that tone via the descendant selectors below, exactly
-   as the approved mockup's AAPL (cyan, hold/intact) vs MSFT (amber,
-   at-risk/attention) examples demonstrate. A neutral track (e.g. HOLD)
-   intentionally falls through to the cyan default -- "everything is fine"
-   reads as brand light, not grey. */
+   shifts the orb to that tone via the descendant selectors below -- a
+   healthy hold/intact position keeps the cyan orb, an at-risk/attention
+   one gets the amber orb, per the approved concept's two contrasting
+   position-card examples. A neutral track (e.g. HOLD) intentionally falls
+   through to the cyan default -- "everything is fine" reads as brand
+   light, not grey. */
 .pbar-marker {
   position: absolute;
   top: 50%;
