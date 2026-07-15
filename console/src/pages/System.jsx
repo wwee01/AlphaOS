@@ -83,7 +83,9 @@ function HealthPanel({ health, startupChecks }) {
               <IconWarningTriangle size={13} /> {pw.degraded} position(s) degraded (target leg missing, stop still live) — not blocking.
             </div>
           ) : (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--primary)' }}>
+            // ND-7: "all protected" is a good/healthy state (ruling §3
+            // migration) -- green, not brand cyan.
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--good)' }}>
               <IconCheck size={13} /> {pw.summary_label ?? 'all protected'}
             </div>
           )}
@@ -93,7 +95,9 @@ function HealthPanel({ health, startupChecks }) {
       <div className="col-12">
         <Block title="Startup safety checks">
           {startupChecks.map((c) => (
-            <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: c.ok ? 'var(--primary)' : 'var(--red)', padding: '3px 0' }}>
+            // ND-7: a passing check is a good/healthy state (ruling §3
+            // migration) -- green, not brand cyan.
+            <div key={c.name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: c.ok ? 'var(--good)' : 'var(--red)', padding: '3px 0' }}>
               {c.ok ? <IconCheck size={13} /> : <IconWarningTriangle size={13} />} {c.name}: {c.detail}
             </div>
           ))}

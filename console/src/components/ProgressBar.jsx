@@ -28,14 +28,22 @@ const TONE_CLASS = {
 //   (the R-ladder's current-price dot).
 // `withLabels`: reserves vertical space above/below the track for
 //   marks'/marker's text -- off for the plain TTL bar (no marks).
+// `fillClassName`: ND-7 addition (design ruling §4.3) -- an optional extra
+//   class on the fill div, layered ON TOP of the tone-based fill (styles.css
+//   orders the override rules after the tone rules so this wins). Used
+//   ONLY by Positions.jsx's R-ladder to select the mockup's `fill-pos`/
+//   `fill-neg` direction gradient (current-vs-entry sign) -- an axis
+//   orthogonal to `tone` (which still drives the marker/marks colors via
+//   badgeTone(verdict), unchanged). The plain TTL bar never passes this.
 export function ProgressBar({
-  pct, tone = 'primary', height = 10, marks, marker, withLabels = false,
+  pct, tone = 'primary', height = 10, marks, marker, withLabels = false, fillClassName,
 }) {
   const clamped = pct === null || pct === undefined || Number.isNaN(pct)
     ? 0 : Math.max(0, Math.min(100, pct));
+  const fillClasses = ['pbar-fill', fillClassName].filter(Boolean).join(' ');
   const track = (
     <div className={`pbar-track ${TONE_CLASS[tone] || TONE_CLASS.primary}`} style={{ height }}>
-      <div className="pbar-fill" style={{ width: `${clamped}%` }} />
+      <div className={fillClasses} style={{ width: `${clamped}%` }} />
       {(marks ?? []).map((m) => (
         <div
           key={m.name}

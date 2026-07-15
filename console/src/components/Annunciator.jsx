@@ -43,8 +43,11 @@ export default function Annunciator({ data, poll }) {
     <div className="annunciator-strip">
       {/* Primary lamps (design ruling §4): mode + kill-switch are the two a
           glance must catch, so they render larger/bolder than the
-          secondary chips below. */}
-      <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'} style={{ fontSize: 13, padding: '6px 12px', fontWeight: 700 }}>
+          secondary chips below. ND-7: the kill-switch badge gets the
+          "lamp" glowing-pill treatment (cyan-dot ARMED / crit ENGAGED,
+          static glow, no pulse -- ruling §2b/§4); the mode chip stays a
+          plain glass chip, no glow. */}
+      <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'} className="lamp" style={{ fontSize: 13, padding: '6px 12px', fontWeight: 700 }}>
         {data.kill_switch_engaged ? <IconWarningTriangle size={13} /> : <IconShield size={13} />}
         {data.kill_switch_engaged
           ? `KILL SWITCH ENGAGED — ${data.kill_switch_reason ?? 'no reason recorded'}`
@@ -54,10 +57,15 @@ export default function Annunciator({ data, poll }) {
 
       {/* The ONLY kill-switch control in this console (hard constraint #6):
           engage and disengage are mutually exclusive, keyed off the same
-          data.kill_switch_engaged read this strip already displays. */}
+          data.kill_switch_engaged read this strip already displays. ND-7:
+          both triggers get the crit-outline treatment (design ruling §4
+          "engage/disengage button (crit outline treatment)") via
+          PinPrompt's `triggerClassName` -- cosmetic only, submit logic
+          below is byte-identical to ND-3/4. */}
       {!data.kill_switch_engaged ? (
         <PinPrompt
           label="engage kill switch"
+          triggerClassName="badge-danger"
           extraFields={(
             <input
               type="text"
@@ -81,6 +89,7 @@ export default function Annunciator({ data, poll }) {
       ) : (
         <PinPrompt
           label="release kill switch"
+          triggerClassName="badge-danger"
           onConfirm={(pin, nonce) => postKillSwitchDisengage(pin, nonce)}
           onDone={(ok) => ok && poll()} // ND-3 plan doc §5: refetch immediately on a successful write
         />
