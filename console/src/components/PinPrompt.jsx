@@ -73,7 +73,14 @@ const INPUT_STYLE = {
 //   server-side-only condition (e.g. TTL expiry) -- those stay enabled so
 //   the operator sees the server's own authoritative message instead of a
 //   client-side guess (see approvals.js:shouldShowProposalActions).
-export function PinPrompt({ label, extraFields, onConfirm, onDone, disabled = false }) {
+// `triggerClassName`: ND-7 addition -- an optional extra class on the
+// CLOSED-state trigger button only (e.g. "badge-success" for approve,
+// "badge-danger" for reject/kill-switch engage-disengage), purely cosmetic.
+// The open panel's confirm/cancel buttons are unaffected -- same hardcoded
+// classes as ND-3/4/6, no submit-logic/DOM-structure change anywhere here.
+export function PinPrompt({
+  label, extraFields, onConfirm, onDone, disabled = false, triggerClassName,
+}) {
   const [open, setOpen] = useState(false);
   const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
@@ -110,7 +117,7 @@ export function PinPrompt({ label, extraFields, onConfirm, onDone, disabled = fa
     return (
       <button
         type="button"
-        className="badge badge-caps"
+        className={['badge', 'badge-caps', triggerClassName].filter(Boolean).join(' ')}
         style={{ cursor: disabled ? 'default' : 'pointer', minHeight: 44, opacity: disabled ? 0.5 : 1 }}
         disabled={disabled}
         onClick={() => { setOpen(true); setMessage(null); }}

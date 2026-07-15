@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { badgeTone } from './Badge.jsx';
+import { badgeTone, TONE_MODIFIER } from './Badge.jsx';
 
 describe('badgeTone', () => {
   it('maps thesis status to tone (position_health.THESIS_*)', () => {
@@ -49,5 +49,31 @@ describe('badgeTone', () => {
     expect(badgeTone(undefined)).toBe('neutral');
     expect(badgeTone('')).toBe('neutral');
     expect(badgeTone('SOMETHING_NEW_NOT_IN_THE_TABLE')).toBe('neutral');
+  });
+});
+
+// ND-7 (design ruling §3 semantic migration): `success` must resolve to a
+// CSS class distinct from `primary`/`ok` -- ND-1..6 collapsed all three onto
+// the same `badge-ok` class (the ND-visual audit's LOW: "primary/success
+// render identically"). This is a legitimate test UPDATE/addition per the
+// ruling's §2a allowance ("legitimate test update, not test-weakening, when
+// done together with this ruling"), not a weakening -- it tightens the
+// assertion from "success renders some tone" to "success renders its OWN
+// green tone, never brand cyan".
+describe('TONE_MODIFIER (ND-7 primary/success class split)', () => {
+  it('success resolves to a different class than primary/ok (brand cyan)', () => {
+    expect(TONE_MODIFIER.success).not.toBe(TONE_MODIFIER.primary);
+    expect(TONE_MODIFIER.success).not.toBe(TONE_MODIFIER.ok);
+  });
+
+  it('primary and the legacy ok alias still resolve to the same (brand) class', () => {
+    expect(TONE_MODIFIER.primary).toBe(TONE_MODIFIER.ok);
+  });
+
+  it('every tone modifier is a non-empty string except neutral/default', () => {
+    expect(TONE_MODIFIER.success).toBeTruthy();
+    expect(TONE_MODIFIER.primary).toBeTruthy();
+    expect(TONE_MODIFIER.warning).toBeTruthy();
+    expect(TONE_MODIFIER.danger).toBeTruthy();
   });
 });

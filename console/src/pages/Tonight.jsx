@@ -43,12 +43,25 @@ function computeTotalOpenR(positionsHealth) {
   return measurable.length ? measurable.reduce((sum, p) => sum + p.current_r, 0) : null;
 }
 
+// ND-7 (design ruling §4.4): the hero numeral is tone-colored by sign --
+// green positive / red negative / ink neutral (unmeasurable). Pure display
+// choice over an already-computed value, same category as everywhere else
+// in this app ("frontend computes nothing business-critical").
+function rTone(totalR) {
+  if (totalR === null || totalR === undefined) return 'neutral';
+  if (totalR > 0) return 'success';
+  if (totalR < 0) return 'danger';
+  return 'neutral';
+}
+
 function Hero({ brief }) {
   const totalR = computeTotalOpenR(brief.positions_health ?? []);
   return (
     <div className="grid reveal-stagger" style={{ marginBottom: 0 }}>
       <div className="col-8">
-        <Block title="① one action" style={{ borderColor: 'var(--primary)', height: '100%' }}>
+        {/* ND-7: this is Tonight's ONE "lit" panel (design ruling §4.2) --
+            the decision that needs the operator, glowing. */}
+        <Block title="① one action" tone="lit" style={{ height: '100%' }}>
           <div className="prose" style={{ fontSize: 17, fontWeight: 600, lineHeight: 1.4 }}>{brief.one_action}</div>
           {brief.kill_switch_engaged && (
             <div style={{ marginTop: 12 }}>
@@ -61,7 +74,12 @@ function Hero({ brief }) {
       </div>
       <div className="col-4">
         <Block style={{ height: '100%' }}>
-          <StatTile label="open R (all positions)" value={formatR(totalR)} context={`${(brief.positions_health ?? []).length} open position(s)`} />
+          <StatTile
+            label="open R (all positions)"
+            value={formatR(totalR)}
+            tone={rTone(totalR)}
+            context={`${(brief.positions_health ?? []).length} open position(s)`}
+          />
         </Block>
       </div>
     </div>
@@ -134,9 +152,14 @@ function OpenRisk({ positionsHealth }) {
 }
 
 function Quiet() {
+  // ND-7: NOT the lit panel -- Tonight's one lit panel is the "① one
+  // action" hero above (design ruling §4.2, exactly one per view). An
+  // all-clear state is "good", not "needs the operator", so it stays a
+  // plain glass block; only the checkmark itself carries the good/green
+  // semantic (ruling §3 migration).
   return (
-    <Block title="② ③ status" style={{ borderColor: 'var(--primary)' }}>
-      <div style={{ fontSize: 14, color: 'var(--primary)', fontWeight: 600 }}>✓ Nothing needs you right now.</div>
+    <Block title="② ③ status">
+      <div style={{ fontSize: 14, color: 'var(--good)', fontWeight: 600 }}>✓ Nothing needs you right now.</div>
       <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
         No pending approvals, no open incidents, no exit reviews. The machine is quietly doing its job.
       </div>

@@ -19,10 +19,24 @@ function prefersReducedMotion() {
 
 const TONE_COLOR = {
   primary: 'var(--primary)',
+  success: 'var(--good)',
   danger: 'var(--red)',
   warning: 'var(--amber)',
   shadow: 'var(--shadow-tier)',
   neutral: 'var(--text)',
+};
+
+// ND-7 (design ruling §4.4): the hero numeral gets a soft matching
+// text-shadow aura -- green positive / red negative / ink neutral. Shadow
+// tier (measurement-only) stays quiet, no glow -- it must never read as a
+// live/lit value (ruling §6 hard constraint #5).
+const TONE_GLOW = {
+  primary: '0 0 30px rgba(91, 227, 214, 0.4)',
+  success: '0 0 30px rgba(61, 220, 151, 0.45)',
+  danger: '0 0 30px rgba(255, 93, 115, 0.4)',
+  warning: '0 0 26px rgba(255, 194, 75, 0.35)',
+  shadow: 'none',
+  neutral: 'none',
 };
 
 export function StatTile({
@@ -57,7 +71,10 @@ export function StatTile({
       <div className="label-caps stat-tile-label">{label}</div>
       <div
         className={`num stat-tile-value stat-tile-${size}`}
-        style={{ color: TONE_COLOR[tone] || TONE_COLOR.primary }}
+        style={{
+          color: TONE_COLOR[tone] || TONE_COLOR.primary,
+          textShadow: TONE_GLOW[tone] || TONE_GLOW.primary,
+        }}
       >
         {value}
         {unit ? <span className="stat-tile-unit">{unit}</span> : null}

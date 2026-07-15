@@ -65,7 +65,15 @@ async function postAndSurface(promise) {
   return result;
 }
 
-function ProposalCard({ v, onWriteSuccess }) {
+// `lit`: ND-7 addition (design ruling §4.2) -- true for exactly the ONE
+// card whose TTL is soonest (Approvals.jsx's default export passes
+// `lit={i === 0}` on the already-sortByTtl()-ordered list, no new
+// sort/logic -- sortByTtl is byte-identical). A stale proposal's red
+// border (a warning, not a "this needs your positive attention" glow)
+// takes precedence over the lit treatment.
+function ProposalCard({
+  v, onWriteSuccess, lit,
+}) {
   const [marginApproved, setMarginApproved] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
   const marginRequired = marginApprovalRequired(v);
@@ -74,12 +82,13 @@ function ProposalCard({ v, onWriteSuccess }) {
   return (
     <Block
       reveal
+      tone={lit && !v.proposal_is_stale ? 'lit' : undefined}
       title={(
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           {v.symbol} <Badge tone={badgeTone(v.side)} caps>{v.side}</Badge> qty {v.qty ?? 'n/a'}
         </span>
       )}
-      style={{ borderColor: v.proposal_is_stale ? 'var(--red)' : 'var(--border)' }}
+      style={{ borderColor: v.proposal_is_stale ? 'var(--red)' : undefined }}
     >
       <TtlBar
         secondsRemaining={v.proposal_seconds_remaining}
@@ -144,11 +153,13 @@ function ProposalCard({ v, onWriteSuccess }) {
           <PinPrompt
             label="approve"
             disabled={approveDisabled}
+            triggerClassName="badge-success"
             onConfirm={(pin, nonce) => postAndSurface(postApprove(pin, nonce, v.proposal_id, marginApproved))}
             onDone={(ok) => ok && onWriteSuccess()}
           />
           <PinPrompt
             label="reject"
+            triggerClassName="badge-danger"
             extraFields={(
               <input
                 type="text"
@@ -217,17 +228,20 @@ export default function Approvals() {
       {!sorted ? (
         <div className="label-caps">loading approvals…</div>
       ) : sorted.length === 0 ? (
-        <Block title="Approval Center" style={{ borderColor: 'var(--primary)' }}>
-          <div style={{ fontSize: 14, color: 'var(--primary)', fontWeight: 600 }}>✓ No open proposals.</div>
+        <Block title="Approval Center">
+          <div style={{ fontSize: 14, color: 'var(--good)', fontWeight: 600 }}>✓ No open proposals.</div>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             Run a scan from the Tonight page to generate proposals.
           </div>
         </Block>
       ) : (
         <div className="grid reveal-stagger">
-          {sorted.map((v) => (
+          {sorted.map((v, i) => (
             <div className="col-6" key={v.proposal_id}>
-              <ProposalCard v={v} onWriteSuccess={poll} />
+              {/* ND-7: exactly one lit panel per view (design ruling §4.2)
+                  -- the soonest-TTL card, since sorted is already
+                  sortByTtl()-ordered (byte-identical logic module). */}
+              <ProposalCard v={v} onWriteSuccess={poll} lit={i === 0} />
             </div>
           ))}
         </div>

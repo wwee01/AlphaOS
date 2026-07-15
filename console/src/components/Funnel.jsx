@@ -2,15 +2,26 @@
 // (design ruling §3.4/§5 Decisions) -- horizontal proportional bars fed by
 // real counts (funnel.js:computeFunnelStages, pure and tested), never a
 // bare count table. `stages`: [{ label, value, tone? }].
+//
+// ND-7 (design ruling §4.3): gradient bars (violet->cyan) with a soft glow
+// for the "alive" stages, dimmed violet for rejected/blocked -- ported from
+// the approved mockup's `.fbar`/`.fbar.dim`. decisions.js:
+// buildDecisionFunnelStages() never attaches a `tone` field (verified --
+// its rows are plain `{label, value}`), so the alive/dim split is decided
+// here, from the SAME `label` string already rendered in the row (pure
+// presentation, no new data/business decision -- an explicit `tone` on a
+// stage, if a future caller ever sets one, still wins over the label
+// heuristic).
 import React from 'react';
 import { computeFunnelStages } from '../funnel.js';
 
-const TONE_COLOR = {
-  primary: 'var(--primary)',
-  warning: 'var(--amber)',
-  danger: 'var(--red)',
-  neutral: 'var(--text-dim)',
-};
+const DIM_TONES = new Set(['danger', 'neutral']);
+const DIM_LABEL_RE = /reject|block/i;
+
+function isDimStage(s) {
+  if (s.tone) return DIM_TONES.has(s.tone);
+  return DIM_LABEL_RE.test(s.label ?? '');
+}
 
 export function Funnel({ stages }) {
   const computed = computeFunnelStages(stages);
@@ -24,8 +35,8 @@ export function Funnel({ stages }) {
               <div className="funnel-row-unknown">n/a</div>
             ) : (
               <div
-                className="funnel-row-fill"
-                style={{ width: `${Math.max(s.pct, s.value > 0 ? 2 : 0)}%`, background: TONE_COLOR[s.tone] || TONE_COLOR.primary }}
+                className={`funnel-row-fill${isDimStage(s) ? ' funnel-row-fill-dim' : ''}`}
+                style={{ width: `${Math.max(s.pct, s.value > 0 ? 2 : 0)}%` }}
               />
             )}
           </div>

@@ -54,7 +54,7 @@ export default function Masthead({ views, activeKey, onSelect }) {
             aria-expanded={expanded}
           >
             {data ? (
-              <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'} style={{ border: 'none', background: 'none', padding: 0 }}>
+              <Badge tone={data.kill_switch_engaged ? 'danger' : 'ok'} className="lamp" style={{ border: 'none', background: 'none', padding: 0 }}>
                 {data.kill_switch_engaged ? <IconWarningTriangle size={12} /> : <IconShield size={12} />}
                 {data.kill_switch_engaged ? 'ENGAGED' : 'armed'}
               </Badge>

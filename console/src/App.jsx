@@ -36,20 +36,36 @@ export default function App() {
   const ActiveComponent = active.Component;
 
   return (
-    <>
-      {/* ND-6: the masthead -- wordmark + live clock, the annunciator (mode/
-          kill-switch as primary lamps, everything else secondary -- design
-          ruling §4), and the nav tab strip (desktop top rail + mobile
-          bottom tab bar), composed in components/Masthead.jsx. */}
-      <Masthead views={VIEWS} activeKey={view} onSelect={setView} />
+    // ND-7: the aurora app shell (design ruling §4.1) -- the living sky (3
+    // drifting blobs, ruling §2b's exact motion bounds), a fine grain, and a
+    // darkening scrim, rendered ONCE here, behind everything, inert to
+    // pointer/AT (aria-hidden + pointer-events:none in styles.css). `.shell`
+    // carries the same centered/padded content `#root` used to (ND-6's
+    // widened 1600px Mac-mini canvas, unchanged).
+    <div className="aurora-root">
+      <div className="sky" aria-hidden="true">
+        <span className="blob b1" />
+        <span className="blob b2" />
+        <span className="blob b3" />
+      </div>
+      <div className="grain" aria-hidden="true" />
+      <div className="scrim" aria-hidden="true" />
 
-      {/* Each page's own `.grid` (or card list) carries the
-          `reveal-stagger` class (design ruling §3.5) -- remounting via
-          `key={active.key}` on every tab switch replays the one-shot
-          page-load reveal once per switch, never continuously. */}
-      <ErrorBoundary key={active.key}>
-        <ActiveComponent />
-      </ErrorBoundary>
-    </>
+      <div className="shell">
+        {/* ND-6: the masthead -- wordmark + live clock, the annunciator (mode/
+            kill-switch as primary lamps, everything else secondary -- design
+            ruling §4), and the nav tab strip (desktop top rail + mobile
+            bottom tab bar), composed in components/Masthead.jsx. */}
+        <Masthead views={VIEWS} activeKey={view} onSelect={setView} />
+
+        {/* Each page's own `.grid` (or card list) carries the
+            `reveal-stagger` class (design ruling §3.5) -- remounting via
+            `key={active.key}` on every tab switch replays the one-shot
+            page-load reveal once per switch, never continuously. */}
+        <ErrorBoundary key={active.key}>
+          <ActiveComponent />
+        </ErrorBoundary>
+      </div>
+    </div>
   );
 }

@@ -13,6 +13,12 @@
 // confused with a live control or value. Never applied to a control surface
 // (Approvals' action buttons, the masthead/annunciator).
 //
+// ND-7: `tone="lit"` applies the aurora "lit" glass variant (design ruling
+// §4.2) -- cyan-tinted border + outer glow. Reserved for exactly ONE panel
+// per view (Tonight's one-action hero, Approvals' soonest-TTL card,
+// otherwise none) -- callers decide which instance qualifies, this
+// component only renders whichever tone it's told.
+//
 // `reveal` opts a block into the one-shot page-load stagger reveal (design
 // ruling §3.5) -- left off by default so e.g. a block that mounts well
 // after first paint (a lazily-revealed sub-panel) doesn't replay the
@@ -25,6 +31,7 @@ export function InstrumentBlock({
   const classes = [
     'block',
     tone === 'shadow' ? 'block-shadow' : '',
+    tone === 'lit' ? 'block-lit' : '',
     reveal ? 'reveal' : '',
     className,
   ].filter(Boolean).join(' ');

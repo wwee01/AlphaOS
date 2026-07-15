@@ -1,53 +1,82 @@
-/* AlphaOS Console (ND-1) design tokens.
-   Source: docs/roadmap/ported/stitch-design-tokens.md (Stitch mockup's own
-   DESIGN.md, ported "skin only" per the Fable5 "adopt the skin, quarantine
-   the script" ruling) + the constants already in production use in
-   alphaos/dashboard/console_theme.py (_BORDER/_TEXT_DIM/_PRIMARY/_AMBER/
-   _RED/background) -- this file keeps those exact hex values so the console
-   and the Streamlit dashboard read as the same visual system.
+/* AlphaOS Console (ND-7 "Aurora Deep-Space") design tokens.
+   Source: docs/roadmap/console-design-ruling-nd7-aurora.md -- SUPERSEDES the
+   ND-1..6 palette (docs/roadmap/ported/stitch-design-tokens.md, which locked
+   this console to the Streamlit dashboard's #131313/#4cd7f6 theme). That
+   coupling is retired (ruling §2a): the console now owns its own cinematic
+   identity, a luminous deep-space operations deck -- a living aurora behind
+   real-glass panels, light used as the design material for the one thing
+   that needs the operator.
 
-   System font stacks ONLY -- no @font-face, no @import, no CDN, no Google
-   Fonts (ND-1 plan doc §2.2, "zero external browser calls"; console_theme.py
-   already established this discipline for the dashboard, this file mirrors
-   it). Component layout stays inline in JSX (matches NightDesk's own
-   convention, adapted here for AlphaOS's own palette/type scale). */
+   This file keeps every ND-1..6 variable NAME used across pages/*.jsx and
+   components/*.jsx (--bg, --primary, --red, --amber, --text-dim, --border,
+   --surface-low, --shadow-tier, etc.) so NOT ONE inline `var(--x)` call site
+   in the JSX needed to change -- only the VALUES change, aliased onto the
+   new aurora token system below, exactly as the ruling allows ("names may be
+   adapted to existing conventions, values are the ruling"). New surfaces
+   (the sky, glass panels, the lit/shadow variants, the luminous ladder/TTL/
+   funnel treatments) are built directly on the new --void/--glass/--cy/
+   --vi/--mag/--good/--warn/--crit names from ruling §3.
+
+   System font stacks ONLY -- still zero @font-face/@import/CDN (ruling §6
+   hard constraint #1, unchanged from ND-1). Component layout stays inline
+   in JSX; this file is tokens + the shared instrument-vocabulary classes. */
 :root {
-  --bg: #131313;
-  --surface: #131313;
-  --surface-lowest: #0e0e0e;
-  --surface-low: #1c1b1b;
-  --surface-container: #201f1f;
-  --surface-high: #2a2a2a;
-  --surface-bright: #3a3939;
+  /* ---- Aurora Deep-Space primitives (ruling §3, authoritative values) ---- */
+  --void: #060812;
+  --abyss: #0a0e1f;
+  --glass: rgba(34, 44, 86, 0.28);
+  --glass-hi: rgba(120, 150, 255, 0.16);
+  --hairline: rgba(140, 160, 230, 0.14);
+  --hairline-lit: rgba(160, 190, 255, 0.45);
 
-  --border: #27272a;
-  --outline-variant: #3d494c;
+  --ink: #eef2ff;
+  --ink-2: #c3ccf2;
+  /* audit-fixup (ND-7 correctness LOW): was #7d88b8, which measured ~3.7:1
+     for small label text in the worst case (lit glass panel directly over
+     the brightest aurora blob) -- below the 4.5:1 AA small-text bar.
+     Lightened to clear AA with margin in that same worst case while
+     staying clearly tertiary next to --ink-2. Ruling §3's value is
+     superseded by this fixup for exactly this reason. */
+  --ink-dim: #9aa4d2;
 
-  --text: #e5e2e1;
-  --text-dim: #869397;
+  /* brand light (aurora) -- interactive/active/identity, NOT a semantic */
+  --cy: #5be3d6;
+  --cy-2: #38bdf8;
+  --vi: #a78bfa;
+  --mag: #e879f9;
 
-  --primary: #4cd7f6;
-  --on-primary: #003640;
-  --amber: #ffb873;
-  --red: #ef4444;
+  /* semantic state -- separate axis from brand (ruling §3 semantic migration:
+     green now means good; cyan is reserved for brand/active/current-marker) */
+  --good: #3ddc97;
+  --warn: #ffc24b;
+  --crit: #ff5d73;
+  --shadow-tier: #8f8be0;
+  --shadow-tier-border: rgba(143, 139, 224, 0.32);
+  --shadow-tier-bg: rgba(40, 34, 78, 0.28);
 
-  /* ND-6: the two permitted new tokens (design ruling §3.1) -- a dim
-     indigo/violet "shadow-tier" accent used ONLY to tint measurement-only
-     surfaces (TQS/attribution/hypotheses/canary; hard constraint #5), and a
-     single very-faint radial ambient wash behind the page (never a second
-     competing gradient, low enough alpha that body-text contrast is
-     untouched -- verified against WCAG AA below). Semantic meaning of the
-     LOCKED palette is unchanged: cyan=good/armed-safe, amber=attention,
-     red=critical/stop. */
-  --shadow-tier: #8b8bd9;
-  --shadow-tier-border: rgba(139, 139, 217, 0.4);
-  --shadow-tier-bg: rgba(139, 139, 217, 0.07);
+  /* ---- ND-1..6 legacy names, aliased onto the tokens above ---- */
+  --bg: var(--void);
+  --surface: var(--void);
+  --surface-lowest: #050710;
+  --surface-low: var(--glass);
+  --surface-container: rgba(26, 34, 68, 0.34);
+  --surface-high: rgba(120, 150, 255, 0.2);
+  --surface-bright: rgba(160, 190, 255, 0.3);
 
-  --mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --border: var(--hairline);
+  --outline-variant: var(--hairline-lit);
 
-  /* ND-6 spacing scale (design ruling §3.3) -- consistent gap steps used via
-     flex/grid `gap`, replacing ad-hoc margins in new composition. */
+  --text: var(--ink);
+  --text-dim: var(--ink-dim);
+
+  --primary: var(--cy);
+  --on-primary: #04231f;
+  --amber: var(--warn);
+  --red: var(--crit);
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', system-ui, sans-serif;
+
   --sp-1: 4px;
   --sp-2: 8px;
   --sp-3: 12px;
@@ -55,69 +84,111 @@
   --sp-6: 24px;
   --sp-8: 32px;
 
-  /* ND-6 type scale (design ruling §3.2) -- the "display numeral" hero
-     moment shared by every view's StatTile. */
   --fs-display: 40px;
   --fs-headline: 18px;
   --fs-body: 14px;
+
+  --r: 14px;
+  --r-sm: 9px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
 html, body {
-  background: var(--bg);
+  background: var(--void);
   color: var(--text);
   font-family: var(--sans);
   min-height: 100vh;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* ND-6 ambient depth (design ruling §3.1) -- one faint radial wash anchored
-   behind the masthead, fixed so it never scrolls with content, alpha low
-   enough (0.05) that it reads as atmosphere, not a second visible gradient
-   competing with instrument-block borders. `background-attachment: fixed`
-   is dropped on narrow/touch viewports below (perf + iOS Safari quirks),
-   the wash itself stays identical. */
-body {
-  background-image: radial-gradient(ellipse 1400px 700px at 50% -8%, rgba(76, 215, 246, 0.055), transparent 60%);
-  background-repeat: no-repeat;
-  background-attachment: fixed;
+#root { min-height: 100vh; }
+
+/* ---- ND-7 the living aurora (ruling §4.1 + §2b's exact motion bounds) ----
+   One app shell, rendered once by App.jsx, behind everything, inert to
+   pointer/AT. `.aurora-root` is the full-bleed ground; `.shell` (below)
+   carries the centered, padded content the old bare `#root` rule used to. */
+.aurora-root {
+  position: relative;
+  min-height: 100vh;
+  background: var(--void);
+  overflow-x: hidden;
 }
 
-/* ND-6: widen the desktop canvas (design ruling §3.3) -- a Mac mini external
-   display comfortably fills 1440-1600px; the old 1200px cap stranded a huge
-   gutter. Content padding still keyed to the spacing scale. */
-#root { max-width: 1600px; margin: 0 auto; padding: var(--sp-8) var(--sp-4) 80px; }
+.sky { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 0; }
+.blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  mix-blend-mode: screen;
+  will-change: transform;
+}
+.b1 {
+  width: 60vw; height: 60vw; left: -10vw; top: -22vw;
+  background: radial-gradient(circle at 30% 30%, var(--cy), transparent 62%);
+  opacity: 0.55;
+  animation: drift1 34s ease-in-out infinite;
+}
+.b2 {
+  width: 52vw; height: 52vw; right: -12vw; top: -16vw;
+  background: radial-gradient(circle at 60% 40%, var(--vi), transparent 60%);
+  opacity: 0.5;
+  animation: drift2 42s ease-in-out infinite;
+}
+.b3 {
+  width: 44vw; height: 44vw; left: 34vw; top: 24vw;
+  background: radial-gradient(circle at 50% 50%, var(--mag), transparent 62%);
+  opacity: 0.32;
+  animation: drift3 50s ease-in-out infinite;
+}
+/* ruling §2b: cycle time >=30s, opacity <=~0.55 pre-blend, blur >=80px,
+   mix-blend-mode:screen, behind a darkening scrim -- all satisfied above.
+   Transform-only keyframes (never filter/opacity) per §5 perf notes. */
+@keyframes drift1 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(6vw, 4vw) scale(1.08); } }
+@keyframes drift2 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-5vw, 5vw) scale(1.12); } }
+@keyframes drift3 { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-4vw, -3vw) scale(1.1); } }
+
+/* Fine grain (inline data-URI SVG turbulence, zero external asset -- ruling
+   §6 hard constraint #1) + a radial scrim darkening the edges so glass-panel
+   text contrast never suffers, regardless of what's behind it (§5's own
+   worst-case contrast requirement). */
+.grain {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.scrim {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background: radial-gradient(120% 90% at 50% -10%, transparent 40%, rgba(6, 8, 18, 0.55) 100%);
+}
+
+/* ---- shell (the old bare #root layout, now living one level in so the sky
+   can be full-bleed behind it) -- ND-6's own widened 1600px Mac-mini canvas
+   stands unchanged. */
+.shell { position: relative; z-index: 2; max-width: 1600px; margin: 0 auto; padding: var(--sp-8) var(--sp-4) 80px; }
 
 a { color: var(--primary); text-decoration: none; }
 button { cursor: pointer; border: none; background: none; font-family: inherit; color: inherit; }
 
-/* ND-6 accessibility (hard constraint #9) -- a visible keyboard focus ring
-   on every interactive element, using the primary token so it reads as
-   "armed/active" rather than a generic browser blue. `:focus-visible` so a
-   mouse click never shows the ring, only keyboard/assistive navigation. */
+/* a11y (ruling §6 hard constraint #9): a visible keyboard focus ring on
+   every interactive element, `:focus-visible` so a mouse click never shows
+   it, only keyboard/assistive navigation. */
 a:focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 [tabindex]:focus-visible {
-  outline: 2px solid var(--primary);
+  outline: 2px solid var(--cy);
   outline-offset: 2px;
   border-radius: 2px;
 }
 
 h1, h2, h3 { text-wrap: balance; }
 
-/* ND-6 reading measure (design ruling §3.2) -- prose blocks (Tonight's
-   brief sentences, invalidation reasons) are capped so a wide desktop
-   instrument block never runs a paragraph the full width of a 27" display. */
 .prose { max-width: 68ch; }
 
-.num {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 
-/* label-caps typography token: 11px/700/uppercase/0.08em (ported doc). */
 .label-caps {
   font-family: var(--sans);
   font-size: 11px;
@@ -127,12 +198,17 @@ h1, h2, h3 { text-wrap: balance; }
   color: var(--text-dim);
 }
 
-/* "Instrument block" -- elevation via 1px border line-work, never shadows
-   (ported doc: "Elevation & Depth... Avoid all blur-based shadows"). */
+/* ---- "Instrument block" -- ND-7 real glass (ruling §4.2) -- gradient fill,
+   1px hairline border with a top-lit inner highlight, a deep soft drop, and
+   backdrop blur+saturate so the aurora reads through, softened. */
 .block {
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--surface-container);
+  position: relative;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r);
+  background: linear-gradient(180deg, rgba(26, 34, 68, 0.34), rgba(12, 16, 36, 0.3));
+  box-shadow: 0 1px 0 var(--hairline-lit) inset, 0 24px 60px -40px rgba(0, 0, 0, 0.9);
+  backdrop-filter: blur(16px) saturate(1.25);
+  -webkit-backdrop-filter: blur(16px) saturate(1.25);
   padding: var(--sp-3) var(--sp-4);
 }
 
@@ -144,13 +220,13 @@ h1, h2, h3 { text-wrap: balance; }
   margin-bottom: var(--sp-3);
 }
 
-/* Static badges only -- no @keyframes, no pulse/blink anywhere in this file
-   (UX doc §13 calm-console rule, carried into ND-1 by the plan doc §2.4:
-   "no flashing/pulsing; live updates are honest... a visible as-of stamp").
-   ND-visual: given more visual weight (background tint + heavier weight)
-   to close the gap against the Stitch mockups' filled-pill treatment --
-   same border/tone tokens as before, this pass only thickens them. See
-   components/Badge.jsx for the React component + tone lookup. */
+/* Badges -- pill-weighted status vocabulary (ND-visual pass), re-themed onto
+   the aurora tokens. `success` NOW gets its OWN green class -- ND-1..6
+   collapsed success onto the same class as primary/brand cyan (the
+   ND-visual audit's LOW); ruling §3's semantic migration requires the two
+   axes to render distinctly, so INTACT/PROTECTED/USABLE/etc. (badgeTone ->
+   'success') are visually green, never brand cyan. See components/Badge.jsx
+   for the tone->class table. */
 .badge {
   display: inline-flex;
   align-items: center;
@@ -159,19 +235,17 @@ h1, h2, h3 { text-wrap: balance; }
   font-size: 12px;
   font-weight: 600;
   padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
   color: var(--text-dim);
-  background: var(--surface-low);
+  background: var(--glass);
 }
-.badge-ok { color: var(--primary); border-color: rgba(76, 215, 246, 0.5); background: rgba(76, 215, 246, 0.1); }
-.badge-warn { color: var(--amber); border-color: rgba(255, 184, 115, 0.5); background: rgba(255, 184, 115, 0.1); }
-.badge-danger { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.08); }
+.badge-ok { color: var(--cy); border-color: rgba(91, 227, 214, 0.4); background: rgba(91, 227, 214, 0.08); }
+.badge-success { color: var(--good); border-color: rgba(61, 220, 151, 0.4); background: rgba(61, 220, 151, 0.08); }
+.badge-warn { color: var(--warn); border-color: rgba(255, 194, 75, 0.4); background: rgba(255, 194, 75, 0.08); }
+.badge-danger { color: var(--crit); border-color: rgba(255, 93, 115, 0.4); background: rgba(255, 93, 115, 0.08); }
+.badge-danger:hover { box-shadow: 0 0 24px -6px var(--crit); }
 
-/* Opt-in label-caps treatment for single-word status pills (verdict/
-   thesis/direction/bucket) -- left off the base .badge rule so the many
-   existing mixed word+number badges ("heartbeat: 12s ago") keep their
-   current mono look; see Badge.jsx's `caps` prop. */
 .badge-caps {
   font-family: var(--sans);
   font-weight: 700;
@@ -180,11 +254,20 @@ h1, h2, h3 { text-wrap: balance; }
   font-size: 11px;
 }
 
+/* the masthead kill-switch lamp -- a glowing PILL, distinct from the small
+   9px-radius badges elsewhere (ruling §4's masthead spec + §3 radius scale:
+   "14px panels / 9px small" -- the lamp is the one deliberate exception,
+   ported from the approved mockup's `.lamp`). Static glow only, no pulse
+   (ruling §2b: "no pulsing kill switch... unchanged"). */
+.lamp { border-radius: 99px !important; padding: 8px 14px !important; }
+.lamp.badge-ok { box-shadow: 0 0 22px -4px rgba(91, 227, 214, 0.4) inset; }
+.lamp.badge-danger { box-shadow: 0 0 22px -4px rgba(255, 93, 115, 0.4) inset; }
+
 .stale-banner {
-  border: 1px solid rgba(239, 68, 68, 0.5);
-  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(255, 93,115, 0.4);
+  background: rgba(255, 93,115, 0.08);
   color: var(--red);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 8px 12px;
   font-size: 13px;
   margin-bottom: 16px;
@@ -206,12 +289,6 @@ h1, h2, h3 { text-wrap: balance; }
   .col-4, .col-6, .col-8, .col-12 { grid-column: span 12; }
 }
 
-/* ND-2: a plain data table for list-shaped API payloads (Decisions/Learning/
-   System pages) -- Tonight/Positions/Approvals never needed one (card
-   layout). Horizontal scroll WITHIN the bordered block at narrow widths
-   (UX doc §16 item 6: "reading density is a desktop virtue worth keeping on
-   mobile for tables"), never a layout that forces the page itself to
-   scroll sideways. */
 .dtable-wrap { overflow-x: auto; }
 .dtable { border-collapse: collapse; width: 100%; font-size: 12px; }
 .dtable th, .dtable td {
@@ -230,16 +307,14 @@ h1, h2, h3 { text-wrap: balance; }
 }
 .dtable td.num { font-family: var(--mono); }
 
-/* ND-2: nav tab strip -- App.jsx's plain useState-based view switcher (no
-   router library, matches this project's "don't over-engineer" house
-   style). Touch target height meets the UX doc §16 44px minimum at every
-   width, not just under the mobile media query below. */
+/* nav tab strip -- quiet links; the active view carries a cy->vi gradient
+   underline with a soft glow (ruling §4), replacing ND-6's flat primary
+   border-bottom. */
 .nav-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-bottom: 20px;
-  border-bottom: 1px solid var(--border);
   padding-bottom: 0;
 }
 .nav-tab {
@@ -247,63 +322,63 @@ h1, h2, h3 { text-wrap: balance; }
   align-items: center;
   gap: 6px;
   font-family: var(--sans);
-  font-size: 12px;
+  font-size: 13.5px;
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--text-dim);
-  padding: 10px 12px;
+  padding: 10px 15px;
   min-height: 44px;
-  border-bottom: 2px solid transparent;
-  white-space: nowrap;
+  border-radius: 10px;
+  position: relative;
+  transition: color 0.16s, background 0.16s;
 }
-.nav-tab:hover { color: var(--text); }
+.nav-tab:hover { color: var(--ink-2); background: rgba(120, 150, 255, 0.06); }
 .nav-tab-active {
-  color: var(--primary);
-  border-bottom-color: var(--primary);
+  color: var(--ink);
+}
+.nav-tab-active::after {
+  content: '';
+  position: absolute;
+  left: 15px;
+  right: 15px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--cy), var(--vi));
+  box-shadow: 0 0 12px var(--cy);
 }
 
-/* ND-visual: shared thick progress-bar track, replacing ND-2's thin
-   .r-ladder-track top-border-only treatment and 8px .ttl-bar-track with the
-   mockups' heavier bar weight (components/ProgressBar.jsx renders these
-   classes). Percentage math is UNCHANGED -- still positions.js:
-   computeRLadder() / approvals.js:computeTtlBar(), both pure and tested;
-   this is layout only. Stays horizontal at every width (UX doc §16 item 5:
-   "R-ladders stay horizontal -- they compress well"). No @keyframes/
-   animation -- §13 calm-console rule: a fill/marker paints once per poll,
-   never a client-side ticking transition. */
-.pbar-unavailable {
-  font-size: 12px;
-  color: var(--text-dim);
-  padding: 10px 0;
-}
-.pbar-wrap {
-  margin: 24px 4px 24px;
-}
+/* ---- luminous progress instruments (ruling §4.3) ---- */
+.pbar-unavailable { font-size: 12px; color: var(--text-dim); padding: 10px 0; }
+.pbar-wrap { margin: 24px 4px 24px; }
 .pbar-track {
   position: relative;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--surface-low);
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
+  background: rgba(120, 150, 255, 0.1);
   overflow: visible;
 }
-.pbar-fill {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  border-radius: 5px;
-  background: var(--primary);
-}
-.pbar-track-primary .pbar-fill { background: var(--primary); }
-.pbar-track-warning .pbar-fill { background: var(--amber); }
-.pbar-track-danger .pbar-fill { background: var(--red); }
-.pbar-track-neutral .pbar-fill { background: var(--text-dim); }
+.pbar-fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 99px; }
+/* TTL-bar tone classes (Approvals.jsx's TTL_TONE) -- glowing gradient (cy)
+   when ok, solid amber when low, solid crit full-bar when expired (the
+   expired-paints-full law stands, computeTtlBar()'s math unchanged). */
+.pbar-track-primary .pbar-fill { background: linear-gradient(90deg, var(--cy), var(--cy-2)); box-shadow: 0 0 16px var(--cy); }
+.pbar-track-warning .pbar-fill { background: var(--warn); box-shadow: 0 0 14px rgba(255, 194, 75, 0.5); }
+.pbar-track-danger .pbar-fill { background: var(--crit); box-shadow: 0 0 14px rgba(255, 93, 115, 0.5); }
+.pbar-track-neutral .pbar-fill { background: var(--ink-dim); }
+/* R-ladder direction fills (ProgressBar's `fillClassName` prop, set by
+   Positions.jsx's RLadder from current-vs-entry sign) -- ported verbatim
+   from the approved mockup's `.fill-pos`/`.fill-neg`. Placed after the
+   tone-class rules above (same specificity, later wins) so the ladder's
+   direction gradient always overrides the generic tone fill. */
+.pbar-fill.pbar-fill-pos { background: linear-gradient(90deg, rgba(255, 93, 115, 0.5), var(--warn) 40%, var(--good)); box-shadow: 0 0 14px rgba(61, 220, 151, 0.4); }
+.pbar-fill.pbar-fill-neg { background: linear-gradient(90deg, var(--crit), rgba(255, 150, 90, 0.6)); box-shadow: 0 0 14px rgba(255, 93, 115, 0.4); }
 
 .pbar-mark {
   position: absolute;
   top: -6px;
   bottom: -6px;
-  border-left: 2px solid var(--text-dim);
+  border-left: 2px solid var(--hairline-lit);
   transform: translateX(-1px);
 }
 .pbar-mark-label {
@@ -324,51 +399,48 @@ h1, h2, h3 { text-wrap: balance; }
   color: var(--text-dim);
   white-space: nowrap;
 }
+/* the current-price marker -- a luminous 16px orb, dark ring + glow, value
+   floated above in matching tone (ruling §4.3). Cyan/brand by default (the
+   ladder's own "current marker" reservation, §3); a track carrying a
+   warning/danger tone (badgeTone(verdict) -- ATTENTION/EXIT_REVIEW etc.)
+   shifts the orb to that tone via the descendant selectors below -- a
+   healthy hold/intact position keeps the cyan orb, an at-risk/attention
+   one gets the amber orb, per the approved concept's two contrasting
+   position-card examples. A neutral track (e.g. HOLD) intentionally falls
+   through to the cyan default -- "everything is fine" reads as brand
+   light, not grey. */
 .pbar-marker {
   position: absolute;
   top: 50%;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--surface-container);
-  border: 2px solid var(--primary);
   transform: translate(-50%, -50%);
+  background: radial-gradient(circle at 40% 35%, #eafffb, var(--cy));
+  box-shadow: 0 0 0 3px rgba(6, 8, 18, 0.85), 0 0 18px 2px var(--cy);
+  z-index: 3;
 }
+.pbar-track-warning .pbar-marker { background: radial-gradient(circle at 40% 35%, #fff, var(--warn)); box-shadow: 0 0 0 3px rgba(6, 8, 18, 0.85), 0 0 18px 2px var(--warn); }
+.pbar-track-danger .pbar-marker { background: radial-gradient(circle at 40% 35%, #fff, var(--crit)); box-shadow: 0 0 0 3px rgba(6, 8, 18, 0.85), 0 0 18px 2px var(--crit); }
 .pbar-marker-label {
   position: absolute;
   top: -22px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  color: var(--primary);
+  color: var(--cy);
+  text-shadow: 0 0 12px rgba(91, 227, 214, 0.6);
   white-space: nowrap;
 }
+.pbar-track-warning .pbar-marker-label { color: var(--warn); text-shadow: 0 0 12px rgba(255, 194, 75, 0.6); }
+.pbar-track-danger .pbar-marker-label { color: var(--crit); text-shadow: 0 0 12px rgba(255, 93, 115, 0.5); }
 
-/* ND-visual: TTL row wrapper -- the clock icon + thick ProgressBar + label
-   sitting on one line (Approvals page). */
-.ttl-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 6px 0;
-}
+.ttl-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
 .ttl-row-track { flex: 1; }
-.ttl-row-label {
-  flex: none;
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.ttl-row-unknown {
-  font-size: 11px;
-  color: var(--text-dim);
-}
+.ttl-row-label { flex: none; font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.ttl-row-unknown { font-size: 11px; color: var(--text-dim); }
 
-/* ND-visual: small N-column paired-stat row (components/StatFooter.jsx) --
-   the mockups' "label over value" stat-block treatment, used wherever this
-   console already renders a run of small labelled numbers inline. */
 .stat-footer {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
@@ -377,41 +449,29 @@ h1, h2, h3 { text-wrap: balance; }
   padding-top: 8px;
   margin-top: 8px;
 }
-.stat-footer-item {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-.stat-footer-value {
-  font-size: 13px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+.stat-footer-item { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.stat-footer-value { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* ND-6: the masthead (design ruling §4) -- a real sticky top bar. Left:
-   wordmark + live clock. Then the annunciator (components/Annunciator.jsx,
-   now presentational -- data/poll owned by useAnnunciator.js and rendered
-   once here) carrying the ONE kill-switch control in this console. Then the
-   nav tab strip. Sticky so mode/kill-switch/nav stay reachable without
-   scrolling on a long System/Learning page. A whisper of shadow is
-   permitted here (design ruling §3.1 "a whisper of shadow is fine for the
-   masthead and modals") -- the only shadow-bearing surface in this file. */
+/* ---- masthead -- ruling §4: a real glass bar. Gradient wordmark
+   (background-clip:text, cy->vi->mag), the annunciator (lamp + chips), the
+   nav strip. Sticky so the kill-switch stays reachable without scrolling
+   (unchanged behavioral requirement); glass/translucent is now the explicit
+   ruling for this bar (supersedes ND-6's own "fully opaque, deliberately"
+   reasoning for the mast specifically -- ruling §4 names the masthead as
+   one of the four signature glass surfaces). */
 .masthead {
   position: sticky;
   top: 0;
   z-index: 40;
   margin: calc(-1 * var(--sp-8)) calc(-1 * var(--sp-4)) var(--sp-4);
   padding: var(--sp-3) var(--sp-4) var(--sp-3);
-  /* Fully opaque, deliberately -- this bar carries the kill-switch control,
-     so scrolled content must never show through it even faintly (a
-     translucent/blurred header here would be exactly the kind of "fancy at
-     the expense of legibility" the design ruling's §7 guardrail forbids on
-     a safety-critical control). */
-  background: var(--bg);
-  border-bottom: 1px solid var(--border);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  background: linear-gradient(180deg, rgba(30, 40, 80, 0.55), rgba(14, 18, 40, 0.5));
+  border: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+  border-radius: 0 0 var(--r) var(--r);
+  box-shadow: 0 1px 0 var(--hairline-lit) inset, 0 20px 60px -30px rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
 }
 .masthead-top {
   display: flex;
@@ -420,56 +480,24 @@ h1, h2, h3 { text-wrap: balance; }
   gap: var(--sp-3);
   margin-bottom: var(--sp-2);
 }
-.masthead-brand {
-  display: flex;
-  align-items: baseline;
-  gap: var(--sp-3);
-}
+.masthead-brand { display: flex; align-items: baseline; gap: var(--sp-3); }
 .wordmark {
   font-family: var(--mono);
+  font-weight: 700;
   font-size: 18px;
-  font-weight: 700;
   letter-spacing: 0.08em;
-  color: var(--primary);
+  background: linear-gradient(92deg, var(--cy), var(--vi) 70%, var(--mag));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 26px rgba(91, 227, 214, 0.25);
 }
-.masthead-clock {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-/* The mobile "expand full annunciator" toggle -- hidden entirely on
-   desktop, where the full strip is always visible (see the >=769px rule
-   overriding .annunciator-shell below). */
-.masthead-expand-toggle {
-  display: none;
-}
-/* nav-tabs sits nested inside .masthead here -- the masthead's own
-   border-bottom/padding-bottom already closes the unit, so the tab strip's
-   standalone border/margin (used when .nav-tabs appears alone, e.g. none
-   currently, kept for CSS-class reuse) is suppressed in this context. */
-.masthead .nav-tabs {
-  margin-bottom: 0;
-  border-bottom: none;
-  padding-bottom: 0;
-}
+.masthead-clock { font-family: var(--mono); font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.masthead-expand-toggle { display: none; }
+.masthead .nav-tabs { margin-bottom: 0; padding-bottom: 0; }
 
-/* ND-3's annunciator strip (components/Annunciator.jsx) -- unchanged
-   fields/polling logic (now sourced from hooks/useAnnunciator.js), restyled
-   here into a primary/secondary hierarchy (design ruling §4: "mode and
-   kill-switch are primary... then autonomy, heartbeat, open-R,
-   approvals-pending as secondary chips"). */
-.annunciator-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  align-items: center;
-}
-.annunciator-primary {
-  font-size: 13px;
-  padding: 6px 12px;
-  font-weight: 700;
-}
+.annunciator-strip { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
+.annunciator-primary { font-size: 13px; padding: 6px 12px; font-weight: 700; }
 .annunciator-secondary-row {
   display: flex;
   flex-wrap: wrap;
@@ -479,15 +507,13 @@ h1, h2, h3 { text-wrap: balance; }
   margin-top: var(--sp-1);
 }
 
-/* ND-6 shadow-tier treatment (design ruling §3.4/§8 hard constraint #5) --
-   applied to any InstrumentBlock with tone="shadow" (Learning's whole view;
-   Approvals' TQS line stays plain text, per that view's own direction).
-   Distinguishes "being measured, not acted on" from a live control/value
-   at a glance: dim indigo border + a faint indigo tint, never the cyan/
-   amber/red vocabulary reserved for live state. */
+/* shadow-tier treatment (ruling §4.2 "shadow" panel variant / §6 hard
+   constraint #5) -- a dim violet glass variant for measurement-only
+   surfaces (Learning's whole view; Approvals' TQS line stays plain text).
+   Never the cy/good/warn/crit vocabulary reserved for a live control/value. */
 .block-shadow {
   border-color: var(--shadow-tier-border);
-  background: linear-gradient(var(--shadow-tier-bg), var(--shadow-tier-bg)), var(--surface-container);
+  background: linear-gradient(180deg, rgba(40, 34, 78, 0.32), rgba(16, 14, 34, 0.3));
 }
 .shadow-tag {
   font-family: var(--sans);
@@ -500,40 +526,31 @@ h1, h2, h3 { text-wrap: balance; }
   border-radius: 3px;
   padding: 1px 5px;
 }
-.block-footer {
-  margin-top: var(--sp-3);
-  padding-top: var(--sp-2);
-  border-top: 1px solid var(--border);
+/* the "lit" variant (ruling §4.2) -- cyan-tinted border + outer glow,
+   exactly ONE panel per view: Tonight's one-action hero, Approvals' card
+   whose TTL is soonest, otherwise none. */
+.block-lit {
+  border-color: rgba(91, 227, 214, 0.4);
+  box-shadow: 0 1px 0 rgba(160, 255, 245, 0.35) inset, 0 0 40px -14px rgba(91, 227, 214, 0.5), 0 24px 60px -40px rgba(0, 0, 0, 0.9);
 }
+.block-footer { margin-top: var(--sp-3); padding-top: var(--sp-2); border-top: 1px solid var(--border); }
 
-/* ND-6 StatTile (design ruling §3.4) -- the big-number hero moment, one per
-   view. Mono/tabular per the type scale; the label sits above in
-   label-caps, an optional context line below. */
+/* ---- StatTile -- the glowing hero numeral (ruling §4.4): one per view,
+   huge mono tabular, tone-colored with a soft matching text-shadow aura
+   (green positive / red negative / ink neutral). Color itself is applied
+   inline by components/StatTile.jsx (tone->color/glow lookup); this file
+   only sets the shared type scale/layout. */
 .stat-tile { display: flex; flex-direction: column; gap: 2px; }
 .stat-tile-label { margin-bottom: 2px; }
-.stat-tile-value {
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  line-height: 1.05;
-}
+.stat-tile-value { font-weight: 700; letter-spacing: -0.01em; line-height: 1.05; }
 .stat-tile-lg { font-size: var(--fs-display); }
 .stat-tile-md { font-size: 24px; }
-.stat-tile-unit {
-  font-family: var(--sans);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-dim);
-  margin-left: 6px;
-}
-.stat-tile-context {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
+.stat-tile-unit { font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--text-dim); margin-left: 6px; }
+.stat-tile-context { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 
-/* ND-6 Funnel (design ruling §3.4/§5 Decisions) -- horizontal proportional
-   bars, widest-stage-relative (funnel.js:computeFunnelStages), never a bare
-   count table. */
+/* ---- Funnel -- gradient bars (vi->cy) with soft glow for the "alive"
+   stages, dimmed violet for rejected/blocked (ruling §4.3), fed by
+   funnel.js:computeFunnelStages (unchanged math). */
 .funnel { display: flex; flex-direction: column; gap: var(--sp-2); }
 .funnel-row {
   display: grid;
@@ -543,47 +560,39 @@ h1, h2, h3 { text-wrap: balance; }
 }
 .funnel-row-track {
   height: 20px;
-  background: var(--surface-low);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  background: rgba(120, 150, 255, 0.08);
+  border: 1px solid var(--hairline);
+  border-radius: 99px;
   overflow: hidden;
   position: relative;
 }
 .funnel-row-fill {
   height: 100%;
-  border-radius: 3px;
-  transition: none; /* §13 calm console -- fill paints once per poll, no ticking transition */
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--vi), var(--cy));
+  box-shadow: 0 0 12px -3px var(--cy);
+  transition: none; /* one-shot only -- fill paints once per poll, ruling §6 #3 */
 }
-.funnel-row-unknown {
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 0 8px;
-  line-height: 18px;
-}
+.funnel-row-fill-dim { background: linear-gradient(90deg, rgba(143, 139, 224, 0.5), rgba(120, 150, 255, 0.25)); box-shadow: none; }
+.funnel-row-unknown { font-size: 11px; color: var(--text-dim); padding: 0 8px; line-height: 18px; }
 .funnel-row-value { text-align: right; font-size: 12px; }
 
-/* ND-6 Sparkline (design ruling §3.4) -- tiny inline SVG, ONLY where a real
-   series exists (sparkline.js:computeSparklinePoints returns null otherwise
-   -- the component then renders the honest text fallback below, never a
-   fabricated flat line). */
+/* ---- Sparkline -- glow applied inline via SVG `filter` (components/
+   Sparkline.jsx); honest empty state stands (sparkline.js returns null,
+   never a fabricated flat line). */
 .sparkline { display: block; overflow: visible; }
 .sparkline-unavailable { font-size: 11px; color: var(--text-dim); padding: 6px 0; }
 
-/* ND-6 motion (design ruling §3.5) -- tasteful ONE-SHOT only, all gated on
-   prefers-reduced-motion below. Page-load stagger reveal on instrument
-   blocks (React remounts each view via App.jsx's `key={active.key}`, so
-   this replays once per view-switch -- a discrete user-caused transition,
-   never a continuous idle animation) and a one-shot value-change flash
-   (components/StatTile.jsx toggles `.value-flash` for 600ms then removes
-   it -- it never loops). Explicitly no @keyframes anywhere else in this
-   file: no pulse, no blink, no breathing glow. */
+/* ---- motion (ruling §2b + §6 #3): data/status motion stays ONE-SHOT only,
+   reduced-motion-gated -- page-load stagger reveal + the one-shot
+   value-change flash. The aurora sky (.blob, above) is the ONLY exception,
+   bounded exactly as §2b describes; it is killed too under
+   prefers-reduced-motion below (the static gradient wash remains). */
 @keyframes reveal-fade-rise {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.reveal {
-  animation: reveal-fade-rise 220ms ease-out both;
-}
+.reveal { animation: reveal-fade-rise 220ms ease-out both; }
 .reveal-stagger > * { animation: reveal-fade-rise 220ms ease-out both; }
 .reveal-stagger > *:nth-child(1) { animation-delay: 0ms; }
 .reveal-stagger > *:nth-child(2) { animation-delay: 30ms; }
@@ -594,12 +603,13 @@ h1, h2, h3 { text-wrap: balance; }
 .reveal-stagger > *:nth-child(n+7) { animation-delay: 180ms; }
 
 @keyframes value-flash-anim {
-  from { background-color: rgba(76, 215, 246, 0.22); border-radius: 4px; }
-  to { background-color: rgba(76, 215, 246, 0); border-radius: 4px; }
+  from { background-color: rgba(91, 227, 214, 0.22); border-radius: var(--r-sm); }
+  to { background-color: rgba(91, 227, 214, 0); border-radius: var(--r-sm); }
 }
 .value-flash { animation: value-flash-anim 600ms ease-out; }
 
 @media (prefers-reduced-motion: reduce) {
+  .blob,
   .reveal,
   .reveal-stagger > *,
   .value-flash {
@@ -608,18 +618,16 @@ h1, h2, h3 { text-wrap: balance; }
   }
 }
 
-/* ND-6: PinPrompt's open panel is portaled to `document.body` (see
-   PinPrompt.jsx's own docstring for why -- a `position:fixed` descendant
-   inside a `reveal`-animated InstrumentBlock was anchoring to that block
-   instead of the viewport), so it needs a real position at EVERY width, not
-   only under the mobile media query below. Desktop/tablet default: a small
-   centered modal (backdrop + a fixed, vertically-centered panel). The
-   >=768px mobile query further down overrides this into the bottom-sheet
-   treatment (design ruling §6). */
+/* ---- PIN sheet/modal -- glass reskin, SUBMIT LOGIC untouched (ruling §6
+   #8 / PinPrompt.jsx docstring). Portaled to document.body, so it sits
+   outside `.aurora-root` -- the `:root`-scoped tokens above still cascade
+   to it (CSS custom properties are document-wide, not React-tree-scoped),
+   it just doesn't see the sky itself, which is fine: a modal doesn't need
+   to show the aurora through it, only to look like the same glass system. */
 .pin-sheet-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(6, 8, 18, 0.65);
   z-index: 49;
 }
 .pin-sheet-panel {
@@ -628,20 +636,25 @@ h1, h2, h3 { text-wrap: balance; }
   left: 50%;
   transform: translate(-50%, -50%);
   z-index: 50;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  border-radius: var(--r) !important;
+  background: linear-gradient(180deg, rgba(30, 40, 80, 0.55), rgba(14, 18, 40, 0.55)) !important;
+  border: 1px solid var(--hairline-lit) !important;
+  box-shadow: 0 1px 0 var(--hairline-lit) inset, 0 20px 50px -20px rgba(0, 0, 0, 0.7) !important;
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
   max-width: calc(100vw - 32px);
 }
 
-/* ND-6 mobile bottom tab bar + PIN bottom sheet + masthead collapse
-   (design ruling §6). 768px is the tablet/phone split -- Mac mini external
-   display stays >=1440px in practice, this breakpoint only ever engages on
-   an actual phone/narrow-window viewport. */
+/* ---- mobile bottom tab bar + PIN bottom sheet + masthead collapse (ruling
+   §4 "mobile: same collapse pattern as ND-6... reskinned to glass"). 768px
+   is the tablet/phone split, unchanged from ND-6. */
 @media (max-width: 768px) {
-  #root { padding: var(--sp-3) var(--sp-3) calc(72px + env(safe-area-inset-bottom) + var(--sp-3)); }
+  .shell { padding: var(--sp-3) var(--sp-3) calc(72px + env(safe-area-inset-bottom) + var(--sp-3)); }
 
   .masthead {
     margin: calc(-1 * var(--sp-3)) calc(-1 * var(--sp-3)) var(--sp-3);
     padding: calc(var(--sp-2) + env(safe-area-inset-top)) var(--sp-3) var(--sp-2);
+    border-radius: 0 0 var(--r) var(--r);
   }
   .masthead-expand-toggle {
     display: inline-flex;
@@ -650,25 +663,9 @@ h1, h2, h3 { text-wrap: balance; }
     min-height: 32px;
     padding: 4px 10px;
   }
-  /* Collapsed by default on mobile: the full annunciator (and the ONE
-     kill-switch control it carries) is one tap away via the toggle above,
-     never hidden behind more than that single tap (design ruling §4:
-     "kill-switch stays reachable without scrolling"). */
-  .annunciator-shell {
-    max-height: 0;
-    overflow: hidden;
-  }
-  .annunciator-shell-expanded {
-    max-height: 600px;
-    overflow: visible;
-    margin-top: var(--sp-2);
-  }
+  .annunciator-shell { max-height: 0; overflow: hidden; }
+  .annunciator-shell-expanded { max-height: 600px; overflow: visible; margin-top: var(--sp-2); }
 
-  /* Nav tabs move to a fixed bottom bar -- thumb-reachable, horizontally
-     scrollable (7 tabs at a comfortable touch width don't all fit at
-     390px), safe-area-aware. The masthead's own top-of-page nav-tabs are
-     hidden on mobile (App.jsx renders the SAME tab data twice -- top strip
-     for desktop, bottom bar for mobile -- CSS chooses which is visible). */
   .masthead .nav-tabs.nav-tabs-top { display: none; }
   .nav-tabs-bottom {
     position: fixed;
@@ -680,12 +677,10 @@ h1, h2, h3 { text-wrap: balance; }
     overflow-x: auto;
     scroll-snap-type: x proximity;
     gap: 0;
-    /* Fully opaque -- same reasoning as .masthead above: this bar is the
-       mobile nav (and sits directly above the kill-switch-bearing
-       masthead's expand toggle), never a translucent surface a scrolled
-       value could show through. */
-    background: var(--bg);
-    border-top: 1px solid var(--border);
+    background: linear-gradient(0deg, rgba(14, 18, 40, 0.7), rgba(14, 18, 40, 0.55));
+    border-top: 1px solid var(--hairline);
+    backdrop-filter: blur(18px) saturate(1.3);
+    -webkit-backdrop-filter: blur(18px) saturate(1.3);
     padding: 4px 4px calc(4px + env(safe-area-inset-bottom));
   }
   .nav-tab-bottom {
@@ -703,23 +698,30 @@ h1, h2, h3 { text-wrap: balance; }
     color: var(--text-dim);
     padding: 6px 4px;
     border-radius: 6px;
+    position: relative;
   }
-  .nav-tab-bottom.nav-tab-active { color: var(--primary); }
+  .nav-tab-bottom.nav-tab-active { color: var(--ink); }
+  .nav-tab-bottom.nav-tab-active::after {
+    content: '';
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 2px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--cy), var(--vi));
+    box-shadow: 0 0 10px var(--cy);
+  }
 
-  /* PIN prompt becomes a proper bottom sheet (design ruling §6): big
-     numeric input, large confirm/cancel, safe-area padding. Logic in
-     PinPrompt.jsx is untouched -- these classes only reposition/resize the
-     SAME markup. Overrides the centered-modal base above: anchor to the
-     bottom edge instead of vertical-center. */
   .pin-sheet-panel {
     top: auto;
     left: 0;
     right: 0;
     bottom: 0;
     transform: none;
-    border-radius: 14px 14px 0 0;
+    border-radius: var(--r) var(--r) 0 0 !important;
     padding: var(--sp-4) var(--sp-4) calc(var(--sp-4) + env(safe-area-inset-bottom)) !important;
-    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.45);
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5) !important;
     min-width: 0 !important;
     max-width: none;
     width: 100%;
@@ -730,9 +732,7 @@ h1, h2, h3 { text-wrap: balance; }
     text-align: center;
     letter-spacing: 0.3em;
   }
-  .pin-sheet-panel .pin-sheet-actions {
-    flex-direction: column !important;
-  }
+  .pin-sheet-panel .pin-sheet-actions { flex-direction: column !important; }
   .pin-sheet-panel .pin-sheet-actions button {
     min-height: 48px !important;
     width: 100%;
@@ -741,37 +741,23 @@ h1, h2, h3 { text-wrap: balance; }
   }
 }
 
-/* >=769px: the mobile collapse/expand classes never apply -- the full
-   annunciator (masthead) is always visible, and the bottom tab bar never
-   renders visually (App.jsx still emits it in the DOM for a11y/consistency,
-   this just keeps it off-screen on anything wider than a phone). */
 @media (min-width: 769px) {
   .annunciator-shell,
   .annunciator-shell-expanded { max-height: none; overflow: visible; }
   .nav-tabs-bottom { display: none; }
 }
 
-/* ND-2 mobile pass (UX doc §16, "Design, by principle") -- 480px is the
-   doc's own chosen breakpoint. Principles ported, Streamlit's M1
-   implementation NOT copied (different substrate): the annunciator
-   condenses (smaller badges, tighter gaps) but every field stays present,
-   never hidden; nav tabs keep their >=44px touch target (already true
-   above, unchanged here); R-ladders/TTL bars keep full label text at every
-   width (no icon-only state introduced here). */
+/* ---- ND-2 mobile pass, unchanged breakpoint/principles -- condensed
+   badges/tighter gaps, every field stays present, R-ladders/TTL bars keep
+   full label text at every width. */
 @media (max-width: 480px) {
-  .badge {
-    font-size: 11px;
-    padding: 3px 7px;
-    gap: 4px;
-  }
+  .badge { font-size: 11px; padding: 3px 7px; gap: 4px; }
 
   .block { padding: 10px 10px; }
 
   .pbar-mark-label,
   .pbar-mark-value,
-  .pbar-marker-label {
-    font-size: 9px;
-  }
+  .pbar-marker-label { font-size: 9px; }
 
   .ttl-row-label { font-size: 10px; }
 
@@ -782,4 +768,14 @@ h1, h2, h3 { text-wrap: balance; }
   .stat-footer { grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 8px 12px; }
 
   .funnel-row { grid-template-columns: 84px 1fr 44px; gap: var(--sp-2); }
+
+  /* ruling §5 perf: halve the blob blur radius and drop backdrop-filter
+     saturation on narrow/touch viewports to keep scrolling at 60fps --
+     depth is sacrificial, legibility is not. Blob opacity/animation/
+     mix-blend-mode stay identical; only cost-heavy filter work is trimmed. */
+  .blob { filter: blur(45px); }
+  .masthead,
+  .block,
+  .pin-sheet-panel,
+  .nav-tabs-bottom { backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
 }

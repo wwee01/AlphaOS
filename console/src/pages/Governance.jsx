@@ -96,7 +96,10 @@ function TradingCalendarPanel({ cal }) {
   return (
     <Block title="Trading calendar">
       <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-        Today ({cal.today_et} ET): <span style={{ color: cal.is_trading_day ? 'var(--primary)' : 'var(--text)' }}>{dayState}</span> · scan windows: {cal.scan_windows_label} · {cal.note}
+        {/* ND-7: "is a trading day" is a healthy/active state (ruling §3
+            migration) -- green, not brand cyan; "market closed" stays
+            plain ink (a fact, not a warning). */}
+        Today ({cal.today_et} ET): <span style={{ color: cal.is_trading_day ? 'var(--good)' : 'var(--text)' }}>{dayState}</span> · scan windows: {cal.scan_windows_label} · {cal.note}
       </div>
     </Block>
   );
