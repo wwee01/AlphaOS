@@ -12,11 +12,18 @@
 
        Serves the built console/dist/ (run `npm ci && npm run build` in
        console/ first -- see console/README.md) same-origin on port 8601,
-       loopback-only, hardcoded in alphaos/api/__main__.py (no flag/env
-       override exists by design). `python -m alphaos.api` is
-       side-effect-free at startup (no scheduler, no provider call, no scan
-       -- see alphaos/api/app.py's module docstring): it only binds and
-       serves.
+       loopback-only BY DEFAULT (alphaos/api/__main__.py / alphaos/config/
+       settings.py). `python -m alphaos.api` is side-effect-free at startup
+       (no scheduler, no provider call, no scan -- see alphaos/api/app.py's
+       module docstring): it only binds and serves.
+
+       ND-8 (Tailscale access): CONSOLE_BIND_HOST / CONSOLE_PORT /
+       CONSOLE_ALLOWED_ORIGINS are now opt-in env overrides (still
+       loopback-only if unset -- see console/README.md's "Tailscale access"
+       section). Because WorkingDirectory above is the repo root, a `.env`
+       file there is picked up automatically (alphaos/config/settings.py's
+       own `load_dotenv()`) -- no edit to this plist's EnvironmentVariables
+       dict is needed to set them.
 
        NOT installed by this build (ND-2 scope note: loading a LaunchAgent
        is an operator action, not the build agent's). To install:

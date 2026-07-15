@@ -600,6 +600,23 @@ class Settings:
     backup2_method: str    # "" | "rclone" | "disk"
     backup2_dest: str      # rclone remote path, or a mounted disk directory
 
+    # --- console API bind + origin allowlist (ND-8: Tailscale access) ------
+    # Loopback-only by DEFAULT -- see alphaos/api/__main__.py and
+    # alphaos/api/security.py's module docstrings for the full security
+    # model this preserves. These three are the ONLY knobs that let an
+    # operator opt into reaching the console from somewhere other than
+    # 127.0.0.1, and only ever by their own explicit action (an unset .env
+    # reproduces today's loopback-only behavior byte-for-byte). The intended
+    # use is binding to a Tailscale IP (100.x.y.z) -- a private, authenticated
+    # WireGuard mesh -- NOT 0.0.0.0/LAN and NOT the public internet; binding
+    # to a specific interface address means only traffic arriving over that
+    # interface is accepted, so a LAN-only attacker cannot reach it even
+    # though the process is no longer loopback-bound. See console/README.md's
+    # "Tailscale access" section for the exact operator setup steps.
+    console_bind_host: str
+    console_port: int
+    console_allowed_origins: str  # comma-separated; see console_allowed_origins_list below
+
     # --- storage / dev ---
     db_path: str
     jsonl_mirror: bool
@@ -685,6 +702,17 @@ class Settings:
     @property
     def has_alpaca_keys(self) -> bool:
         return bool(self.alpaca_api_key) and bool(self.alpaca_secret_key)
+
+    @property
+    def console_allowed_origins_list(self) -> tuple[str, ...]:
+        """Parsed CONSOLE_ALLOWED_ORIGINS (ND-8): trimmed, blank entries
+        dropped, order-preserving. These are ADDED to -- never a replacement
+        for -- the hardcoded loopback origins alphaos/api/security.py always
+        allows, so a malformed or empty value can only ever mean "zero extra
+        origins", never "loopback access revoked". An unset/empty default
+        returns an empty tuple, matching today's loopback-only allowlist
+        exactly."""
+        return tuple(o.strip() for o in self.console_allowed_origins.split(",") if o.strip())
 
     # ------------------------------------------------------------- validation
     def validate_startup(self) -> list[StartupCheck]:
@@ -1484,6 +1512,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         hypothesis_gen_max_calls_per_day=hypothesis_gen_max_calls_per_day,
         hypothesis_gen_max_proposals_per_run=hypothesis_gen_max_proposals_per_run,
         attribution_enabled=_get_bool(src, "ATTRIBUTION_ENABLED", True),
+        console_bind_host=_get(src, "CONSOLE_BIND_HOST", "127.0.0.1"),
+        console_port=_get_int(src, "CONSOLE_PORT", 8601),
+        console_allowed_origins=_get(src, "CONSOLE_ALLOWED_ORIGINS", ""),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),
