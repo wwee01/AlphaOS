@@ -1433,12 +1433,16 @@ SCHEMA: list[tuple[str, str]] = [
             max_adverse_3d_r REAL,
             max_favorable_5d_r REAL,
             max_adverse_5d_r REAL,
-            -- EVID-1: which forward bar (1-indexed, counting only bars
-            -- strictly after decision_at_utc, matching forward_window_stats's
-            -- own bar-order convention) produced that horizon's excursion
-            -- extreme. NULL under the exact same conditions max_favorable/
-            -- max_adverse_Nd_r are NULL (no stop, or no bars) -- see
-            -- outcomes_engine.forward_window_stats.
+            -- EVID-1: which forward bar produced that horizon's excursion
+            -- extreme -- 1-indexed among the EXCURSION-ELIGIBLE bars (bars
+            -- with both high and low present) max_favorable/max_adverse_Nd_r
+            -- are themselves drawn from, NOT a count of every forward bar
+            -- (audit-fixup: a bar with a close but no high/low is skipped
+            -- from that eligible list, so this index can under-count real
+            -- elapsed trading days by the number of such bars skipped before
+            -- the extreme). NULL under the exact same conditions max_
+            -- favorable/max_adverse_Nd_r are NULL (no stop, or no bars) --
+            -- see outcomes_engine.forward_window_stats's own docstring.
             bars_to_favorable_1d INTEGER,
             bars_to_adverse_1d INTEGER,
             bars_to_favorable_3d INTEGER,

@@ -413,6 +413,72 @@ def test_update_stores_bars_to_favorable_and_adverse():
     o.close()
 
 
+# ---------------------------------------------- audit-fixup regressions (MED)
+def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_position():
+    """Audit-fixup regression (correctness MED): the candidate's own bar
+    series has a gap on day 2 (simulating e.g. a halt) while SPY's series is
+    continuous. The benchmark leg must be aligned to the candidate's OWN
+    bar dates (d1, d3, d4), never to "the first N benchmark bars"
+    positionally -- taking SPY's first 3 bars unaligned would wrongly pull
+    in SPY's own d2 (a date the candidate has no bar for at all), silently
+    comparing spans that don't actually match."""
+    o = _orch()
+    row = _seeded_row(o)   # entry=100.0, long
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    d1 = (d0 + datetime.timedelta(days=1)).isoformat()
+    d2 = (d0 + datetime.timedelta(days=2)).isoformat()
+    d3 = (d0 + datetime.timedelta(days=3)).isoformat()
+    d4 = (d0 + datetime.timedelta(days=4)).isoformat()
+
+    # Candidate has NO bar on d2 (a halt) -- only 3 bars total: d1, d3, d4.
+    bars = [
+        {"date": d1, "open": 100, "high": 102, "low": 99, "close": 101},
+        {"date": d3, "open": 101, "high": 105, "low": 100, "close": 104},
+        {"date": d4, "open": 104, "high": 107, "low": 103, "close": 106},
+    ]
+    # SPY is continuous across all 4 days -- d2 exists for SPY even though
+    # the candidate has no matching bar.
+    _insert_benchmark_bar(o, created_date, 400.0)
+    _insert_benchmark_bar(o, d1, 402.0)
+    _insert_benchmark_bar(o, d2, 403.0)
+    _insert_benchmark_bar(o, d3, 404.0)
+    _insert_benchmark_bar(o, d4, 406.0)
+
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+
+    assert updated["forward_3d_return_pct"] == 0.06   # candidate: entry=100 -> d4 close=106
+    # Correctly DATE-aligned SPY leg uses d1/d3/d4 (402/404/406) -> +1.5%.
+    # The WRONG position-aligned leg would have used d1/d2/d3 (402/403/404)
+    # -> +1.0%, a different (and wrong) number.
+    assert updated["market_adjusted_return_3d_pct"] == round(0.06 - 0.015, 4)
+    o.close()
+
+
+def test_market_adjusted_return_pct_requires_both_legs_to_reach_n_days():
+    """Audit-fixup regression (correctness MED, defense-in-depth):
+    _market_adjusted_return_pct's own contract must independently refuse to
+    compute the figure whenever EITHER leg is short of n_days -- not just
+    the benchmark leg. The real update_pending_outcomes call path can no
+    longer produce a benchmark-ahead-of-candidate mismatch after the
+    date-alignment fix above (benchmark forward bars are always a subset of
+    the candidate's own dates, so the benchmark can never resolve further
+    than the candidate does) -- but the function's own guard should not
+    depend on that being true forever; this pins its contract directly."""
+    from alphaos.learning.outcomes_tracker import _market_adjusted_return_pct
+
+    candidate_partial = {"return_pct": 0.06, "bars_used": 2}
+    candidate_full = {"return_pct": 0.06, "bars_used": 3}
+    bench_partial = {"return_pct": 0.01, "bars_used": 2}
+    bench_full = {"return_pct": 0.01, "bars_used": 3}
+
+    assert _market_adjusted_return_pct(candidate_partial, bench_full, 3) is None
+    assert _market_adjusted_return_pct(candidate_full, bench_partial, 3) is None
+    assert _market_adjusted_return_pct(candidate_full, bench_full, 3) == round(0.06 - 0.01, 4)
+
+
 def test_update_with_no_provider_skips_safely_and_stays_pending():
     o = _orch()
     row = _seeded_row(o)

@@ -295,6 +295,13 @@ def cmd_setup_evidence_report(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_setup_population_breakdown(orch: Orchestrator, card_id: str, card_version: int, metric_key: str) -> int:
+    """EVID-1: per-population evidence breakdown for one setup-version -- PURE READ."""
+    rep = orch.setup_population_breakdown(card_id, card_version, metric_key)
+    _print({"setup_population_breakdown": rep})
+    return 0
+
+
 def cmd_hypothesis_mark_status(
     orch: Orchestrator, hypothesis_id: str, new_status: str, decided_by: str, confirm: bool,
 ) -> int:
@@ -1019,6 +1026,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="EVID-1: per-setup-version evidence (full family, incl. shadow/demoted) "
                         "-- market-adjusted return + replay_r, BH-FDR across setups that clear "
                         "their own floor; descriptive only, never gates/promotes/demotes")
+    spb = sub.add_parser("setup_population_breakdown",
+                         help="EVID-1: one setup-version's evidence side by side across every "
+                              "candidate population (proposal/blocked/armed_watch/reject/candidate) "
+                              "-- answers 'did rejects outperform approvals?' directly; PURE READ")
+    spb.add_argument("card_id")
+    spb.add_argument("card_version", type=int)
+    spb.add_argument("--metric", default="market_adjusted_return_5d_pct",
+                     help="candidate_outcomes column to bootstrap (default: market_adjusted_return_5d_pct)")
     hms = sub.add_parser("hypothesis_mark_met",
                          help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis MET "
                               "(the only writer of this status; never automated). PERMANENT, no undo -- "
@@ -1245,6 +1260,8 @@ def main(argv=None) -> int:
             return cmd_card_demotion_check(orch)
         if args.command == "setup_evidence_report":
             return cmd_setup_evidence_report(orch)
+        if args.command == "setup_population_breakdown":
+            return cmd_setup_population_breakdown(orch, args.card_id, args.card_version, args.metric)
         if args.command == "hypothesis_mark_met":
             return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "met", args.decided_by, args.confirm)
         if args.command == "hypothesis_mark_failed":

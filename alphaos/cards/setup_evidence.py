@@ -104,10 +104,23 @@ def compute_setup_metric_stats(
     """One setup-version's evidence for ONE metric over ONE population,
     computed fresh (mirrors scoreboard.py's ``compute_card_scoreboard()``
     exactly, generalized to any metric/population instead of hardcoding
-    replay_r/proposal+blocked)."""
+    replay_r/proposal+blocked).
+
+    Audit-fixup (correctness HIGH): rows missing ``metric_key`` (e.g. a
+    ``market_adjusted_return_5d_pct`` never resolved because the row was
+    already ``outcome_status='complete'`` before this metric existed, or the
+    benchmark side hadn't caught up -- see outcomes_tracker's own gating)
+    are filtered out BEFORE ``effective_n()``, mirroring scoreboard.py's own
+    ``AND co.replay_r IS NOT NULL`` filter. Without this, ``effective_n``/
+    ``clears_floor`` were computed over every row regardless of whether it
+    actually carried this metric, while ``clustered_bootstrap`` silently
+    dropped the nulls -- a setup could "clear the floor" on 35 rows and 32
+    of them null, then have its 3 real observations admitted straight into
+    BH-FDR as if they were a trustworthy 35-observation sample."""
     if metric_key not in METRICS:
         raise ValueError(f"unknown metric {metric_key!r}, expected one of {METRICS}")
-    rows = _rows_for_setup(journal, card_id, card_version, candidate_types)
+    rows = [r for r in _rows_for_setup(journal, card_id, card_version, candidate_types)
+            if r.get(metric_key) is not None]
     en = effective_n(
         [{**r, "decision_date": (r["decision_at_utc"] or "")[:10]} for r in rows],
     )
@@ -187,6 +200,14 @@ def build_setup_evidence_report(
 def render_markdown(rep: dict) -> str:
     lines = [
         f"## EVID-1 -- setup-version evidence report ({rep['metric']})",
+        # Scope/safety-audit LOW: this shares "q="/"discovery" vocabulary with
+        # PR12's own compute_verdicts() output, but it is NOT that function --
+        # this is an always-fresh operational diagnostic (same posture as
+        # scoreboard.py), never a formal promotion/rejection. Said explicitly
+        # here rather than only in the module/CLI docstrings, since this is
+        # the text an operator actually reads.
+        "_Operational diagnostic -- not a PR12 hypothesis verdict. Never "
+        "promotes, demotes, or changes production behavior._",
         f"{rep['n_setups_registered']} registered setup-version(s), "
         f"{rep['n_setups_testable']} clear the floor "
         f"({rep['floor_effective_n']}+ effective_n, {rep['floor_span_days']}+ day span) "
@@ -194,9 +215,16 @@ def render_markdown(rep: dict) -> str:
         "",
     ]
     for s in rep["setups"]:
-        if not s["clears_floor"]:
+        # Audit-fixup (correctness HIGH, belt-and-suspenders): clears_floor
+        # alone doesn't guarantee a real point_estimate -- build_setup_
+        # evidence_report's own "testable" gate additionally requires
+        # one_sided_p_below_zero is not None. Checking point_estimate here
+        # too (rather than trusting clears_floor in isolation) means this
+        # render can never crash formatting a None with :+.4f even if some
+        # future metric/edge-case produced that combination.
+        if not s["clears_floor"] or s["point_estimate"] is None:
             lines.append(
-                f"- {s['card_id']} v{s['card_version']}: below floor -- "
+                f"- {s['card_id']} v{s['card_version']}: below floor or unresolved -- "
                 f"effective_n={s['effective_n']}, span_days={s['span_days']} "
                 "(counts only, no expectancy shown)"
             )

@@ -1442,6 +1442,18 @@ class Orchestrator:
 
         return build_setup_evidence_report(self.journal, metric_key=metric_key)
 
+    def setup_population_breakdown(
+        self, card_id: str, card_version: int, metric_key: str = "market_adjusted_return_5d_pct",
+    ) -> dict:
+        """EVID-1: the Edge Lab audit's own Stage-7 question -- "did
+        rejected candidates outperform approved ones?" -- for ONE
+        setup-version, side by side across every candidate population
+        (proposal/blocked/armed_watch/reject/candidate). PURE READ -- never
+        writes, never gates/promotes/demotes."""
+        from alphaos.cards.setup_evidence import population_breakdown
+
+        return population_breakdown(self.journal, card_id, card_version, metric_key)
+
     def hypothesis_mark_status(self, hypothesis_id: str, new_status: str, decided_by: str) -> dict:
         """PR13 slice 2: the ONLY writer of MET/FAILED/WITHDRAWN. Operator-
         only by construction (raises if decided_by='system'); requires the

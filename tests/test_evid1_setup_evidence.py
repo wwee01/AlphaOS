@@ -119,6 +119,55 @@ def test_compute_setup_metric_stats_generalizes_to_market_adjusted_return(journa
     assert stats["point_estimate"] is not None
 
 
+def test_compute_setup_metric_stats_null_metric_rows_excluded_from_floor(journal):
+    """Audit-fixup regression (correctness HIGH): rows without THIS metric
+    (e.g. seeded before market_adjusted_return_5d_pct existed, or the
+    benchmark leg never resolved) must not count toward effective_n/
+    clears_floor -- otherwise a setup with 35 total rows but only 3
+    actually carrying the metric would wrongly "clear the floor" on the
+    other 32's mere presence, then admit a 3-observation sample straight
+    into BH-FDR as if it were a trustworthy 35-observation one."""
+    base = _date.fromisoformat("2026-01-01")
+    for i in range(35):
+        kwargs = {"replay_r": 0.1}   # every row carries an unrelated metric
+        if i < 3:
+            kwargs["market_adjusted_return_5d_pct"] = 0.02   # only 3 carry THIS one
+        _insert_candidate_with_outcome(
+            journal, f"card_a-cand-{i}", "card_a", 1, f"SYM{i}",
+            (base + timedelta(days=i)).isoformat(), **kwargs,
+        )
+
+    stats = setup_evidence.compute_setup_metric_stats(
+        journal, "card_a", 1, "market_adjusted_return_5d_pct",
+    )
+
+    assert stats["n_raw"] == 3            # only the rows actually carrying this metric count
+    assert stats["clears_floor"] is False  # far below the 30-effective-n floor
+
+
+def test_render_markdown_never_crashes_on_clears_floor_with_none_point_estimate():
+    """Audit-fixup regression (correctness HIGH, belt-and-suspenders):
+    render_markdown must not crash formatting a None point_estimate with
+    :+.4f even if some future caller/edge-case produces clears_floor=True
+    alongside an unresolved point_estimate -- render checks point_estimate
+    itself rather than trusting clears_floor alone."""
+    rep = {
+        "metric": "market_adjusted_return_5d_pct", "fdr_q": 0.1,
+        "n_setups_registered": 1, "n_setups_testable": 0,
+        "floor_effective_n": 30, "floor_span_days": 28,
+        "setups": [{
+            "card_id": "card_a", "card_version": 1, "clears_floor": True,
+            "point_estimate": None, "ci_low": None, "ci_high": None,
+            "one_sided_p_below_zero": None, "effective_n": 30, "span_days": 40,
+            "q_value": None, "bh_discovery": False,
+        }],
+    }
+
+    md = setup_evidence.render_markdown(rep)   # must not raise
+
+    assert "card_a" in md
+
+
 def test_compute_setup_metric_stats_unknown_metric_raises(journal):
     try:
         setup_evidence.compute_setup_metric_stats(journal, "card_a", 1, "not_a_real_column")
@@ -235,3 +284,21 @@ def test_render_markdown_does_not_raise_on_mixed_floor_setups(journal):
     md = setup_evidence.render_markdown(rep)
 
     assert "card_strong" in md and "card_thin" in md
+
+
+# ------------------------------------------------------------------ isolation
+def test_setup_evidence_module_never_referenced_by_decision_paths():
+    """Audit-fixup (scope/safety MED): the house-standard isolation guard
+    this codebase's other measurement-only modules all ship (see
+    test_relative_performance.py, test_benchmark_capture.py, test_setup_
+    cards.py) -- setup_evidence.py was missing its own copy. Descriptive-
+    only reports must never be importable from anywhere a real decision
+    gets made."""
+    import pathlib
+
+    import alphaos.approval as approval_mod
+    import alphaos.risk.risk_engine as risk_mod
+
+    for mod, name in ((approval_mod, "approval.py"), (risk_mod, "risk_engine.py")):
+        text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+        assert "setup_evidence" not in text, f"{name} references the setup-evidence module"

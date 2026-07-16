@@ -1,6 +1,9 @@
 # Edge Lab — Stage 1 Capability Audit (2026-07-16)
 
-**Status: AUDIT COMPLETE — NO IMPLEMENTATION. Holding for operator go-ahead on specific slices.**
+**Status: AUDIT COMPLETE. EVID-1 shipped (operator go-ahead 2026-07-16: "start
+with EVID-1 as you recommended"), branch `feat/evid1-market-adjusted-evidence`,
+T4 audit-fixup applied. Remaining slices (EVID-2, SETUP-1, SECT-1, INTRA-1)
+still hold for their own explicit operator go-ahead.**
 
 Provenance: two independent read-only Opus audit agents against main @ `ac8ed2e`
 (post ND-8 + EXP-1 merges), one covering the evidence/data-path side, one covering
@@ -135,15 +138,23 @@ existing house law the new code must simply keep following.
 
 ## 4. Recommended build slices (each = own PR, T4 protocol, shadow-only)
 
-Ranked by value ÷ effort. NONE are green-lit by this document — each needs an
-explicit operator go-ahead.
+Ranked by value ÷ effort. Slices below are green-lit only once explicitly
+marked SHIPPED with a commit SHA — the rest still need an explicit operator
+go-ahead before any build starts.
 
-- **EVID-1 (highest value, zero new data):** per-candidate market-adjusted
-  1/3/5d returns (join `benchmark_bars` SPY in `update_pending_outcomes`) +
-  time-to-excursion columns + generalize the card scoreboard to a per-setup-key,
-  multi-horizon evidence report with BH-FDR. Answers "did approvals beat the
-  population?" and "did rejects outperform?" — the two questions AlphaOS
-  genuinely cannot answer today.
+- **EVID-1 (highest value, zero new data) — SHIPPED 2026-07-16**, branch
+  `feat/evid1-market-adjusted-evidence`, build `faeaff7` + T4 audit-fixup
+  (2 parallel Opus audits: correctness found 2 HIGH + 2 MED, scope/safety
+  found 1 MED + several LOW, all fixed and regression-tested). Per-candidate
+  market-adjusted 1/3/5d returns (joins `benchmark_bars` SPY in
+  `update_pending_outcomes`, date-aligned to the candidate's own bar dates)
+  + time-to-excursion columns + `alphaos/cards/setup_evidence.py` generalizing
+  the card scoreboard to a per-setup-key, multi-horizon evidence report with
+  BH-FDR (`setup_evidence_report` / `setup_population_breakdown` CLI
+  commands). Answers "did approvals beat the population?" and "did rejects
+  outperform?" — the two questions AlphaOS genuinely cannot answer today.
+  Holding for explicit per-PR merge instruction, per this repo's standing
+  protocol.
 - **EVID-2 (small):** un-gate `candidate_packets` freeze for every evaluated
   candidate; add core-tier per-window survivorship rows (reuse the shadow
   pattern). Makes every future setup measurable from first observation.
