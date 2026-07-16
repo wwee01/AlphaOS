@@ -1512,7 +1512,16 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         hypothesis_gen_max_calls_per_day=hypothesis_gen_max_calls_per_day,
         hypothesis_gen_max_proposals_per_run=hypothesis_gen_max_proposals_per_run,
         attribution_enabled=_get_bool(src, "ATTRIBUTION_ENABLED", True),
-        console_bind_host=_get(src, "CONSOLE_BIND_HOST", "127.0.0.1"),
+        # audit-fixup (scope/safety MED): `_get` returns the env value verbatim
+        # whenever the key is PRESENT, even if that value is "" -- so
+        # `CONSOLE_BIND_HOST=` (present-but-blank, as opposed to unset) fell
+        # through to `uvicorn.run(host="")`, which binds ALL interfaces on
+        # both IPv4 and IPv6 -- broader exposure than even the documented,
+        # explicit `0.0.0.0` opt-in, and the exact opposite of what
+        # .env.example told the operator "blank" would do. `or` coalesces an
+        # empty/whitespace-only value (already stripped by `_get`) back to
+        # the safe loopback default, so blank and unset are now equivalent.
+        console_bind_host=_get(src, "CONSOLE_BIND_HOST", "127.0.0.1") or "127.0.0.1",
         console_port=_get_int(src, "CONSOLE_PORT", 8601),
         console_allowed_origins=_get(src, "CONSOLE_ALLOWED_ORIGINS", ""),
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),

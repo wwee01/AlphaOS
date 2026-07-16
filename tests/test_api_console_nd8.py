@@ -85,6 +85,19 @@ def test_console_bind_host_0_0_0_0_is_allowed_not_rejected():
     assert settings.console_bind_host == "0.0.0.0"
 
 
+@pytest.mark.parametrize("blank_value", ["", "   ", "\t"])
+def test_console_bind_host_present_but_blank_falls_back_to_loopback(blank_value):
+    """Audit-fixup (scope/safety MED): CONSOLE_BIND_HOST= (present, empty --
+    as distinct from unset) previously fell through to `uvicorn.run(host="")`,
+    which binds ALL interfaces (IPv4 AND IPv6) -- broader than even the
+    documented, explicit 0.0.0.0 opt-in, and the exact opposite of what
+    .env.example told the operator "blank" would do. A blank/whitespace-only
+    value must resolve to the same safe loopback default as leaving the key
+    unset entirely."""
+    settings = make_settings(CONSOLE_BIND_HOST=blank_value)
+    assert settings.console_bind_host == "127.0.0.1"
+
+
 def test_console_port_reads_operator_value():
     settings = make_settings(CONSOLE_PORT="9000")
     assert settings.console_port == 9000
