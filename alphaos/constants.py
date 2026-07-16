@@ -914,3 +914,15 @@ SHADOW_LABEL_SKIPPED_REASON_STALE = "stale"
 # selection_arm values (mechanism 2): stamped on every shadow-tier labelled row.
 SHADOW_SELECTION_ARM_TOP_K = "top_k"
 SHADOW_SELECTION_ARM_EXPLORE = "explore"
+
+# Mechanism 3's own accumulation bar ("this spec doesn't guess") expressed in
+# trading days rather than calendar weeks, for the digest's accumulation-
+# progress status line. ~2 weeks is the spec's stated lower bound (worth a
+# look, still short); ~4 weeks is the target. NOT imported by
+# scripts/shadow_saturation_audit.py -- that script deliberately has zero
+# alphaos.* imports (self-contained, run standalone against production data,
+# no package import-path resolution to depend on); keep its own hardcoded 20
+# in sync with SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS by hand if this
+# ever changes.
+SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS = 10
+SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS = 20

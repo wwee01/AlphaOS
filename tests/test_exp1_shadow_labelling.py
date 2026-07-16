@@ -883,3 +883,57 @@ def test_label_summary_and_recent_labels_exclude_shadow(journal):
     assert all(not r.get("shadow_tier") for r in recent)
     recent_incl = journal.recent_candidate_labels(200, include_shadow=True)
     assert any(r.get("shadow_tier") for r in recent_incl)
+
+
+# ----------------------------------------------- saturation-audit readiness
+def _insert_shadow_instr1_candidate_on_day(journal, days_ago: int, suffix) -> None:
+    day = _days_ago(days_ago)
+    journal.insert("candidates", {
+        "candidate_id": f"cand-sat-{suffix}", "symbol": f"SAT{suffix}",
+        "shadow_tier": 1, "instrument_version": "instr1",
+        "created_at_utc": f"{day}T02:00:00+00:00", "created_at_sgt": f"{day}T10:00:00+08:00",
+    })
+
+
+def test_saturation_audit_readiness_zero_days_is_accumulating(tmp_path, journal):
+    """New digest status line (operator ask, 2026-07-16): counts distinct
+    trading days of real instr1 shadow-tier data the same way
+    scripts/shadow_saturation_audit.py does, so the operator sees
+    accumulation progress every day in the digest instead of relying on
+    anyone remembering to check back manually. An empty journal must read
+    as 'accumulating', not error or show a stale/undefined status."""
+    settings = make_settings()
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+    digest = build_daily_digest(journal, settings, kill_switch)
+    readiness = digest["shadow_labelling"]["saturation_audit_readiness"]
+    assert readiness["distinct_instr1_trading_days"] == 0
+    assert readiness["status"] == "accumulating"
+    assert readiness["min_trading_days"] == 10
+    assert readiness["target_trading_days"] == 20
+
+
+def test_saturation_audit_readiness_crosses_min_and_target_thresholds(tmp_path, journal):
+    """Boundary-condition regression: exactly 9 distinct days must still
+    read 'accumulating' (below the 10-day minimum), the 10th day must flip
+    to 'min_reached_consider_recalibration', and the 20th day must flip to
+    'target_reached_recalibrate' -- the >= comparisons are exactly where an
+    off-by-one would hide."""
+    settings = make_settings()
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+
+    for i in range(9):
+        _insert_shadow_instr1_candidate_on_day(journal, days_ago=i, suffix=i)
+    readiness = build_daily_digest(journal, settings, kill_switch)["shadow_labelling"]["saturation_audit_readiness"]
+    assert readiness["distinct_instr1_trading_days"] == 9
+    assert readiness["status"] == "accumulating"
+
+    _insert_shadow_instr1_candidate_on_day(journal, days_ago=9, suffix=9)
+    readiness = build_daily_digest(journal, settings, kill_switch)["shadow_labelling"]["saturation_audit_readiness"]
+    assert readiness["distinct_instr1_trading_days"] == 10
+    assert readiness["status"] == "min_reached_consider_recalibration"
+
+    for i in range(10, 20):
+        _insert_shadow_instr1_candidate_on_day(journal, days_ago=i, suffix=i)
+    readiness = build_daily_digest(journal, settings, kill_switch)["shadow_labelling"]["saturation_audit_readiness"]
+    assert readiness["distinct_instr1_trading_days"] == 20
+    assert readiness["status"] == "target_reached_recalibrate"

@@ -15,7 +15,11 @@ from __future__ import annotations
 from datetime import datetime, time as _time, timedelta, timezone as _tz
 
 from alphaos.attribution import ATTRIBUTION_VERSION
-from alphaos.constants import ProposalStatus
+from alphaos.constants import (
+    ProposalStatus,
+    SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS,
+    SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS,
+)
 from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
@@ -397,6 +401,36 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     shadow_confidences = [r["label_confidence"] for r in shadow_label_rows_today if r["label_confidence"] is not None]
     shadow_label_other_today = sum(1 for r in shadow_label_rows_today if r["primary_label"] == "Other/Unclassified")
     shadow_suspend_engaged = ShadowLabelSuspendSwitch().is_engaged()
+
+    # EXP-1 mechanism 3: saturation-audit accumulation-progress status line.
+    # Answers "how close are we to being able to trust a fresh
+    # scripts/shadow_saturation_audit.py run" every day in the report the
+    # operator already reads, rather than relying on anyone remembering to
+    # check back manually (see docs/ALPHAOS_MASTER_REFERENCE.md §9 for the
+    # decision this exists to support). Counts distinct trading days the
+    # exact same way the audit script itself does (shadow_tier=1 AND
+    # instrument_version='instr1', substr(created_at_sgt, 1, 10)) so the two
+    # can never disagree.
+    shadow_instr1_trading_days = int(
+        journal.scalar(
+            "SELECT COUNT(DISTINCT substr(created_at_sgt, 1, 10)) FROM candidates "
+            "WHERE shadow_tier = 1 AND instrument_version = 'instr1'"
+        )
+        or 0
+    )
+    if shadow_instr1_trading_days >= SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS:
+        saturation_audit_status = "target_reached_recalibrate"
+    elif shadow_instr1_trading_days >= SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS:
+        saturation_audit_status = "min_reached_consider_recalibration"
+    else:
+        saturation_audit_status = "accumulating"
+    saturation_audit_readiness = {
+        "distinct_instr1_trading_days": shadow_instr1_trading_days,
+        "min_trading_days": SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS,
+        "target_trading_days": SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS,
+        "status": saturation_audit_status,
+    }
+
     shadow_labelling = {
         "enabled": bool(settings.shadow_labelling_enabled),
         "auto_suspended": shadow_suspend_engaged,
@@ -414,6 +448,7 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "cap_per_30d": settings.shadow_ai_cap_calls_per_30d,
         "calls_today": shadow_label_module.shadow_calls_today(journal),
         "cap_per_day": settings.shadow_ai_cap_calls_per_day,
+        "saturation_audit_readiness": saturation_audit_readiness,
     }
 
     from alphaos.util.market_calendar import is_trading_day
