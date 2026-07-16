@@ -1432,6 +1432,16 @@ class Orchestrator:
 
         return run_daily_card_evaluation(self.journal, self.settings)
 
+    def setup_evidence_report(self, metric_key: str = "market_adjusted_return_5d_pct") -> dict:
+        """EVID-1: every registered setup-version's (card_id, card_version)
+        evidence for one metric, full family (incl. shadow/demoted, unlike
+        card_scoreboard_report's live-only scope), BH-FDR across the setups
+        that clear their own floor. PURE READ -- never writes, never
+        gates/promotes/demotes; descriptive/diagnostic only."""
+        from alphaos.cards.setup_evidence import build_setup_evidence_report
+
+        return build_setup_evidence_report(self.journal, metric_key=metric_key)
+
     def hypothesis_mark_status(self, hypothesis_id: str, new_status: str, decided_by: str) -> dict:
         """PR13 slice 2: the ONLY writer of MET/FAILED/WITHDRAWN. Operator-
         only by construction (raises if decided_by='system'); requires the

@@ -284,6 +284,17 @@ def cmd_card_demotion_check(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_setup_evidence_report(orch: Orchestrator) -> int:
+    """EVID-1: per-setup-version evidence report -- PURE READ."""
+    from alphaos.cards.setup_evidence import render_markdown
+
+    rep = orch.setup_evidence_report()
+    print(render_markdown(rep))
+    print()
+    _print({"setup_evidence_report": rep})
+    return 0
+
+
 def cmd_hypothesis_mark_status(
     orch: Orchestrator, hypothesis_id: str, new_status: str, decided_by: str, confirm: bool,
 ) -> int:
@@ -1004,6 +1015,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("card_demotion_check",
                    help="PR13 slice 1: one daily pass -- snapshot every live_eligible card, "
                         "demote (+ alert) any card with >= 2 consecutive breach snapshots")
+    sub.add_parser("setup_evidence_report",
+                   help="EVID-1: per-setup-version evidence (full family, incl. shadow/demoted) "
+                        "-- market-adjusted return + replay_r, BH-FDR across setups that clear "
+                        "their own floor; descriptive only, never gates/promotes/demotes")
     hms = sub.add_parser("hypothesis_mark_met",
                          help="PR13 slice 2: operator adjudication -- mark a 'resolved' hypothesis MET "
                               "(the only writer of this status; never automated). PERMANENT, no undo -- "
@@ -1228,6 +1243,8 @@ def main(argv=None) -> int:
             return cmd_card_scoreboard(orch)
         if args.command == "card_demotion_check":
             return cmd_card_demotion_check(orch)
+        if args.command == "setup_evidence_report":
+            return cmd_setup_evidence_report(orch)
         if args.command == "hypothesis_mark_met":
             return cmd_hypothesis_mark_status(orch, args.hypothesis_id, "met", args.decided_by, args.confirm)
         if args.command == "hypothesis_mark_failed":
