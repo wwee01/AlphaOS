@@ -67,7 +67,8 @@ def test_forward_window_stats_partial_window_signals_bars_used():
 def test_forward_window_stats_empty_bars_is_safe():
     s = forward_window_stats(100.0, 90.0, "long", [], n_days=3)
     assert s == {"return_pct": None, "r": None, "max_favorable_r": None,
-                "max_adverse_r": None, "bars_used": 0}
+                "max_adverse_r": None, "bars_to_favorable": None,
+                "bars_to_adverse": None, "bars_used": 0}
 
 
 def test_forward_window_stats_return_pct_works_without_stop():
@@ -75,6 +76,35 @@ def test_forward_window_stats_return_pct_works_without_stop():
     s = forward_window_stats(100.0, None, "long", bars, n_days=1)
     assert s["return_pct"] == 0.03
     assert s["r"] is None and s["max_favorable_r"] is None   # can't R-normalize without a stop
+    assert s["bars_to_favorable"] is None and s["bars_to_adverse"] is None
+
+
+# --------------------------------------------------------- time-to-excursion (EVID-1)
+def test_forward_window_stats_bars_to_favorable_and_adverse_first_touch():
+    """The favorable extreme occurs on bar 2 (high=108), the adverse extreme
+    on bar 3 (low=96) -- bars_to_favorable/adverse must report the 1-indexed
+    position of each, not just the magnitude."""
+    bars = [
+        {"date": "d1", "high": 102, "low": 99, "close": 101},
+        {"date": "d2", "high": 108, "low": 100, "close": 107},
+        {"date": "d3", "high": 105, "low": 96, "close": 104},
+    ]
+    s = forward_window_stats(reference=100.0, stop=90.0, direction="long", bars=bars, n_days=3)
+    assert s["bars_to_favorable"] == 2
+    assert s["bars_to_adverse"] == 3
+
+
+def test_forward_window_stats_bars_to_excursion_reports_first_occurrence_on_tie():
+    """Two bars tie the same favorable extreme (high=108) -- bars_to_favorable
+    must report the FIRST one (bar 1), i.e. time-to-first-touch, never a later
+    bar that happens to re-tie."""
+    bars = [
+        {"date": "d1", "high": 108, "low": 99, "close": 101},
+        {"date": "d2", "high": 108, "low": 100, "close": 107},
+    ]
+    s = forward_window_stats(reference=100.0, stop=90.0, direction="long", bars=bars, n_days=2)
+    assert s["max_favorable_r"] == round((108 - 100) / 10, 4)
+    assert s["bars_to_favorable"] == 1
 
 
 # ---------------------------------------------------------------- bracket replay

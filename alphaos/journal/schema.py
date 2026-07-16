@@ -1433,6 +1433,34 @@ SCHEMA: list[tuple[str, str]] = [
             max_adverse_3d_r REAL,
             max_favorable_5d_r REAL,
             max_adverse_5d_r REAL,
+            -- EVID-1: which forward bar produced that horizon's excursion
+            -- extreme -- 1-indexed among the EXCURSION-ELIGIBLE bars (bars
+            -- with both high and low present) max_favorable/max_adverse_Nd_r
+            -- are themselves drawn from, NOT a count of every forward bar
+            -- (audit-fixup: a bar with a close but no high/low is skipped
+            -- from that eligible list, so this index can under-count real
+            -- elapsed trading days by the number of such bars skipped before
+            -- the extreme). NULL under the exact same conditions max_
+            -- favorable/max_adverse_Nd_r are NULL (no stop, or no bars) --
+            -- see outcomes_engine.forward_window_stats's own docstring.
+            bars_to_favorable_1d INTEGER,
+            bars_to_adverse_1d INTEGER,
+            bars_to_favorable_3d INTEGER,
+            bars_to_adverse_3d INTEGER,
+            bars_to_favorable_5d INTEGER,
+            bars_to_adverse_5d INTEGER,
+            -- EVID-1: candidate's own forward_Nd_return_pct minus what the
+            -- SAME directional bet (long/short matching direction_hint) on
+            -- the benchmark (SPY, benchmark_bars) would have returned over
+            -- the identical forward window. Deliberately the same modest
+            -- "excess return" framing as reports/relative_performance.py
+            -- (never a CAPM/risk-adjusted alpha) -- see outcomes_tracker's
+            -- own comment for the exact derivation. NULL whenever either leg
+            -- is unavailable (no SPY bar coverage for the window, or the
+            -- candidate leg itself is None).
+            market_adjusted_return_1d_pct REAL,
+            market_adjusted_return_3d_pct REAL,
+            market_adjusted_return_5d_pct REAL,
             replay_result TEXT,
             replay_r REAL,
             replay_exit_reason TEXT,

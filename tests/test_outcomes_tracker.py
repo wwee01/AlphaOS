@@ -318,6 +318,167 @@ def test_update_resolves_forward_returns_and_replay_end_to_end():
     o.close()
 
 
+# ------------------------------------------------------- market-adjusted return (EVID-1)
+def _insert_benchmark_bar(o, bar_date, close, symbol="SPY"):
+    o.journal.insert("benchmark_bars", {
+        "bar_id": new_id("bench"), "symbol": symbol, "bar_date": bar_date, "close": close,
+    })
+
+
+def test_update_computes_market_adjusted_return_against_benchmark_bars():
+    """market_adjusted_return_1d_pct = candidate's own 1-day return minus
+    SPY's own 1-day return over the identical forward window, both anchored
+    on the same decision-date reference close."""
+    o = _orch()
+    row = _seeded_row(o)   # entry=100, long
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    day1 = (d0 + datetime.timedelta(days=1)).isoformat()
+
+    bars = [{"date": day1, "open": 100, "high": 103, "low": 99, "close": 102}]   # AAPL: +2%
+    _insert_benchmark_bar(o, created_date, 400.0)   # SPY reference
+    _insert_benchmark_bar(o, day1, 404.0)            # SPY: +1%
+
+    res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    assert res["updated"] == 1
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+    assert updated["forward_1d_return_pct"] == 0.02
+    assert updated["market_adjusted_return_1d_pct"] == round(0.02 - 0.01, 4)
+    o.close()
+
+
+def test_update_market_adjusted_return_none_without_benchmark_bars():
+    """No benchmark_bars rows at all -> market_adjusted_return_*d_pct stay
+    None, but the candidate's own forward return is unaffected."""
+    o = _orch()
+    row = _seeded_row(o)
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    bars = [{"date": (d0 + datetime.timedelta(days=1)).isoformat(),
+            "open": 100, "high": 103, "low": 99, "close": 102}]
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+    assert updated["forward_1d_return_pct"] == 0.02
+    assert updated["market_adjusted_return_1d_pct"] is None
+    o.close()
+
+
+def test_update_market_adjusted_return_none_when_benchmark_window_lags():
+    """The candidate's own 5-day window fully resolves (row goes 'complete'
+    and will never be revisited again), but only 3 SPY forward bars exist --
+    market_adjusted_return_5d_pct must stay None rather than silently
+    comparing a full 5-day candidate return against a partial 3-day
+    benchmark return under the '5d' name. The 3d figure, which the
+    benchmark DOES fully cover, is unaffected."""
+    o = _orch()
+    row = _seeded_row(o)
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+            "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 6)]
+    _insert_benchmark_bar(o, created_date, 400.0)
+    for i in range(1, 4):   # only 3 of the 5 forward SPY bars
+        _insert_benchmark_bar(o, (d0 + datetime.timedelta(days=i)).isoformat(), 400.0 + i)
+
+    res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    assert res["completed"] == 1
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+    assert updated["outcome_status"] == "complete"
+    assert updated["market_adjusted_return_3d_pct"] is not None
+    assert updated["market_adjusted_return_5d_pct"] is None
+    o.close()
+
+
+# ------------------------------------------------------------ time-to-excursion (EVID-1)
+def test_update_stores_bars_to_favorable_and_adverse():
+    o = _orch()
+    row = _seeded_row(o, entry=100.0, stop=90.0, target=200.0)   # target far away: no replay noise
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    bars = [
+        {"date": (d0 + datetime.timedelta(days=1)).isoformat(), "open": 100, "high": 102, "low": 99, "close": 101},
+        {"date": (d0 + datetime.timedelta(days=2)).isoformat(), "open": 101, "high": 108, "low": 100, "close": 107},
+        {"date": (d0 + datetime.timedelta(days=3)).isoformat(), "open": 107, "high": 105, "low": 96, "close": 104},
+        {"date": (d0 + datetime.timedelta(days=4)).isoformat(), "open": 104, "high": 106, "low": 103, "close": 105},
+        {"date": (d0 + datetime.timedelta(days=5)).isoformat(), "open": 105, "high": 106, "low": 104, "close": 105},
+    ]
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+    assert updated["bars_to_favorable_5d"] == 2   # bar 2's high=108 is the best across the 5-day window
+    assert updated["bars_to_adverse_5d"] == 3     # bar 3's low=96 is the worst across the 5-day window
+    o.close()
+
+
+# ---------------------------------------------- audit-fixup regressions (MED)
+def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_position():
+    """Audit-fixup regression (correctness MED): the candidate's own bar
+    series has a gap on day 2 (simulating e.g. a halt) while SPY's series is
+    continuous. The benchmark leg must be aligned to the candidate's OWN
+    bar dates (d1, d3, d4), never to "the first N benchmark bars"
+    positionally -- taking SPY's first 3 bars unaligned would wrongly pull
+    in SPY's own d2 (a date the candidate has no bar for at all), silently
+    comparing spans that don't actually match."""
+    o = _orch()
+    row = _seeded_row(o)   # entry=100.0, long
+    created_date = row["created_at_utc"][:10]
+    import datetime
+    d0 = datetime.date.fromisoformat(created_date)
+    d1 = (d0 + datetime.timedelta(days=1)).isoformat()
+    d2 = (d0 + datetime.timedelta(days=2)).isoformat()
+    d3 = (d0 + datetime.timedelta(days=3)).isoformat()
+    d4 = (d0 + datetime.timedelta(days=4)).isoformat()
+
+    # Candidate has NO bar on d2 (a halt) -- only 3 bars total: d1, d3, d4.
+    bars = [
+        {"date": d1, "open": 100, "high": 102, "low": 99, "close": 101},
+        {"date": d3, "open": 101, "high": 105, "low": 100, "close": 104},
+        {"date": d4, "open": 104, "high": 107, "low": 103, "close": 106},
+    ]
+    # SPY is continuous across all 4 days -- d2 exists for SPY even though
+    # the candidate has no matching bar.
+    _insert_benchmark_bar(o, created_date, 400.0)
+    _insert_benchmark_bar(o, d1, 402.0)
+    _insert_benchmark_bar(o, d2, 403.0)
+    _insert_benchmark_bar(o, d3, 404.0)
+    _insert_benchmark_bar(o, d4, 406.0)
+
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
+
+    assert updated["forward_3d_return_pct"] == 0.06   # candidate: entry=100 -> d4 close=106
+    # Correctly DATE-aligned SPY leg uses d1/d3/d4 (402/404/406) -> +1.5%.
+    # The WRONG position-aligned leg would have used d1/d2/d3 (402/403/404)
+    # -> +1.0%, a different (and wrong) number.
+    assert updated["market_adjusted_return_3d_pct"] == round(0.06 - 0.015, 4)
+    o.close()
+
+
+def test_market_adjusted_return_pct_requires_both_legs_to_reach_n_days():
+    """Audit-fixup regression (correctness MED, defense-in-depth):
+    _market_adjusted_return_pct's own contract must independently refuse to
+    compute the figure whenever EITHER leg is short of n_days -- not just
+    the benchmark leg. The real update_pending_outcomes call path can no
+    longer produce a benchmark-ahead-of-candidate mismatch after the
+    date-alignment fix above (benchmark forward bars are always a subset of
+    the candidate's own dates, so the benchmark can never resolve further
+    than the candidate does) -- but the function's own guard should not
+    depend on that being true forever; this pins its contract directly."""
+    from alphaos.learning.outcomes_tracker import _market_adjusted_return_pct
+
+    candidate_partial = {"return_pct": 0.06, "bars_used": 2}
+    candidate_full = {"return_pct": 0.06, "bars_used": 3}
+    bench_partial = {"return_pct": 0.01, "bars_used": 2}
+    bench_full = {"return_pct": 0.01, "bars_used": 3}
+
+    assert _market_adjusted_return_pct(candidate_partial, bench_full, 3) is None
+    assert _market_adjusted_return_pct(candidate_full, bench_partial, 3) is None
+    assert _market_adjusted_return_pct(candidate_full, bench_full, 3) == round(0.06 - 0.01, 4)
+
+
 def test_update_with_no_provider_skips_safely_and_stays_pending():
     o = _orch()
     row = _seeded_row(o)

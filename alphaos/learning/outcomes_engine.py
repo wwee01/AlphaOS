@@ -54,21 +54,31 @@ def signed_r(reference: Optional[float], price: Optional[float], direction: Opti
 def forward_window_stats(reference: Optional[float], stop: Optional[float], direction: Optional[str],
                          bars: list[dict], n_days: int) -> dict:
     """Stats for the first ``n_days`` bars: {return_pct, r, max_favorable_r,
-    max_adverse_r, bars_used}. ``bars`` must already be filtered to strictly
-    AFTER the decision point (callers own that filtering — this function never
-    looks at dates, only order). ``bars_used < n_days`` signals the window
-    isn't fully resolved yet; callers decide pending/partial/complete from
-    that. Point-in-time return/R use the last available bar's close; the
-    favorable/adverse extremes use each bar's high/low within the window."""
+    max_adverse_r, bars_to_favorable, bars_to_adverse, bars_used}. ``bars``
+    must already be filtered to strictly AFTER the decision point (callers own
+    that filtering — this function never looks at dates, only order).
+    ``bars_used < n_days`` signals the window isn't fully resolved yet;
+    callers decide pending/partial/complete from that. Point-in-time
+    return/R use the last available bar's close; the favorable/adverse
+    extremes use each bar's high/low within the window.
+
+    ``bars_to_favorable``/``bars_to_adverse`` (EVID-1) are the 1-indexed
+    position, among the SAME excursion-eligible bars max_favorable_r/
+    max_adverse_r are drawn from (i.e. bars with both high and low present —
+    not necessarily every bar in ``bars_used``, if a bar has a close but no
+    high/low), of the first bar reaching that extreme. None under the exact
+    same conditions the extreme itself is None."""
     window = [b for b in (bars or []) if b.get("close") is not None][:n_days]
     if not window:
         return {"return_pct": None, "r": None, "max_favorable_r": None,
-                "max_adverse_r": None, "bars_used": 0}
+                "max_adverse_r": None, "bars_to_favorable": None,
+                "bars_to_adverse": None, "bars_used": 0}
     last_close = window[-1]["close"]
     return_pct = signed_return_pct(reference, last_close, direction)
     r = signed_r(reference, last_close, direction, stop)
 
     max_favorable_r = max_adverse_r = None
+    bars_to_favorable = bars_to_adverse = None
     if stop and reference is not None:
         risk_per_share = abs(float(reference) - float(stop))
         if risk_per_share:
@@ -86,10 +96,15 @@ def forward_window_stats(reference: Optional[float], stop: Optional[float], dire
             if favorable:
                 max_favorable_r = round(max(favorable), 4)
                 max_adverse_r = round(min(adverse), 4)
+                # First occurrence -- "time to first touch," not a later bar
+                # that happens to re-tie the same extreme.
+                bars_to_favorable = favorable.index(max(favorable)) + 1
+                bars_to_adverse = adverse.index(min(adverse)) + 1
 
     return {
         "return_pct": return_pct, "r": r,
         "max_favorable_r": max_favorable_r, "max_adverse_r": max_adverse_r,
+        "bars_to_favorable": bars_to_favorable, "bars_to_adverse": bars_to_adverse,
         "bars_used": len(window),
     }
 

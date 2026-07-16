@@ -9,8 +9,11 @@ Two phases, both idempotent and both safe to call repeatedly / on a schedule:
   themselves, never influences scanning/eval/labelling/risk/execution.
 * ``update_pending_outcomes`` — for rows still ``pending``/``partial``, fetches
   bars observed AFTER the decision and computes forward 1/3/5-day returns +
-  bracket replay (see ``outcomes_engine``). Write-only to
-  ``candidate_outcomes``; never reads back into any trading decision.
+  bracket replay (see ``outcomes_engine``), plus (EVID-1) a market-adjusted
+  return per horizon against the already-captured SPY ``benchmark_bars``
+  cache, and the bar index (time-to-excursion) of each horizon's MFE/MAE.
+  Write-only to ``candidate_outcomes``; never reads back into any trading
+  decision.
 
 Both use SQL ``NOT EXISTS`` / status filters to only touch un-worked rows, so
 re-running converges rather than reprocessing.
@@ -32,6 +35,11 @@ _ALPHAOS_SIDE_TYPES = ("proposal", "blocked", "armed_watch", "reject", "candidat
 # was recorded, treat it as genuinely unavailable (not a transient gap) so the
 # row converges instead of being retried forever.
 UNAVAILABLE_AFTER_DAYS = 15.0
+
+# EVID-1: the benchmark this codebase already captures daily (PR9.5's
+# benchmark_capture.py -> benchmark_bars) -- same symbol relative_performance.py
+# compares paper equity against. Reused, not a second benchmark source.
+BENCHMARK_SYMBOL = "SPY"
 
 
 # --------------------------------------------------------------------- seed
@@ -210,6 +218,82 @@ def seed_pending_outcomes(journal, limit: int = 500) -> dict:
 
 
 # ------------------------------------------------------------------- update
+def _benchmark_reference_and_forward_bars(journal, decision_date: str, candidate_bar_dates) -> tuple:
+    """EVID-1: the benchmark's own reference price (last close AT OR BEFORE
+    decision_date -- the same "reference point" role entry_reference_price
+    plays for the candidate) and forward bars from the already-captured
+    ``benchmark_bars`` cache. Read-only; never fetches over the network
+    (benchmark_capture.py's own once-daily job owns that).
+
+    Audit-fixup (correctness MED): forward bars are restricted to
+    ``candidate_bar_dates`` (the candidate's OWN forward-bar dates) rather
+    than every benchmark bar after decision_date. Without this, "first N
+    benchmark bars" and "first N candidate bars" are aligned by POSITION
+    only -- if the candidate's own bar series has a gap the benchmark's
+    doesn't (a halt) or vice versa, the Nth bar on each side can fall on
+    DIFFERENT calendar dates, silently comparing a 5-trading-day candidate
+    move against e.g. a 6-calendar-day benchmark move under the "identical
+    forward window" claim. Restricting to the intersection means position N
+    in the returned list is always the same date as position N in the
+    candidate's own bars (any date the candidate has that the benchmark
+    lacks simply isn't in this list -- correctly read as the benchmark
+    window not yet reaching N, never as a mismatched date standing in for
+    it).
+
+    Returns ``(reference_close_or_None, forward_bars)`` -- forward_bars is
+    always a list (possibly empty) shaped like the candidate provider's own
+    bars (``date``/``close`` keys), so it can be passed straight into
+    ``forward_window_stats`` unchanged."""
+    ref_row = journal.one(
+        "SELECT close FROM benchmark_bars WHERE symbol = ? AND bar_date <= ? "
+        "ORDER BY bar_date DESC LIMIT 1",
+        (BENCHMARK_SYMBOL, decision_date),
+    )
+    reference = ref_row["close"] if ref_row else None
+    if reference is None:
+        return None, []
+    all_forward_bars = journal.query(
+        "SELECT bar_date AS date, close FROM benchmark_bars WHERE symbol = ? AND bar_date > ? "
+        "ORDER BY bar_date ASC",
+        (BENCHMARK_SYMBOL, decision_date),
+    )
+    candidate_dates = set(candidate_bar_dates)
+    forward_bars = [b for b in all_forward_bars if b["date"] in candidate_dates]
+    return reference, forward_bars
+
+
+def _market_adjusted_return_pct(candidate_stats: dict, benchmark_stats: dict, n_days: int):
+    """Candidate's own directional forward return minus what the SAME
+    directional bet (long/short matching the candidate's direction_hint) on
+    the benchmark would have returned over the identical forward window --
+    the same modest "excess return" framing as
+    reports/relative_performance.py (never a CAPM/risk-adjusted alpha), just
+    computed per-candidate instead of on the portfolio equity curve. None
+    whenever either leg is unavailable.
+
+    Audit-fixup (correctness MED): requires BOTH legs to have resolved the
+    full ``n_days`` window (``bars_used >= n_days`` on each side), not just
+    the benchmark side. The original gate only checked the benchmark,
+    reasoning that a candidate row's completion status (which stops it
+    being revisited forever) is governed solely by the candidate's own bar
+    count -- true, but it missed that ``update_pending_outcomes`` also
+    reads and stores this value on a still-``partial`` row (candidate not
+    yet at n_days either), which would silently pair a partial candidate
+    return against a fully-resolved benchmark return under the "Nd" name.
+    Requiring both sides keeps every published market_adjusted_return_Nd_pct
+    an apples-to-apples N-day-vs-N-day comparison; a lagging OR
+    still-accumulating side just leaves the field honestly None instead."""
+    if candidate_stats is None or benchmark_stats is None:
+        return None
+    if candidate_stats.get("bars_used", 0) < n_days or benchmark_stats.get("bars_used", 0) < n_days:
+        return None
+    candidate_return_pct = candidate_stats.get("return_pct")
+    bench_return_pct = benchmark_stats.get("return_pct")
+    if candidate_return_pct is None or bench_return_pct is None:
+        return None
+    return round(candidate_return_pct - bench_return_pct, 4)
+
+
 def _update_row(journal, outcome_id: str, fields: dict) -> None:
     st = timeutils.stamp()
     fields = dict(fields)
@@ -338,13 +422,36 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
         f3 = forward_window_stats(ref, stop, direction, forward_bars, 3)
         f5 = forward_window_stats(ref, stop, direction, forward_bars, 5)
 
+        # EVID-1: market-adjusted return, computed from the SAME
+        # already-captured benchmark_bars cache used by relative_performance.py
+        # -- a DB read, never a network fetch. Reuses forward_window_stats
+        # verbatim (stop=None so only return_pct is computed; no R/excursion
+        # for a benchmark, which has no stop to normalize against). Benchmark
+        # forward bars are restricted to the candidate's OWN bar dates (see
+        # _benchmark_reference_and_forward_bars's own docstring) so the two
+        # legs are aligned by DATE, never merely by position.
+        candidate_bar_dates = [b["date"] for b in forward_bars if b.get("date")]
+        bench_ref, bench_forward_bars = _benchmark_reference_and_forward_bars(
+            journal, decision_date, candidate_bar_dates)
+        bench_f1 = bench_f3 = bench_f5 = None
+        if bench_ref is not None:
+            bench_f1 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 1)
+            bench_f3 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 3)
+            bench_f5 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 5)
+
         update = {
             "forward_1d_return_pct": f1["return_pct"], "forward_1d_r": f1["r"],
             "max_favorable_1d_r": f1["max_favorable_r"], "max_adverse_1d_r": f1["max_adverse_r"],
+            "bars_to_favorable_1d": f1["bars_to_favorable"], "bars_to_adverse_1d": f1["bars_to_adverse"],
+            "market_adjusted_return_1d_pct": _market_adjusted_return_pct(f1, bench_f1, 1),
             "forward_3d_return_pct": f3["return_pct"], "forward_3d_r": f3["r"],
             "max_favorable_3d_r": f3["max_favorable_r"], "max_adverse_3d_r": f3["max_adverse_r"],
+            "bars_to_favorable_3d": f3["bars_to_favorable"], "bars_to_adverse_3d": f3["bars_to_adverse"],
+            "market_adjusted_return_3d_pct": _market_adjusted_return_pct(f3, bench_f3, 3),
             "forward_5d_return_pct": f5["return_pct"], "forward_5d_r": f5["r"],
             "max_favorable_5d_r": f5["max_favorable_r"], "max_adverse_5d_r": f5["max_adverse_r"],
+            "bars_to_favorable_5d": f5["bars_to_favorable"], "bars_to_adverse_5d": f5["bars_to_adverse"],
+            "market_adjusted_return_5d_pct": _market_adjusted_return_pct(f5, bench_f5, 5),
         }
 
         target = row.get("target_price")
