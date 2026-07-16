@@ -21,6 +21,8 @@ from alphaos.constants import (
     PLAYBOOK_V1,
     ReasonCode,
     Severity,
+    SHADOW_INTEREST_SCORE_VERSION_V1,
+    SHADOW_LIQUIDITY_INSTRUMENTATION_VERSION_V1,
     Strategy,
     TradeDirection,
     UniverseTier,
@@ -46,6 +48,49 @@ DEFAULT_UNIVERSE = [
 # analysis -- segment on this field, never assume it's uniform.
 CURRENT_INSTRUMENT_VERSION = "instr1"
 
+# EXP-1 mechanism 3: interest_score_shadow_v1 -- tier-scoped recalibration of
+# InterestScanner's megacap-calibrated scale constants (0.06 change-scale /
+# 2.0 rel-vol scale / 0.02 day-range floor) plus this module's own momentum
+# caps (8% change / 3x rel-vol) for the shadow small/mid band. Same formula
+# shape, no fork -- see interest_scanner.py's own InterestScanner docstring.
+#
+# ******************** PROVISIONAL -- NOT DATA-DERIVED ********************
+# The spec mandates these literals come from a build-time saturation audit
+# of EXP-0's own accumulated instr1 shadow captures in the OPERATOR'S REAL
+# data/alphaos.db ("the data answers 0.12-vs-0.15, this spec doesn't
+# guess") -- never a guess, never env-tunable, never retro-scored. That
+# audit could NOT be run this build session: computing it requires reading
+# the live production alphaos.db (~1132 shadow-tier rows across ~4 trading
+# days since 2026-07-10), and this session's sandbox permission classifier
+# refused that read as a production-database access outside this build's
+# remit (this build's own instructions separately forbid writing to that
+# same file, and the read was declined out of caution for the same reason).
+# scripts/shadow_saturation_audit.py is written and ready -- run it against
+# the real DB and replace every literal below (bumping the version to _v2)
+# before ever setting SHADOW_LABELLING_ENABLED=true. Until then these are
+# reasoned placeholders only (roughly 2x the megacap scale, since small/mid
+# names move more per dollar of catalyst and the spec explicitly warns
+# today's megacap constants saturate at this band), not evidence.
+SHADOW_V1_CHANGE_SCALE = 0.12          # PROVISIONAL (megacap: 0.06)
+SHADOW_V1_REL_VOL_SCALE = 3.0          # PROVISIONAL (megacap: 2.0)
+SHADOW_V1_DAY_RANGE_MIN = 0.035        # PROVISIONAL (megacap: 0.02)
+SHADOW_V1_MOMENTUM_CHANGE_CAP = 0.12   # PROVISIONAL (megacap: 0.08, candidate_scanner.py momentum_score)
+SHADOW_V1_MOMENTUM_RELVOL_CAP = 4.0    # PROVISIONAL (megacap: 3.0, candidate_scanner.py momentum_score)
+
+
+def _spread_pct_mid(snapshot: dict) -> Optional[float]:
+    """EXP-1 mechanism 10: spread as a fraction of the quote MIDPOINT, not
+    ``last_price`` (the snapshot's existing ``spread_pct`` divides by
+    possibly-stale last-trade price -- a cleaner, less lagged denominator
+    for the liquidity instrumentation specifically)."""
+    bid, ask = snapshot.get("bid"), snapshot.get("ask")
+    if bid is None or ask is None:
+        return None
+    mid = (bid + ask) / 2.0
+    if not mid:
+        return None
+    return round((ask - bid) / mid, 6)
+
 
 @dataclass
 class ScanResult:
@@ -70,6 +115,13 @@ class CandidateScanner:
         self.market = market_data or MarketDataClient(settings, journal)
         self.freshness = FreshnessGuard.from_settings(settings)
         self.interest = InterestScanner(settings)   # Roadmap 2.3: deterministic interest scoring
+        # EXP-1 mechanism 3: a SEPARATE InterestScanner instance, same class/
+        # formula, tier-scoped constants only -- used for the shadow-tier
+        # pass exclusively. The core `self.interest` above is never touched.
+        self.interest_shadow = InterestScanner(
+            settings, change_scale=SHADOW_V1_CHANGE_SCALE,
+            rel_vol_scale=SHADOW_V1_REL_VOL_SCALE, day_range_min=SHADOW_V1_DAY_RANGE_MIN,
+        )
         self._spy: Optional[dict] = None
         self._qqq: Optional[dict] = None
 
@@ -149,7 +201,8 @@ class CandidateScanner:
 
     def scan_shadow_tier(
         self, symbols: list[str], scan_batch_id: Optional[str] = None,
-        universe_file_version: Optional[int] = None,
+        universe_file_version: Optional[int] = None, scan_window: Optional[str] = None,
+        adv_by_symbol: Optional[dict] = None,
     ) -> ScanResult:
         """EXP-0: the shadow-tier pass -- same 3 windows (batch snapshot ->
         freshness assess -> deterministic interest score) as ``scan()``, but
@@ -192,15 +245,23 @@ class CandidateScanner:
                 )
                 continue
 
-            reason = self._tradeability_reason(snapshot)
-            if reason is not None:
-                result.rejected_illiquid += 1
-                self._reject(None, sym, "shadow_scan", reason, "tradeability gate", snapshot)
-                continue
+            # EXP-1 mechanism 10 INVARIANT: the core tradeability gate
+            # (MIN_DOLLAR_VOLUME/MAX_SPREAD_PCT/crossed-quote) NEVER filters
+            # shadow capture or selection eligibility -- the $2M cumulative
+            # floor alone fails roughly half the band before noon; gating
+            # would censor exactly the tail COST-1 needs. Compute the
+            # verdict (for instrumentation/reporting) but never act on it
+            # here -- freshness above is a SEPARATE, still-enforced gate
+            # (data trustworthiness, not tradeability).
+            core_gate_verdict = self._tradeability_reason(snapshot) or "pass"
 
             cand = self._maybe_candidate(
                 scan_id, sym, snapshot, snapshot_id,
                 shadow_tier=True, instrument_version=CURRENT_INSTRUMENT_VERSION,
+                interest_scanner=self.interest_shadow, core_gate_verdict=core_gate_verdict,
+                scan_window=scan_window,
+                adv_20d_dollar=(adv_by_symbol or {}).get(sym),
+                quote_age_seconds=report.quote_age_seconds,
             )
             if cand is not None:
                 result.candidates.append(cand)
@@ -235,6 +296,9 @@ class CandidateScanner:
     def _maybe_candidate(
         self, scan_id, sym, snapshot, snapshot_id,
         shadow_tier: bool = False, instrument_version: Optional[str] = None,
+        interest_scanner: Optional[InterestScanner] = None,
+        core_gate_verdict: Optional[str] = None, scan_window: Optional[str] = None,
+        adv_20d_dollar: Optional[float] = None, quote_age_seconds: Optional[float] = None,
     ) -> Optional[ScanContext]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
@@ -242,14 +306,24 @@ class CandidateScanner:
         # beyond pure momentum: gap / near hi-lo / rel-strength / breakout /
         # reversal / volatility). "Interesting" != "trade" — the trade decision
         # is still owned by the OpenAI eval + the existing safety gates.
-        signals = self.interest.score(snapshot, self._spy, self._qqq)
+        # EXP-1 mechanism 3: shadow-tier callers pass `self.interest_shadow`
+        # (tier-scoped constants); core callers omit this and get the
+        # unmodified `self.interest` -- byte-identical to pre-EXP-1 behavior.
+        scorer = interest_scanner or self.interest
+        signals = scorer.score(snapshot, self._spy, self._qqq)
         # Candidate if momentum-y OR interesting enough for AI classification.
+        # EXP-1 mechanism 3: momentum caps are ALSO tier-scoped -- shadow
+        # rows use the recalibrated 12%/4x caps, core keeps 8%/3x unchanged.
+        momentum_change_cap = SHADOW_V1_MOMENTUM_CHANGE_CAP if shadow_tier else 0.08
+        momentum_relvol_cap = SHADOW_V1_MOMENTUM_RELVOL_CAP if shadow_tier else 3.0
         is_momentum = abs(change) >= 0.02 or rel_vol >= 1.5
         is_candidate = is_momentum or signals.interest_score >= self.settings.interest_min_score
         if not is_candidate:
             return None
         direction = TradeDirection.LONG.value if change >= 0 else TradeDirection.SHORT.value
-        momentum_score = round(min(1.0, (abs(change) / 0.08) * 0.6 + min(rel_vol / 3.0, 1.0) * 0.4), 3)
+        momentum_score = round(
+            min(1.0, (abs(change) / momentum_change_cap) * 0.6 + min(rel_vol / momentum_relvol_cap, 1.0) * 0.4), 3,
+        )
         trend_quality = round(min(1.0, abs(change) * 10), 3)
 
         candidate_id = new_id("cand")
@@ -292,6 +366,35 @@ class CandidateScanner:
             "shadow_tier": 1 if shadow_tier else 0,
             "instrument_version": instrument_version,
         }
+        if shadow_tier:
+            # EXP-1 mechanism 10: liquidity instrumentation -- RECORD, NEVER
+            # GATE (see the INVARIANT comment in scan_shadow_tier). NULL for
+            # every core-tier row (additive, shadow-only fields).
+            dollar_volume = snapshot.get("dollar_volume")
+            cand.update({
+                "bid_size": snapshot.get("bid_size"),
+                "ask_size": snapshot.get("ask_size"),
+                "quote_age_seconds": quote_age_seconds,
+                "spread_pct_mid": _spread_pct_mid(snapshot),
+                "adv_20d_dollar": adv_20d_dollar,
+                "volume_today_pct_of_adv": (
+                    round(dollar_volume / adv_20d_dollar, 4)
+                    if (dollar_volume and adv_20d_dollar) else None
+                ),
+                "scan_window": scan_window,
+                "data_feed": snapshot.get("feed"),
+                "crossed_or_locked_quote": 1 if quote_crossed_or_invalid(snapshot) else 0,
+                "core_gate_verdict": core_gate_verdict,
+                "liquidity_instrumentation_version": SHADOW_LIQUIDITY_INSTRUMENTATION_VERSION_V1,
+                # audit-fixup (correctness LOW): mechanism 3's own constant
+                # named this row's interest/momentum formula version, but
+                # nothing stamped it -- unlike selection_version (mechanism 2)
+                # a future v1->v2 recalibration of SHADOW_V1_* would have been
+                # invisible in the archive (code-convention-only versioning).
+                # Stamped here, mirroring liquidity_instrumentation_version's
+                # own pattern immediately above.
+                "interest_score_version": SHADOW_INTEREST_SCORE_VERSION_V1,
+            })
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).
         cand["last_price"] = snapshot.get("last_price")

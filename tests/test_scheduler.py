@@ -288,9 +288,17 @@ def test_scheduler_restart_does_not_clear_protection_incidents():
 
 # ---------------------------------------------------------------- cost cap
 def test_cost_cap_exceeded_is_visible_and_safe(orchestrator):
+    """EXP-1 mechanism 13 degrade-law fix (2026-07-16): a cost-cap breach is
+    no longer a full skip -- the scan still runs in DETERMINISTIC-CAPTURE-
+    ONLY mode. No NEW proposal can be created (AI evaluation is skipped for
+    every candidate), but candidate/snapshot capture demonstrably continues
+    (the survivorship regression this fix targets)."""
     from alphaos.util.ids import new_id
 
-    orchestrator.settings = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
+    orchestrator.settings = make_settings(
+        SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50,
+        SHADOW_AI_CAP_CALLS_PER_30D=12,  # EXP-1's own joint-validation must clear this cap too
+    )
     for _ in range(51):
         orchestrator.journal.insert("openai_evaluations", {
             "eval_id": new_id("eval"), "candidate_id": new_id("cand"), "symbol": "AAPL",
@@ -300,24 +308,25 @@ def test_cost_cap_exceeded_is_visible_and_safe(orchestrator):
         })
     runner = JobRunner(orchestrator)
     proposals_before = orchestrator.journal.count_rows("trade_proposals")
+    candidates_before = orchestrator.journal.count_rows("candidates")
 
     result = runner.run_job("scan")
 
-    assert result["status"] == "skipped"
+    assert result["status"] == "completed"
     assert result["cost_cap_exceeded"] is True
+    assert result["degraded"] is True
     proposals_after = orchestrator.journal.count_rows("trade_proposals")
-    assert proposals_after == proposals_before
-    assert isinstance(result["reason"], str) and result["reason"]  # explains the skip
+    assert proposals_after == proposals_before  # AI evaluation skipped -> no new proposal possible
+    candidates_after = orchestrator.journal.count_rows("candidates")
+    assert candidates_after > candidates_before  # deterministic capture DID continue (the fix)
+    assert isinstance(result["reason"], str) and result["reason"]  # explains the degrade
 
-    # run_job's own job_runs row is the durable, queryable record of the skip
-    # (cost_guard/jobs.py do not additionally log a system_events row for a
-    # handled/expected skip -- only run_job's except-block does that for an
-    # unexpected failure). Confirm the skip is visible via job_runs instead.
+    # run_job's own job_runs row is the durable, queryable record.
     row = orchestrator.journal.one(
         "SELECT * FROM job_runs WHERE job_type = 'scan' ORDER BY id DESC LIMIT 1"
     )
     assert row["cost_cap_exceeded"] == 1
-    assert row["status"] == "skipped"
+    assert row["status"] == "completed"
 
 
 def test_cost_cap_check_fails_safe_on_a_db_error(orchestrator, monkeypatch):
@@ -337,12 +346,15 @@ def test_cost_cap_check_fails_safe_on_a_db_error(orchestrator, monkeypatch):
     assert "error checking AI cost cap" in detail
 
     # And the same fail-safe behavior holds end-to-end through run_scan_job:
-    # a raising cost check must SKIP the scan, never let it silently proceed.
+    # a raising cost check must degrade to deterministic-capture-only, never
+    # let AI evaluation/proposal-creation silently proceed (EXP-1 mechanism
+    # 13's degrade-law fix -- see test_cost_cap_exceeded_is_visible_and_safe).
     runner = JobRunner(orchestrator)
     proposals_before = orchestrator.journal.count_rows("trade_proposals")
     result = runner.run_job("scan")
-    assert result["status"] == "skipped"
+    assert result["status"] == "completed"
     assert result["cost_cap_exceeded"] is True
+    assert result["degraded"] is True
     assert orchestrator.journal.count_rows("trade_proposals") == proposals_before
 
 

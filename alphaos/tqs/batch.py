@@ -145,8 +145,13 @@ def score_scan_batch(journal, settings, scan_batch_id: Optional[str]) -> dict:
     if not scan_batch_id:
         return {"scored_candidates": 0, "scored_proposals": 0, "skipped": 0}
     try:
+        # EXP-1: shadow-tier candidates share scan_batch_id with the core
+        # scan (EXP-0's shadow pass rides the same batch) -- shadow_tier = 0
+        # keeps TQS a CORE-book measurement, never silently pooling shadow
+        # rows into tqs_scores (which would then leak into H-TQS-1's own
+        # core-only hypothesis evidence via alphaos/hypotheses/queries.py).
         candidates = journal.query(
-            "SELECT * FROM candidates WHERE scan_batch_id = ?", (scan_batch_id,)
+            "SELECT * FROM candidates WHERE scan_batch_id = ? AND shadow_tier = 0", (scan_batch_id,)
         )
     except Exception as exc:
         journal.log_system_event(

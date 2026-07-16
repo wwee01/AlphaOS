@@ -286,6 +286,10 @@ def test_live_run_refuses_when_cost_cap_is_reached(journal):
     settings = make_settings(
         ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-test-key-not-real",
         SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+        # EXP-1: SHADOW_AI_CAP_CALLS_PER_30D's own joint-validation (<=25% of
+        # the shared pool) must clear THIS lowered global cap too -- its
+        # default of 500 only clears the default global cap of 2000.
+        SHADOW_AI_CAP_CALLS_PER_30D="12",
     )
     _seed_packet(journal, symbol="AAPL")
     for _ in range(50):

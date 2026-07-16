@@ -125,18 +125,29 @@ def write_corpus(corpus_dir: str, new_packets: list, as_of_date: str) -> tuple:
     return manifest, written
 
 
-def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT) -> list:
+def select_seed_packets(journal, limit: int = DEFAULT_SEED_LIMIT, include_shadow: bool = False) -> list:
     """Selects up to ``limit`` real, clean (post-PR9.1), already-labelled
     candidate_packets rows -- a spread across distinct symbols first, then
     filling any remaining slots with the next-oldest clean rows -- and
     shapes each into a corpus fixture dict (ready for ``write_corpus``).
     ``ground_truth_label`` is always ``None`` here; this function only ever
-    selects real historical packets, it never adjudicates them."""
+    selects real historical packets, it never adjudicates them.
+
+    EXP-1 mechanism 9(f): defaults to EXCLUDING shadow-tier packets (LEFT
+    JOINed via candidate_id -> candidates.shadow_tier) -- a plain date-sweep
+    would otherwise silently ingest shadow packets into the golden corpus,
+    which CANARY's own Tier-1 refuse-to-aggregate law and EVAL-1's ground
+    truth both currently assume is megacap-only. LEFT (not INNER) JOIN
+    deliberately: a packet with no matching candidates row can never be
+    shadow-tier by construction and must still be selectable."""
+    shadow_clause = "" if include_shadow else "AND COALESCE(c.shadow_tier, 0) = 0 "
     rows = journal.query(
         "SELECT cp.packet_id, cp.candidate_id, cp.interest_rank, cp.packet_json, cp.symbol, "
         "cp.created_at_utc, cl.primary_label, cl.label_decision "
-        "FROM candidate_packets cp JOIN candidate_labels cl ON cl.packet_id = cp.packet_id "
-        "WHERE cl.is_mock = 0 AND cp.created_at_utc >= ? "
+        "FROM candidate_packets cp "
+        "JOIN candidate_labels cl ON cl.packet_id = cp.packet_id "
+        "LEFT JOIN candidates c ON c.candidate_id = cp.candidate_id "
+        f"WHERE cl.is_mock = 0 AND cp.created_at_utc >= ? {shadow_clause}"
         # candidate_labels has no uniqueness constraint on packet_id -- today's
         # write path (_freeze_label) always produces exactly one real label per
         # packet, but nothing STRUCTURALLY guarantees that stays true (a future

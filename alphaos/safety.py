@@ -88,3 +88,49 @@ class KillSwitch:
                 return fh.read().strip() or "engaged"
         except OSError:  # pragma: no cover
             return "engaged"
+
+
+class ShadowLabelSuspendSwitch:
+    """EXP-1 mechanism 13: file-backed, restart-surviving auto-suspend for
+    shadow-tier AI labelling ONLY -- deliberately a SEPARATE switch from
+    ``KillSwitch`` (engaging this must never touch core-book trading, and
+    engaging the real kill switch already covers shadow calls too via its
+    own, independent check). Same design as ``KillSwitch`` for the same
+    reason: presence of the marker file means "engaged", survives restarts,
+    and any process (scheduler/dashboard/CLI) agrees without shared state.
+
+    Auto-suspend triggers (trailing feed_coverage below the arming floor for
+    3 consecutive trading days; any CANARY Tier-1 drift event) engage this
+    switch programmatically -- see ``alphaos.scheduler.shadow_label.
+    check_auto_suspend``. Clearing it is a deliberate operator action
+    (delete the file, or a future CLI command), never automatic -- an
+    auto-suspend is "force off + page, don't wait to finish the week," not
+    a condition that should silently self-heal the moment the metric
+    recovers for one good tick.
+    """
+
+    def __init__(self, path: str = "data/SHADOW_LABEL_SUSPENDED"):
+        self.path = path
+
+    def is_engaged(self) -> bool:
+        return os.path.exists(self.path)
+
+    def engage(self, reason: str = "auto-suspended") -> None:
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(reason)
+
+    def release(self) -> None:
+        try:
+            os.remove(self.path)
+        except FileNotFoundError:
+            pass
+
+    def reason(self) -> Optional[str]:
+        if not self.is_engaged():
+            return None
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                return fh.read().strip() or "engaged"
+        except OSError:  # pragma: no cover
+            return "engaged"

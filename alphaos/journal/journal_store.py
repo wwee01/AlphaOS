@@ -415,8 +415,26 @@ class JournalStore:
             "SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,)
         )
 
-    def recent_candidates(self, limit: int = 200) -> list[dict]:
-        return self.query("SELECT * FROM candidates ORDER BY id DESC LIMIT ?", (limit,))
+    def recent_candidates(self, limit: int = 200, include_shadow: bool = False) -> list[dict]:
+        """EXP-1 mechanism 9(c)/(f): defaults to EXCLUDING shadow-tier rows.
+
+        This is the generic "recent candidates" feed behind the dashboard's
+        Candidates/Trade-Packet tabs (streamlit_app.py) and the console
+        API's ``/system`` route -- exactly the kind of surface mechanism 9
+        names as the single biggest EXP-1 build-session risk: a shadow-tier
+        candidate now carries a REAL AI label (including a real 'propose'
+        label_decision) indistinguishable from an actionable one unless a
+        surface explicitly filters. ``include_shadow=True`` is available for
+        a future dedicated shadow-aware audit view that stamps rows
+        NON-ACTIONABLE/SHADOW inline -- no such view exists yet, so the safe
+        default stays exclusion (mirrors relabel/eval_corpus_build's own
+        default-exclude-shadow posture).
+        """
+        if include_shadow:
+            return self.query("SELECT * FROM candidates ORDER BY id DESC LIMIT ?", (limit,))
+        return self.query(
+            "SELECT * FROM candidates WHERE shadow_tier = 0 ORDER BY id DESC LIMIT ?", (limit,),
+        )
 
     def recent_proposals(self, limit: int = 200) -> list[dict]:
         return self.query("SELECT * FROM trade_proposals ORDER BY id DESC LIMIT ?", (limit,))
@@ -426,10 +444,28 @@ class JournalStore:
 
         This is the actionable approval queue: a proposal leaves it once it is
         approved (filled), rejected, or blocked. Read-only — newest first.
+
+        Excludes any proposal whose candidate is shadow-tier (EXP-1 audit-
+        fixup: mechanism 9's own creation-time guards already make a
+        shadow-tier proposal impossible today, but this endpoint is exactly
+        the "needs you" / approvals-queue DISPLAY surface the spec names as
+        the real trap -- an operator seeing a small-cap ticker by name here
+        and manually trading it elsewhere, contaminating the shadow ledger,
+        would happen BEFORE approve_proposal()'s own belt-and-suspenders
+        refusal ever fires. Filtering here too means this list is never
+        solely reliant on the creation-time chokepoint -- the exact "never
+        trust a single chokepoint" lesson this codebase already learned once
+        (2026-07-09, _override_open_trade). COALESCE handles a proposal whose
+        candidate_id doesn't resolve to a candidates row at all (pre-EXP-0
+        history, or any future orphan) the same as a non-shadow one, matching
+        this file's other unknown-never-zero conventions -- absence of
+        evidence is not evidence of shadow-ness.
         """
         return self.query(
-            "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-            "ORDER BY id DESC LIMIT ?",
+            "SELECT tp.* FROM trade_proposals tp "
+            "LEFT JOIN candidates c ON c.candidate_id = tp.candidate_id "
+            "WHERE tp.status IN (?, ?) AND COALESCE(c.shadow_tier, 0) = 0 "
+            "ORDER BY tp.id DESC LIMIT ?",
             (*ProposalStatus.approvable(), limit),
         )
 
@@ -473,19 +509,36 @@ class JournalStore:
             "SELECT * FROM candidate_packets WHERE candidate_id = ? ORDER BY id DESC LIMIT 1", (candidate_id,)
         )
 
-    def recent_candidate_labels(self, limit: int = 200) -> list[dict]:
-        return self.query("SELECT * FROM candidate_labels ORDER BY id DESC LIMIT ?", (limit,))
+    def recent_candidate_labels(self, limit: int = 200, include_shadow: bool = False) -> list[dict]:
+        """EXP-1 mechanism 9: defaults to EXCLUDING shadow-tier rows -- this
+        table's ``symbol``/label columns are exactly the shape mechanism 9
+        warns about; unused today (no caller wires this into a surface yet)
+        but fixed defensively so a future caller inherits the safe default
+        rather than needing to remember it."""
+        if include_shadow:
+            return self.query("SELECT * FROM candidate_labels ORDER BY id DESC LIMIT ?", (limit,))
+        return self.query(
+            "SELECT * FROM candidate_labels WHERE shadow_tier = 0 ORDER BY id DESC LIMIT ?", (limit,),
+        )
 
     def label_summary(self) -> dict:
-        """Counts by primary_label and by advisory label_decision (read-only)."""
+        """Counts by primary_label and by advisory label_decision (read-only).
+
+        EXP-1: excludes ``shadow_tier = 1`` rows -- this is the operator
+        console's own label-summary tile (``/api/v1/decisions``); pooling
+        shadow-tier label volume into it would both mislead an operator
+        reading "what is the core book's AI actually saying" and violate the
+        same never-pool-shadow-with-core law mechanism 11's statistics
+        follow (a counts-only aggregate is not a symbol-name leak, but it is
+        still a live-aggregate that must stay core-only)."""
         return {
             "by_primary_label": self.query(
                 "SELECT primary_label AS label, COUNT(*) AS n FROM candidate_labels "
-                "GROUP BY primary_label ORDER BY n DESC"
+                "WHERE shadow_tier = 0 GROUP BY primary_label ORDER BY n DESC"
             ),
             "by_label_decision": self.query(
                 "SELECT label_decision AS decision, COUNT(*) AS n FROM candidate_labels "
-                "GROUP BY label_decision ORDER BY n DESC"
+                "WHERE shadow_tier = 0 GROUP BY label_decision ORDER BY n DESC"
             ),
         }
 

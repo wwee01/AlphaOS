@@ -15,14 +15,31 @@ from __future__ import annotations
 from datetime import datetime, time as _time, timedelta, timezone as _tz
 
 from alphaos.attribution import ATTRIBUTION_VERSION
-from alphaos.constants import ProposalStatus
+from alphaos.constants import (
+    ProposalStatus,
+    SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS,
+    SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS,
+)
 from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.protection_watchdog import status_report
 from alphaos.proposals import seconds_remaining as _proposal_seconds_remaining
 from alphaos.reports.position_health import assess_positions
+from alphaos.safety import ShadowLabelSuspendSwitch
 from alphaos.scheduler import cost_guard
+from alphaos.scheduler import shadow_label as shadow_label_module
 from alphaos.tqs import TQS_VERSION
 from alphaos.util import timeutils
+
+# EXP-1 audit-fixup (scope/safety): shared shadow-tier exclusion fragment for
+# every raw `trade_proposals` query across this module AND daily_brief.py --
+# any operator-facing proposal count/name is exactly the DISPLAY surface the
+# audit named as the real trap (never solely reliant on the creation-time
+# guard; see open_proposals()'s own docstring for the full reasoning). LEFT
+# JOIN + COALESCE so a proposal whose candidate_id doesn't resolve at all
+# reads as non-shadow, not silently dropped. Single-sourced here (rather than
+# duplicated per call site) so the fragment can only drift in one place.
+SHADOW_SAFE_JOIN = "LEFT JOIN candidates c ON c.candidate_id = tp.candidate_id"
+SHADOW_SAFE_WHERE = "COALESCE(c.shadow_tier, 0) = 0"
 
 
 def _start_of_today_sgt_utc(now=None) -> str:
@@ -189,25 +206,29 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     now_iso = timeutils.to_iso(timeutils.now_utc())
     open_statuses = ProposalStatus.approvable()
     active_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-        "AND proposal_expires_at_utc IS NOT NULL AND proposal_expires_at_utc > ? "
-        "AND created_at_utc >= ? ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status IN (?, ?) "
+        "AND tp.proposal_expires_at_utc IS NOT NULL AND tp.proposal_expires_at_utc > ? "
+        f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} ORDER BY tp.id DESC",
         (*open_statuses, now_iso, since_sgt),
     )
     stale_unmarked_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-        "AND (proposal_expires_at_utc IS NULL OR proposal_expires_at_utc <= ?) "
-        "AND created_at_utc >= ? ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status IN (?, ?) "
+        "AND (tp.proposal_expires_at_utc IS NULL OR tp.proposal_expires_at_utc <= ?) "
+        f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} ORDER BY tp.id DESC",
         (*open_statuses, now_iso, since_sgt),
     )
     expired_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status = 'expired' AND created_at_utc >= ? "
-        "ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status = 'expired' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} "
+        "ORDER BY tp.id DESC",
         (since_sgt,),
     )
     superseded_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status = 'superseded' AND created_at_utc >= ? "
-        "ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status = 'superseded' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} "
+        "ORDER BY tp.id DESC",
         (since_sgt,),
     )
     for bucket in (active_proposals_today, stale_unmarked_proposals_today):
@@ -360,6 +381,76 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "feed_coverage_today": round(shadow_fresh / shadow_scanned, 4) if shadow_scanned else None,
     }
 
+    # EXP-1 mechanism 9(d)/12: shadow-tier AI LABELLING visibility. Counts +
+    # health only, floor-gated the same way tqs_shadow/attribution_shadow
+    # are above -- NO shadow symbol names, ever (mechanism 9(e): the trap is
+    # an operator manually trading a surfaced small-cap, contaminating the
+    # shadow ledger). Segmented `shadow_tier = 1` labeller health (parse/
+    # fail-safe rate, validation_status mix, confidence histogram) per
+    # mechanism 12.
+    shadow_label_rows_today = journal.query(
+        "SELECT validation_status, label_source, label_confidence, primary_label, is_mock "
+        "FROM candidate_labels WHERE shadow_tier = 1 AND created_at_utc >= ?",
+        (since_sgt,),
+    )
+    shadow_label_status_histogram: dict = {}
+    for r in shadow_label_rows_today:
+        key = r["validation_status"] or "unknown"
+        shadow_label_status_histogram[key] = shadow_label_status_histogram.get(key, 0) + 1
+    shadow_fail_safe_today = sum(1 for r in shadow_label_rows_today if r["label_source"] == "fail_safe")
+    shadow_confidences = [r["label_confidence"] for r in shadow_label_rows_today if r["label_confidence"] is not None]
+    shadow_label_other_today = sum(1 for r in shadow_label_rows_today if r["primary_label"] == "Other/Unclassified")
+    shadow_suspend_engaged = ShadowLabelSuspendSwitch().is_engaged()
+
+    # EXP-1 mechanism 3: saturation-audit accumulation-progress status line.
+    # Answers "how close are we to being able to trust a fresh
+    # scripts/shadow_saturation_audit.py run" every day in the report the
+    # operator already reads, rather than relying on anyone remembering to
+    # check back manually (see docs/ALPHAOS_MASTER_REFERENCE.md §9 for the
+    # decision this exists to support). Counts distinct trading days the
+    # exact same way the audit script itself does (shadow_tier=1 AND
+    # instrument_version='instr1', substr(created_at_sgt, 1, 10)) so the two
+    # can never disagree.
+    shadow_instr1_trading_days = int(
+        journal.scalar(
+            "SELECT COUNT(DISTINCT substr(created_at_sgt, 1, 10)) FROM candidates "
+            "WHERE shadow_tier = 1 AND instrument_version = 'instr1'"
+        )
+        or 0
+    )
+    if shadow_instr1_trading_days >= SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS:
+        saturation_audit_status = "target_reached_recalibrate"
+    elif shadow_instr1_trading_days >= SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS:
+        saturation_audit_status = "min_reached_consider_recalibration"
+    else:
+        saturation_audit_status = "accumulating"
+    saturation_audit_readiness = {
+        "distinct_instr1_trading_days": shadow_instr1_trading_days,
+        "min_trading_days": SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS,
+        "target_trading_days": SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS,
+        "status": saturation_audit_status,
+    }
+
+    shadow_labelling = {
+        "enabled": bool(settings.shadow_labelling_enabled),
+        "auto_suspended": shadow_suspend_engaged,
+        "labelled_today": len(shadow_label_rows_today),
+        "fail_safe_count_today": shadow_fail_safe_today,
+        "fail_safe_rate_today": (
+            round(shadow_fail_safe_today / len(shadow_label_rows_today), 4) if shadow_label_rows_today else None
+        ),
+        "validation_status_histogram_today": shadow_label_status_histogram,
+        "other_unclassified_count_today": shadow_label_other_today,
+        "mean_confidence_today": (
+            round(sum(shadow_confidences) / len(shadow_confidences), 3) if shadow_confidences else None
+        ),
+        "calls_in_last_30_days": shadow_label_module.shadow_calls_in_last_30_days(journal),
+        "cap_per_30d": settings.shadow_ai_cap_calls_per_30d,
+        "calls_today": shadow_label_module.shadow_calls_today(journal),
+        "cap_per_day": settings.shadow_ai_cap_calls_per_day,
+        "saturation_audit_readiness": saturation_audit_readiness,
+    }
+
     from alphaos.util.market_calendar import is_trading_day
 
     return {
@@ -385,4 +476,5 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
         "attribution_shadow": attribution_shadow,
         "position_health": position_health,
         "shadow_tier": shadow_tier,
+        "shadow_labelling": shadow_labelling,
     }

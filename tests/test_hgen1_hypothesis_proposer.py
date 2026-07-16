@@ -699,7 +699,10 @@ def test_hypothesis_gen_daily_cap_cannot_exceed_25pct_of_shared_30day_cap():
         make_settings(HYPOTHESIS_GEN_MAX_CALLS_PER_DAY=100, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
     with pytest.raises(SettingsError):
         make_settings(HYPOTHESIS_GEN_MAX_CALLS_PER_DAY=13, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)  # 13 > 12.5
-    s = make_settings(HYPOTHESIS_GEN_MAX_CALLS_PER_DAY=12, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
+    s = make_settings(
+        HYPOTHESIS_GEN_MAX_CALLS_PER_DAY=12, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50,
+        SHADOW_AI_CAP_CALLS_PER_30D=12,  # EXP-1's own joint-validation must clear this cap too
+    )
     assert s.hypothesis_gen_max_calls_per_day == 12
     s = make_settings()  # defaults: 5 <= 0.25 * 2000 = 500
     assert s.hypothesis_gen_max_calls_per_day == 5

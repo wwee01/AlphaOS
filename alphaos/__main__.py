@@ -491,13 +491,14 @@ def cmd_card_materialize(orch: Orchestrator, hypothesis_id: str, decided_by: Opt
     return 0
 
 
-def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
+def cmd_eval_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int, include_shadow: bool = False) -> int:
     """EVAL-1 one-off: select real, clean (post-PR9.1) candidate_packets rows
     into the frozen golden corpus (additive; never overwrites an existing
     fixture). Does NOT adjudicate ground truth -- the operator reviews the
     written fixture files and fills in ground_truth_label by hand, then
-    commits the corpus directory like a card."""
-    res = orch.eval_corpus_build(corpus_dir=corpus_dir, limit=limit)
+    commits the corpus directory like a card. EXP-1: shadow-tier packets are
+    excluded by default -- pass --include-shadow to opt in."""
+    res = orch.eval_corpus_build(corpus_dir=corpus_dir, limit=limit, include_shadow=include_shadow)
     _print({"eval_corpus_build": res})
     print(
         f"\n{res['packets_written']} new packet(s) written to {res['corpus_dir']} "
@@ -529,13 +530,16 @@ def cmd_eval_report(orch: Orchestrator) -> int:
     return 0
 
 
-def cmd_relabel(orch: Orchestrator, date_from: str, date_to: str, dry_run: bool) -> int:
+def cmd_relabel(
+    orch: Orchestrator, date_from: str, date_to: str, dry_run: bool, include_shadow: bool = False,
+) -> int:
     """TASK-R one-off: replay stored packet_json for candidate_packets rows
     in [date_from, date_to] through the CURRENT labeller. --dry-run prints
     composed prompts with zero network calls; the live run persists new
     candidate_labels rows (relabel_of set, originals never touched) and
-    prints an old-vs-new label diff table."""
-    res = orch.relabel_candidates(date_from, date_to, dry_run=dry_run)
+    prints an old-vs-new label diff table. EXP-1: shadow-tier packets are
+    excluded by default -- pass --include-shadow to opt in."""
+    res = orch.relabel_candidates(date_from, date_to, dry_run=dry_run, include_shadow=include_shadow)
     if "error" in res:
         _print({"relabel": res})
         return 1
@@ -557,12 +561,12 @@ def cmd_relabel(orch: Orchestrator, date_from: str, date_to: str, dry_run: bool)
     return 0
 
 
-def cmd_canary_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int) -> int:
+def cmd_canary_corpus_build(orch: Orchestrator, corpus_dir: str, limit: int, include_shadow: bool = False) -> int:
     """CANARY one-off: select real, clean (post-PR9.1) candidate_packets rows
     -- preferring TASK-R relabels -- into the frozen golden corpus (additive;
     never overwrites an existing fixture). Review the fixtures, then git
     add/commit the corpus directory -- it is never auto-committed."""
-    res = orch.canary_corpus_build(corpus_dir=corpus_dir, limit=limit)
+    res = orch.canary_corpus_build(corpus_dir=corpus_dir, limit=limit, include_shadow=include_shadow)
     _print({"canary_corpus_build": res})
     print(
         f"\n{res['packets_written']} new packet(s) written to {res['corpus_dir']} "
@@ -933,6 +937,9 @@ def build_parser() -> argparse.ArgumentParser:
     srj.add_argument("job_type", choices=[
         "scan", "monitor", "outcomes_update", "daily_digest", "benchmark_spine", "text_archive_pull",
         "atr_update", "canary_run",
+        # EXP-1: shadow-tier AI labelling -- own job type (mechanism 4), idempotent
+        # per-window rerun (mechanism 4's own tested acceptance criterion).
+        "shadow_label",
     ])
     sub.add_parser("scheduler_health",
                    help="dead-man's-switch check: exit 0 if a job completed recently enough during "
@@ -1067,6 +1074,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "auto-committed)")
     ecb.add_argument("--corpus-dir", default=None, help="defaults to data/eval")
     ecb.add_argument("--limit", type=int, default=30, help="max NEW packets to select (default 30)")
+    ecb.add_argument("--include-shadow", action="store_true",
+                     help="EXP-1: also consider shadow-tier (small/mid) packets (default: excluded)")
     ev = sub.add_parser("eval",
                         help="EVAL-1: replay the frozen golden corpus through the current playbook "
                              "classifier; stores every result incl. fail-safe ones")
@@ -1082,11 +1091,15 @@ def build_parser() -> argparse.ArgumentParser:
     rl.add_argument("--from", dest="date_from", required=True, help="SGT calendar date, YYYY-MM-DD")
     rl.add_argument("--to", dest="date_to", required=True, help="SGT calendar date, YYYY-MM-DD")
     rl.add_argument("--dry-run", action="store_true", help="print composed prompts, zero network calls")
+    rl.add_argument("--include-shadow", action="store_true",
+                    help="EXP-1: also consider shadow-tier (small/mid) packets (default: excluded)")
     ccb = sub.add_parser("canary_corpus_build",
                          help="CANARY: select real, clean candidate_packets rows (preferring TASK-R "
                               "relabels) into the frozen golden corpus (additive; never auto-committed)")
     ccb.add_argument("--corpus-dir", default=None, help="defaults to data/canary")
     ccb.add_argument("--limit", type=int, default=20, help="max NEW packets to select (default 20)")
+    ccb.add_argument("--include-shadow", action="store_true",
+                     help="EXP-1: also consider shadow-tier (small/mid) packets (default: excluded)")
     cr = sub.add_parser("canary_run",
                         help="CANARY: replay the frozen golden corpus through the current playbook "
                              "classifier and compare against the pinned baseline run")
@@ -1238,15 +1251,15 @@ def main(argv=None) -> int:
         if args.command == "card_materialize":
             return cmd_card_materialize(orch, args.hypothesis_id, args.decided_by, args.confirm)
         if args.command == "eval_corpus_build":
-            return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit)
+            return cmd_eval_corpus_build(orch, args.corpus_dir, args.limit, args.include_shadow)
         if args.command == "eval":
             return cmd_eval(orch, args.corpus_dir, args.repeats)
         if args.command == "eval_report":
             return cmd_eval_report(orch)
         if args.command == "relabel":
-            return cmd_relabel(orch, args.date_from, args.date_to, args.dry_run)
+            return cmd_relabel(orch, args.date_from, args.date_to, args.dry_run, args.include_shadow)
         if args.command == "canary_corpus_build":
-            return cmd_canary_corpus_build(orch, args.corpus_dir, args.limit)
+            return cmd_canary_corpus_build(orch, args.corpus_dir, args.limit, args.include_shadow)
         if args.command == "canary_run":
             return cmd_canary_run(orch, args.corpus_dir)
         if args.command == "canary_status":

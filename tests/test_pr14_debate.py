@@ -272,7 +272,10 @@ def test_daily_cap_already_reached_sits_out_the_whole_batch():
 
 
 def test_shared_30day_cap_exhausted_sits_out_entirely():
-    o = _orch(DEBATE_SHADOW_ENABLED="true", SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50")
+    o = _orch(
+        DEBATE_SHADOW_ENABLED="true", SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+        SHADOW_AI_CAP_CALLS_PER_30D="12",  # EXP-1's own joint-validation must clear this cap too
+    )
     from alphaos.util import timeutils
     from alphaos.util.ids import new_id
 

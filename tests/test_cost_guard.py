@@ -103,7 +103,7 @@ def test_check_scan_budget_detail_reflects_all_three_tables(journal):
         journal.insert("openai_evaluations", _eval_row(is_mock=0))
     journal.insert("candidate_labels", _label_row(is_mock=0))
     journal.insert("last30days_polarity", _polarity_row(model_provider="openai"))
-    settings = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D="100")
+    settings = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D="100", SHADOW_AI_CAP_CALLS_PER_30D="25")
 
     within_budget, detail = cost_guard.check_scan_budget(settings, journal)
 
@@ -120,7 +120,7 @@ def test_check_scan_budget_trips_when_the_combined_total_reaches_the_cap(journal
     for _ in range(24):
         journal.insert("candidate_labels", _label_row(is_mock=0))
     journal.insert("last30days_polarity", _polarity_row(model_provider="openai"))
-    settings = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50")
+    settings = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50", SHADOW_AI_CAP_CALLS_PER_30D="12")
 
     within_budget, detail = cost_guard.check_scan_budget(settings, journal)
 

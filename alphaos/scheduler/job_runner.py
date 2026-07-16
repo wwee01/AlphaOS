@@ -34,6 +34,7 @@ _JOB_FUNCS = {
     cadence.JobType.CANARY_RUN: jobs.run_canary_run_job,
     cadence.JobType.HYPOTHESIS_RESOLVE: jobs.run_hypothesis_resolve_job,
     cadence.JobType.CARD_DEMOTION_CHECK: jobs.run_card_demotion_check_job,
+    cadence.JobType.SHADOW_LABEL: jobs.run_shadow_label_job,
 }
 
 
@@ -204,6 +205,10 @@ class JobRunner:
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
             cadence.JobType.CARD_DEMOTION_CHECK,
+            # EXP-1 mechanism 4: labelling never rides inside SCAN and is
+            # ORDERED LAST in the tick -- a budget squeeze hits research,
+            # never the live book; core SCAN/MONITOR are never delayed.
+            cadence.JobType.SHADOW_LABEL,
         ):
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
             if not due:
@@ -302,6 +307,10 @@ class JobRunner:
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
             cadence.JobType.CARD_DEMOTION_CHECK,
+            # EXP-1 mechanism 4: labelling never rides inside SCAN and is
+            # ORDERED LAST in the tick -- a budget squeeze hits research,
+            # never the live book; core SCAN/MONITOR are never delayed.
+            cadence.JobType.SHADOW_LABEL,
         ):
             recent_by_job_type[job_type] = self.journal.query(
                 "SELECT * FROM job_runs WHERE job_type = ? ORDER BY id DESC LIMIT ?",

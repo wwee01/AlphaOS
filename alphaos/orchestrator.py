@@ -51,6 +51,8 @@ from alphaos.constants import (
     RunStatus,
     ScanType,
     SchedulerRunType,
+    SHADOW_LABEL_SKIPPED_REASON_STALE,
+    SHADOW_SELECTION_VERSION_V1,
     Severity,
     Strategy,
     TargetProfile,
@@ -193,6 +195,15 @@ class Orchestrator:
                     "Paper execution refused: Alpaca paper safety checks failed.",
                     {"failing": [f.name for f in failing]},
                 )
+        # EXP-1 mechanism 11: ensure both shadow preregistration rows exist
+        # (idempotent, check-then-register). Gated on shadow_tier_enabled --
+        # pointless to register a shadow-data hypothesis on an install that
+        # has no shadow capture running at all, and keeps this a no-op for
+        # every existing test/install that leaves shadow tier off.
+        if self.settings.shadow_tier_enabled:
+            from alphaos.scheduler.shadow_label import seed_shadow_preregistrations
+
+            seed_shadow_preregistrations(self.journal)
         self._startup_logged = True
         return checks
 
@@ -201,7 +212,19 @@ class Orchestrator:
             self.startup()
 
     # ------------------------------------------------------------- scan_once
-    def run_scan_once(self, trigger_source: str = TriggerSource.MANUAL_CLI.value) -> ScanSummary:
+    def run_scan_once(
+        self, trigger_source: str = TriggerSource.MANUAL_CLI.value, ai_degraded: bool = False,
+    ) -> ScanSummary:
+        """``ai_degraded=True`` (EXP-1 mechanism 13's degrade-law fix, called
+        ONLY by ``jobs.run_scan_job`` on a global AI-cost-cap breach):
+        DETERMINISTIC-CAPTURE-ONLY -- universe/candidate/snapshot capture and
+        EXP-0's shadow-tier ``universe_days`` survivorship rows all continue
+        exactly as normal; only the AI evaluator + labeller (core AND
+        shadow) are skipped for every candidate this scan. Replaces the
+        previous full-skip-the-whole-scan behavior, which silently punched a
+        survivorship hole in "prune nothing, this IS the dataset" on every
+        cost-cap-breach day. Every existing caller omits this parameter and
+        is completely unaffected (default False -- byte-identical)."""
         self._ensure_startup()
 
         # --- Mint a scan batch + a scheduler run (records exist even though v1
@@ -298,9 +321,28 @@ class Orchestrator:
             universe_doc = load_universe_file(self.settings.shadow_tier_universe_file)
             if universe_doc and universe_doc.get("symbols"):
                 shadow_symbols = [s["symbol"] for s in universe_doc["symbols"] if s.get("symbol")]
+                # EXP-1 mechanism 10: per-symbol ADV context from the committed
+                # universe file (already reviewed/versioned -- never a new
+                # screen), threaded through for volume_today_pct_of_adv.
+                adv_by_symbol = {
+                    s["symbol"]: s.get("adv_20d_usd") for s in universe_doc["symbols"] if s.get("symbol")
+                }
+                # EXP-1 mechanisms 4/8/10: this scan's own window label, shared
+                # verbatim with the SHADOW_LABEL job's cadence (cadence.py's
+                # scan_windows/window_containing) so liquidity instrumentation
+                # and the labelling job can both name "which of the day's 3
+                # windows" a row belongs to.
+                from alphaos.scheduler.cadence import format_hhmm_et as _fmt_hhmm_et
+                from alphaos.scheduler.cadence import market_now_et as _market_now_et
+                from alphaos.scheduler.cadence import scan_windows as _scan_windows
+                from alphaos.scheduler.cadence import window_containing as _window_containing
+
+                _window = _window_containing(_fmt_hhmm_et(_market_now_et()), _scan_windows(self.settings))
+                scan_window_label = f"{_window[0]}-{_window[1]}" if _window else None
                 shadow_result = self.scanner.scan_shadow_tier(
                     shadow_symbols, scan_batch_id=scan_batch_id,
                     universe_file_version=universe_doc.get("version"),
+                    scan_window=scan_window_label, adv_by_symbol=adv_by_symbol,
                 )
                 self._record_universe_days(shadow_result, universe_doc)
                 summary.shadow_tier_scanned = shadow_result.snapshots
@@ -393,6 +435,15 @@ class Orchestrator:
             snapshot = cand.snapshot or {}
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
+
+            if ai_degraded:
+                # EXP-1 mechanism 13 degrade law: the candidate row + snapshot
+                # above are already durably captured (deterministic, zero AI
+                # cost) -- skip evaluation/labelling/decision entirely for
+                # this candidate rather than fully skipping the whole scan.
+                # Status stays 'detected'; nothing here ever creates a
+                # proposal or spends AI budget.
+                continue
 
             # AI category/playbook label for the shortlist only (advisory, journaled,
             # cost-capped). It never executes anything and is applied downgrade-only.
@@ -733,6 +784,29 @@ class Orchestrator:
             return False, "proposal not found"
         if row["status"] not in ProposalStatus.approvable():
             return False, f"proposal not approvable (status={row['status']})"
+        # EXP-1 mechanism 9(c): defense in depth, independent of every
+        # creation-time guard (_handle_proposal's, _override_open_trade's).
+        # Structurally this candidate_id should never own a trade_proposals
+        # row at all -- but "never trust a single chokepoint" is this
+        # codebase's own standing lesson (master reference §9, the
+        # _override_open_trade F-1 finding), so approve_proposal refuses on
+        # its own, from the DB, even if some future path somehow lets a
+        # shadow_tier=1 proposal reach this point.
+        shadow_cand = self.journal.one(
+            "SELECT shadow_tier FROM candidates WHERE candidate_id = ?", (row["candidate_id"],),
+        )
+        if shadow_cand and shadow_cand.get("shadow_tier"):
+            self.journal.log_system_event(
+                Severity.CRITICAL, "approval",
+                f"approve_proposal refused {proposal_id!r}: candidate {row['candidate_id']!r} "
+                "is shadow_tier=1 -- shadow-tier candidates are measurement-only and can never "
+                "be approved/executed, regardless of how a proposal row came to exist for it.",
+                {"proposal_id": proposal_id, "candidate_id": row["candidate_id"]},
+            )
+            return False, (
+                "blocked: candidate is shadow_tier=1 -- shadow-tier candidates are "
+                "measurement-only and can never be approved (shadow_tier_excluded)"
+            )
         proposal = TradeProposal.from_row(row)
 
         # PR6: stale-approval guard. Checked BEFORE broker submission (and
@@ -1480,17 +1554,22 @@ class Orchestrator:
         provider = make_bars_provider(self.settings, self.journal)
         return backfill_regime_days(self.journal, self.settings, bars_provider=provider)
 
-    def eval_corpus_build(self, corpus_dir: Optional[str] = None, limit: int = 30) -> dict:
+    def eval_corpus_build(
+        self, corpus_dir: Optional[str] = None, limit: int = 30, include_shadow: bool = False,
+    ) -> dict:
         """EVAL-1 one-off: select up to ``limit`` real, clean (post-PR9.1)
         candidate_packets rows and write them into the frozen golden corpus
         (additive -- never overwrites an existing fixture). Does NOT
         adjudicate ground truth; every newly-written packet's
         ``ground_truth_label`` starts null until an operator hand-edits the
-        fixture file. See alphaos/eval/corpus.py."""
+        fixture file. See alphaos/eval/corpus.py. EXP-1 mechanism 9(f):
+        ``include_shadow`` defaults to False -- CANARY's/EVAL-1's golden
+        corpus stays megacap-weighted for now (small/mids are harder to
+        adjudicate confidently, per the spec's own mechanism 12 note)."""
         from alphaos.eval.corpus import DEFAULT_CORPUS_DIR, select_seed_packets, write_corpus
 
         root = corpus_dir or DEFAULT_CORPUS_DIR
-        seeds = select_seed_packets(self.journal, limit=limit)
+        seeds = select_seed_packets(self.journal, limit=limit, include_shadow=include_shadow)
         manifest, written = write_corpus(root, seeds, as_of_date=timeutils.market_date().isoformat())
         return {
             "corpus_dir": root, "candidates_considered": len(seeds),
@@ -1516,23 +1595,32 @@ class Orchestrator:
 
         return build_eval_report(self.journal, run_id=run_id)
 
-    def relabel_candidates(self, date_from: str, date_to: str, dry_run: bool = False) -> dict:
+    def relabel_candidates(
+        self, date_from: str, date_to: str, dry_run: bool = False, include_shadow: bool = False,
+    ) -> dict:
         """TASK-R one-off: retro-relabel candidate_packets rows in
         [date_from, date_to] through the CURRENT labeller. Never touches
-        an original row; see alphaos/relabel.py."""
+        an original row; see alphaos/relabel.py. EXP-1 mechanism 9(f):
+        ``include_shadow`` defaults to False."""
         from alphaos.relabel import relabel_candidates
 
-        return relabel_candidates(self.journal, self.settings, date_from, date_to, dry_run=dry_run)
+        return relabel_candidates(
+            self.journal, self.settings, date_from, date_to, dry_run=dry_run, include_shadow=include_shadow,
+        )
 
-    def canary_corpus_build(self, corpus_dir: Optional[str] = None, limit: int = 20) -> dict:
+    def canary_corpus_build(
+        self, corpus_dir: Optional[str] = None, limit: int = 20, include_shadow: bool = False,
+    ) -> dict:
         """CANARY one-off: select up to ``limit`` real, clean (post-PR9.1)
         candidate_packets rows -- preferring TASK-R relabels -- and write
         them into the frozen golden corpus (additive -- never overwrites an
-        existing fixture). See alphaos/canary/corpus.py."""
+        existing fixture). See alphaos/canary/corpus.py. EXP-1 mechanism
+        9(f)/12: ``include_shadow`` defaults to False -- CANARY's golden
+        corpus stays megacap-weighted for now."""
         from alphaos.canary.corpus import DEFAULT_CORPUS_DIR, select_seed_packets, write_corpus
 
         root = corpus_dir or DEFAULT_CORPUS_DIR
-        seeds = select_seed_packets(self.journal, limit=limit)
+        seeds = select_seed_packets(self.journal, limit=limit, include_shadow=include_shadow)
         manifest, written = write_corpus(root, seeds, as_of_date=timeutils.market_date().isoformat())
         return {
             "corpus_dir": root, "candidates_considered": len(seeds),
@@ -2051,6 +2139,77 @@ class Orchestrator:
         cand.earnings = earnings
         cand.packet_id = packet.packet_id
         return classification
+
+    # ---------------------------------------------------------- EXP-1 shadow
+    def _label_shadow_shortlist(
+        self, selected: list[dict], scan_batch_id: Optional[str], feed_coverage_at_scan: Optional[float],
+    ) -> dict:
+        """EXP-1 mechanism 5 (founder ruling): loop the already-selected
+        shadow-tier shortlist through the EXISTING ``_label_candidate(...,
+        enrich=False, l30_mode=None, earnings_mode=None)`` -- packet + label
+        ONLY, zero enrichment/L30/earnings for this tier, ZERO
+        ``PlaybookClassifier`` changes. ``_label_candidate`` itself is never
+        modified; every shadow-only stamp (``shadow_tier``, liquidity/
+        selection/feed-coverage columns) is applied via a follow-up UPDATE
+        keyed on the label_id/candidate_id it returns, after the fact.
+
+        Mechanism 8's structural law: a stale/degraded CURRENT snapshot (not
+        the scan-time one -- real time has passed since SCAN wrote this
+        candidate row) gets NO API call ever; the candidate row keeps its
+        deterministic capture plus ``label_skipped_reason='stale'``.
+
+        Never raises: mirrors ``_label_candidate``'s own per-call safety
+        (the labeller itself never raises) plus this loop's own per-symbol
+        isolation -- one bad snapshot/packet must never abort the rest of
+        the shortlist.
+        """
+        labelled = 0
+        skipped_stale = 0
+        errors = 0
+        for row in selected:
+            symbol = str(row.get("symbol") or "")
+            candidate_id = row.get("candidate_id")
+            try:
+                snapshot = self.market.get_snapshot(symbol)
+                report = self.freshness.assess(snapshot)
+                if not report.is_usable:
+                    self.journal.conn.execute(
+                        "UPDATE candidates SET label_skipped_reason = ?, feed_coverage_at_scan = ? "
+                        "WHERE candidate_id = ?",
+                        (SHADOW_LABEL_SKIPPED_REASON_STALE, feed_coverage_at_scan, candidate_id),
+                    )
+                    self.journal.conn.commit()
+                    skipped_stale += 1
+                    continue
+
+                ctx = ScanContext(row=dict(row))
+                ctx.snapshot = snapshot
+                ctx.interest = None  # recomputed fresh from `snapshot` inside _label_candidate
+                classification = self._label_candidate(
+                    ctx, snapshot, scan_batch_id, enrich=False, l30_mode=None, earnings_mode=None,
+                )
+                self.journal.conn.execute(
+                    "UPDATE candidate_labels SET shadow_tier = 1 WHERE label_id = ?",
+                    (classification.label_id,),
+                )
+                self.journal.conn.execute(
+                    "UPDATE candidates SET selection_arm = ?, selection_version = ?, "
+                    "feed_coverage_at_scan = ? WHERE candidate_id = ?",
+                    (
+                        row.get("selection_arm"), SHADOW_SELECTION_VERSION_V1,
+                        feed_coverage_at_scan, candidate_id,
+                    ),
+                )
+                self.journal.conn.commit()
+                labelled += 1
+            except Exception as exc:  # noqa: BLE001 - one bad symbol must never abort the shortlist
+                errors += 1
+                self.journal.log_system_event(
+                    Severity.ERROR, "shadow_label",
+                    f"shadow labelling failed for {symbol!r} (candidate {candidate_id!r}): {exc} -- skipped.",
+                )
+                continue
+        return {"labelled": labelled, "skipped_stale": skipped_stale, "errors": errors}
 
     def _freeze_label(self, cand: "ScanContext", packet, classification, scan_batch_id, catalyst=None,
                       last30=None, polarity=None, earnings=None) -> None:

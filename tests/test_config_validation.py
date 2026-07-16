@@ -69,7 +69,10 @@ def test_scheduler_cost_cap_bounds_validation():
         make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=49)
     with pytest.raises(SettingsError):
         make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=100001)
-    s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
+    # EXP-1: SHADOW_AI_CAP_CALLS_PER_30D's own joint-validation (<=25% of the
+    # shared pool) must clear this lowered global cap too -- its default of
+    # 500 only clears the default global cap of 2000.
+    s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50, SHADOW_AI_CAP_CALLS_PER_30D=12)
     assert s.scheduler_ai_cost_cap_calls_per_30d == 50
     s = make_settings(SCHEDULER_AI_COST_CAP_CALLS_PER_30D=100000)
     assert s.scheduler_ai_cost_cap_calls_per_30d == 100000
@@ -88,7 +91,10 @@ def test_debate_daily_cap_cannot_exceed_25pct_of_shared_30day_cap():
         make_settings(DEBATE_MAX_CALLS_PER_DAY=500, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)
     with pytest.raises(SettingsError):
         make_settings(DEBATE_MAX_CALLS_PER_DAY=13, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)  # 13 > 12.5
-    s = make_settings(DEBATE_MAX_CALLS_PER_DAY=12, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50)  # 12 <= 12.5
+    s = make_settings(
+        DEBATE_MAX_CALLS_PER_DAY=12, SCHEDULER_AI_COST_CAP_CALLS_PER_30D=50,
+        SHADOW_AI_CAP_CALLS_PER_30D=12,  # EXP-1's own joint-validation must clear this cap too
+    )  # 12 <= 12.5
     assert s.debate_max_calls_per_day == 12
     s = make_settings()  # defaults: 10 <= 0.25 * 2000 = 500
     assert s.debate_max_calls_per_day == 10

@@ -349,6 +349,10 @@ def test_run_eval_refuses_when_planned_calls_would_overshoot_the_cap(tmp_path, j
     settings = make_settings(
         ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-test-key-not-real",
         SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+        # EXP-1: SHADOW_AI_CAP_CALLS_PER_30D's own joint-validation (<=25% of
+        # the shared pool) must clear THIS lowered global cap too -- its
+        # default of 500 only clears the default global cap of 2000.
+        SHADOW_AI_CAP_CALLS_PER_30D="12",
     )
     corpus_dir = str(tmp_path / "corpus")
     for i in range(3):
@@ -438,6 +442,10 @@ def test_run_eval_refuses_a_live_run_once_the_cost_cap_is_reached(tmp_path, jour
     settings = make_settings(
         ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-test-key-not-real",
         SCHEDULER_AI_COST_CAP_CALLS_PER_30D="50",
+        # EXP-1: SHADOW_AI_CAP_CALLS_PER_30D's own joint-validation (<=25% of
+        # the shared pool) must clear THIS lowered global cap too -- its
+        # default of 500 only clears the default global cap of 2000.
+        SHADOW_AI_CAP_CALLS_PER_30D="12",
     )
     corpus_dir = str(tmp_path / "corpus")
     _seed_real_labelled_packet(journal, symbol="AAPL")
