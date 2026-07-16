@@ -82,13 +82,26 @@ class EarningsTimingClass:
 
 # --------------------------------------------------------------- cache health
 def _parse_result_summary(row: dict) -> Optional[dict]:
+    """Audit-fixup (correctness MED): a JSON payload that parses but whose
+    TOP-LEVEL value isn't a dict (e.g. a bare list/string/number -- never
+    expected from the real writer, but not impossible from a hand-edited
+    or corrupted row) must degrade EXACTLY like invalid JSON, not escape
+    as an uncaught AttributeError on the next ``.get()`` call. Before this
+    fix, that escape was caught by compute_cache_health's own broad
+    except-Exception and mapped to UNKNOWN -- a state this module reserves
+    for a failure of the health check's OWN read, not one bad row's
+    payload (see compute_cache_health's docstring). A non-dict payload now
+    reads as unusable the same way invalid JSON does, so it degrades to
+    STALE/REFRESH_FAILED_RECENT depending on whether another usable run
+    exists in-window, never masking one behind UNKNOWN."""
     raw = row.get("result_summary_json")
     if not raw:
         return None
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
     except (TypeError, ValueError):
         return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _run_is_usable(row: dict) -> bool:
@@ -127,7 +140,21 @@ def _run_is_usable(row: dict) -> bool:
     result = summary.get("earnings_calendar_result")
     if not isinstance(result, dict):
         return False
-    if not result.get("n_fetched"):
+    # Audit-fixup (correctness LOW): validate n_fetched as a real positive
+    # integer rather than trusting truthiness -- a bare `if not
+    # result.get("n_fetched")` would read a malformed non-numeric value
+    # (e.g. a stray "0" string, or "abc") as usable, since both are
+    # truthy. The real writer only ever emits an int (see
+    # earnings_calendar_service.update_earnings_calendar), so this is
+    # defense against a hand-edited or corrupted row, not the expected
+    # path -- but it costs nothing to make explicit.
+    n_fetched = result.get("n_fetched")
+    if n_fetched is None:
+        return False
+    try:
+        if int(n_fetched) <= 0:
+            return False
+    except (TypeError, ValueError):
         return False
     if result.get("warnings"):
         return False
@@ -157,10 +184,18 @@ def compute_cache_health(journal, as_of_utc: str) -> str:
             datetime.fromisoformat(as_of_utc) - timedelta(hours=CACHE_HEALTH_STALE_HOURS)
         ).isoformat()
         rows = journal.query(
-            "SELECT status, result_summary_json FROM job_runs "
+            "SELECT id, status, result_summary_json FROM job_runs "
             "WHERE job_type = 'earnings_calendar_pull' AND finished_at_utc IS NOT NULL "
             "AND finished_at_utc >= ? AND finished_at_utc < ? "
-            "ORDER BY finished_at_utc DESC",
+            # Audit-fixup (correctness LOW): secondary sort by id DESC --
+            # two runs can share the exact same finished_at_utc (coarse-
+            # precision fixtures/backfills; live runs carry microsecond
+            # timestamps so this is practically unreachable there), and
+            # without a tiebreak SQLite's order among ties is unspecified,
+            # making "the latest run" nondeterministic. id DESC matches
+            # this module's own higher-id-is-later convention
+            # (_resolve_current_belief's supersession rule).
+            "ORDER BY finished_at_utc DESC, id DESC",
             (window_start, as_of_utc),
         )
         if not rows:
@@ -357,7 +392,14 @@ def select_card(context: SelectorContext, symbol: str, market_date: date) -> dic
     # landing in-window at once): the event with the most recent
     # report_date wins, deterministically -- never an error, never a
     # silent pick of "whichever the group-by happened to order first."
-    events.sort(key=lambda e: e["report_date"], reverse=True)
+    # Audit-fixup (correctness LOW): secondary key on id -- two events CAN
+    # share the exact same report_date (same calendar day, different
+    # fiscal quarters), and without a tiebreak the sort silently fell back
+    # to Python's stable-sort input order, which traced back to an
+    # ORDER-BY-less SQL read (build_selector_context) rather than any
+    # deliberate rule. id DESC (higher id wins) matches
+    # _resolve_current_belief's own higher-id-is-later-inserted convention.
+    events.sort(key=lambda e: (e["report_date"], e["id"]), reverse=True)
     chosen = events[0]
     return {
         "card_id": PER_CARD_ID,

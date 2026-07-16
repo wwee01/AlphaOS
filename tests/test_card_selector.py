@@ -139,6 +139,70 @@ def test_health_unknown_when_the_health_read_itself_fails(journal):
     assert selector.compute_cache_health(_BrokenJournal(), "2026-07-16T12:00:00+00:00") == selector.CacheHealth.UNKNOWN
 
 
+def test_non_dict_result_summary_degrades_like_invalid_json_not_unknown(journal):
+    """Audit-fixup regression (correctness MED): a result_summary_json that
+    PARSES but whose top-level value isn't a dict (e.g. a bare JSON list)
+    must degrade exactly like invalid JSON -- STALE here, since no other
+    usable run exists in-window -- never UNKNOWN. Before the fix,
+    summary.get(...) on a list raised AttributeError, which
+    compute_cache_health's own broad except-Exception caught and mapped to
+    UNKNOWN, a state reserved for a failure of the health check's OWN
+    read, not one row's malformed payload."""
+    _insert_cache_row(journal, "AAPL", "2026-08-01")
+    journal.insert("job_runs", {
+        "job_run_id": new_id("jr"), "job_type": "earnings_calendar_pull",
+        "started_at_utc": "2026-07-16T01:00:00+00:00", "started_at_sgt": "2026-07-16T01:00:00+00:00",
+        "finished_at_utc": "2026-07-16T01:00:00+00:00", "finished_at_sgt": "2026-07-16T01:00:00+00:00",
+        "status": "completed", "result_summary_json": "[1, 2, 3]",
+    })
+    health = selector.compute_cache_health(journal, "2026-07-16T12:00:00+00:00")
+    assert health == selector.CacheHealth.STALE
+
+
+def test_non_dict_result_summary_does_not_mask_an_earlier_usable_run(journal):
+    """The sharper failure mode: a non-dict payload on the LATEST run must
+    not short-circuit the any(...) fallback check and hide an earlier
+    usable run -- that combination must read REFRESH_FAILED_RECENT, not
+    UNKNOWN."""
+    _insert_cache_row(journal, "AAPL", "2026-08-01")
+    _insert_pull_run(journal, "2026-07-15T01:00:00+00:00", n_fetched=200)  # earlier, usable
+    journal.insert("job_runs", {  # latest, non-dict payload
+        "job_run_id": new_id("jr"), "job_type": "earnings_calendar_pull",
+        "started_at_utc": "2026-07-16T01:00:00+00:00", "started_at_sgt": "2026-07-16T01:00:00+00:00",
+        "finished_at_utc": "2026-07-16T01:00:00+00:00", "finished_at_sgt": "2026-07-16T01:00:00+00:00",
+        "status": "completed", "result_summary_json": '"just a string"',
+    })
+    health = selector.compute_cache_health(journal, "2026-07-16T12:00:00+00:00")
+    assert health == selector.CacheHealth.REFRESH_FAILED_RECENT
+
+
+def test_health_latest_run_tiebreak_uses_id_not_insertion_order(journal):
+    """Audit-fixup regression (correctness LOW): two runs sharing the exact
+    same finished_at_utc must resolve "latest" by id DESC, not by
+    whatever order SQLite happens to return ties in. Insert the FAILED run
+    first and the USABLE run second (higher id = later, still within the
+    same instant) -- health must read OK, matching "the higher-id run is
+    the real latest," never STALE/REFRESH_FAILED_RECENT from picking the
+    lower-id row instead."""
+    _insert_cache_row(journal, "AAPL", "2026-08-01")
+    same_instant = "2026-07-16T01:00:00+00:00"
+    _insert_pull_run(journal, same_instant, n_fetched=0)     # inserted first -> lower id
+    _insert_pull_run(journal, same_instant, n_fetched=200)   # inserted second -> higher id, real latest
+    health = selector.compute_cache_health(journal, "2026-07-16T12:00:00+00:00")
+    assert health == selector.CacheHealth.OK
+
+
+def test_n_fetched_non_numeric_garbage_is_not_usable(journal):
+    """Audit-fixup regression (correctness LOW): a malformed n_fetched
+    (non-numeric string, or a numeric-looking string like "0") must not
+    be read as usable via bare truthiness -- both are truthy Python
+    values but neither is a valid positive count."""
+    for garbage in ("abc", "0", -5):
+        summary = json.dumps({"earnings_calendar_result": {"n_fetched": garbage, "warnings": []}})
+        row = {"status": "completed", "result_summary_json": summary}
+        assert selector._run_is_usable(row) is False, f"n_fetched={garbage!r} was wrongly treated as usable"
+
+
 # ----------------------------------------------------------- context loading
 def test_context_excludes_rows_at_or_after_as_of_strict_less_than(journal):
     _insert_pull_run(journal, "2026-07-16T01:00:00+00:00", n_fetched=200)
@@ -317,6 +381,25 @@ def test_multiple_overlapping_events_most_recent_report_date_wins(journal):
     ctx = selector.build_selector_context(journal, "2026-07-16T09:00:00+00:00", ["AAPL"])
     assignment = selector.select_card(ctx, "AAPL", date(2026, 7, 15))  # both windows contain this date
     assert assignment["card_assignment_ref"] == newer_id
+
+
+def test_overlapping_events_same_report_date_tiebreak_by_id(journal):
+    """Audit-fixup regression (correctness LOW): two DISTINCT fiscal-quarter
+    events for one symbol can share the exact same report_date (both
+    survive _resolve_current_belief as separate groups). The sort's
+    primary key (report_date) ties, so the outcome must fall to the
+    documented secondary rule (higher id wins) -- never to whatever order
+    the underlying SQL happened to return rows in."""
+    _insert_pull_run(journal, _fresh_pull_run_utc("2026-07-16T09:00:00+00:00"), n_fetched=200)
+    _insert_cache_row(journal, "AAPL", report_date="2026-07-14", fiscal_date_ending="2026-03-31",
+                      timing="pre-market", created_at_utc="2026-07-01T00:00:00+00:00")  # lower id
+    higher_id = _insert_cache_row_returning_id(
+        journal, "AAPL", report_date="2026-07-14", fiscal_date_ending="2026-06-30",
+        timing="pre-market", created_at_utc="2026-07-02T00:00:00+00:00",
+    )
+    ctx = selector.build_selector_context(journal, "2026-07-16T09:00:00+00:00", ["AAPL"])
+    assignment = selector.select_card(ctx, "AAPL", date(2026, 7, 14))
+    assert assignment["card_assignment_ref"] == higher_id
 
 
 # ------------------------------------------------------ health gates selection
