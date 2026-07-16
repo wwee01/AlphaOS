@@ -33,6 +33,22 @@ from alphaos.util import alerts, timeutils
 # --------------------------------------------------------------- constants
 FEED_COVERAGE_TRAILING_DAYS = 14
 AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS = 3
+# audit-fixup (correctness LOW): the auto-suspend check fetches this many
+# CALENDAR days of history to find AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS
+# actual TRADING days within it (universe_days has no row on non-trading
+# days, so the map is trading-days-only even though the cutoff is calendar-
+# based). The original +2 padding covers one ordinary weekend but not a
+# holiday cluster (e.g. a Monday holiday adjacent to a weekend, or two
+# holidays in the same stretch) -- a rare span like that could silently
+# under-trigger this safety mechanism (the unsafe direction) by finding
+# fewer than 3 trading-day entries in the window. +9 comfortably spans any
+# realistic US-market holiday cluster (this codebase's own HOL-2 early-
+# close item names Thanksgiving-week as the tightest case) while still
+# being a small, cheap query. Independently mitigated regardless: the
+# separate trailing-14-day feed-coverage gate (check_feed_coverage_gate,
+# below) still blocks arming on sustained bad coverage even if this
+# specific auto-suspend edge case were missed.
+AUTO_SUSPEND_LOOKBACK_CALENDAR_PADDING_DAYS = 9
 
 
 # ------------------------------------------------------------- cost guard
@@ -141,7 +157,9 @@ def check_auto_suspend(journal, settings) -> tuple[bool, str]:
     Neither trigger self-heals -- the caller engages ``ShadowLabelSuspend
     Switch`` on a True return, which stays engaged until an operator clears
     it explicitly."""
-    daily_map = _daily_feed_coverage_map(journal, AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS + 2)
+    daily_map = _daily_feed_coverage_map(
+        journal, AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS + AUTO_SUSPEND_LOOKBACK_CALENDAR_PADDING_DAYS
+    )
     last_n = sorted(daily_map.items())[-AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS:]
     floor = settings.shadow_label_min_feed_coverage
     if len(last_n) == AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS and all(cov < floor for _, cov in last_n):

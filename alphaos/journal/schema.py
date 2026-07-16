@@ -255,6 +255,12 @@ SCHEMA: list[tuple[str, str]] = [
             -- shadow capture/selection eligibility (invariant, mechanism 10).
             core_gate_verdict TEXT,
             liquidity_instrumentation_version TEXT,
+            -- audit-fixup (correctness LOW): mechanism 3's interest/momentum
+            -- formula version, stamped per row so a future v1->v2
+            -- recalibration is traceable in the archive the same way
+            -- selection_version already is -- see candidate_scanner.py's
+            -- SHADOW_INTEREST_SCORE_VERSION_V1 stamp.
+            interest_score_version TEXT,
             -- EXP-1 mechanism 2: selection-arm stamping (top_k|explore) +
             -- the selection formula/version, so retuning K/fraction/formula
             -- without a version bump is detectable as selection p-hacking.

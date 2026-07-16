@@ -21,6 +21,7 @@ from alphaos.constants import (
     PLAYBOOK_V1,
     ReasonCode,
     Severity,
+    SHADOW_INTEREST_SCORE_VERSION_V1,
     SHADOW_LIQUIDITY_INSTRUMENTATION_VERSION_V1,
     Strategy,
     TradeDirection,
@@ -385,6 +386,14 @@ class CandidateScanner:
                 "crossed_or_locked_quote": 1 if quote_crossed_or_invalid(snapshot) else 0,
                 "core_gate_verdict": core_gate_verdict,
                 "liquidity_instrumentation_version": SHADOW_LIQUIDITY_INSTRUMENTATION_VERSION_V1,
+                # audit-fixup (correctness LOW): mechanism 3's own constant
+                # named this row's interest/momentum formula version, but
+                # nothing stamped it -- unlike selection_version (mechanism 2)
+                # a future v1->v2 recalibration of SHADOW_V1_* would have been
+                # invisible in the archive (code-convention-only versioning).
+                # Stamped here, mirroring liquidity_instrumentation_version's
+                # own pattern immediately above.
+                "interest_score_version": SHADOW_INTEREST_SCORE_VERSION_V1,
             })
         self.journal.insert("candidates", cand)
         # Keep a dict the orchestrator can use directly (with last_price handy).

@@ -21,7 +21,12 @@ from alphaos.reports.relative_performance import (
     build_relative_performance_report,
 )
 from alphaos.scheduler import cadence
-from alphaos.scheduler.digest import _start_of_today_sgt_utc, build_daily_digest
+from alphaos.scheduler.digest import (
+    SHADOW_SAFE_JOIN,
+    SHADOW_SAFE_WHERE,
+    _start_of_today_sgt_utc,
+    build_daily_digest,
+)
 from alphaos.stats.fdr import preregistration_family_summary
 from alphaos.util import timeutils
 
@@ -380,13 +385,23 @@ def _hypothesis_drafts_pending(journal) -> Optional[dict]:
 
 def _todays_activity(journal, since_sgt: str) -> dict:
     candidates_today = journal.count_rows("candidates", "created_at_utc >= ?", (since_sgt,))
-    proposed_today = journal.count_rows(
-        "trade_proposals", "status IN ('pending_approval', 'approved', 'filled') AND created_at_utc >= ?",
+    # EXP-1 audit-fixup (scope/safety): these two counted straight off
+    # trade_proposals with no shadow_tier exclusion -- the same DISPLAY-surface
+    # risk shape as open_proposals()/digest.py's four buckets (see
+    # SHADOW_SAFE_JOIN's own docstring), just counting instead of naming. An
+    # operator reading "3 proposed today" would have no way to know some of
+    # those 3 were shadow-tier measurement-only rows, not real activity.
+    proposed_today = int(journal.scalar(
+        f"SELECT COUNT(*) FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        "WHERE tp.status IN ('pending_approval', 'approved', 'filled') "
+        f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE}",
         (since_sgt,),
-    )
-    blocked_today = journal.count_rows(
-        "trade_proposals", "status = 'blocked' AND created_at_utc >= ?", (since_sgt,),
-    )
+    ) or 0)
+    blocked_today = int(journal.scalar(
+        f"SELECT COUNT(*) FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status = 'blocked' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE}",
+        (since_sgt,),
+    ) or 0)
     rejected_today = journal.count_rows("rejected_candidates", "created_at_utc >= ?", (since_sgt,))
     return {
         "candidates_today": candidates_today,

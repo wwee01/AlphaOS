@@ -278,6 +278,23 @@ def test_stale_snapshot_skips_no_api_call_stamps_reason(tmp_path, monkeypatch):
     orch.journal.close()
 
 
+def test_shadow_candidate_stamps_interest_score_version(tmp_path):
+    """Audit-fixup regression (correctness LOW): mechanism 3's own constant
+    named this row's interest/momentum formula version, but nothing stamped
+    it -- unlike selection_version, a future v1->v2 recalibration of
+    SHADOW_V1_* would have been invisible in the archive (code-convention-
+    only versioning, no data trail). Mirrors liquidity_instrumentation_
+    version's own already-tested pattern immediately above it in
+    candidate_scanner.py."""
+    from alphaos.constants import SHADOW_INTEREST_SCORE_VERSION_V1
+
+    orch, _ = _orch_with_shadow_universe(tmp_path, _seed_symbols(2))
+    orch.run_scan_once()
+    row = orch.journal.query("SELECT * FROM candidates WHERE shadow_tier = 1")[0]
+    assert row["interest_score_version"] == SHADOW_INTEREST_SCORE_VERSION_V1
+    orch.journal.close()
+
+
 # --------------------------------------------------- operator-surface exclusion (mech 9)
 def test_shadow_labelling_loop_does_not_bypass_the_scan_loop_guard(tmp_path):
     """Behavior probe (not just a grep): run shadow labelling end-to-end with
@@ -520,6 +537,21 @@ def test_auto_suspend_does_not_trigger_with_only_two_bad_days(journal):
     assert should_suspend is False
 
 
+def test_auto_suspend_triggers_across_a_holiday_cluster_gap(journal):
+    """Audit-fixup regression (correctness LOW): 3 bad-coverage TRADING days
+    spread across a 6-calendar-day span (simulating a weekend + a holiday
+    cluster between them) must still trigger -- the original +2 calendar
+    padding on top of the 3-day requirement only covered an ordinary
+    weekend (a 5-calendar-day window), so day offset -6 would have fallen
+    outside it and this exact case would have silently under-triggered."""
+    settings = make_settings(SHADOW_LABEL_MIN_FEED_COVERAGE="0.80")
+    for offset in (0, 3, 6):
+        _seed_universe_days(journal, _days_ago(offset), n_scanned=10, n_fresh=2)  # 0.20 coverage
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "consecutive trading days" in reason
+
+
 def test_auto_suspend_triggers_on_canary_tier1(journal):
     settings = make_settings()
     journal.insert("canary_runs", {
@@ -615,7 +647,7 @@ def test_additive_shadow_columns_migrate_onto_an_old_db(tmp_path):
     for expected in (
         "bid_size", "ask_size", "quote_age_seconds", "spread_pct_mid", "adv_20d_dollar",
         "volume_today_pct_of_adv", "scan_window", "data_feed", "crossed_or_locked_quote",
-        "core_gate_verdict", "liquidity_instrumentation_version", "selection_arm",
+        "core_gate_verdict", "liquidity_instrumentation_version", "interest_score_version", "selection_arm",
         "selection_version", "feed_coverage_at_scan", "label_skipped_reason", "sector_cluster_key",
     ):
         assert expected in cols, f"{expected!r} missing from migrated candidates table"
@@ -699,6 +731,117 @@ def test_h_int_1_never_pools_shadow_tier_rows(journal):
     rows, _, reference = h_int_1_rows(journal)
     all_symbols = {r["symbol"] for r in rows} | {r["symbol"] for r in (reference or [])}
     assert "H10" not in all_symbols, "shadow-tier row leaked into H-INT-1's evidence population"
+
+
+def test_h_win_1_never_pools_shadow_tier_rows(journal):
+    """Audit-fixup (correctness LOW): h_win_1_rows carries the identical
+    `c.shadow_tier = 0` filter as h_int_1_rows, but only H-INT-1 had a
+    dedicated regression test -- this is H-WIN-1's twin, closing the gap
+    the correctness audit named."""
+    from alphaos.hypotheses.queries import h_win_1_rows
+
+    sbid = new_id("scan")
+    journal.conn.execute(
+        "INSERT INTO scan_batches (scan_batch_id, market_session, started_at_sgt, "
+        "created_at_utc, created_at_sgt) VALUES (?, 'regular', '2026-07-01T09:40:00+08:00', "
+        "'2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00')",
+        (sbid,),
+    )
+    for i, (shadow, r) in enumerate([
+        (0, 1.0), (0, -0.5), (0, 0.0), (0, 0.1), (0, 0.2),
+        (0, -0.1), (0, 0.3), (0, -0.2), (0, 0.4), (0, 0.05),
+        (1, 5.0),  # shadow-tier outlier -- must never enter H-WIN-1's population
+    ]):
+        cid = new_id("cand")
+        journal.conn.execute(
+            "INSERT INTO candidates (candidate_id, symbol, scan_batch_id, shadow_tier, "
+            "created_at_utc, created_at_sgt) VALUES (?, ?, ?, ?, '2026-07-01T00:00:00+00:00', "
+            "'2026-07-01T00:00:00+00:00')",
+            (cid, f"W{i}", sbid, shadow),
+        )
+        journal.conn.execute(
+            "INSERT INTO candidate_outcomes (outcome_id, candidate_id, symbol, candidate_type, replay_r, "
+            "created_at_utc, created_at_sgt) VALUES (?, ?, ?, 'candidate', ?, "
+            "'2026-07-01T00:00:00+00:00', '2026-07-01T00:00:00+00:00')",
+            (new_id("out"), cid, f"W{i}", r),
+        )
+    journal.conn.commit()
+
+    rows, _, reference = h_win_1_rows(journal)
+    all_symbols = {r["symbol"] for r in rows} | {r["symbol"] for r in (reference or [])}
+    assert "W10" not in all_symbols, "shadow-tier row leaked into H-WIN-1's evidence population"
+
+
+def test_proposal_display_surfaces_never_leak_a_shadow_tier_proposal(tmp_path, journal):
+    """Audit-fixup regression (scope/safety, the audit's single most
+    consequential finding): plant a `trade_proposals` row pointing at a
+    shadow-tier candidate directly -- bypassing every creation-time guard,
+    exactly as the auditor did to demonstrate the gap -- and confirm
+    open_proposals()/build_daily_digest()/build_daily_brief() all exclude
+    it. The two adjacent symbol-leak tests above (test_digest_never_names_a_
+    shadow_symbol / test_daily_brief_never_names_a_shadow_symbol) structurally
+    can't catch this: per the auditor, neither of them ever creates a
+    proposal at all, so a display surface relying solely on the (today,
+    unreachable) creation-time chokepoint would sail through both."""
+    journal.insert("candidates", {
+        "candidate_id": "cand-shadow-1", "symbol": "SHDWPROP", "shadow_tier": 1,
+    })
+    journal.insert("trade_proposals", {
+        "proposal_id": "prop-shadow-1", "candidate_id": "cand-shadow-1",
+        "symbol": "SHDWPROP", "status": "pending_approval",
+    })
+
+    open_props = journal.open_proposals()
+    assert "SHDWPROP" not in {p["symbol"] for p in open_props}, (
+        "shadow-tier proposal leaked into open_proposals()"
+    )
+
+    settings = make_settings()
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+
+    digest = build_daily_digest(journal, settings, kill_switch)
+    assert "SHDWPROP" not in json.dumps(digest, default=str), (
+        "shadow-tier proposal leaked into the digest"
+    )
+
+    from alphaos.reports.daily_brief import build_daily_brief
+
+    brief = build_daily_brief(journal, settings, kill_switch)
+    assert "SHDWPROP" not in json.dumps(brief, default=str), (
+        "shadow-tier proposal leaked into the daily brief"
+    )
+
+
+def test_todays_activity_excludes_shadow_tier_proposals_from_counts(tmp_path, journal):
+    """Audit-fixup regression (scope/safety LOW, self-discovered while
+    writing the test above): unlike open_proposals()/digest.py's four
+    buckets, daily_brief.py's _todays_activity() counted `trade_proposals`
+    directly with no shadow_tier join at all -- a symbol-grep test can't
+    catch this since it's a COUNT, not a name, so this asserts on the
+    number itself. A shadow-tier proposal must not inflate either the
+    'proposed today' or 'blocked today' counters an operator reads as real
+    activity."""
+    from alphaos.reports.daily_brief import build_daily_brief
+
+    journal.insert("candidates", {
+        "candidate_id": "cand-shadow-2", "symbol": "SHDWCOUNT", "shadow_tier": 1,
+    })
+    journal.insert("trade_proposals", {
+        "proposal_id": "prop-shadow-2a", "candidate_id": "cand-shadow-2",
+        "symbol": "SHDWCOUNT", "status": "pending_approval",
+    })
+    journal.insert("trade_proposals", {
+        "proposal_id": "prop-shadow-2b", "candidate_id": "cand-shadow-2",
+        "symbol": "SHDWCOUNT", "status": "blocked",
+    })
+
+    settings = make_settings()
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+
+    brief = build_daily_brief(journal, settings, kill_switch)
+    ta = brief["todays_activity"]
+    assert ta["proposed_today"] == 0, "shadow-tier proposal inflated the proposed_today count"
+    assert ta["blocked_today"] == 0, "shadow-tier proposal inflated the blocked_today count"
 
 
 def test_tqs_score_scan_batch_excludes_shadow_tier(tmp_path):

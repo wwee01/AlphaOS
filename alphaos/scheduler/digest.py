@@ -26,6 +26,17 @@ from alphaos.scheduler import shadow_label as shadow_label_module
 from alphaos.tqs import TQS_VERSION
 from alphaos.util import timeutils
 
+# EXP-1 audit-fixup (scope/safety): shared shadow-tier exclusion fragment for
+# every raw `trade_proposals` query across this module AND daily_brief.py --
+# any operator-facing proposal count/name is exactly the DISPLAY surface the
+# audit named as the real trap (never solely reliant on the creation-time
+# guard; see open_proposals()'s own docstring for the full reasoning). LEFT
+# JOIN + COALESCE so a proposal whose candidate_id doesn't resolve at all
+# reads as non-shadow, not silently dropped. Single-sourced here (rather than
+# duplicated per call site) so the fragment can only drift in one place.
+SHADOW_SAFE_JOIN = "LEFT JOIN candidates c ON c.candidate_id = tp.candidate_id"
+SHADOW_SAFE_WHERE = "COALESCE(c.shadow_tier, 0) = 0"
+
 
 def _start_of_today_sgt_utc(now=None) -> str:
     """UTC ISO timestamp for midnight at the start of today, Asia/Singapore.
@@ -191,25 +202,29 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     now_iso = timeutils.to_iso(timeutils.now_utc())
     open_statuses = ProposalStatus.approvable()
     active_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-        "AND proposal_expires_at_utc IS NOT NULL AND proposal_expires_at_utc > ? "
-        "AND created_at_utc >= ? ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status IN (?, ?) "
+        "AND tp.proposal_expires_at_utc IS NOT NULL AND tp.proposal_expires_at_utc > ? "
+        f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} ORDER BY tp.id DESC",
         (*open_statuses, now_iso, since_sgt),
     )
     stale_unmarked_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-        "AND (proposal_expires_at_utc IS NULL OR proposal_expires_at_utc <= ?) "
-        "AND created_at_utc >= ? ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status IN (?, ?) "
+        "AND (tp.proposal_expires_at_utc IS NULL OR tp.proposal_expires_at_utc <= ?) "
+        f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} ORDER BY tp.id DESC",
         (*open_statuses, now_iso, since_sgt),
     )
     expired_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status = 'expired' AND created_at_utc >= ? "
-        "ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status = 'expired' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} "
+        "ORDER BY tp.id DESC",
         (since_sgt,),
     )
     superseded_proposals_today = journal.query(
-        "SELECT * FROM trade_proposals WHERE status = 'superseded' AND created_at_utc >= ? "
-        "ORDER BY id DESC",
+        f"SELECT tp.* FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
+        f"WHERE tp.status = 'superseded' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE} "
+        "ORDER BY tp.id DESC",
         (since_sgt,),
     )
     for bucket in (active_proposals_today, stale_unmarked_proposals_today):

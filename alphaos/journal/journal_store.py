@@ -444,10 +444,28 @@ class JournalStore:
 
         This is the actionable approval queue: a proposal leaves it once it is
         approved (filled), rejected, or blocked. Read-only — newest first.
+
+        Excludes any proposal whose candidate is shadow-tier (EXP-1 audit-
+        fixup: mechanism 9's own creation-time guards already make a
+        shadow-tier proposal impossible today, but this endpoint is exactly
+        the "needs you" / approvals-queue DISPLAY surface the spec names as
+        the real trap -- an operator seeing a small-cap ticker by name here
+        and manually trading it elsewhere, contaminating the shadow ledger,
+        would happen BEFORE approve_proposal()'s own belt-and-suspenders
+        refusal ever fires. Filtering here too means this list is never
+        solely reliant on the creation-time chokepoint -- the exact "never
+        trust a single chokepoint" lesson this codebase already learned once
+        (2026-07-09, _override_open_trade). COALESCE handles a proposal whose
+        candidate_id doesn't resolve to a candidates row at all (pre-EXP-0
+        history, or any future orphan) the same as a non-shadow one, matching
+        this file's other unknown-never-zero conventions -- absence of
+        evidence is not evidence of shadow-ness.
         """
         return self.query(
-            "SELECT * FROM trade_proposals WHERE status IN (?, ?) "
-            "ORDER BY id DESC LIMIT ?",
+            "SELECT tp.* FROM trade_proposals tp "
+            "LEFT JOIN candidates c ON c.candidate_id = tp.candidate_id "
+            "WHERE tp.status IN (?, ?) AND COALESCE(c.shadow_tier, 0) = 0 "
+            "ORDER BY tp.id DESC LIMIT ?",
             (*ProposalStatus.approvable(), limit),
         )
 
