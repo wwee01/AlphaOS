@@ -46,10 +46,11 @@ class JobRunner:
         self.journal = orch.journal
 
     # -------------------------------------------------------------- locking
-    def acquire(self, job_type: str, lock_key: str) -> bool:
+    def acquire(self, job_type: str, lock_key: str) -> Optional[int]:
         """Claim ``lock_key`` for ``job_type`` by inserting a ``started`` row.
+        Returns the new row's ``id`` on success, ``None`` on failure.
 
-        Returns False (inserting nothing) if a ``started`` or ``completed`` row
+        Returns None (inserting nothing) if a ``started`` or ``completed`` row
         already exists for this exact (job_type, lock_key) -- the idempotency
         guard that keeps the same window/interval/day from running twice.
 
@@ -61,17 +62,28 @@ class JobRunner:
         backstops this at the DB level -- the loser's INSERT raises
         sqlite3.IntegrityError, which we treat exactly like "already locked"
         rather than an unexpected error.
+
+        2026-07-17 (Opus audit, scheduler-reaper follow-up): returning the row
+        ``id`` (not just a bool) is what lets ``run_job()`` key its completion
+        UPDATE on THIS SPECIFIC ROW rather than on ``lock_key + status =
+        'started'`` -- necessary once ``_reap_stale_started_jobs()`` exists,
+        because a reap can leave a reclaimed ``failed`` row sitting beside a
+        brand-new ``started`` row for the same lock_key (a legitimately slow
+        job force-reaped by a concurrent manual run, then re-acquired). A
+        lock_key-keyed UPDATE would match BOTH rows' shared lock_key loosely
+        and could write one run's result onto the other's row; an id-keyed
+        UPDATE can only ever touch the exact row this call just inserted.
         """
         existing = self.journal.one(
             "SELECT 1 FROM job_runs WHERE lock_key = ? AND status IN ('started', 'completed')",
             (lock_key,),
         )
         if existing:
-            return False
+            return None
 
         st = timeutils.stamp()
         try:
-            self.journal.insert(
+            row_id = self.journal.insert(
                 "job_runs",
                 {
                     "job_run_id": new_id("jobrun"),
@@ -86,14 +98,27 @@ class JobRunner:
         except sqlite3.IntegrityError:
             # Another process won the race for this lock_key between our
             # SELECT and INSERT -- the partial unique index caught it.
-            return False
-        return True
+            return None
+        return row_id
 
     # ---------------------------------------------------------------- run
     def run_job(self, job_type: str, lock_key: Optional[str] = None) -> dict:
         """Run ``job_type`` now, enforcing the idempotency lock. Never raises --
         genuinely unexpected exceptions from the dispatched job are caught here
-        and recorded as a 'failed' job_runs row instead of propagating."""
+        and recorded as a 'failed' job_runs row instead of propagating.
+
+        2026-07-17: also reaps stale 'started' rows before acquiring (belt on
+        top of `run_due_jobs()`'s own reap at the top of its tick) -- this
+        method is ALSO the operator's manual escape hatch (the
+        `scheduler_run_job` CLI command calls it directly, bypassing
+        `run_due_jobs()`/`is_due()` entirely, "still respects... locking" per
+        its own --help text). Without this, the exact tool an operator would
+        reach for to clear a wedged job was itself blocked by the same wedge
+        -- a manual force-run and a scheduled tick hit the identical
+        `acquire()` lock, so both must be able to self-heal it. Idempotent:
+        called again moments later from within run_due_jobs()'s loop, it
+        simply finds nothing left to reclaim."""
+        self._reap_stale_started_jobs()
         if job_type not in _JOB_FUNCS:
             # Validate before acquire() -- an unknown job_type must never claim
             # a lock row it can then never resolve to completed/failed.
@@ -103,12 +128,12 @@ class JobRunner:
             lock_key = cadence.default_lock_key(job_type, self.orch.settings)
 
         try:
-            acquired = self.acquire(job_type, lock_key)
+            job_run_id = self.acquire(job_type, lock_key)
         except Exception as exc:  # noqa: BLE001 - claiming the lock must not crash the caller either
             self._log_failure_best_effort(job_type, lock_key, f"acquire failed for {job_type}: {exc}")
             return {"job_type": job_type, "status": "failed", "error": f"acquire failed: {exc}", "lock_key": lock_key}
 
-        if not acquired:
+        if job_run_id is None:
             return {"job_type": job_type, "status": "skipped", "reason": "duplicate_lock", "lock_key": lock_key}
 
         job_func = _JOB_FUNCS[job_type]
@@ -118,10 +143,16 @@ class JobRunner:
         except Exception as exc:  # noqa: BLE001 - never let a job crash the scheduler loop
             duration_ms = int((time.monotonic() - started) * 1000)
             done = timeutils.stamp()
+            # id-keyed, not lock_key+status='started' (2026-07-17, see
+            # acquire()'s own docstring): a reap can leave a reclaimed
+            # 'failed' row beside a fresh 'started' row sharing this same
+            # lock_key -- a loose WHERE could write this run's outcome onto
+            # the WRONG row. Keying on the exact id acquire() just returned
+            # makes that structurally impossible.
             self.journal.conn.execute(
                 "UPDATE job_runs SET status = ?, error = ?, finished_at_utc = ?, finished_at_sgt = ?, "
-                "duration_ms = ? WHERE lock_key = ? AND status = 'started'",
-                ("failed", str(exc), done.utc, done.local_sgt, duration_ms, lock_key),
+                "duration_ms = ? WHERE id = ?",
+                ("failed", str(exc), done.utc, done.local_sgt, duration_ms, job_run_id),
             )
             self.journal.conn.commit()
             self._log_failure_best_effort(job_type, lock_key, f"{job_type} job failed: {exc}")
@@ -130,10 +161,11 @@ class JobRunner:
 
         duration_ms = int((time.monotonic() - started) * 1000)
         done = timeutils.stamp()
+        # id-keyed -- see the failure-path UPDATE's comment above, same reason.
         self.journal.conn.execute(
             "UPDATE job_runs SET status = ?, kill_switch_engaged = ?, protection_blocking = ?, "
             "cost_cap_exceeded = ?, result_summary_json = ?, finished_at_utc = ?, finished_at_sgt = ?, "
-            "duration_ms = ? WHERE lock_key = ? AND status = 'started'",
+            "duration_ms = ? WHERE id = ?",
             (
                 result.get("status"),
                 result.get("kill_switch_engaged"),
@@ -143,7 +175,7 @@ class JobRunner:
                 done.utc,
                 done.local_sgt,
                 duration_ms,
-                lock_key,
+                job_run_id,
             ),
         )
         self.journal.conn.commit()
@@ -178,6 +210,67 @@ class JobRunner:
         except Exception:  # noqa: BLE001 - see docstring
             pass
 
+    # ------------------------------------------------------------- reaping
+    def _reap_stale_started_jobs(self) -> list[dict]:
+        """2026-07-17 audit fix (MED-HIGH): reclaim ``job_runs`` rows stuck at
+        ``status='started'`` for longer than ``scheduler_stale_job_minutes``.
+
+        Before this existed, a hard-killed run (crash/OOM/laptop-sleep mid-job
+        -- the same class of interruption that stranded the backup script's
+        temp file, see deploy/backup_ledger.sh's mktemp fix the same day)
+        left a permanent ``started`` row. ``acquire()``'s idempotency guard
+        treats ANY ``started`` or ``completed`` row as "already claimed", so
+        that one interruption silently blocked every future attempt to run
+        that exact ``lock_key`` for the rest of its window/day -- and because
+        the row was never ``failed``, ``is_fused``'s streak-of-'failed' never
+        saw it either, so no fuse tripped and no page ever went out. The
+        `stale_running_jobs` query already existed (status_report()/digest.py)
+        but was READ-ONLY -- visible in a report nobody necessarily reads,
+        never actually freeing the lock.
+
+        Reclaiming to 'failed' (not deleting the row -- job_runs is
+        additive-only, same law as trade_proposals/protection_checks) does
+        two things at once: (1) clears `idx_jobruns_lock_key_active`'s
+        predicate so the SAME tick's `acquire()` below can succeed again if
+        the job type is still due, and (2) feeds `is_fused`'s existing
+        streak-of-'failed' counter, so a job that reliably crashes every run
+        now correctly fuses and pages via the existing mechanism instead of
+        silently re-wedging forever. Runs at the top of every tick (this is
+        the scheduler's own single chokepoint for lock acquisition -- same
+        "one place, not N" discipline as this codebase's other reaped-state
+        fixes) -- a short-lived LaunchAgent process (StartInterval, not a
+        daemon) means the very next invocation always re-enters here fresh,
+        even if the process that stranded the row is long gone.
+
+        Alerts (priority=high) on every reclaim -- a wedge is exactly as
+        page-worthy as an ordinary job failure, arguably more so (it means
+        something crashed hard enough to bypass the job's own try/except)."""
+        stale_before = timeutils.to_iso(
+            timeutils.now_utc() - timedelta(minutes=int(self.orch.settings.scheduler_stale_job_minutes))
+        )
+        stale = self.journal.query(
+            "SELECT * FROM job_runs WHERE status = 'started' AND started_at_utc <= ? ORDER BY id ASC",
+            (stale_before,),
+        )
+        reclaimed = []
+        for row in stale:
+            done = timeutils.stamp()
+            error = (
+                f"reclaimed by scheduler: exceeded scheduler_stale_job_minutes "
+                f"({self.orch.settings.scheduler_stale_job_minutes}min) without completing -- "
+                "likely crash/kill/sleep interruption, not a normal job failure"
+            )
+            self.journal.conn.execute(
+                "UPDATE job_runs SET status = 'failed', error = ?, finished_at_utc = ?, "
+                "finished_at_sgt = ? WHERE id = ? AND status = 'started'",
+                (error, done.utc, done.local_sgt, row["id"]),
+            )
+            self.journal.conn.commit()
+            self._log_failure_best_effort(row["job_type"], row["lock_key"], error)
+            self._alert_job_failure(row["job_type"], error)
+            reclaimed.append({"job_type": row["job_type"], "lock_key": row["lock_key"], "error": error})
+        return reclaimed
+
     # ------------------------------------------------------------- cadence
     def run_due_jobs(self) -> list:
         """Run every job type that is currently due, in a fixed order (scan,
@@ -191,7 +284,18 @@ class JobRunner:
         job_runs row inserted (same "not dispatched, nothing recorded"
         contract as not_due) -- the fuse's own alert/log happens once per
         fused state via ``_handle_fuse``, not per tick.
+
+        2026-07-17: reaps stale 'started' rows FIRST, before any is_due/
+        acquire check below -- see `_reap_stale_started_jobs()`. This one
+        specifically matters here (not just via run_job()'s own reap) because
+        scan/shadow_label's own `is_due()` (cadence._scan_due) independently
+        checks for a 'started' row and would report "not due" -- skipping
+        run_job() entirely -- before run_job()'s reap ever got a chance to
+        run. A lock_key wedged by a crash is freed in the same tick that
+        discovers it, so a job type that's still due can run again
+        immediately rather than waiting for the next window/day boundary.
         """
+        self._reap_stale_started_jobs()
         results = []
         for job_type in (
             cadence.JobType.SCAN,

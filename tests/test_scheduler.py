@@ -32,18 +32,22 @@ from test_alpaca_paper_execution import FakeTradingClient, _paper_om, _seed_prop
 from test_protection_watchdog import _force_check_error, _open_protected_position
 
 
-def _insert_job_run(journal, job_type, status, lock_key=None, finished_at_utc=None):
+def _insert_job_run(journal, job_type, status, lock_key=None, finished_at_utc=None, started_at_utc=None):
     """PR9 test helper: directly construct a terminal job_runs row with a
     known status/timestamp -- never depend on what a live run happens to
     produce (the date-seeded-mock-data lesson applies just as much to
-    job_runs history as to price data)."""
+    job_runs history as to price data).
+
+    `started_at_utc`: 2026-07-17 addition (job-reaper tests) -- lets a test
+    plant an ALREADY-OLD 'started' row (simulating a crash N minutes ago)
+    without depending on the wall clock advancing during the test."""
     st = timeutils.stamp()
     row = {
         "job_run_id": new_id("jobrun"),
         "job_type": job_type,
         "trigger_source": "scheduler",
         "lock_key": lock_key or new_id(f"{job_type}-lock"),
-        "started_at_utc": st.utc,
+        "started_at_utc": started_at_utc or st.utc,
         "started_at_sgt": st.local_sgt,
         "status": status,
     }
@@ -480,18 +484,24 @@ def test_partial_unique_index_blocks_two_active_locks_for_one_key(journal):
         journal.insert("job_runs", {"job_run_id": new_id("jobrun"), **row})
 
 
-def test_acquire_converts_a_lost_race_to_false_not_an_exception(orchestrator, monkeypatch):
+def test_acquire_converts_a_lost_race_to_none_not_an_exception(orchestrator, monkeypatch):
     """When two processes both pass acquire()'s SELECT before either INSERT
     commits, the loser's INSERT hits the partial unique index. acquire() must
-    convert that sqlite3.IntegrityError into a clean False (== 'already
-    locked'), never let it propagate."""
+    convert that sqlite3.IntegrityError into a clean None (== 'already
+    locked'), never let it propagate.
+
+    2026-07-17: acquire() returns the claimed row's id (not a bare bool) --
+    see its own docstring for why (run_job()'s completion UPDATE must key on
+    this exact row, not lock_key+status, once the stale-job reaper exists)."""
     runner = JobRunner(orchestrator)
-    assert runner.acquire("monitor", "monitor:race-key") is True  # first caller wins, inserts 'started'
+    row_id = runner.acquire("monitor", "monitor:race-key")
+    assert row_id is not None  # first caller wins, inserts 'started'
+    assert isinstance(row_id, int)
 
     # Simulate the TOCTOU: force the pre-INSERT SELECT to miss the existing row
     # so the second acquire proceeds to INSERT and hits the unique index.
     monkeypatch.setattr(orchestrator.journal, "one", lambda *args, **kwargs: None)
-    assert runner.acquire("monitor", "monitor:race-key") is False  # IntegrityError -> False, no raise
+    assert runner.acquire("monitor", "monitor:race-key") is None  # IntegrityError -> None, no raise
 
 
 # ------------------------------------------------------------- CLI invalid job
@@ -763,6 +773,162 @@ def test_fuse_re_alerts_on_a_genuinely_new_episode_after_clearing(orchestrator, 
     runner.run_due_jobs()
 
     assert len(calls) == 2  # the second, genuinely new episode re-alerted
+
+
+# =============================================================================
+# 2026-07-17 audit fix: stale 'started' job reaper
+#
+# Before this existed, a hard-killed run (crash/OOM/laptop-sleep -- the EXIT
+# trap in run_job()'s try/except never fires on SIGKILL, same failure mode
+# that stranded the backup script's temp file the same day) left a permanent
+# 'started' job_runs row. acquire()'s idempotency guard then treated that
+# row as "already claimed" forever, silently blocking every future attempt
+# at that exact lock_key -- and because the row was never 'failed', is_fused
+# never counted it either, so no fuse tripped and no page went out.
+# =============================================================================
+def _stale_started_at(settings, extra_minutes=1):
+    """An ISO timestamp definitely older than scheduler_stale_job_minutes."""
+    return timeutils.to_iso(
+        timeutils.now_utc() - timedelta(minutes=settings.scheduler_stale_job_minutes + extra_minutes)
+    )
+
+
+def test_reap_reclaims_a_stale_started_row_to_failed(orchestrator):
+    lock_key = "monitor-stale-lock"
+    _insert_job_run(
+        orchestrator.journal, "monitor", "started", lock_key=lock_key,
+        started_at_utc=_stale_started_at(orchestrator.settings),
+    )
+    reclaimed = JobRunner(orchestrator)._reap_stale_started_jobs()
+    assert [r["job_type"] for r in reclaimed] == ["monitor"]
+
+    row = orchestrator.journal.one("SELECT * FROM job_runs WHERE lock_key = ?", (lock_key,))
+    assert row["status"] == "failed"
+    assert "reclaimed by scheduler" in row["error"]
+    assert row["finished_at_utc"] is not None
+
+
+def test_reap_leaves_a_fresh_started_row_alone(orchestrator):
+    """A row that's merely IN PROGRESS (younger than the stale threshold)
+    must never be reclaimed -- only genuinely abandoned rows."""
+    lock_key = "monitor-fresh-lock"
+    _insert_job_run(orchestrator.journal, "monitor", "started", lock_key=lock_key)  # started_at_utc = now
+    reclaimed = JobRunner(orchestrator)._reap_stale_started_jobs()
+    assert reclaimed == []
+    row = orchestrator.journal.one("SELECT * FROM job_runs WHERE lock_key = ?", (lock_key,))
+    assert row["status"] == "started"
+
+
+def test_reap_alerts_once_per_reclaimed_job(orchestrator, monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append((a, k)) or True)
+    _insert_job_run(
+        orchestrator.journal, "monitor", "started", lock_key="l1",
+        started_at_utc=_stale_started_at(orchestrator.settings),
+    )
+    _insert_job_run(
+        orchestrator.journal, "atr_update", "started", lock_key="l2",
+        started_at_utc=_stale_started_at(orchestrator.settings),
+    )
+    JobRunner(orchestrator)._reap_stale_started_jobs()
+    assert len(calls) == 2
+    titles = {c[1]["title"] for c in calls}
+    assert titles == {"AlphaOS job failed: monitor", "AlphaOS job failed: atr_update"}
+
+
+def test_reap_frees_the_lock_so_a_still_due_job_can_run_again_the_same_tick(orchestrator, monkeypatch):
+    """The end-to-end point of the reaper: a wedged lock_key must not survive
+    to block the very tick that discovers it -- freed and re-runnable
+    immediately, not just cleaned up for next time."""
+    monkeypatch.setattr(
+        cadence, "is_due",
+        lambda job_type, settings, journal, now=None: (
+            (True, "forced for test") if job_type == cadence.JobType.MONITOR.value else (False, "not due")
+        ),
+    )
+    lock_key = cadence.default_lock_key(cadence.JobType.MONITOR.value, orchestrator.settings)
+    _insert_job_run(
+        orchestrator.journal, "monitor", "started", lock_key=lock_key,
+        started_at_utc=_stale_started_at(orchestrator.settings),
+    )
+
+    results = JobRunner(orchestrator).run_due_jobs()
+    by_type = {r["job_type"]: r for r in results}
+    assert by_type["monitor"]["status"] not in ("skipped", "not_due")
+
+    rows = orchestrator.journal.query(
+        "SELECT status FROM job_runs WHERE lock_key = ? ORDER BY id ASC", (lock_key,),
+    )
+    assert rows[0]["status"] == "failed"  # the reclaimed zombie
+    assert rows[1]["status"] in ("completed", "failed")  # the fresh attempt that followed
+
+
+def test_reap_frees_the_manual_cli_recovery_path_too(orchestrator):
+    """run_job() (the scheduler_run_job CLI's direct entry point, bypassing
+    is_due()/run_due_jobs() entirely) must ALSO be able to clear a wedge --
+    it is the operator's designated manual recovery tool, and hits the exact
+    same acquire() lock a scheduled tick would."""
+    lock_key = cadence.default_lock_key(cadence.JobType.MONITOR.value, orchestrator.settings)
+    _insert_job_run(
+        orchestrator.journal, "monitor", "started", lock_key=lock_key,
+        started_at_utc=_stale_started_at(orchestrator.settings),
+    )
+    result = JobRunner(orchestrator).run_job("monitor", lock_key=lock_key)
+    assert result["status"] != "skipped"
+
+
+def test_run_job_completion_update_is_id_keyed_not_lock_key_keyed(orchestrator, monkeypatch):
+    """Opus audit MED finding, 2026-07-17: once the stale-job reaper exists, a
+    reclaimed 'failed' row can sit beside a fresh 'started' row sharing the
+    SAME lock_key (a legitimately slow job reaped by a concurrent manual
+    force-run, then re-acquired). Before the id-keyed UPDATE fix, run_job()'s
+    completion UPDATE matched on `lock_key + status='started'` -- loose
+    enough to land on the WRONG row if more than one existed for that
+    lock_key. Proven end-to-end here by actually driving run_job() (not a
+    hand-rolled UPDATE): pre-seed an unrelated 'failed' row for the same
+    lock_key (simulating an already-reclaimed sibling), then run_job()
+    dispatches a real (stubbed, fast) job function and must only ever
+    complete the ONE row its OWN acquire() call inserted."""
+    from alphaos.scheduler import job_runner as job_runner_module
+
+    lock_key = "monitor-shared-lock"
+    _insert_job_run(orchestrator.journal, "monitor", "failed", lock_key=lock_key)  # the reclaimed sibling
+    stale_row = orchestrator.journal.one(
+        "SELECT id FROM job_runs WHERE lock_key = ? AND status = 'failed'", (lock_key,),
+    )
+
+    monkeypatch.setitem(job_runner_module._JOB_FUNCS, "monitor", lambda orch, runner: {"status": "completed"})
+    result = JobRunner(orchestrator).run_job("monitor", lock_key=lock_key)
+    assert result["status"] == "completed"
+
+    # The pre-existing 'failed' sibling must be completely untouched.
+    sibling = orchestrator.journal.one("SELECT status FROM job_runs WHERE id = ?", (stale_row["id"],))
+    assert sibling["status"] == "failed"
+
+    # Exactly one OTHER row for this lock_key is now 'completed' -- this
+    # run's own row, found by elimination (id != the untouched sibling's).
+    rows = orchestrator.journal.query("SELECT id, status FROM job_runs WHERE lock_key = ?", (lock_key,))
+    assert len(rows) == 2
+    new_rows = [r for r in rows if r["id"] != stale_row["id"]]
+    assert len(new_rows) == 1
+    assert new_rows[0]["status"] == "completed"
+
+
+def test_reap_reclaimed_row_feeds_the_existing_fuse_mechanism(orchestrator):
+    """A job that reliably crashes every run (never completes, never
+    naturally reaches 'failed') must still eventually fuse -- reclaiming to
+    'failed' is what lets is_fused's streak counter see it at all."""
+    for _ in range(3):
+        _insert_job_run(
+            orchestrator.journal, "monitor", "started", lock_key=new_id("stale-lock"),
+            started_at_utc=_stale_started_at(orchestrator.settings),
+        )
+    JobRunner(orchestrator)._reap_stale_started_jobs()
+    fused, reason, streak = cadence.is_fused(
+        "monitor", orchestrator.settings.scheduler_max_consecutive_failures, orchestrator.journal,
+    )
+    assert fused is True
+    assert streak == 3
 
 
 # =============================================================================
