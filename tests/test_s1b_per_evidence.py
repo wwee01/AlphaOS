@@ -8,6 +8,7 @@ end to end.
 
 from __future__ import annotations
 
+import random
 from datetime import date, timedelta
 
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from alphaos.cards import per_evidence as pe
 from alphaos.cards.selector import PER_CARD_ID, SELECTOR_VERSION
 from alphaos.journal.journal_store import JournalStore
+from alphaos.stats.two_arm import two_arm_bootstrap
 from alphaos.util.ids import new_id
 
 
@@ -331,3 +333,162 @@ def test_placebo_never_shares_a_control_with_its_own_event(journal):
     placebo_event_ids = {r["candidate_id"] for r in placebo.snapshot_rows if r["arm"] == "placebo_event"}
     placebo_control_ids = {r["candidate_id"] for r in placebo.snapshot_rows if r["arm"] == "placebo_control"}
     assert placebo_event_ids.isdisjoint(placebo_control_ids)
+
+
+# ============================================================ integrated calibration
+def _seed_integrated_null_population(journal, seed=42):
+    """A single zero-true-effect population carrying EVERY property the
+    approved spec's calibration DGP requires, all at once, built through
+    real DB rows (not synthetic dicts):
+
+      * skewed, heavy-tailed outcomes (lognormal noise, matching
+        _skewed_zero_effect_fixture's own convention) on BOTH arms, so the
+        true effect is exactly zero by construction;
+      * a REPEATED symbol ('REPEATSYM') with two distinct, non-overlapping
+        earnings events (different fiscal quarters, ~3 months apart);
+      * unequal date x tier control counts (8 per date is typical; a few
+        dates get exactly the rung-1 minimum; one date is deliberately
+        starved to force a rung-2 pooled fallback);
+      * a minimum-support same-date stratum (exactly RUNG1_MIN_CONTROLS=5
+        controls on 3 separate dates);
+      * a pooled same-tier fallback (one event's own date has only 3
+        controls -- below the rung-1 minimum -- so it must resolve via
+        rung-2 against the >=30-control tier pool);
+      * a planted same-symbol, same-window control (on SYM5's own event
+        date) that a correct primary control pool must exclude.
+
+    Returns the list of PER event dates (for span/exclusion assertions).
+    """
+    rng = random.Random(seed)
+    dates = _trading_dates_from(date(2026, 1, 5), 28)
+    for i, d in enumerate(dates):
+        symbol = f"SYM{i}"
+        cache_id = _insert_cache_row(journal, symbol, d, fiscal_date_ending=f"fiscal-{i}")
+        _insert_per_candidate(journal, symbol, d, cache_id, outcome_value=rng.lognormvariate(0, 0.6) - 1.2)
+        if i == 0:
+            n_ctl = 3  # below the rung-1 minimum -> forces a rung-2 pooled fallback
+        elif i in (1, 2, 3):
+            n_ctl = 5  # exactly the rung-1 minimum -- minimum-support strata
+        else:
+            n_ctl = 8  # typical -- deliberately UNEQUAL vs the above two cases
+        for k in range(n_ctl):
+            _insert_control_candidate(journal, f"CTL{i}_{k}", d, outcome_value=rng.lognormvariate(0, 0.6) - 1.2)
+
+    # Repeated symbol: two distinct earnings events, well-separated dates,
+    # distinct fiscal quarters (so they dedup as two SEPARATE events, not one).
+    rep_dates = [date(2026, 2, 2).isoformat(), date(2026, 5, 4).isoformat()]
+    for qi, d in enumerate(rep_dates):
+        cache_id = _insert_cache_row(journal, "REPEATSYM", d, fiscal_date_ending=f"repfiscal-{qi}")
+        _insert_per_candidate(journal, "REPEATSYM", d, cache_id, outcome_value=rng.lognormvariate(0, 0.6) - 1.2)
+        for k in range(8):
+            _insert_control_candidate(journal, f"REPCTL{qi}_{k}", d, outcome_value=rng.lognormvariate(0, 0.6) - 1.2)
+
+    # Planted same-symbol, same-window control: must be excluded from the
+    # primary control pool (SYM5's PER event sits at dates[5]).
+    _insert_control_candidate(journal, "SYM5", dates[5], outcome_value=999.0)
+
+    return dates + rep_dates
+
+
+def _redraw_values(clusters, rng):
+    """Deep-copies a cluster list with every 'value' field redrawn from a
+    fresh zero-mean skewed (lognormal) null draw, preserving cluster
+    membership / stratum_key / stratum_keys exactly. Used to re-run the
+    SAME real, DB-derived cluster STRUCTURE (unequal counts, thin/thick
+    strata, the repeated-symbol cluster, post-exclusion control pool)
+    through many independent null draws for a calibration-rate check,
+    without paying the cost of rebuilding the DB fixture each time."""
+    out = []
+    for cluster in clusters:
+        out.append([{**row, "value": rng.lognormvariate(0, 0.6) - 1.2} for row in cluster])
+    return out
+
+
+def test_integrated_skewed_null_calibration_through_the_real_evidence_and_bootstrap_path(journal):
+    """The integration-level calibration test the conformance audit
+    required: unlike every other calibration test in this suite (which
+    hand-builds synthetic cluster dicts and calls
+    ``two_arm.two_arm_bootstrap`` directly), this one goes through the
+    REAL DB-facing construction path -- ``per_evidence.build_primary_evidence()``
+    -- against a population carrying every property the approved DGP
+    specifies at once (skew, heavy tails, a repeated symbol, unequal
+    date x tier control counts, a minimum-support stratum, a pooled
+    rung-2 fallback, and a planted cross-arm exclusion), then feeds the
+    REAL resulting clusters into the REAL bootstrap engine.
+    """
+    as_of = "2027-01-01T00:00:00+00:00"
+    _seed_integrated_null_population(journal)
+
+    # ---- structural properties, verified once against the real construction ----
+    result_a = pe.build_primary_evidence(journal, as_of)
+    assert result_a.status == "ok", result_a.reason
+    detail = result_a.detail
+    assert detail["n_per_raw"] >= 25
+    assert detail["span_days"] >= 90.0
+    assert detail["n_distinct_months"] >= 3
+    assert detail["max_symbol_share"] <= 0.20
+    assert detail["n_control_raw"] >= 100
+    assert 0.0 < detail["pooled_fallback_share"] <= 0.20, (
+        "the deliberately-starved date must have forced a real rung-2 fallback"
+    )
+    assert detail["exclusion_share"] <= 0.10
+
+    per_event_rows = [r for r in result_a.snapshot_rows if r["arm"] == "per_event"]
+    assert sum(1 for r in per_event_rows if r["symbol"] == "REPEATSYM") == 2, (
+        "the repeated symbol must contribute exactly its two distinct earnings events to E*"
+    )
+    assert any(r["control_fallback"] == "rung2" for r in per_event_rows), (
+        "at least one event must have resolved through the pooled rung-2 fallback"
+    )
+    control_rows = [r for r in result_a.snapshot_rows if r["arm"] == "control"]
+    assert not any(r["symbol"] == "SYM5" for r in control_rows), (
+        "the planted same-symbol, same-window control must be excluded from the primary pool"
+    )
+    # A genuine minimum-support stratum exists (exactly RUNG1_MIN_CONTROLS on 3 dates).
+    from collections import Counter
+    date_counts = Counter((r["market_date"]) for r in control_rows)
+    assert any(n == pe.RUNG1_MIN_CONTROLS for n in date_counts.values()), (
+        "expected at least one date stratum with EXACTLY the rung-1 minimum control count"
+    )
+
+    # ---- fixed E* / reproducibility: an independent rebuild must be IDENTICAL ----
+    result_b = pe.build_primary_evidence(journal, as_of)
+    assert result_a.per_clusters == result_b.per_clusters
+    assert result_a.control_clusters == result_b.control_clusters
+    hash_a = pe.canonical_snapshot_hash(pe.canonical_snapshot_rows(result_a, None))
+    hash_b = pe.canonical_snapshot_hash(pe.canonical_snapshot_rows(result_b, None))
+    assert hash_a == hash_b, "the evidence snapshot hash must be reproducible given identical input data"
+
+    # ---- primary independence from the placebo, on THIS realistic fixture ----
+    import unittest.mock
+    with unittest.mock.patch.object(pe, "PLACEBO_SHIFT_TRADING_DAYS", 20):
+        result_c = pe.build_primary_evidence(journal, as_of)
+    hash_c = pe.canonical_snapshot_hash(pe.canonical_snapshot_rows(result_c, None))
+    assert hash_c == hash_a, "changing the placebo definition must never alter the primary result"
+
+    # ---- calibration rate: reuse the REAL cluster structure across many null draws ----
+    # This is what makes the rate check "integrated" rather than synthetic: the
+    # cluster membership, stratum assignment, unequal control counts, and
+    # post-exclusion control pool all come from the ACTUAL per_evidence.py
+    # construction above -- only the outcome VALUES are redrawn per rep (a
+    # fresh DB rebuild per rep would test the same thing far more slowly).
+    n_sims = 100
+    rejections_pos = rejections_neg = 0
+    for sim_seed in range(n_sims):
+        rng = random.Random(5000 + sim_seed)
+        per_clusters = _redraw_values(result_a.per_clusters, rng)
+        control_clusters = _redraw_values(result_a.control_clusters, rng)
+        res = two_arm_bootstrap(per_clusters, control_clusters, n_resamples=300, seed=sim_seed)
+        assert res["status"] == "ok"
+        if res["p_pos"] < 0.05:
+            rejections_pos += 1
+        if res["p_neg"] < 0.05:
+            rejections_neg += 1
+    rate_pos, rate_neg = rejections_pos / n_sims, rejections_neg / n_sims
+    # Documented tolerance: same [0, 0.11] skewed-null band as the low-level
+    # calibration test -- justified identically (skew + a single-draw PER
+    # arm vs a multi-draw control average is asymmetric by construction, so
+    # the lower bound stays at 0; the upper bound is the real anti-inflation
+    # control). 100 sims here, same as the low-level test, for the same band.
+    assert 0.0 <= rate_pos <= 0.11, f"integrated H-PER-1P false-positive rate {rate_pos} outside tolerance"
+    assert 0.0 <= rate_neg <= 0.11, f"integrated H-PER-1N false-positive rate {rate_neg} outside tolerance"

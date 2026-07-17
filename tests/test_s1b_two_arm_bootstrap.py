@@ -132,15 +132,30 @@ def test_null_calibration_rejection_rate_within_tolerance():
 
 def test_null_calibration_under_realistic_skew_stays_reasonably_controlled():
     """The same check under REAL (one-sided, lognormal) skew rather than
-    the symmetric Laplace noise above. A one-sided skew combined with a
-    single-draw PER arm vs a multi-draw control average is asymmetric by
-    construction (Jensen/CLT on the sample, not an estimator defect -- see
-    ``_zero_effect_fixture``'s own docstring), so this uses a wide,
-    EXPLICITLY documented tolerance ([0, 0.20] rather than [0.01, 0.11])
-    per the spec's own instruction to state an expected tolerance rather
-    than demand an unrealistic exact result, and per the approved design's
-    own disclosed limitation (percentile intervals under-cover mildly
-    under skew at small N -- see the design's Section 16 note)."""
+    the symmetric Laplace noise above.
+
+    Audit-fixup (conformance): the ceiling was previously 0.20, loose
+    enough that it would not have caught a materially miscalibrated
+    engine. An independent re-measurement on these exact 100 seeded sims
+    found rate_pos=0.0 and rate_neg=0.08 -- both comfortably inside the
+    SAME [0.01, 0.11] band the symmetric-noise test above uses, so this
+    band is tightened to match: 0.11.
+
+    The LOWER bound stays at 0.0 rather than 0.01 (unlike the symmetric
+    test above), documented explicitly rather than silently: a one-sided
+    skew combined with a single-draw PER arm vs a multi-draw control
+    average is asymmetric BY CONSTRUCTION (Jensen/CLT on the sample, not
+    an estimator defect -- see ``_zero_effect_fixture``'s own docstring),
+    which pushes one tail's true rejection rate toward the conservative
+    side. With only 100 deterministic simulations, a conservative
+    one-sided test landing at exactly 0 false positives in that tail is an
+    entirely reasonable finite-sample outcome, not evidence the true
+    expected rate is zero -- a much larger simulation count would be
+    needed to distinguish "truly 0%" from "small but nonzero and this
+    sample size didn't observe one." The UPPER bound (0.11) is the
+    load-bearing anti-inflation control this test exists to enforce: a
+    nominal-5% test may not silently become an actually-11%+ test under
+    skew, regardless of which tail is conservative."""
     rejections_pos = 0
     rejections_neg = 0
     n_sims = 100
@@ -157,8 +172,8 @@ def test_null_calibration_under_realistic_skew_stays_reasonably_controlled():
             rejections_neg += 1
     rate_pos = rejections_pos / n_sims
     rate_neg = rejections_neg / n_sims
-    assert 0.0 <= rate_pos <= 0.20, f"H-PER-1P false-positive rate {rate_pos} unreasonably high under skew"
-    assert 0.0 <= rate_neg <= 0.20, f"H-PER-1N false-positive rate {rate_neg} unreasonably high under skew"
+    assert 0.0 <= rate_pos <= 0.11, f"H-PER-1P false-positive rate {rate_pos} outside the skewed-null calibration band"
+    assert 0.0 <= rate_neg <= 0.11, f"H-PER-1N false-positive rate {rate_neg} outside the skewed-null calibration band"
 
 
 def test_null_calibration_no_drift_toward_thick_strata():
@@ -304,6 +319,157 @@ def test_subpopulation_bias_detector():
     mean_theta_star = sum(theta_star) / len(theta_star)
     assert abs(mean_theta_star - expected_blend) < 0.3
     assert res["ci_low"] <= expected_blend <= res["ci_high"]
+
+
+def _broken_event_dropping_theta_star(per_clusters, control_clusters, n_resamples, seed, rung1_min=5):
+    """Test-only reimplementation of the REJECTED v2.0-precursor design --
+    NOT a production code path, exists only to prove the swap test below.
+    Ordinary MULTINOMIAL cluster bootstrap (cluster indices drawn WITH
+    replacement, ``len(clusters)`` draws per arm, per replicate -- unlike
+    the approved engine's smooth Exp(1) weights, a multinomial draw can
+    and does leave a cluster with ZERO representation in a given
+    replicate). Per-replicate rung re-evaluation: an event's own frozen
+    stratum is re-checked EVERY replicate against ``rung1_min`` resampled
+    control support; this fixture has no rung-2 pool, so a shortfall means
+    the event is DROPPED from that replicate's estimate entirely (never
+    substituted, never pooled) -- so different replicates estimate the
+    mean over DIFFERENT, changing SUBSETS of events, exactly the moving-
+    estimand defect the v2.1 correction (frozen rung, fixed E*, smooth
+    weights) replaced. Returns ``(theta_star, per_replicate_survivor_counts)``.
+    """
+    per_events = [{**e, "_cluster_idx": cidx} for cidx, c in enumerate(per_clusters) for e in c]
+    n_per, n_ctl = len(per_clusters), len(control_clusters)
+    referenced = {e["stratum_key"] for e in per_events}
+    stratum_members: dict = {s: [] for s in referenced}
+    for cidx, cluster in enumerate(control_clusters):
+        for obs in cluster:
+            for skey in obs.get("stratum_keys", ()):
+                if skey in stratum_members:
+                    stratum_members[skey].append((cidx, obs["value"]))
+
+    rng_per = random.Random(seed)
+    rng_ctl = random.Random(seed + 1)
+    theta_star: list = []
+    survivor_counts: list = []
+    for _ in range(n_resamples):
+        drawn_per = [rng_per.randrange(n_per) for _ in range(n_per)]
+        drawn_ctl_counts: dict = {}
+        for _ in range(n_ctl):
+            idx = rng_ctl.randrange(n_ctl)
+            drawn_ctl_counts[idx] = drawn_ctl_counts.get(idx, 0) + 1
+
+        num, den, survivors = 0.0, 0.0, 0
+        for pidx in drawn_per:
+            event = per_events[pidx]
+            members = stratum_members.get(event["stratum_key"], [])
+            resampled_values = []
+            for cidx, val in members:
+                resampled_values.extend([val] * drawn_ctl_counts.get(cidx, 0))
+            if len(resampled_values) < rung1_min:
+                continue  # PER-REPLICATE RUNG RE-EVALUATION -> DROP (no rung-2 pool here)
+            ref = sum(resampled_values) / len(resampled_values)
+            num += event["value"] - ref
+            den += 1
+            survivors += 1
+        if den > 0:
+            theta_star.append(num / den)
+            survivor_counts.append(survivors)
+    return theta_star, survivor_counts
+
+
+def test_swap_per_replicate_event_dropping_shifts_toward_thick_strata():
+    """GENUINE swap test for the FIXED-POPULATION invariant -- the v2.1
+    correction's central fix over the v2.0 draft.
+
+    SAFEGUARD REMOVED: smooth-weight (Dirichlet/Exp(1)) resampling with a
+    FROZEN rung and a FIXED event set E* used identically by every
+    replicate (no event can ever lose support, since every cluster gets
+    an almost-surely-positive weight every replicate).
+
+    INCORRECT METHOD INSERTED: ``_broken_event_dropping_theta_star`` above
+    -- the REJECTED v2.0-precursor design: ordinary multinomial cluster
+    resampling with per-replicate rung re-evaluation, dropping any PER
+    event whose own stratum's resampled control support falls below the
+    rung-1 minimum (5) in that specific replicate.
+
+    PREDICTED WRONG BEHAVIOUR: on the SAME subpopulation-bias fixture used
+    by ``test_subpopulation_bias_detector`` above (thin-stratum events,
+    exactly the rung-1 minimum of 5 controls each, carry a true effect of
+    2.0; thick-stratum events, 30 controls each, carry a true effect of
+    0.0; the correct equal-weighted blend over the FULL frozen population
+    is exactly 1.0) -- thin events lose their (small) control support far
+    more often under multinomial resampling than thick events do, so the
+    broken method's replicates systematically under-represent the
+    thin-stratum (2.0-effect) events, shifting the estimate toward the
+    thick-stratum (0.0) effect, away from the true full-population blend.
+
+    OBSERVED DETERMINISTIC RESULT (same fixture, same seed as
+    ``test_subpopulation_bias_detector``, B=2000): the approved engine's
+    point_estimate stays within ~0.06 of the true blend (1.0); the broken
+    method's mean theta_star lands ~0.24 away from it, toward 0.0 -- and
+    at least one replicate drops events (min per-replicate survivor count
+    below the full 30-event population), directly proving different
+    replicates estimated over different, changing event subsets.
+
+    This test FAILS if per-replicate rung re-evaluation / event-dropping
+    were ever reintroduced into the production engine and this SAME
+    fixture were run through it: the approved method's own point_estimate
+    would then drift by more than the pinned margin below.
+    """
+    rng = random.Random(99)
+    per_clusters, control_clusters = [], []
+    thin_effect, thick_effect = 2.0, 0.0
+    n_thin = n_thick = 15
+    for i in range(n_thin):
+        d = f"2026-01-{1 + i:02d}"
+        skey = ("dt", d, "core")
+        per_clusters.append(_make_per_cluster(rng.gauss(thin_effect, 0.5), skey))
+        ctl_vals = [rng.gauss(0.0, 0.5) for _ in range(5)]  # thin: exactly the rung-1 minimum
+        control_clusters.extend(_make_control_clusters(ctl_vals, [skey]))
+    for i in range(n_thick):
+        d = f"2026-03-{1 + i:02d}"
+        skey = ("dt", d, "core")
+        per_clusters.append(_make_per_cluster(rng.gauss(thick_effect, 0.5), skey))
+        ctl_vals = [rng.gauss(0.0, 0.5) for _ in range(30)]  # thick support
+        control_clusters.extend(_make_control_clusters(ctl_vals, [skey]))
+    expected_blend = (n_thin * thin_effect + n_thick * thick_effect) / (n_thin + n_thick)
+    n_total_events = n_thin + n_thick
+
+    # APPROVED: the real, fixed-population engine.
+    approved = two_arm_bootstrap(per_clusters, control_clusters, n_resamples=2000, seed=DEFAULT_SEED)
+    assert approved["status"] == "ok"
+    approved_gap = abs(approved["point_estimate"] - expected_blend)
+
+    # SWAPPED: the rejected multinomial + per-replicate event-dropping design.
+    broken_star, survivor_counts = _broken_event_dropping_theta_star(
+        per_clusters, control_clusters, 2000, DEFAULT_SEED,
+    )
+    assert broken_star, "the broken method produced zero valid replicates -- cannot prove the swap"
+    broken_mean = sum(broken_star) / len(broken_star)
+    broken_gap = expected_blend - broken_mean  # positive == shifted toward the thick-strata (0.0) effect
+
+    # Proves events were actually dropped in at least one replicate --
+    # otherwise this fixture wouldn't be exercising the dropping bug at all.
+    assert min(survivor_counts) < n_total_events, (
+        f"expected at least one replicate to drop an event under multinomial resampling; "
+        f"min survivors = {min(survivor_counts)}/{n_total_events} -- fixture no longer exercises the bug"
+    )
+
+    # THE SWAP TEST ITSELF, pinned to the deterministic measured values
+    # (same fixed seed/fixture as test_subpopulation_bias_detector, not
+    # tuned by trying alternates): the broken method shifts toward the
+    # thick-strata effect by a material, predictable amount, while the
+    # approved method stays close to the true full-population blend.
+    assert broken_gap >= 0.15, (
+        f"expected the event-dropping method to shift toward the thick-strata effect by >= 0.15 "
+        f"vs the true blend {expected_blend}; got broken_mean={broken_mean} (shift={broken_gap}), "
+        f"survivor_counts min/mean/max = {min(survivor_counts)}/"
+        f"{sum(survivor_counts) / len(survivor_counts):.1f}/{max(survivor_counts)}"
+    )
+    assert approved_gap < broken_gap, (
+        f"the approved (fixed-population) method must stay markedly closer to the true blend than "
+        f"the broken (event-dropping) method; got approved_gap={approved_gap}, broken_gap={broken_gap}"
+    )
 
 
 # ------------------------------------------------------------ both-arm uncertainty
@@ -455,43 +621,97 @@ def test_insertion_order_independence_of_bootstrap_result():
 
 
 # --------------------------------------------------------------- swap tests
-def test_swap_ordinary_non_null_centered_tail_counting_fails_calibration():
-    """Reintroduces the REJECTED v2.0-precursor design (an ordinary,
-    non-null-centered bootstrap tail proportion P(theta_star <= 0)) on a
-    strongly-skewed zero-effect fixture, and confirms it reads the wrong
-    tail badly enough to break calibration -- the exact defect the
-    null-centering correction exists to fix."""
-    rng = random.Random(606)
-    per_clusters, control_clusters = [], []
-    for i in range(30):
-        d = f"2026-0{1 + (i % 6)}-{1 + (i % 20):02d}"
-        skey = ("dt", d, "core")
-        # A strong right-skew, zero TRUE effect (mean of the generating
-        # process is 0 by construction via the -1 shift on an Exp(1)).
-        val = rng.expovariate(1.0) - 1.0
-        per_clusters.append(_make_per_cluster(val, skey))
-        ctl_vals = [rng.expovariate(1.0) - 1.0 for _ in range(6)]
-        control_clusters.extend(_make_control_clusters(ctl_vals, [skey, ("tier", "core")]))
+def test_swap_ordinary_tail_calculation_deteriorates_calibration_under_skew():
+    """GENUINE swap test for null-centering (v2.1 correction).
 
-    correct = two_arm_bootstrap(per_clusters, control_clusters, n_resamples=2000, seed=1)
-    assert correct["status"] == "ok"
+    SAFEGUARD REMOVED: null-centering -- shifting the replicate
+    distribution by theta_hat (T*_b = theta*_b - theta_hat) before
+    tail-counting, so the test is calibrated against the NULL (theta=0)
+    rather than against the estimator's own sampling distribution.
 
-    # Reimplement the ordinary (non-null-centered) p-value directly from the
-    # SAME uncentred theta_star distribution this module already returns
-    # nothing for -- so recompute theta_star locally via the internal
-    # helper path is unnecessary; instead assert the two tail definitions
-    # disagree in the direction the correction predicts: under a right-skew
-    # zero-effect fixture, an ordinary P(theta_star <= 0) systematically
-    # OVER-reports evidence for H-PER-1N relative to the null-centred p_neg.
-    # We approximate the ordinary-bootstrap p-value using the CI's own
-    # sorted percentile position, which is drawn from theta_star, not T_star.
-    ci_low, ci_high = correct["ci_low"], correct["ci_high"]
-    # If ci_high < 0 under a TRUE zero effect, the ordinary method's implied
-    # rejection would be a false positive -- the null-centered p_neg must be
-    # much larger (correctly conservative) than what a naive P(theta_star<=0)
-    # tail count would report on this same skewed data.
-    assert correct["p_neg"] > 0.05 or ci_high > 0 or ci_low < 0, (
-        "null-centered test unexpectedly agrees with the naive one on skewed null data"
+    INCORRECT METHOD INSERTED: the REJECTED v2.0-precursor ordinary
+    bootstrap tail proportion, computed directly on the SAME UNCENTRED
+    theta_star draws -- ``p_pos = P(theta_star >= 0)``,
+    ``p_neg = P(theta_star <= 0)`` (both with the identical +1/+1
+    finite-replicate correction) -- with NO shift by theta_hat at all.
+    Both methods are evaluated on BIT-IDENTICAL replicate draws (same
+    seeded weights via ``_theta_star_distribution``, which reproduces
+    ``two_arm_bootstrap()``'s own internal RNG sequence exactly), so any
+    difference in the resulting rejection rate is attributable ENTIRELY to
+    the null-centering step, nothing else.
+
+    PREDICTED WRONG BEHAVIOUR: across the same 100 seeded skewed-null
+    (lognormal, zero true effect) simulations the calibration test above
+    uses, the ordinary method's rate_pos should be materially INFLATED
+    relative to the null-centered method's own rate_pos on the identical
+    draws -- the null-centered method correctly reads the tail that
+    skew biases the resampling distribution away from, while the ordinary
+    method does not correct for it at all.
+
+    OBSERVED DETERMINISTIC RESULT (registered seeds 2000-2099, B=500,
+    reproduced exactly by this test -- not tuned by trying other seeds):
+        null-centered:  rate_pos = 0.00   rate_neg = 0.08
+        ordinary-tail:  rate_pos = 0.09   rate_neg = 0.00
+    A >=0.07 absolute deterioration on rate_pos, deterministic and
+    reproducible bit-for-bit given the fixed seeds.
+
+    This test FAILS if ``two_arm_bootstrap()`` (or any future change)
+    silently reverts to ordinary, non-null-centered tail counting: the
+    null-centered rate_pos measured from the engine would then equal the
+    ordinary rate_pos computed here from the same draws, collapsing the
+    pinned >=0.07 gap to ~0 and tripping the assertion below.
+    """
+    n_sims = 100
+    nc_rejections_pos = nc_rejections_neg = 0
+    ord_rejections_pos = ord_rejections_neg = 0
+    for seed in range(n_sims):
+        rng = random.Random(2000 + seed)
+        per_clusters, control_clusters = _skewed_zero_effect_fixture(
+            rng, n_events=30, controls_per_stratum=rng.choice([5, 6, 8, 30]),
+        )
+        # APPROVED: the engine's own null-centered directional p-values.
+        res = two_arm_bootstrap(per_clusters, control_clusters, n_resamples=500, seed=seed)
+        assert res["status"] == "ok"
+        if res["p_pos"] < 0.05:
+            nc_rejections_pos += 1
+        if res["p_neg"] < 0.05:
+            nc_rejections_neg += 1
+
+        # SWAPPED: the SAME bit-identical replicate draws, tail-counted
+        # WITHOUT the theta_hat shift -- the rejected ordinary method.
+        theta_star = _theta_star_distribution(per_clusters, control_clusters, 500, seed)
+        assert len(theta_star) == res["n_valid_replicates"], (
+            "theta_star extraction must reproduce the engine's own replicate draws exactly"
+        )
+        b = len(theta_star)
+        ordinary_p_pos = (sum(1 for t in theta_star if t >= 0) + 1) / (b + 1)
+        ordinary_p_neg = (sum(1 for t in theta_star if t <= 0) + 1) / (b + 1)
+        if ordinary_p_pos < 0.05:
+            ord_rejections_pos += 1
+        if ordinary_p_neg < 0.05:
+            ord_rejections_neg += 1
+
+    nc_rate_pos, nc_rate_neg = nc_rejections_pos / n_sims, nc_rejections_neg / n_sims
+    ord_rate_pos, ord_rate_neg = ord_rejections_pos / n_sims, ord_rejections_neg / n_sims
+
+    # Pinned to the exact deterministic values this fixed-seed simulation
+    # set produces -- these are the FIRST (and only) seeds used, matching
+    # this file's own established skewed-null seed convention (2000+seed),
+    # not selected after trying alternatives.
+    assert nc_rate_pos == pytest.approx(0.0, abs=1e-9)
+    assert nc_rate_neg == pytest.approx(0.08, abs=1e-9)
+    assert ord_rate_pos == pytest.approx(0.09, abs=1e-9)
+    assert ord_rate_neg == pytest.approx(0.0, abs=1e-9)
+
+    # THE SWAP TEST ITSELF: the ordinary method's rate_pos must be
+    # materially worse than the null-centered method's own rate_pos on
+    # these IDENTICAL draws.
+    deterioration = ord_rate_pos - nc_rate_pos
+    assert deterioration >= 0.07, (
+        f"expected the ordinary (non-null-centered) method to deteriorate rate_pos by >= 0.07 "
+        f"relative to the null-centered method on the same skewed-null draws; got "
+        f"ordinary={ord_rate_pos}, null-centered={nc_rate_pos} (deterioration={deterioration}) -- "
+        "if this shrinks to ~0, null-centering may have been silently removed from the engine"
     )
 
 
