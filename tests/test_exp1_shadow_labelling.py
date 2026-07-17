@@ -73,6 +73,27 @@ def _days_ago(n: int) -> str:
     return (timeutils.market_date() - timedelta(days=n)).isoformat()
 
 
+def _force_momentum_candidates(monkeypatch, orch):
+    """``MockDataProvider.get_snapshot`` (mock_provider.py) seeds its RNG
+    with ``f"{symbol}:{market_date()}"``, so whether a seeded symbol clears
+    the shadow-tier momentum/interest gate (``_maybe_candidate`` in
+    candidate_scanner.py) is a function of the calendar date, not just the
+    symbol -- on 2026-07-17 one of ``_seed_symbols(4)``'s own names misses
+    the gate entirely (see
+    ``test_shadow_scan_symbol_can_legitimately_miss_the_momentum_gate``
+    below). Any test that asserts an EXACT candidate count from N seeded
+    symbols must pin momentum past the 2% gate itself rather than rely on
+    N symbols always yielding N candidates."""
+    orig_get_snapshot = orch.market.provider.get_snapshot
+
+    def _forced(symbol):
+        snap = orig_get_snapshot(symbol)
+        snap["change_pct"] = 0.05
+        return snap
+
+    monkeypatch.setattr(orch.market.provider, "get_snapshot", _forced)
+
+
 def _seed_universe_days(journal, market_date, n_scanned=10, n_fresh=10):
     """Directly seed universe_days rows (bypassing a real scan) so the feed-
     coverage gate has trailing history to compute a median from -- mirrors
@@ -137,11 +158,12 @@ def test_select_shadow_shortlist_zero_candidates_zero_calls():
     assert shadow_label.select_shadow_shortlist([], settings, "2026-07-15", "w1") == []
 
 
-def test_fetch_shadow_selection_pool_dedups_already_labelled_today(tmp_path):
+def test_fetch_shadow_selection_pool_dedups_already_labelled_today(tmp_path, monkeypatch):
     """Mechanism 2's own dedup law: a symbol already labelled today (any
     window) is excluded from the pool, so a persistent name is never
     triple-paid across the day's 3 windows."""
     orch, _ = _orch_with_shadow_universe(tmp_path, _seed_symbols(4))
+    _force_momentum_candidates(monkeypatch, orch)
     orch.run_scan_once()
     market_date = timeutils.market_date().isoformat()
 
@@ -163,6 +185,31 @@ def test_fetch_shadow_selection_pool_dedups_already_labelled_today(tmp_path):
     pool_after = shadow_label.fetch_shadow_selection_pool(orch.journal, market_date)
     assert row["symbol"] not in {r["symbol"] for r in pool_after}
     assert len(pool_after) == 3
+    orch.journal.close()
+
+
+def test_shadow_scan_symbol_can_legitimately_miss_the_momentum_gate_on_a_given_date(tmp_path, monkeypatch):
+    """Regression pin for the date-dependent bug that broke
+    ``test_fetch_shadow_selection_pool_dedups_already_labelled_today``:
+    ``MockDataProvider.get_snapshot`` (mock_provider.py) seeds its RNG with
+    ``f"{symbol}:{market_date()}"``, so a seeded symbol's change_pct/
+    rel_volume -- and therefore whether it clears the shadow-tier momentum
+    gate in ``_maybe_candidate`` (candidate_scanner.py) -- is a function of
+    the calendar date, not just the symbol. On 2026-07-17, of
+    ``_seed_symbols(4)`` (ZZ0-ZZ3), ZZ2 rolls change_pct/rel_volume/
+    interest_score that ALL miss the gate, so a shadow scan over 4 seeded
+    symbols yields only 3 candidates. This is deterministic, not a flake --
+    it reproduces on this date every run. Pinned here so nobody re-adds a
+    test that hardcodes "N seeded symbols -> N candidates" without forcing
+    momentum (see ``_force_momentum_candidates``)."""
+    import datetime as _dt
+
+    monkeypatch.setattr(timeutils, "market_date", lambda dt=None: _dt.date(2026, 7, 17))
+    orch, _ = _orch_with_shadow_universe(tmp_path, _seed_symbols(4))
+    orch.run_scan_once()
+
+    pool = shadow_label.fetch_shadow_selection_pool(orch.journal, "2026-07-17")
+    assert {r["symbol"] for r in pool} == {"ZZ0", "ZZ1", "ZZ3"}  # ZZ2 misses momentum/interest on this date
     orch.journal.close()
 
 
