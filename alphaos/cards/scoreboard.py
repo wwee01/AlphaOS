@@ -40,20 +40,41 @@ MIN_SPAN_DAYS = MIN_SPAN_DAYS_FOR_V2_AGGREGATE
 
 
 def live_eligible_cards(journal) -> list[dict]:
-    """Every (card_id, version) currently registered with state='live_eligible'
-    that has NOT already been terminally demoted (a demoted version is never
+    """Every (card_id, version) currently eligible for live scoring: either
+    registered with ``state='live_eligible'`` directly, OR graduated via
+    ``alphaos.cards.promotion.promote_card()`` -- that module's own
+    docstring is explicit ("never touches setup_cards or any YAML file --
+    graduation changes eligibility, not content") per a 2026-07-10 Fable 5
+    design consult, so a promoted card's ``setup_cards.state`` legitimately
+    stays 'shadow' forever. This OR-clause is what makes that design
+    actually connect end-to-end: without it, a real promotion would never
+    once appear here (2026-07-17 audit finding -- caught before it ever
+    fired, since nothing has been graduated yet). Symmetric with how
+    demotion ALREADY works below -- `card_demotions`/`promotion_decisions
+    (direction='demote')` are checked by EXCLUSION, never by mutating state
+    back to 'shadow' either; this adds the missing INCLUSION half for
+    promotion, same read-time-derived shape.
+
+    Also excludes anything terminally demoted (a demoted version is never
     re-scored -- re-entry requires a brand new version, per the anti-double-
     jeopardy law; scoring it again would be pointless and could look like a
-    second, contradictory verdict on the same terminal fact). Checks BOTH
-    demotion mechanisms (PR13 slice 2): slice 1's own automatic-trigger-only
-    ``card_demotions``, and ``promotion_decisions``'s manual
-    ``direction='demote'`` rows (``alphaos.cards.promotion``'s
-    ``demote_card()``) -- the two tables are never merged, so both must be
-    checked here."""
+    second, contradictory verdict on the same terminal fact) -- including a
+    promoted-then-later-demoted card, which must NOT re-appear here just
+    because it once had a 'promote' row. Checks BOTH demotion mechanisms
+    (PR13 slice 2): slice 1's own automatic-trigger-only ``card_demotions``,
+    and ``promotion_decisions``'s manual ``direction='demote'`` rows
+    (``alphaos.cards.promotion.demote_card()``) -- the two tables are never
+    merged, so both must be checked here."""
     return journal.query(
         "SELECT sc.card_id, sc.version AS card_version, sc.state "
         "FROM setup_cards sc "
-        "WHERE sc.state = 'live_eligible' "
+        "WHERE ("
+        "  sc.state = 'live_eligible' "
+        "  OR EXISTS ("
+        "    SELECT 1 FROM promotion_decisions pd "
+        "    WHERE pd.card_id = sc.card_id AND pd.card_version = sc.version AND pd.direction = 'promote'"
+        "  )"
+        ") "
         "AND NOT EXISTS ("
         "  SELECT 1 FROM card_demotions cd "
         "  WHERE cd.card_id = sc.card_id AND cd.card_version = sc.version"

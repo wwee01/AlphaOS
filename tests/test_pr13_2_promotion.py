@@ -224,14 +224,48 @@ def test_promote_card_refuses_when_not_eligible(journal):
         promotion.promote_card(journal, "H-TEST", decided_by="ck")
 
 
-def test_promoting_does_not_change_live_eligible_cards_by_itself(journal):
-    """Promotion writes a decision row -- it does NOT itself flip
-    setup_cards.state, so live_eligible_cards() (which reads setup_cards)
-    correctly does not show this card as live_eligible until an operator
-    actually edits the card's own YAML state field (out of scope for v0's
-    graduation-only mechanism -- see promotion.py's own module docstring)."""
+def test_promoting_makes_the_card_live_eligible_via_the_decision_row_not_a_state_write(journal):
+    """2026-07-17 audit fix: promotion writes ONLY a decision row -- it still
+    does NOT itself flip setup_cards.state (that remains true; see
+    promotion.py's own module docstring, "never touches setup_cards or any
+    YAML file"). What was WRONG before this fix is that live_eligible_cards()
+    had no read-time inclusion clause for that decision row, so a genuinely
+    promoted card could never appear there at all -- graduation was built but
+    silently inert. (The design this test used to assert -- "an operator
+    hand-edits the card's YAML state field" -- turns out to be structurally
+    impossible: sync_registry() hashes `state` as part of a card's content,
+    so editing it without a version bump is REFUSED at startup, and a version
+    bump would make it a mutation, not a graduation, contradicting this same
+    module's own graduation-vs-mutation law.)
+
+    live_eligible_cards() now derives eligibility the same way it already
+    derives demotion: by EXISTENCE of a promotion_decisions row, read at query
+    time, never by mutating setup_cards.state -- setup_cards.state stays
+    'shadow' on this card even after promotion, and that's correct."""
     hid, card_id, version = _make_eligible(journal)
     promotion.promote_card(journal, hid, decided_by="ck")
+
+    stored = journal.one("SELECT state FROM setup_cards WHERE card_id = ? AND version = ?", (card_id, version))
+    assert stored["state"] == "shadow"  # unchanged -- promotion.py's own law
+
+    cards = live_eligible_cards(journal)
+    assert card_id in [c["card_id"] for c in cards]  # but it IS live-eligible now
+
+
+def test_promoted_then_demoted_card_does_not_reappear_via_the_new_inclusion_path(journal):
+    """Anti-double-jeopardy must survive the new promotion-inclusion clause:
+    demote_card() doesn't require state='live_eligible' (it only checks
+    registration + not-already-terminal, see check_demotion_preconditions),
+    so a card promoted-but-still-state='shadow' CAN be demoted -- and once
+    demoted, it must be excluded again despite having a 'promote' row on
+    record, not leak back in because the OR-clause alone would otherwise
+    re-admit it."""
+    hid, card_id, version = _make_eligible(journal)
+    promotion.promote_card(journal, hid, decided_by="ck")
+    assert card_id in [c["card_id"] for c in live_eligible_cards(journal)]
+
+    promotion.demote_card(journal, card_id, version, decided_by="ck", reason="reconsidered")
+
     cards = live_eligible_cards(journal)
     assert card_id not in [c["card_id"] for c in cards]
 
