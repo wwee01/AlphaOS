@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint, universeOf,
+  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint,
 } from './decisions.js';
 
 describe('formatHindsight', () => {
@@ -53,20 +53,6 @@ describe('buildDecisionFunnelStages', () => {
   });
 });
 
-describe('universeOf', () => {
-  it('reads shadow from a candidates row (shadow_tier=1)', () => {
-    expect(universeOf({ shadow_tier: 1 })).toBe('shadow');
-  });
-  it('reads shadow from a rejected_candidates row (stage=shadow_scan)', () => {
-    expect(universeOf({ stage: 'shadow_scan' })).toBe('shadow');
-  });
-  it('reads core for live rows and rows without either field (trade_proposals)', () => {
-    expect(universeOf({ shadow_tier: 0 })).toBe('core');
-    expect(universeOf({ stage: 'scan' })).toBe('core');
-    expect(universeOf({})).toBe('core');
-    expect(universeOf(null)).toBe('core');
-  });
-});
 
 describe('formatNarrative', () => {
   it('shows the polarity verdict when the LLM classified the narrative', () => {

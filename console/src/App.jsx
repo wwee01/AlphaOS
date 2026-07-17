@@ -12,20 +12,26 @@ import Positions from './pages/Positions.jsx';
 import Approvals from './pages/Approvals.jsx';
 import Decisions from './pages/Decisions.jsx';
 import Learning from './pages/Learning.jsx';
+import Research from './pages/Research.jsx';
 import Governance from './pages/Governance.jsx';
 import System from './pages/System.jsx';
 import Masthead from './components/Masthead.jsx';
 import { ErrorBoundary } from './components/ErrorBoundary.jsx';
 import {
-  IconBars, IconBook, IconCheckShield, IconFunnel, IconGear, IconMoon, IconShield,
+  IconBars, IconBook, IconCheckShield, IconFlask, IconFunnel, IconGear, IconMoon, IconShield,
 } from './components/icons.jsx';
 
+// 2026-07-17: Research sits between Learning and Governance -- Learning's
+// sibling (measurement-only, zero-decision-surface), split out of Decisions
+// so shadow-tier research data never shares a page with live trade
+// decisions again (Fable 5 strategic consult, same day).
 const VIEWS = [
   { key: 'tonight', label: 'Tonight', Icon: IconMoon, Component: Tonight },
   { key: 'positions', label: 'Positions', Icon: IconBars, Component: Positions },
   { key: 'approvals', label: 'Approvals', Icon: IconCheckShield, Component: Approvals },
   { key: 'decisions', label: 'Decisions', Icon: IconFunnel, Component: Decisions },
   { key: 'learning', label: 'Learning', Icon: IconBook, Component: Learning },
+  { key: 'research', label: 'Research', Icon: IconFlask, Component: Research },
   { key: 'governance', label: 'Autonomy & Risk', Icon: IconShield, Component: Governance },
   { key: 'system', label: 'System & Audit', Icon: IconGear, Component: System },
 ];

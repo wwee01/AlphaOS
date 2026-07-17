@@ -21,7 +21,9 @@ import sqlite3
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
-from alphaos.constants import FailsafeReason, LabelSource, ProposalStatus, Severity
+from alphaos.constants import (
+    FailsafeReason, LabelSource, ProposalStatus, SHADOW_AUDIT_MIN_TRADING_DAYS, Severity,
+)
 from alphaos.journal.schema import INDEXES, SCHEMA, SCHEMA_VERSION
 from alphaos.lineage.hashing import stable_hash
 from alphaos.util import timeutils
@@ -517,7 +519,8 @@ class JournalStore:
         # to exclude, via the one transition that has no eager writer.
         now_iso = timeutils.to_iso(timeutils.now_utc())
         return self.query(
-            "SELECT * FROM candidates c WHERE c.status = 'proposed' AND NOT EXISTS ("
+            "SELECT * FROM candidates c WHERE c.status = 'proposed' AND c.shadow_tier = 0 "
+            "AND NOT EXISTS ("
             "  SELECT 1 FROM trade_proposals tp WHERE tp.candidate_id = c.candidate_id "
             f"  AND (tp.status IN ({placeholders}) "
             "       OR tp.proposal_expires_at_utc IS NULL OR tp.proposal_expires_at_utc <= ?)"
@@ -526,10 +529,89 @@ class JournalStore:
         )
 
     def watch_candidates(self, limit: int = 200) -> list[dict]:
-        return self.candidates_by_status("watch", limit)
+        """Core-book only (2026-07-17 Research-tab split): a shadow-tier row
+        can reach status='watch' the moment SHADOW_LABELLING_ENABLED is ever
+        armed (nothing else stops it -- today's core-only-ness is incidental
+        on that flag being off, not a guarantee), and this is the operator's
+        live "what's worth watching for a real trade" surface -- shadow
+        measurement never belongs here, armed or not. Deliberately NOT
+        `candidates_by_status()` + a filter arg: that generic helper stays
+        generic (recent_candidate_labels()/label_summary() already establish
+        the "shadow exclusion lives in the specific method, not an opt-in
+        flag on a shared one" convention this follows)."""
+        return self.query(
+            "SELECT * FROM candidates WHERE status = 'watch' AND shadow_tier = 0 "
+            "ORDER BY id DESC LIMIT ?", (limit,),
+        )
 
     def rejected_candidates_recent(self, limit: int = 200) -> list[dict]:
-        return self.query("SELECT * FROM rejected_candidates ORDER BY id DESC LIMIT ?", (limit,))
+        """Core-book only. `rejected_candidates` has no shadow_tier column of
+        its own (unlike `candidates`) -- shadow-universe screen rejects stamp
+        `stage='shadow_scan'` instead (candidate_scanner.scan_shadow_tier's
+        own reject calls); COALESCE so a NULL/legacy stage still shows
+        (absence of evidence is not evidence of shadow-ness, same convention
+        as open_proposals()'s COALESCE on shadow_tier)."""
+        return self.query(
+            "SELECT * FROM rejected_candidates WHERE COALESCE(stage, '') != 'shadow_scan' "
+            "ORDER BY id DESC LIMIT ?", (limit,),
+        )
+
+    def _latest_per_symbol(self, base_sql: str, params: tuple, limit: int, history_per_symbol: int) -> list[dict]:
+        """Shared window-function core for watch_candidates_latest()/
+        rejected_candidates_latest() (2026-07-17, "why do I see the same
+        ticker over and over" -- an append-only per-scan log collapsed to
+        one row per symbol). `base_sql` is a full SELECT over one table
+        aliased `t`, already filtered to the population this method should
+        cover (core-only, whatever status/stage predicate applies) -- this
+        helper adds ONLY the windowing, so the two callers can't drift on
+        the underlying filter logic.
+
+        `occurrence_count` is computed over EVERY matching row for that
+        symbol, never capped by `history_per_symbol` -- "seen 15 times" must
+        stay 15 even when only 10 history rows are returned. `history` is
+        newest-first, strictly older than the latest row, capped at
+        `history_per_symbol`."""
+        rows = self.query(
+            f"SELECT * FROM ("
+            f"  SELECT t.*, "
+            f"    COUNT(*) OVER (PARTITION BY t.symbol) AS occurrence_count, "
+            f"    MIN(t.created_at_utc) OVER (PARTITION BY t.symbol) AS first_seen_at_utc, "
+            f"    ROW_NUMBER() OVER (PARTITION BY t.symbol ORDER BY t.id DESC) AS rn "
+            f"  FROM ({base_sql}) t"
+            f") WHERE rn <= ? ORDER BY id DESC",
+            (*params, history_per_symbol + 1),
+        )
+        latest_by_symbol: dict = {}
+        order: list = []
+        for row in rows:
+            rn = row.pop("rn")
+            symbol = row["symbol"]
+            if rn == 1:
+                row["history"] = []
+                latest_by_symbol[symbol] = row
+                order.append(symbol)
+            else:
+                latest_by_symbol[symbol]["history"].append(row)
+        return [latest_by_symbol[sym] for sym in order[:limit]]
+
+    def watch_candidates_latest(self, limit: int = 100, history_per_symbol: int = 10) -> list[dict]:
+        """One row per symbol currently on watch (the latest evaluation),
+        newest-first, with `occurrence_count`/`first_seen_at_utc`/`history`
+        attached -- see _latest_per_symbol()'s docstring. Core-only, same
+        predicate as watch_candidates()."""
+        return self._latest_per_symbol(
+            "SELECT * FROM candidates WHERE status = 'watch' AND shadow_tier = 0",
+            (), limit, history_per_symbol,
+        )
+
+    def rejected_candidates_latest(self, limit: int = 100, history_per_symbol: int = 10) -> list[dict]:
+        """One row per symbol among recent core-book rejects, newest-first,
+        with `occurrence_count`/`first_seen_at_utc`/`history` attached.
+        Core-only, same predicate as rejected_candidates_recent()."""
+        return self._latest_per_symbol(
+            "SELECT * FROM rejected_candidates WHERE COALESCE(stage, '') != 'shadow_scan'",
+            (), limit, history_per_symbol,
+        )
 
     def blocked_proposals(self, limit: int = 200) -> list[dict]:
         return self.query(
@@ -578,6 +660,85 @@ class JournalStore:
                 "WHERE shadow_tier = 0 GROUP BY label_decision ORDER BY n DESC"
             ),
         }
+
+    # ------------------------------------------- 2.3b shadow instrument health
+    # (Research tab, 2026-07-17): the OPPOSITE of label_summary() above --
+    # this is a shadow-ONLY view, for the one page that exists specifically
+    # to talk about the measurement instrument (never mixed with the core
+    # book, mirroring the same never-pool law from the other direction).
+    def shadow_instrument_health(self) -> dict:
+        """Capture-window / coverage / rejection-reason facts for the
+        shadow-tier research universe -- answers "when is the saturation
+        audit viable", never "what should the AI conclude" (that's the
+        audit script's job, run by hand against the real DB, never this
+        live 15s-poll surface -- see routes.py's /research docstring).
+        Unknown-never-zero throughout: an empty/fresh DB reads as
+        capture_days=0 / None dates / [] coverage, never a fabricated 0%."""
+        window = self.one(
+            "SELECT COUNT(DISTINCT market_date) AS days, MIN(market_date) AS first_day, "
+            "MAX(market_date) AS last_day FROM universe_days WHERE instrument_version = 'instr1'"
+        ) or {}
+        capture_days = int(window.get("days") or 0)
+
+        coverage_by_day = self.query(
+            "SELECT market_date, COUNT(*) AS symbols, "
+            "SUM(CASE WHEN freshness_status = 'usable' THEN 1 ELSE 0 END) AS usable, "
+            "SUM(CASE WHEN freshness_status = 'stale' THEN 1 ELSE 0 END) AS stale, "
+            "SUM(candidate_found) AS candidates_found "
+            "FROM universe_days WHERE instrument_version = 'instr1' "
+            "GROUP BY market_date ORDER BY market_date DESC LIMIT 15"
+        )
+        for row in coverage_by_day:
+            symbols = int(row.get("symbols") or 0)
+            usable = int(row.get("usable") or 0)
+            row["usable_pct"] = round(usable / symbols * 100, 1) if symbols else None
+
+        latest_universe_size = coverage_by_day[0]["symbols"] if coverage_by_day else None
+
+        rows_by_version = self.query(
+            "SELECT instrument_version, COUNT(*) AS rows, "
+            "COUNT(DISTINCT substr(created_at_sgt, 1, 10)) AS sgt_days "
+            "FROM candidates WHERE shadow_tier = 1 GROUP BY instrument_version"
+        )
+        screen_rejects_by_reason = self.query(
+            "SELECT reason_code, COUNT(*) AS n FROM rejected_candidates "
+            "WHERE stage = 'shadow_scan' GROUP BY reason_code ORDER BY n DESC"
+        )
+        shadow_candidate_rows_total = int(self.scalar(
+            "SELECT COUNT(*) FROM candidates WHERE shadow_tier = 1"
+        ) or 0)
+        screen_rejects_total = int(self.scalar(
+            "SELECT COUNT(*) FROM rejected_candidates WHERE stage = 'shadow_scan'"
+        ) or 0)
+        shadow_labels_total = int(self.scalar(
+            "SELECT COUNT(*) FROM candidate_labels WHERE shadow_tier = 1"
+        ) or 0)
+
+        min_days = SHADOW_AUDIT_MIN_TRADING_DAYS
+        return {
+            "capture_days": capture_days,
+            "first_market_date": window.get("first_day"),
+            "last_market_date": window.get("last_day"),
+            "audit_min_trading_days": min_days,
+            "audit_days_remaining": max(0, min_days - capture_days),
+            "audit_viable": capture_days >= min_days,
+            "universe_size_latest": latest_universe_size,
+            "coverage_by_day": coverage_by_day,
+            "rows_by_instrument_version": rows_by_version,
+            "shadow_candidate_rows_total": shadow_candidate_rows_total,
+            "screen_rejects_total": screen_rejects_total,
+            "screen_rejects_by_reason": screen_rejects_by_reason,
+            "shadow_labels_total": shadow_labels_total,
+        }
+
+    def shadow_recent_captures(self, limit: int = 25) -> list[dict]:
+        """Raw, newest-first shadow-tier candidate rows -- the Research
+        tab's one demoted detail table (§5's "Recent shadow captures (raw)",
+        the only place a shadow symbol is ever named, inside a page whose
+        header already says none of this can trade)."""
+        return self.query(
+            "SELECT * FROM candidates WHERE shadow_tier = 1 ORDER BY id DESC LIMIT ?", (limit,)
+        )
 
     # ---------------------------------------------- 2.4 catalyst enrichment views
     def catalyst_for_candidate(self, candidate_id: str) -> Optional[dict]:

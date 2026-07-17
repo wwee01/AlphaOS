@@ -107,6 +107,16 @@ SHADOW_V1_DAY_RANGE_MIN = 0.035        # PROVISIONAL (megacap: 0.02)
 SHADOW_V1_MOMENTUM_CHANGE_CAP = 0.12   # PROVISIONAL (megacap: 0.08, candidate_scanner.py momentum_score)
 SHADOW_V1_MOMENTUM_RELVOL_CAP = 4.0    # PROVISIONAL (megacap: 3.0, candidate_scanner.py momentum_score)
 
+# 2026-07-17 (Research tab): the single source of truth for "is shadow
+# calibration still a guess". SHADOW_INTEREST_SCORE_VERSION_V1 IS the
+# placeholder generation by the law stated above ("bumping the version to
+# _v2" is how the saturation audit's own instructions describe applying real
+# numbers) -- so provisional-vs-audited is this version string's own "_v1"
+# suffix, never a second flag that could drift out of sync with it. Bump
+# this alias (not the _V1 constant itself, which stays a historical anchor)
+# the day the audit's literals replace the ones above.
+SHADOW_INTEREST_SCORE_VERSION_CURRENT = SHADOW_INTEREST_SCORE_VERSION_V1
+
 
 def _spread_pct_mid(snapshot: dict) -> Optional[float]:
     """EXP-1 mechanism 10: spread as a fraction of the quote MIDPOINT, not

@@ -44,6 +44,10 @@ from alphaos.reports.position_health import assess_positions
 from alphaos.reports.tqs_report import build_tqs_report
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
+from alphaos.scanner.candidate_scanner import (
+    SHADOW_INTEREST_SCORE_VERSION_CURRENT, SHADOW_V1_CHANGE_SCALE, SHADOW_V1_DAY_RANGE_MIN,
+    SHADOW_V1_MOMENTUM_CHANGE_CAP, SHADOW_V1_MOMENTUM_RELVOL_CAP, SHADOW_V1_REL_VOL_SCALE,
+)
 from alphaos.util import timeutils
 
 router = APIRouter(prefix="/api/v1")
@@ -232,8 +236,15 @@ def decisions(journal: JournalStore = Depends(get_journal)) -> dict:
     unresolved replay" rule) rather than re-deriving it here."""
     label_summary = journal.label_summary()
     proposed = journal.proposed_candidates(100)
-    watch = journal.watch_candidates(200)
-    rejected = journal.rejected_candidates_recent(200)
+    # 2026-07-17 (Research-tab split): core-only is now a hard filter inside
+    # these methods (was incidental on SHADOW_LABELLING_ENABLED being off),
+    # and watch/rejected are latest-per-symbol (was an append-only per-scan
+    # log -- 134 rows for 21 symbols read as noise). Each returned row
+    # carries occurrence_count/first_seen_at_utc/history; blocked/proposed
+    # stay as-is (proposed is already a self-pruning "currently pending"
+    # list, per journal_store.py's own docstring on why it isn't deduped).
+    watch = journal.watch_candidates_latest(100)
+    rejected = journal.rejected_candidates_latest(100)
     blocked = journal.blocked_proposals(200)
     rejected_hindsight = journal.attribution_by_candidate(
         [cid for c in rejected if (cid := _candidate_id_str(c))]
@@ -297,6 +308,58 @@ def learning(settings: Settings = Depends(get_settings), journal: JournalStore =
         "hypotheses": build_hypothesis_report(journal),
         "hypothesis_drafts": list_drafts(journal, status="draft"),
         "journal_feed": build_journal_feed(journal, limit=50),
+        "as_of": _as_of(),
+    }
+
+
+@router.get("/research")
+def research(settings: Settings = Depends(get_settings), journal: JournalStore = Depends(get_journal)) -> dict:
+    """The Research tab -- the shadow-tier (EXP-0/EXP-1) instrument's OWN
+    surface, split out from /decisions 2026-07-17 specifically so shadow
+    measurement data never shares a page with live trade decisions again
+    (Fable 5 strategic consult: Decisions answers "what did the live
+    machine decide"; shadow rows can never answer that -- the orchestrator
+    itself raises if one ever reaches a trade decision).
+
+    Deliberately reports READINESS, never audit conclusions: "how many
+    trading days captured vs the ~20-day bar" (journal.shadow_instrument_
+    health()), never percentiles/recommended-constant values. Those are a
+    build-time, hand-run, version-bumped act (scripts/shadow_saturation_
+    audit.py's own docstring: "never a guess, never env-tunable, never
+    retro-scored") -- surfacing them on a 15s-poll console would recreate
+    the exact premature-application pressure the operator already declined
+    once on a 6-day sample (2026-07-16 hold decision). This endpoint answers
+    "is it time to go run the script", not "what should the constants be".
+
+    `constants.provisional` is derived from the version string's own "_v1"
+    suffix (SHADOW_INTEREST_SCORE_VERSION_CURRENT), never a second flag --
+    see candidate_scanner.py's comment on why that alias is the single
+    source of truth for guessed-vs-audited."""
+    version = SHADOW_INTEREST_SCORE_VERSION_CURRENT
+    return {
+        "shadow_tier_enabled": settings.shadow_tier_enabled,
+        "shadow_labelling_enabled": settings.shadow_labelling_enabled,
+        "constants": {
+            "interest_score_version": version,
+            "provisional": version.endswith("_v1"),
+            "values": {
+                "change_scale": SHADOW_V1_CHANGE_SCALE,
+                "rel_vol_scale": SHADOW_V1_REL_VOL_SCALE,
+                "day_range_min": SHADOW_V1_DAY_RANGE_MIN,
+                "momentum_change_cap": SHADOW_V1_MOMENTUM_CHANGE_CAP,
+                "momentum_relvol_cap": SHADOW_V1_MOMENTUM_RELVOL_CAP,
+            },
+        },
+        "universe_config": {
+            "min_adv_usd": settings.shadow_tier_min_adv_usd,
+            "max_adv_usd": settings.shadow_tier_max_adv_usd,
+            "min_price": settings.shadow_tier_min_price,
+            "max_price": settings.shadow_tier_max_price,
+            "target_count": settings.shadow_tier_target_count,
+            "max_count": settings.shadow_tier_max_count,
+        },
+        "capture": journal.shadow_instrument_health(),
+        "recent_captures": journal.shadow_recent_captures(25),
         "as_of": _as_of(),
     }
 

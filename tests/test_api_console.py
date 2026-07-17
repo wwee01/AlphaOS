@@ -218,8 +218,8 @@ def test_positions_empty_journal_returns_empty_list(tmp_path):
 
 @pytest.mark.parametrize("path", [
     "/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions",
-    "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/governance",
-    "/api/v1/system", "/api/v1/system/trade-packet",
+    "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/research",
+    "/api/v1/governance", "/api/v1/system", "/api/v1/system/trade-packet",
 ])
 def test_disallowed_origin_returns_403(tmp_path, path):
     settings, journal, _ = _seed(tmp_path)
@@ -279,8 +279,8 @@ def test_serving_every_endpoint_writes_nothing(tmp_path):
     client = _client(settings)
     for path in (
         "/api/v1/health", "/api/v1/annunciator", "/api/v1/tonight", "/api/v1/positions",
-        "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/governance",
-        "/api/v1/system", "/api/v1/system/trade-packet",
+        "/api/v1/approvals", "/api/v1/decisions", "/api/v1/learning", "/api/v1/research",
+        "/api/v1/governance", "/api/v1/system", "/api/v1/system/trade-packet",
     ):
         r = client.get(path, headers=HEADERS)
         assert r.status_code == 200, f"{path} returned {r.status_code}: {r.text}"

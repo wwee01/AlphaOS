@@ -921,6 +921,12 @@ SHADOW_INTEREST_SCORE_VERSION_V1 = "interest_score_shadow_v1"
 SHADOW_LIQUIDITY_INSTRUMENTATION_VERSION_V1 = "liq_v1"
 SHADOW_LABEL_SKIPPED_REASON_STALE = "stale"
 
+# 2026-07-17 (Research tab): scripts/shadow_saturation_audit.py's own
+# "fewer than N trading days -- treat with caution" bar (~4 weeks), shared
+# here so the console's instrument-health readiness check and the script's
+# own warning can never silently drift apart.
+SHADOW_AUDIT_MIN_TRADING_DAYS = 20
+
 # selection_arm values (mechanism 2): stamped on every shadow-tier labelled row.
 SHADOW_SELECTION_ARM_TOP_K = "top_k"
 SHADOW_SELECTION_ARM_EXPLORE = "explore"

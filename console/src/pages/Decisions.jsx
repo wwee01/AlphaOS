@@ -4,65 +4,121 @@
 // proposed/watch/rejected/blocked sections and tab_open_trades()/
 // tab_closed_trades(). Every candidate/trade field is the raw journal
 // column, unreshaped; client-side logic is display formatting only
-// (decisions.js: formatHindsight/formatNarrative/universeOf, each mirroring
-// or reading a raw journal field) and view state (collapse/expand, the
-// shadow-row visibility toggle -- counts always shown, nothing silently
-// dropped).
+// (decisions.js: formatHindsight/formatNarrative/formatSentimentHint) and
+// view state (collapse/expand, which symbol's history is expanded).
 //
-// 2026-07-17 operator redesign ruling ("free play ... for this tab to be
-// neater"): (1) every candidate row carries a core/shadow universe badge;
-// (2) long lists collapse to the first rows with an explicit "show all (N)"
-// control; (3) the narrative column shows the polarity LLM's verdict
-// (polarity_label), never the legacy always-'unknown' sentiment_label hint --
-// shown alongside a separate "last30 hint" column carrying the raw
-// sentiment_label as-is (operator request, same day: show both, since they
-// are different signals -- one is the enricher's un-classified per-cluster
-// hint, the other the LLM's actual verdict); (4) the rejected list hides
-// shadow-universe screen rejects by default behind a labelled toggle,
-// because 200 shadow rows were burying the ~20 live rejects the operator
-// actually needs to read.
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+// 2026-07-17 operator redesign, TWO passes same day:
+//   pass 1: every candidate row carried a core/shadow universe badge, and
+//     the rejected list hid shadow-universe screen rejects behind a toggle.
+//   pass 2 (this one, Fable 5 architecture consult): shadow data moved to
+//     its OWN tab (pages/Research.jsx) -- the server now hard-filters
+//     proposed/watch/rejected to core-only (journal_store.py), so the badge
+//     and toggle are dead weight and removed. Separately, watch/rejected
+//     were an append-only per-scan log (134 rows for 21 symbols read as
+//     noise, the operator's own complaint) -- the server now returns ONE
+//     row per symbol (the latest) with `occurrence_count`/
+//     `first_seen_at_utc`/`history`; this page renders a "seen ×N" control
+//     that expands that symbol's history inline, one symbol at a time.
+import React, {
+  useCallback, useEffect, useRef, useState,
+} from 'react';
 import { getDecisions } from '../api.js';
 import { Block, DataTable, Badge } from '../components/ui.jsx';
+import { CollapsedTable } from '../components/CollapsedTable.jsx';
 import { Funnel } from '../components/Funnel.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
 import {
-  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint, universeOf,
+  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint,
 } from '../decisions.js';
 
 const POLL_MS = 15000;
-const COLLAPSED_ROWS = 8;
 
-function UniverseBadge({ row }) {
-  const u = universeOf(row);
-  if (u === 'shadow') return <Badge tone="warn" caps>shadow</Badge>;
-  return <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>core</span>;
+// "seen ×N" -- a clickable control only when there IS history to show (a
+// symbol seen once has nothing to expand). `onToggle` receives the row's
+// symbol; the caller owns which symbol (if any) is currently expanded.
+function SeenControl({ row, expanded, onToggle }) {
+  const n = row.occurrence_count ?? 1;
+  if (n <= 1) return <span className="num" style={{ color: 'var(--text-dim)' }}>1</span>;
+  return (
+    <button
+      type="button"
+      className="linklike"
+      onClick={() => onToggle(row.symbol)}
+      style={{
+        background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+        fontSize: 12, color: 'var(--primary)', fontFamily: 'inherit',
+      }}
+    >
+      {expanded ? '▴' : '▾'} ×{n}
+    </button>
+  );
 }
 
-// Trimmed from the original 10 columns (rank/status/decision dropped: rank
-// duplicates interest, status+decision are implied by which section the row
-// sits in) -- "dense but scannable".
-const CANDIDATE_COLUMNS = [
-  { key: 'symbol', label: 'symbol' },
-  { key: 'universe', label: 'universe', render: (r) => <UniverseBadge row={r} /> },
-  { key: 'primary_label', label: 'label' },
-  { key: 'label_confidence', label: 'confidence', numeric: true },
-  { key: 'interest_score', label: 'interest', numeric: true },
-  { key: 'catalyst_status', label: 'catalyst' },
-  { key: 'narrative', label: 'polarity', render: (r) => formatNarrative(r) },
-  { key: 'sentiment_label', label: 'last30 hint', render: (r) => formatSentimentHint(r) },
-  { key: 'shortlist_reason', label: 'reason' },
-];
+const HISTORY_COLUMNS_BY_KIND = {
+  candidate: [
+    { key: 'created_at_utc', label: 'seen (UTC)', render: (r) => formatClockUTC(r.created_at_utc) },
+    { key: 'primary_label', label: 'label' },
+    { key: 'label_confidence', label: 'confidence', numeric: true },
+    { key: 'interest_score', label: 'interest', numeric: true },
+  ],
+  rejected: [
+    { key: 'created_at_utc', label: 'seen (UTC)', render: (r) => formatClockUTC(r.created_at_utc) },
+    { key: 'reason_code', label: 'reason code' },
+    { key: 'reason_detail', label: 'reason detail' },
+  ],
+};
 
-const REJECTED_COLUMNS = [
-  { key: 'symbol', label: 'symbol' },
-  { key: 'universe', label: 'universe', render: (r) => <UniverseBadge row={r} /> },
-  { key: 'stage', label: 'stage' },
-  { key: 'reason_code', label: 'reason code' },
-  { key: 'reason_detail', label: 'reason detail' },
-  { key: 'hindsight', label: 'hindsight', numeric: true, render: (r) => formatHindsight(r.hindsight_raw) },
-];
+// Renders, directly beneath a watch/rejected table, the expanded symbol's
+// older sightings -- one row per prior scan, newest-first, exactly what
+// `occurrence_count` was counting. Collapses to nothing when no symbol in
+// this table is expanded.
+function HistoryPanel({ rows, expandedSymbol, kind }) {
+  if (!expandedSymbol) return null;
+  const row = (rows ?? []).find((r) => r.symbol === expandedSymbol);
+  const history = row?.history ?? [];
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+      <div className="label-caps" style={{ marginBottom: 6 }}>
+        history — {expandedSymbol} ({row?.occurrence_count ?? history.length} sighting(s))
+      </div>
+      <DataTable columns={HISTORY_COLUMNS_BY_KIND[kind]} rows={history} emptyText="No earlier sightings." />
+    </div>
+  );
+}
+
+// `deduped`: proposed_candidates() is NOT server-deduped (it's already a
+// self-pruning "currently pending" list -- see journal_store.py's own
+// docstring on why), so its rows never carry occurrence_count/history. A
+// "seen" column there would always render a bare, meaningless "1" -- so the
+// column itself is omitted rather than shown-but-always-1 (Audit LOW,
+// 2026-07-17).
+function buildCandidateColumns(expandedSymbol, onToggle, deduped = true) {
+  const cols = [{ key: 'symbol', label: 'symbol' }];
+  if (deduped) {
+    cols.push({ key: 'seen', label: 'seen', numeric: true, render: (r) => <SeenControl row={r} expanded={r.symbol === expandedSymbol} onToggle={onToggle} /> });
+  }
+  return [
+    ...cols,
+    { key: 'primary_label', label: 'label' },
+    { key: 'label_confidence', label: 'confidence', numeric: true },
+    { key: 'interest_score', label: 'interest', numeric: true },
+    { key: 'catalyst_status', label: 'catalyst' },
+    { key: 'narrative', label: 'polarity', render: (r) => formatNarrative(r) },
+    { key: 'sentiment_label', label: 'last30 hint', render: (r) => formatSentimentHint(r) },
+    { key: 'shortlist_reason', label: 'reason' },
+  ];
+}
+
+function buildRejectedColumns(expandedSymbol, onToggle) {
+  return [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'seen', label: 'seen', numeric: true, render: (r) => <SeenControl row={r} expanded={r.symbol === expandedSymbol} onToggle={onToggle} /> },
+    { key: 'reason_code', label: 'reason code' },
+    { key: 'reason_detail', label: 'reason detail' },
+    { key: 'hindsight', label: 'hindsight', numeric: true, render: (r) => formatHindsight(r.hindsight_raw) },
+  ];
+}
 
 const BLOCKED_COLUMNS = [
   { key: 'symbol', label: 'symbol' },
@@ -92,33 +148,6 @@ const CLOSED_TRADE_COLUMNS = [
   { key: 'created_at_utc', label: 'closed (UTC)' },
 ];
 
-// DataTable wrapper that renders only the first `initial` rows until the
-// operator expands it. The full count is ALWAYS visible in the control --
-// collapsing is a view choice, never silent truncation.
-function CollapsedTable({ columns, rows, emptyText, initial = COLLAPSED_ROWS }) {
-  const [expanded, setExpanded] = useState(false);
-  const all = rows ?? [];
-  const visible = expanded ? all : all.slice(0, initial);
-  return (
-    <>
-      <DataTable columns={columns} rows={visible} emptyText={emptyText} />
-      {all.length > initial && (
-        <button
-          type="button"
-          className="linklike"
-          onClick={() => setExpanded((e) => !e)}
-          style={{
-            background: 'none', border: 'none', padding: '6px 0 0', cursor: 'pointer',
-            fontSize: 12, color: 'var(--primary)',
-          }}
-        >
-          {expanded ? '▴ show fewer' : `▾ show all ${all.length}`}
-        </button>
-      )}
-    </>
-  );
-}
-
 function GateFunnel({ labelSummary }) {
   const stages = buildDecisionFunnelStages(labelSummary.by_label_decision);
   return (
@@ -138,29 +167,34 @@ function GateFunnel({ labelSummary }) {
   );
 }
 
-// Rejected candidates: live-book rows shown by default; shadow-universe
-// screen rejects (stage='shadow_scan' -- research-capture volume, hundreds
-// of rows) sit behind a labelled toggle with their count always visible.
-function RejectedBlock({ rejected }) {
-  const [showShadow, setShowShadow] = useState(false);
-  const all = rejected ?? [];
-  const live = all.filter((r) => universeOf(r) === 'core');
-  const shadowCount = all.length - live.length;
-  const rows = showShadow ? all : live;
+// One row per symbol now (server-side dedup) -- "N candidates" in the title
+// is the true distinct-symbol count, not a per-scan event count.
+function WatchBlock({ watch }) {
+  const [expandedSymbol, setExpandedSymbol] = useState(null);
+  const rows = watch ?? [];
+  const onToggle = useCallback(
+    (symbol) => setExpandedSymbol((cur) => (cur === symbol ? null : symbol)),
+    [],
+  );
   return (
-    <Block title={`Rejected candidates (${live.length} live)`}>
-      <CollapsedTable columns={REJECTED_COLUMNS} rows={rows} emptyText="None." />
-      {shadowCount > 0 && (
-        <label style={{ display: 'block', marginTop: 8, fontSize: 11, color: 'var(--text-dim)', cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={showShadow}
-            onChange={(e) => setShowShadow(e.target.checked)}
-            style={{ marginRight: 6, verticalAlign: 'middle' }}
-          />
-          include {shadowCount} shadow-universe screen reject(s) — research capture, not live decisions
-        </label>
-      )}
+    <Block title={`Watch candidates (${rows.length})`}>
+      <CollapsedTable columns={buildCandidateColumns(expandedSymbol, onToggle)} rows={rows} emptyText="No watch candidates." />
+      <HistoryPanel rows={rows} expandedSymbol={expandedSymbol} kind="candidate" />
+    </Block>
+  );
+}
+
+function RejectedBlock({ rejected }) {
+  const [expandedSymbol, setExpandedSymbol] = useState(null);
+  const rows = rejected ?? [];
+  const onToggle = useCallback(
+    (symbol) => setExpandedSymbol((cur) => (cur === symbol ? null : symbol)),
+    [],
+  );
+  return (
+    <Block title={`Rejected candidates (${rows.length})`}>
+      <CollapsedTable columns={buildRejectedColumns(expandedSymbol, onToggle)} rows={rows} emptyText="None." />
+      <HistoryPanel rows={rows} expandedSymbol={expandedSymbol} kind="rejected" />
     </Block>
   );
 }
@@ -211,13 +245,11 @@ export default function Decisions() {
 
             <div className="col-6">
               <Block title={`Proposed candidates (${(data.proposed ?? []).length})`}>
-                <CollapsedTable columns={CANDIDATE_COLUMNS} rows={data.proposed} emptyText="No proposed candidates." />
+                <CollapsedTable columns={buildCandidateColumns(null, () => {}, false)} rows={data.proposed} emptyText="No proposed candidates." />
               </Block>
             </div>
             <div className="col-6">
-              <Block title={`Watch candidates (${(data.watch ?? []).length})`}>
-                <CollapsedTable columns={CANDIDATE_COLUMNS} rows={data.watch} emptyText="No watch candidates." />
-              </Block>
+              <WatchBlock watch={data.watch} />
             </div>
 
             <div className="col-6">

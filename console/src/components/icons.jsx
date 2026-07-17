@@ -159,3 +159,17 @@ export function IconGear(props) {
     </Svg>
   );
 }
+
+// Research / shadow instrumentation tab (measurement-only telemetry,
+// 2026-07-17) -- a flask, distinct from every other tab's icon vocabulary
+// (none of Clock/Check/WarningTriangle/Chevron/Arrows fit "instrument under
+// test").
+export function IconFlask(props) {
+  return (
+    <Svg {...props}>
+      <path d="M10 3v5.5L5.2 16.8A2 2 0 0 0 7 20h10a2 2 0 0 0 1.8-3.2L14 8.5V3" />
+      <path d="M8.5 3h7" />
+      <path d="M7.5 14h9" />
+    </Svg>
+  );
+}

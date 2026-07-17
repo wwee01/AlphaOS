@@ -28,6 +28,7 @@ export const getPositions = () => apiGet('/positions');
 export const getApprovals = () => apiGet('/approvals');
 export const getDecisions = () => apiGet('/decisions');
 export const getLearning = () => apiGet('/learning');
+export const getResearch = () => apiGet('/research');
 export const getGovernance = () => apiGet('/governance');
 export const getSystem = () => apiGet('/system');
 export const getTradePacket = (params) => {

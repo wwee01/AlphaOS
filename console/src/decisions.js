@@ -3,6 +3,13 @@
 // API's /api/v1/decisions already attaches the raw attribution row under
 // `hindsight_raw`, unformatted; this is the ONLY place that turns it into
 // display text). No DOM, no React (ND-1 precedent: format.js).
+//
+// 2026-07-17: this file previously also carried `universeOf()` (a core/
+// shadow badge helper) -- removed once /api/v1/decisions started hard-
+// filtering to core-only server-side (journal_store.py) and shadow data
+// moved to its own tab (pages/Research.jsx, research.js). Nothing on this
+// page can be a shadow row anymore, so the distinction no longer applies
+// here.
 
 // An unresolved/missing replay reads "pending", never a fabricated 0R
 // (unknown-never-zero). A mock ΔR (is_mock on the attribution row -- only
@@ -39,20 +46,6 @@ export function buildDecisionFunnelStages(byLabelDecision) {
     { label: 'candidates', value: total },
     ...rows.map((r) => ({ label: r.decision ?? 'unknown', value: r.n ?? null })),
   ];
-}
-
-// Which universe a Decisions row came from (operator request 2026-07-17:
-// "label if the candidates are from the shadow universe or from the default
-// universe clearly"). Pure read of raw journal fields already on the row:
-// candidates rows carry shadow_tier (0/1); rejected_candidates rows carry no
-// shadow_tier but stamp stage='shadow_scan' for shadow-universe screen
-// rejects. trade_proposals rows are core by construction (EXP-0's chokepoint
-// guard: shadow candidates can never reach proposal creation) and carry
-// neither field, so they fall through to 'core' correctly.
-export function universeOf(row) {
-  if (!row) return 'core';
-  if (row.shadow_tier === 1 || row.stage === 'shadow_scan') return 'shadow';
-  return 'core';
 }
 
 // Narrative/sentiment cell (operator bug 2026-07-17: the column showed
