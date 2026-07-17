@@ -168,6 +168,10 @@ function Quiet() {
 }
 
 function TodaysActivity({ ta }) {
+  // Counters are keyed to the US trading day (midnight ET) and count the live
+  // book only -- never shadow-universe capture rows (operator ruling
+  // 2026-07-17; boundary + tier both set server-side in daily_brief.py's
+  // _todays_activity, this component just labels them honestly).
   return (
     <Block title="④ today's machine activity" style={{ height: '100%' }}>
       <StatFooter
@@ -178,7 +182,24 @@ function TodaysActivity({ ta }) {
           { label: 'rejected', value: ta.rejected_today },
         ]}
       />
+      <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 6 }}>
+        US trading day (resets midnight ET) · live book only, excludes shadow research universe
+      </div>
     </Block>
+  );
+}
+
+// ⑤ rewritten for plain English (operator request 2026-07-17: "clearer what
+// it is trying to say"). Three questions, one line each: how are we doing vs
+// the index / what looked best today / what did we learn. Full server-side
+// caveat text is preserved verbatim on hover (title=) -- shortened on screen,
+// never dropped: the honesty rules stay, the wall of text goes.
+function BriefRow({ label, children }) {
+  return (
+    <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', marginBottom: 8 }}>
+      <span className="label-caps" style={{ flex: '0 0 auto', width: 110 }}>{label}</span>
+      <span className="prose" style={{ fontSize: 13 }}>{children}</span>
+    </div>
   );
 }
 
@@ -186,39 +207,49 @@ function TonightsBrief({ brief }) {
   const mc = brief.market_condition;
   const bc = brief.best_candidate;
   const wl = brief.what_learned;
+  const measurable = mc.excess_return_pct !== null && mc.excess_return_pct !== undefined;
+  const ahead = measurable && mc.excess_return_pct >= 0;
   return (
     <Block title="⑤ tonight's brief" style={{ height: '100%' }}>
-      <div className="prose" style={{ fontSize: 13, marginBottom: 8 }}>
-        {mc.excess_return_pct !== null && mc.excess_return_pct !== undefined ? (
+      <BriefRow label="vs the market">
+        {measurable ? (
           <>
-            market: excess return{' '}
-            <span className="num">
-              {mc.excess_return_pct >= 0 ? '+' : ''}
-              {mc.excess_return_pct.toFixed(2)}%
+            <span className="num" style={{ color: ahead ? 'var(--good)' : 'var(--red)' }}>
+              {ahead ? '+' : ''}{mc.excess_return_pct.toFixed(2)}%
             </span>{' '}
-            vs S&amp;P (paired {mc.paired_trading_days} trading days)
+            {ahead ? 'ahead of' : 'behind'} the S&amp;P 500, measured over the {mc.paired_trading_days} day(s)
+            both were active
           </>
         ) : (
-          <>market: {mc.note ?? 'not yet measurable'}</>
+          <>too early to compare against the S&amp;P 500 ({mc.note ?? 'not yet measurable'})</>
         )}
-      </div>
-      <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 10 }}>⚠ {mc.caveat}</div>
+      </BriefRow>
 
-      <div className="prose" style={{ fontSize: 13, marginBottom: 8 }}>
-        best candidate today: {bc ? (
-          <>{bc.symbol} — TQS {bc.tqs_score} ({bc.tqs_bucket}), interest {bc.interest_score}, confidence {bc.label_confidence}</>
-        ) : '(none)'}
-      </div>
+      <BriefRow label="best setup">
+        {bc ? (
+          <>
+            {bc.symbol} scored highest today — trade quality {bc.tqs_score}/100 ({bc.tqs_bucket})
+            <span style={{ color: 'var(--text-dim)' }}>
+              {' '}· AI label confidence {Math.round((bc.label_confidence ?? 0) * 100)}%
+            </span>
+          </>
+        ) : 'nothing stood out today'}
+      </BriefRow>
 
-      <div style={{ fontSize: 13, marginBottom: 4 }}>learned today ({wl.total_resolved_today} resolved):</div>
-      {wl.sentences.length ? (
-        wl.sentences.map((s, i) => (
-          <div key={i} className="prose" style={{ fontSize: 12, color: 'var(--text-dim)', padding: '2px 0' }}>· {s}</div>
-        ))
-      ) : (
-        <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>(nothing newly resolved today)</div>
-      )}
-      <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>⚠ {wl.caveat}</div>
+      <BriefRow label="learned">
+        {wl.sentences.length ? `${wl.total_resolved_today} trade(s) resolved today:` : 'no trades resolved today, so no new lessons yet'}
+      </BriefRow>
+      {wl.sentences.map((s, i) => (
+        <div key={i} className="prose" style={{ fontSize: 12, color: 'var(--text-dim)', padding: '2px 0 2px 120px' }}>· {s}</div>
+      ))}
+
+      <div
+        className="prose"
+        title={`${mc.caveat ?? ''}\n\n${wl.caveat ?? ''}`}
+        style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, cursor: 'help' }}
+      >
+        ⚠ small sample — treat these numbers as early signals, not proof (hover for the full caveats)
+      </div>
     </Block>
   );
 }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { buildDecisionFunnelStages, formatHindsight } from './decisions.js';
+import {
+  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint, universeOf,
+} from './decisions.js';
 
 describe('formatHindsight', () => {
   it('reads "pending" when there is no attribution row at all (unknown-never-zero)', () => {
@@ -48,5 +50,49 @@ describe('buildDecisionFunnelStages', () => {
   it('falls back to "unknown" for a missing decision field, never dropping the row silently', () => {
     const stages = buildDecisionFunnelStages([{ decision: null, n: 4 }]);
     expect(stages[1].label).toBe('unknown');
+  });
+});
+
+describe('universeOf', () => {
+  it('reads shadow from a candidates row (shadow_tier=1)', () => {
+    expect(universeOf({ shadow_tier: 1 })).toBe('shadow');
+  });
+  it('reads shadow from a rejected_candidates row (stage=shadow_scan)', () => {
+    expect(universeOf({ stage: 'shadow_scan' })).toBe('shadow');
+  });
+  it('reads core for live rows and rows without either field (trade_proposals)', () => {
+    expect(universeOf({ shadow_tier: 0 })).toBe('core');
+    expect(universeOf({ stage: 'scan' })).toBe('core');
+    expect(universeOf({})).toBe('core');
+    expect(universeOf(null)).toBe('core');
+  });
+});
+
+describe('formatNarrative', () => {
+  it('shows the polarity verdict when the LLM classified the narrative', () => {
+    expect(formatNarrative({ polarity_label: 'bullish', sentiment_label: 'unknown' })).toBe('bullish');
+    expect(formatNarrative({ polarity_label: 'unclear' })).toBe('unclear');
+  });
+  it('never shows the legacy sentiment_label hint (live CLI provider never sets it)', () => {
+    expect(formatNarrative({ sentiment_label: 'bullish', last30days_status: 'available' }))
+      .toBe('not classified');
+  });
+  it('distinguishes the three honest non-answers', () => {
+    expect(formatNarrative({ last30days_status: 'available' })).toBe('not classified');
+    expect(formatNarrative({ last30days_status: 'none_found' })).toBe('no narrative found');
+    expect(formatNarrative({ last30days_status: 'unavailable' })).toBe('not researched');
+    expect(formatNarrative({})).toBe('not researched');
+  });
+});
+
+describe('formatSentimentHint', () => {
+  it('reads the raw sentiment_label as-is, unlike formatNarrative it never falls back to polarity_label', () => {
+    expect(formatSentimentHint({ sentiment_label: 'bullish', polarity_label: 'bearish' })).toBe('bullish');
+    expect(formatSentimentHint({ sentiment_label: 'unknown' })).toBe('unknown');
+  });
+  it('defaults to "unknown" when the field is missing, matching the enricher\'s own default', () => {
+    expect(formatSentimentHint({})).toBe('unknown');
+    expect(formatSentimentHint(null)).toBe('unknown');
+    expect(formatSentimentHint(undefined)).toBe('unknown');
   });
 });

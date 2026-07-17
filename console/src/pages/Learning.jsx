@@ -27,10 +27,57 @@ import { formatAttributionRow, formatHypothesisProgress, formatHypothesisStatus 
 
 const POLL_MS = 15000;
 
+// 2026-07-17 operator request: "how do I interpret the TQS table and
+// attribution table?" -- each panel opens with a plain-English "how to read
+// this" explainer. Wording is derived from (and must stay consistent with)
+// the authoritative backend semantics: tqs/scoring.py's _BUCKET_THRESHOLDS
+// and reports/attribution.py's ATTRIBUTION_V2_CAVEAT. Display copy only --
+// no number here is computed client-side.
+function HowToRead({ children }) {
+  return (
+    <div
+      className="prose"
+      style={{
+        fontSize: 12, color: 'var(--text-dim)', marginBottom: 12, padding: '8px 10px',
+        background: 'var(--surface-low)', border: '1px solid var(--border)', borderRadius: 4, lineHeight: 1.5,
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+const TQS_EXPLAINER = (
+  <>
+    <b>How to read this:</b> every candidate gets a Trade Quality Score, 0–100 — a checklist
+    of how much supporting evidence a setup had (trend, volume, catalyst, narrative, earnings
+    risk…), scored <i>before</i> the outcome is known. Buckets: 85+ strong · 70+ good ·
+    50+ watch · 25+ mixed · below 25 weak. The point of collecting these: once enough trades
+    resolve, we can check whether high-TQS setups actually earn more R than low-TQS ones — if
+    they don't, the checklist is wrong and gets revised. "Component availability" shows how
+    often each evidence input was even measurable — a low rate means the score is running
+    partially blind on that ingredient, not that the setups were bad.
+  </>
+);
+
+const ATTRIBUTION_EXPLAINER = (
+  <>
+    <b>How to read this:</b> every time reality deviated from the machine's frozen plan —
+    you overrode it, a gate blocked it, a proposal expired, or the fill differed from the
+    plan — we later measure what that deviation cost or earned, in R (risk units). Positive
+    mean ΔR on a slice = that kind of deviation has been <i>adding</i> value so far; negative
+    = costing. Each row is one deviation type + who caused it. Rows below the sample floor
+    show counts only ("insufficient sample") — no averages, because a 3-trade average is
+    noise. Nothing here sums to one "system score" on purpose: one trade can appear in
+    several slices.
+  </>
+);
+
 function TqsPanel({ tqs }) {
   if (tqs.scored_count === 0) {
     return (
       <Block title="TQS — evidence-weighted setup quality" tone="shadow">
+        <HowToRead>{TQS_EXPLAINER}</HowToRead>
         <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No TQS scores yet (mock rows excluded).</div>
       </Block>
     );
@@ -38,6 +85,7 @@ function TqsPanel({ tqs }) {
   const buckets = Object.entries(tqs.bucket_histogram).sort(([a], [b]) => a.localeCompare(b));
   return (
     <Block title="TQS — evidence-weighted setup quality" tone="shadow">
+      <HowToRead>{TQS_EXPLAINER}</HowToRead>
       <StatFooter
         stats={[
           { label: 'scored (live)', value: tqs.scored_count },
@@ -90,7 +138,10 @@ function AttributionPanel({ attribution }) {
 
   return (
     <Block title="Attribution — floor-gated ΔR aggregates" tone="shadow">
-      <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8 }}>{v2.caveat}</div>
+      <HowToRead>{ATTRIBUTION_EXPLAINER}</HowToRead>
+      <div className="prose" title={v2.caveat} style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 8, cursor: 'help' }}>
+        ⚠ heuristic, small-sample — never a per-trade verdict on you or the machine (hover for the full caveat)
+      </div>
       <StatFooter
         stats={[
           { label: 'total records', value: v2.total_records },

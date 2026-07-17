@@ -40,3 +40,44 @@ export function buildDecisionFunnelStages(byLabelDecision) {
     ...rows.map((r) => ({ label: r.decision ?? 'unknown', value: r.n ?? null })),
   ];
 }
+
+// Which universe a Decisions row came from (operator request 2026-07-17:
+// "label if the candidates are from the shadow universe or from the default
+// universe clearly"). Pure read of raw journal fields already on the row:
+// candidates rows carry shadow_tier (0/1); rejected_candidates rows carry no
+// shadow_tier but stamp stage='shadow_scan' for shadow-universe screen
+// rejects. trade_proposals rows are core by construction (EXP-0's chokepoint
+// guard: shadow candidates can never reach proposal creation) and carry
+// neither field, so they fall through to 'core' correctly.
+export function universeOf(row) {
+  if (!row) return 'core';
+  if (row.shadow_tier === 1 || row.stage === 'shadow_scan') return 'shadow';
+  return 'core';
+}
+
+// Narrative/sentiment cell (operator bug 2026-07-17: the column showed
+// sentiment_label, a legacy per-cluster HINT the live CLI provider never
+// sets -- see last30days_provider.py:54 "mock sets it, CLI leaves None" --
+// so every live row read "unknown" even when the polarity LLM HAD classified
+// it). The real classification is polarity_label (Roadmap 2.7). Fallbacks
+// distinguish the three honest non-answers instead of one misleading
+// "unknown": research never ran / ran but found nothing / ran but the
+// polarity classifier didn't produce a verdict.
+export function formatNarrative(row) {
+  if (!row) return 'not researched';
+  if (row.polarity_label) return row.polarity_label;
+  const status = row.last30days_status;
+  if (status === 'available' || status === 'stale') return 'not classified';
+  if (status === 'none_found') return 'no narrative found';
+  return 'not researched';
+}
+
+// Raw last30days sentiment hint, shown alongside the polarity verdict rather
+// than collapsed into it (operator request 2026-07-17, while diagnosing why
+// "sentiment" read unknown: the two are different signals -- this is the
+// un-classified per-cluster hint the enricher attaches directly, always
+// populated (defaults to 'unknown' with the live CLI provider -- see
+// last30days_provider.py:54) -- so a direct read, not a fallback chain.
+export function formatSentimentHint(row) {
+  return row?.sentiment_label ?? 'unknown';
+}
