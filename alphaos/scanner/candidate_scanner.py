@@ -37,9 +37,39 @@ from alphaos.util.ids import new_id
 
 # A small, deliberately liquid default universe for v1 (core tier). Illiquid
 # small caps / penny stocks are intentionally excluded.
+#
+# EXPANDED 2026-07-16 (operator decision, 20 -> 38 names): frequency was the
+# binding constraint -- 5 proposals in 16 days starves every learning
+# instrument (TQS shadow, attribution, baselines, hypothesis tests). This is a
+# deliberate REGIME CHANGE, not a tuning tweak: pre/post stats are not directly
+# comparable, and the universe hash stamped on every scan (lineage/builder.py's
+# stable_hash(sorted(DEFAULT_UNIVERSE))) marks the boundary for any analysis
+# that spans it.
+#
+# The 18 added names were screened against the LIVE iex feed (3 samples during
+# the 11:30-12:00 ET scan window, 2026-07-16) for observed quote spread vs the
+# MAX_SPREAD_PCT=1% gate -- not chosen from reputation. Two tiers:
+#   - clean passers (<1% observed): MU QCOM TXN MRVL PLTR UBER HOOD BAC V WMT
+#     DIS XOM XLV XLI
+#   - marginal (~1-3%, pass intermittently; expected to clear most often in the
+#     15:45-16:00 ET close window when iex depth is best): CAT UNH ORCL COIN
+#
+# DELIBERATELY EXCLUDED despite being mega-liquid in reality: ARM CRM GS BA CVX
+# SBUX MRK HD MA MCD LLY CRWD. Their true NBBO spreads are ~1 cent, but the
+# free iex feed QUOTES them 2-17% wide, and every gate/entry/stop/current_r
+# reads that quote -- so they would produce permanent WIDE_SPREAD rejects and,
+# worse, a midpoint too far off true price to measure honestly. This list is a
+# feed limitation, NOT a judgment about the names: a SIP-feed upgrade is the
+# lever that reclaims them (revisit this comment then).
 DEFAULT_UNIVERSE = [
+    # --- original v1 core book (unchanged) ---
     "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMD", "TSLA", "AMZN",
     "GOOGL", "META", "NFLX", "AVGO", "JPM", "XLK", "XLE", "XLF", "SMH", "COST",
+    # --- 2026-07-16 expansion: clean passers ---
+    "MU", "QCOM", "TXN", "MRVL", "PLTR", "UBER", "HOOD", "BAC", "V", "WMT",
+    "DIS", "XOM", "XLV", "XLI",
+    # --- 2026-07-16 expansion: marginal-spread (see note above) ---
+    "CAT", "UNH", "ORCL", "COIN",
 ]
 
 # EXP-0/INSTR-1 (flipped 2026-07-09): every shadow-tier candidate row stamps
