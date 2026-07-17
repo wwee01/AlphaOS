@@ -13,7 +13,15 @@ from alphaos.earnings.earnings_enricher import (
     recompute_with_hold_days,
 )
 from alphaos.earnings.earnings_provider import EarningsProximityResult
+from alphaos.util import timeutils
 from conftest import make_settings
+
+# Monday, no adjacent weekend/holiday inside a 3-trading-day window (see
+# test_flags_hold_window_with_no_weekend_gap_stays_consistent) -- the safe
+# anchor for tests that need "N calendar days out" to also be unambiguously
+# N calendar days clear of the TRADING-day hold boundary, regardless of which
+# real-world weekday the suite happens to run on.
+_SAFE_TODAY = date(2026, 1, 5)
 
 
 class _StubProvider:
@@ -44,10 +52,17 @@ def _settings(**over):
     return make_settings(EARNINGS_PROXIMITY_ENABLED="true", **over)
 
 
-def _result(symbol="AAPL", days_out=None, **kw):
+def _result(symbol="AAPL", days_out=None, today=None, **kw):
+    """``today`` overrides the calendar-day reference point (defaults to the
+    real ``date.today()``). Callers that also mock ``timeutils.market_date``
+    (the "today" the production hold-window comparison actually uses) MUST
+    pass the same ``today`` here, or the fixture's calendar-day math and the
+    production trading-day math will silently disagree depending on which
+    real-world weekday the suite runs on -- see _SAFE_TODAY and HOLD-1."""
     earnings_date = None
     if days_out is not None:
-        earnings_date = (date.today() + timedelta(days=days_out)).isoformat()
+        base = today if today is not None else date.today()
+        earnings_date = (base + timedelta(days=days_out)).isoformat()
     kw.setdefault("status", EarningsDataStatus.OK.value if days_out is not None
                   else EarningsDataStatus.UNAVAILABLE.value)
     return EarningsProximityResult(symbol=symbol, earnings_date=earnings_date, **kw)
@@ -191,11 +206,20 @@ def test_enrich_populates_context_for_ok_result():
     assert ctx.hold_days_used == _settings().earnings_proximity_default_hold_days
 
 
-def test_enrich_uses_default_hold_days_not_real_one():
+def test_enrich_uses_default_hold_days_not_real_one(monkeypatch):
     """enrich() runs before the real max_holding_days is known -- it must use the
-    conservative DEFAULT, not assume any particular trade's hold length."""
+    conservative DEFAULT, not assume any particular trade's hold length.
+
+    Anchored to _SAFE_TODAY (a Monday) via monkeypatching timeutils.market_date,
+    the "today" enrich()'s hold-window check actually uses. Without this, "5
+    days out" is built from the real calendar date while the production
+    comparison counts TRADING days (HOLD-1): on a real-world Wed/Thu/Fri, a
+    3-trading-day hold spans a weekend and stretches out to 5 calendar days,
+    landing exactly ON the boundary and flipping this assertion depending on
+    which weekday the suite happens to run on."""
+    monkeypatch.setattr(timeutils, "market_date", lambda dt=None: _SAFE_TODAY)
     s = _settings(EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS="3")
-    res = _result(days_out=5)
+    res = _result(days_out=5, today=_SAFE_TODAY)
     ctx = EarningsProximityEnricher(s, provider=_StubProvider(result=res)).enrich(_pkt())
     assert ctx.hold_days_used == 3
     assert ctx.earnings_within_hold_window == 0     # 5 days out > default 3-day hold
@@ -278,14 +302,18 @@ def test_summary_fields_subset():
 
 
 # ----------------------------------------------------- recompute_with_hold_days
-def test_recompute_does_not_refetch_only_reclassifies():
+def test_recompute_does_not_refetch_only_reclassifies(monkeypatch):
     """The provider is called exactly ONCE (inside enrich()); recompute must
     reclassify using the SAME fetched earnings_date, just against a new hold
     length -- days_until_earnings must be identical across recomputes. Proven
     with a CALL-COUNTING stub, not just value equality (a buggy recompute that
     silently refetched and happened to get the same date back would otherwise
-    slip past this test)."""
-    res = _result(days_out=5)
+    slip past this test).
+
+    Anchored to _SAFE_TODAY (see test_enrich_uses_default_hold_days_not_real_one
+    for why -- same calendar-vs-trading-day mismatch, same fix)."""
+    monkeypatch.setattr(timeutils, "market_date", lambda dt=None: _SAFE_TODAY)
+    res = _result(days_out=5, today=_SAFE_TODAY)
     stub = _StubProvider(result=res)
     e = EarningsProximityEnricher(_settings(EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS="3"), provider=stub)
     ctx = e.enrich(_pkt())
@@ -298,6 +326,27 @@ def test_recompute_does_not_refetch_only_reclassifies():
     assert recomputed.earnings_date == ctx.earnings_date
     assert recomputed.hold_days_used == 10
     assert recomputed.earnings_within_hold_window == 1  # now within the wider 10-day hold
+
+
+def test_enrich_weekend_crossing_hold_window_matches_trading_day_math(monkeypatch):
+    """Regression for the calendar-vs-trading-day fixture mismatch (the bug
+    behind the two flaky tests above): a Thursday 'today' with a 3-trading-day
+    hold spans Fri/Mon/Tue, so earnings 5 CALENDAR days out lands exactly ON
+    that trading-day boundary (still inside the hold), while 6 calendar days
+    out is one trading day past it (outside). Pinned to a fixed Thursday so
+    this boundary is exercised every run, not just on real-world Wed/Thu/Fri
+    test runs."""
+    thursday = date(2026, 1, 1)
+    monkeypatch.setattr(timeutils, "market_date", lambda dt=None: thursday)
+    s = _settings(EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS="3")
+
+    on_boundary = _result(days_out=5, today=thursday)  # Tue -- 3rd trading day after Thu
+    ctx = EarningsProximityEnricher(s, provider=_StubProvider(result=on_boundary)).enrich(_pkt())
+    assert ctx.earnings_within_hold_window == 1
+
+    past_boundary = _result(days_out=6, today=thursday)  # Wed -- one trading day past
+    ctx2 = EarningsProximityEnricher(s, provider=_StubProvider(result=past_boundary)).enrich(_pkt())
+    assert ctx2.earnings_within_hold_window == 0
 
 
 def test_recompute_never_raises_on_bad_context():
