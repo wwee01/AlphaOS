@@ -29,7 +29,7 @@ import { Funnel } from '../components/Funnel.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
 import {
-  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint,
+  buildDecisionFunnelStages, formatHindsight, formatNarrative,
 } from '../decisions.js';
 
 const POLL_MS = 15000;
@@ -93,6 +93,14 @@ function HistoryPanel({ rows, expandedSymbol, kind }) {
 // "seen" column there would always render a bare, meaningless "1" -- so the
 // column itself is omitted rather than shown-but-always-1 (Audit LOW,
 // 2026-07-17).
+//
+// 2026-07-17 (operator report): dropped the "last30 hint" (sentiment_label)
+// column added earlier the same day -- it read "unknown" for every row, not
+// as a partial gap but permanently: the live CLI provider hardcodes
+// sentiment_hint=None unconditionally (last30days_provider.py, only the
+// mock provider ever sets it), so this column carries zero information
+// under the operator's actual live config and never will. "polarity" below
+// (polarity_label, a separate model call) is the real signal and stays.
 function buildCandidateColumns(expandedSymbol, onToggle, deduped = true) {
   const cols = [{ key: 'symbol', label: 'symbol' }];
   if (deduped) {
@@ -105,7 +113,6 @@ function buildCandidateColumns(expandedSymbol, onToggle, deduped = true) {
     { key: 'interest_score', label: 'interest', numeric: true },
     { key: 'catalyst_status', label: 'catalyst' },
     { key: 'narrative', label: 'polarity', render: (r) => formatNarrative(r) },
-    { key: 'sentiment_label', label: 'last30 hint', render: (r) => formatSentimentHint(r) },
     { key: 'shortlist_reason', label: 'reason' },
   ];
 }

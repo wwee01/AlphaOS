@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  buildDecisionFunnelStages, formatHindsight, formatNarrative, formatSentimentHint,
+  buildDecisionFunnelStages, formatHindsight, formatNarrative,
 } from './decisions.js';
 
 describe('formatHindsight', () => {
@@ -68,17 +68,5 @@ describe('formatNarrative', () => {
     expect(formatNarrative({ last30days_status: 'none_found' })).toBe('no narrative found');
     expect(formatNarrative({ last30days_status: 'unavailable' })).toBe('not researched');
     expect(formatNarrative({})).toBe('not researched');
-  });
-});
-
-describe('formatSentimentHint', () => {
-  it('reads the raw sentiment_label as-is, unlike formatNarrative it never falls back to polarity_label', () => {
-    expect(formatSentimentHint({ sentiment_label: 'bullish', polarity_label: 'bearish' })).toBe('bullish');
-    expect(formatSentimentHint({ sentiment_label: 'unknown' })).toBe('unknown');
-  });
-  it('defaults to "unknown" when the field is missing, matching the enricher\'s own default', () => {
-    expect(formatSentimentHint({})).toBe('unknown');
-    expect(formatSentimentHint(null)).toBe('unknown');
-    expect(formatSentimentHint(undefined)).toBe('unknown');
   });
 });

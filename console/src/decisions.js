@@ -65,12 +65,11 @@ export function formatNarrative(row) {
   return 'not researched';
 }
 
-// Raw last30days sentiment hint, shown alongside the polarity verdict rather
-// than collapsed into it (operator request 2026-07-17, while diagnosing why
-// "sentiment" read unknown: the two are different signals -- this is the
-// un-classified per-cluster hint the enricher attaches directly, always
-// populated (defaults to 'unknown' with the live CLI provider -- see
-// last30days_provider.py:54) -- so a direct read, not a fallback chain.
-export function formatSentimentHint(row) {
-  return row?.sentiment_label ?? 'unknown';
-}
+// formatSentimentHint() (the raw sentiment_label column) lived here briefly
+// on 2026-07-17, same day it was added -- removed once the operator noticed
+// it read "unknown" for every single row and traced why: the live CLI
+// provider (last30days_provider.py) hardcodes sentiment_hint=None
+// unconditionally, only the mock provider ever sets it, so this field
+// carries zero information under any real config and always will.
+// formatNarrative() above (polarity_label, a separate model call) is the
+// real signal and is unaffected.
