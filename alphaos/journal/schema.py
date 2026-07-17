@@ -278,6 +278,19 @@ SCHEMA: list[tuple[str, str]] = [
             -- anywhere in this codebase -- UNIV-D/TEXT-0 owns populating
             -- this later). Nullable; no logic reads it yet.
             sector_cluster_key TEXT,
+            -- S1b: dormant placeholder columns for SETUP-1's card-selector
+            -- output (alphaos/cards/selector.py, S1a). Nothing writes these
+            -- yet -- select_card() has zero production callers throughout
+            -- S1a/S1b; wiring a stamping call site is S1c's job, which may
+            -- not run until H-PER-1P/H-PER-1N are preregistered (S1b's own
+            -- registration command, itself operator-invoked and not run as
+            -- part of this build). card_assignment_ref is TEXT (not
+            -- INTEGER) because select_card()'s own ref is currently an
+            -- earnings_calendar_cache row id but a future card's ref need
+            -- not be numeric; SQLite's dynamic typing stores either exactly.
+            card_assignment_status TEXT,
+            card_assignment_ref TEXT,
+            card_selector_version TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1929,6 +1942,13 @@ SCHEMA: list[tuple[str, str]] = [
             operator_approved_for_forward_test INTEGER NOT NULL DEFAULT 0,
             operator_decision_at_utc TEXT,
             operator_notes TEXT,
+            -- S1b: nullable extras a two-arm evaluation carries that the
+            -- one-arm evaluate_hypothesis() columns above have no room for
+            -- (bootstrap replicate counts, control population/fallback
+            -- shares, snapshot id + hash, placebo estimate/CI, sensitivity
+            -- views). NULL for every existing one-arm hypothesis row; only
+            -- evaluate_two_arm_hypothesis_pair() ever writes it.
+            evidence_detail_json TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -2381,6 +2401,55 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        "per_evidence_snapshots",
+        """
+        CREATE TABLE IF NOT EXISTS per_evidence_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            -- S1b: one immutable row per observation frozen for a
+            -- post_earnings_reaction_v1 formal-evidence snapshot. Both
+            -- H-PER-1P and H-PER-1N reference the SAME snapshot_id (one
+            -- shared freeze -- alphaos.stats.preregistration.
+            -- evaluate_two_arm_hypothesis_pair() writes this table and both
+            -- preregistrations rows in one transaction). Dormant: nothing
+            -- writes here until that function is actually invoked, which
+            -- does not happen during S1b's own build/tests (fixture
+            -- journals only) -- see registration/evaluation CLI docstrings.
+            snapshot_id TEXT NOT NULL,
+            -- 'per_event' (in the frozen E*), 'per_event_excluded' (dropped
+            -- before freezing E* -- no control reference cleared the
+            -- ladder; excluded_reason explains why), 'control' (primary
+            -- control-pool member), 'placebo_event'/'placebo_event_excluded'
+            -- /'placebo_control' (the fully independent placebo arms --
+            -- see per_evidence.py's own module docstring for why the
+            -- placebo never shares a row with the primary arms).
+            arm TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            -- Canonical event key string, e.g. "fiscal:2026-04-30" or
+            -- "report_date:2026-05-01" -- NULL for control-arm rows (a
+            -- control observation is not itself an "event").
+            event_key TEXT,
+            market_date TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            outcome_value REAL,
+            cluster_id TEXT NOT NULL,
+            -- Frozen ladder reference, e.g. "dt:2026-05-01:core" (rung 1) or
+            -- "tier:core" (rung 2 pooled) -- event-arm rows only, NULL for
+            -- control rows (a control can be a MEMBER of several strata's
+            -- pools; it has no single "assigned" stratum of its own).
+            stratum_key TEXT,
+            -- 'rung1' / 'rung2' -- event-arm rows only; NULL for control
+            -- rows and for '*_excluded' rows (which cleared no rung).
+            control_fallback TEXT,
+            -- Populated only for '*_excluded' rows -- e.g.
+            -- 'no_rung_cleared' (fewer than the rung-1/rung-2 minimums).
+            excluded_reason TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2621,6 +2690,12 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_created ON hypothesis_drafts(created_at_utc)",
     "CREATE INDEX IF NOT EXISTS idx_hypothesis_drafts_accepted_hypothesis "
     "ON hypothesis_drafts(accepted_hypothesis_id)",
+    # S1b: one immutable snapshot lookup by id, plus a per-arm scan; unique
+    # on (snapshot_id, arm, candidate_id) since one candidate appears at
+    # most once per arm within a single frozen snapshot.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_per_evidence_snapshots_unique "
+    "ON per_evidence_snapshots(snapshot_id, arm, candidate_id)",
+    "CREATE INDEX IF NOT EXISTS idx_per_evidence_snapshots_snapshot ON per_evidence_snapshots(snapshot_id)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).
