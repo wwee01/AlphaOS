@@ -270,6 +270,55 @@ def test_closed_mismatch_incident_blocks_new_entries():
     assert res.block_reason == ReasonCode.PROTECTION_INTEGRITY_FAILURE.value
 
 
+def test_incident_auto_resolves_when_its_position_closes(monkeypatch):
+    """2026-07-17 audit HIGH finding: an open incident whose position is closed
+    through a normal exit path was never resolved by anything -- the watchdog
+    only re-scores OPEN positions -- so has_blocking_incident() kept returning
+    it and every new entry stayed blocked forever. The orphan sweep at the top
+    of run_watchdog_pass must resolve it (resolved_by='position_closed') and
+    unblock new entries, WITHOUT touching incidents whose position is still
+    open."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    pos, _ = _open_protected_position(fake, om, journal, "META", 618.78, 594.99, 666.45, 41, max_holding_days=5)
+    fake.expire_leg("META", "stop_loss")
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    assert pw.has_blocking_incident(journal) is not None
+
+    # The operator does the natural thing: closes the unprotected position.
+    om.positions.close_position(pos["position_id"], 600.0, "manual", triggered_by="user")
+
+    counts = pw.run_watchdog_pass(journal, om.alpaca, s)
+    assert counts["orphaned_incidents_resolved"] == 1
+    assert pw.has_blocking_incident(journal) is None
+    resolved = journal.one(
+        "SELECT * FROM protection_checks WHERE position_id = ? AND resolved_at_utc IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1", (pos["position_id"],),
+    )
+    assert resolved["resolved_by"] == "position_closed"
+
+    new_prop = make_proposal(symbol="AAPL", entry=100.0, stop=97.0, target=106.0, qty=10)
+    _seed_proposal(journal, new_prop)
+    res = om.execute_proposal(new_prop)
+    assert res.blocked is False
+
+
+def test_incident_for_still_open_position_is_never_swept():
+    """The orphan sweep must be scoped to CLOSED positions only -- an incident
+    guarding a live exposure keeps blocking until the per-position self-heal
+    (PROTECTED/DEGRADED re-score) or a human resolves it."""
+    fake = FakeTradingClient()
+    s, journal, om = _paper_om(fake)
+    _open_protected_position(fake, om, journal, "META", 618.78, 594.99, 666.45, 41, max_holding_days=5)
+    fake.expire_leg("META", "stop_loss")
+    pw.run_watchdog_pass(journal, om.alpaca, s)
+    assert pw.has_blocking_incident(journal) is not None
+
+    counts = pw.run_watchdog_pass(journal, om.alpaca, s)
+    assert counts["orphaned_incidents_resolved"] == 0
+    assert pw.has_blocking_incident(journal) is not None
+
+
 def test_manual_approval_boundary_unchanged_when_no_incident(orchestrator):
     proposal_id, _ = inject_pending_proposal(orchestrator, symbol="AAPL")
     ok, msg = orchestrator.approve_proposal(proposal_id, approver="test")

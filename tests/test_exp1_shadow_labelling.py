@@ -842,6 +842,47 @@ def test_todays_activity_excludes_shadow_tier_proposals_from_counts(tmp_path, jo
     ta = brief["todays_activity"]
     assert ta["proposed_today"] == 0, "shadow-tier proposal inflated the proposed_today count"
     assert ta["blocked_today"] == 0, "shadow-tier proposal inflated the blocked_today count"
+    # Operator ruling 2026-07-17: the OTHER two buckets are live-tier-only as
+    # well -- previously candidates/rejected counted shadow capture rows while
+    # proposed/blocked excluded them, so one row of four numbers silently mixed
+    # two populations ("293 candidates, 0 proposed" on a 12-live-candidate day).
+    assert ta["candidates_today"] == 0, "shadow-tier candidate inflated the candidates_today count"
+
+
+def test_todays_activity_is_keyed_to_us_trading_day_not_sgt_midnight(tmp_path, journal):
+    """Operator ruling 2026-07-17: 'today's machine activity' follows the US
+    TRADING day (midnight ET -- the boundary the daily risk caps already use),
+    never the SGT calendar day. The SGT-midnight window wiped the counters to
+    zero at 00:00 SGT = 12:00 ET, the middle of the live session.
+
+    Fixed clock (18:00 ET summer = 22:00 UTC = 06:00 SGT next day) so both
+    boundaries are known constants: midnight ET = 04:00 UTC; SGT midnight
+    (of the SGT day containing `now`) = 16:00 UTC. A live candidate created at
+    05:00 UTC -- inside the ET trading day but BEFORE SGT midnight -- must be
+    counted; SGT keying would drop it. Deterministic by construction (see
+    build_daily_brief's `now` docstring): never assert date windows against
+    the wall clock."""
+    from datetime import datetime, timezone
+
+    from alphaos.reports.daily_brief import build_daily_brief
+
+    fixed_now = datetime(2026, 7, 15, 22, 0, 0, tzinfo=timezone.utc)
+    journal.insert("candidates", {
+        "candidate_id": "cand-etday-1", "symbol": "ETDAY", "shadow_tier": 0,
+        "created_at_utc": "2026-07-15T05:00:00+00:00",
+    })
+    journal.insert("candidates", {
+        "candidate_id": "cand-etday-0", "symbol": "PRIORDAY", "shadow_tier": 0,
+        "created_at_utc": "2026-07-15T03:59:00+00:00",  # before midnight ET: prior trading day
+    })
+
+    settings = make_settings()
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+    ta = build_daily_brief(journal, settings, kill_switch, now=fixed_now)["todays_activity"]
+    assert ta["candidates_today"] == 1, (
+        "expected exactly the 05:00-UTC candidate (inside the ET trading day, "
+        "before SGT midnight); SGT-midnight keying would return 0 here"
+    )
 
 
 def test_tqs_score_scan_batch_excludes_shadow_tier(tmp_path):

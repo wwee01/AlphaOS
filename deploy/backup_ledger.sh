@@ -112,7 +112,18 @@ fi
 
 mkdir -p "$DAILY_DIR" "$MONTHLY_DIR" || fail "could not create backup directories under $BACKUP_DIR"
 
-TMP_BACKUP="$(mktemp "${TMPDIR:-/tmp}/alphaos-backup-XXXXXX.db")"
+# mktemp template MUST end in the XXXXXX: BSD/macOS mktemp only substitutes
+# TRAILING Xs -- with a suffix after them it returns the LITERAL template
+# path every run. One abnormally-killed run (EXIT trap doesn't fire on
+# SIGKILL) then strands that literal file, and every later run dies at
+# "mkstemp failed: File exists" -- which is exactly how nightly backups
+# silently failed Jul 12-16 2026. sqlite3 .backup does not care about a .db
+# extension. [ -n ] guard: if mktemp still fails, die HERE, loudly -- an
+# empty $TMP_BACKUP would otherwise sail through sqlite3 .backup '' AND
+# "PRAGMA integrity_check" (both succeed on an empty path) and only trip at
+# gzip with a confusing "can't stat" error.
+TMP_BACKUP="$(mktemp "${TMPDIR:-/tmp}/alphaos-backup-XXXXXX")"
+[ -n "$TMP_BACKUP" ] || fail "mktemp could not create the staging file for the DB backup"
 trap 'rm -f "$TMP_BACKUP"' EXIT
 
 # --- 1. Online backup (WAL-safe -- consistent even if the scheduler is mid-write) ---
@@ -170,7 +181,8 @@ if [ -d "$TEXT_ARCHIVE_DIR" ]; then
 
   if [ -d "$TEXT_ARCHIVE_BACKUP_DIR" ]; then
     if command -v rsync >/dev/null 2>&1; then
-      CHANGED_LIST="$(mktemp "${TMPDIR:-/tmp}/alphaos-archive-changed-XXXXXX.txt")"
+      # Trailing-Xs rule (see TMP_BACKUP's comment): no suffix after XXXXXX.
+      CHANGED_LIST="$(mktemp "${TMPDIR:-/tmp}/alphaos-archive-changed-XXXXXX")"
       if ! rsync -a --out-format='%n' "$TEXT_ARCHIVE_DIR"/ "$TEXT_ARCHIVE_BACKUP_DIR"/ > "$CHANGED_LIST" 2>&1; then
         alert_failure "text archive rsync failed: $(cat "$CHANGED_LIST")"
       else
@@ -367,8 +379,9 @@ elif [ -z "${BACKUP_PASSPHRASE:-}" ]; then
   alert_failure "offsite backup skipped: BACKUP2_METHOD is configured but no encryption passphrase is armed -- refusing to ship an unencrypted DB off-ecosystem"
 else
   mkdir -p "$OFFSITE_DIR"
-  DB_ENC_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-db-offsite-XXXXXX.db.gz.enc")"
-  OFFSITE_MANIFEST_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-offsite-manifest-XXXXXX.json")"
+  # Trailing-Xs rule (see TMP_BACKUP's comment): no suffix after XXXXXX.
+  DB_ENC_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-db-offsite-XXXXXX")"
+  OFFSITE_MANIFEST_TMP="$(mktemp "${TMPDIR:-/tmp}/alphaos-offsite-manifest-XXXXXX")"
 
   if ! openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -pass fd:3 -in "$DAILY_DEST" -out "$DB_ENC_TMP" 3<<< "$BACKUP_PASSPHRASE" 2>/dev/null; then
     alert_failure "offsite backup skipped: openssl encryption of the DB copy failed"

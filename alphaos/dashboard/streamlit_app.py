@@ -336,6 +336,7 @@ def tab_tonight(orch: Orchestrator) -> None:
             f"Candidates: {ta['candidates_today']} · Proposed: {ta['proposed_today']} · "
             f"Blocked: {ta['blocked_today']} · Rejected: {ta['rejected_today']}"
         )
+        st.caption("US trading day (resets midnight ET) · live book only, excludes shadow research universe")
 
     with st.container(border=True, key="blk_tonight_brief"):
         st.markdown(console_theme.render_section_label("⑤ Tonight's brief"), unsafe_allow_html=True)

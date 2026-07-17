@@ -104,6 +104,27 @@ def test_decisions_returns_expected_shape(tmp_path):
     journal.close()
 
 
+def test_decisions_proposed_excludes_candidates_whose_proposal_already_resolved(tmp_path):
+    """`candidates.status='proposed'` is set once, at proposal-creation time,
+    and never updated again when the proposal itself later resolves (see
+    JournalStore.proposed_candidates()'s docstring) -- so a candidate whose
+    trade_proposal already reached a terminal state (filled here) must NOT
+    keep showing up as an actionable "proposed candidate" on the Decisions
+    tab days/weeks after the fact."""
+    settings, journal, _ = _seed(tmp_path)
+    r = _client(settings).get("/api/v1/decisions", headers=HEADERS)
+    before = r.json()["proposed"]
+    assert len(before) == 1  # the pending proposal _seed() injected
+
+    journal.conn.execute("UPDATE trade_proposals SET status = 'filled'")
+    journal.conn.commit()
+
+    r = _client(settings).get("/api/v1/decisions", headers=HEADERS)
+    after = r.json()["proposed"]
+    assert after == []
+    journal.close()
+
+
 def test_decisions_rejected_blocked_carry_raw_hindsight_not_formatted(tmp_path):
     """The API attaches the RAW attribution row (or None) under
     `hindsight_raw` -- it must never pre-format it into "pending"/"+N.NNR"

@@ -123,3 +123,69 @@ def test_backup2_method_accepts_rclone_and_disk():
 def test_backup2_method_rejects_invalid_value():
     with pytest.raises(Exception):
         make_settings(BACKUP2_METHOD="dropbox")
+
+
+# ------------------------------------------------- staleness (2026-07-17 audit)
+# The status file is written ONLY on success, so "OK" in the file proves
+# nothing about any night since -- backups failed silently Jul 12-16 while
+# every renderer showed "Nightly: OK 2026-07-11". Fixed clock via the `now`
+# param, never the wall clock (repo false-green discipline).
+
+def _utc(y, m, d, hh=12):
+    from datetime import datetime, timezone
+    return datetime(y, m, d, hh, 0, 0, tzinfo=timezone.utc)
+
+
+def _status_file(tmp_path, date_str):
+    p = tmp_path / "backup_status.json"
+    p.write_text(json.dumps({
+        "nightly_backup_ok_at_utc": f"{date_str}T21:30:00Z", "nightly_backup_date": date_str,
+        "env_enc_armed": True, "offsite_configured": True, "offsite_last_ok_month": "2026-07",
+    }))
+    return str(p)
+
+
+def test_backup_health_fresh_run_is_not_stale(tmp_path):
+    health = build_backup_health(_status_file(tmp_path, "2026-07-16"), now=_utc(2026, 7, 17))
+    assert health["stale"] is False
+    assert health["days_since_success"] == 1
+    assert "Nightly: OK" in render_markdown(health)
+    assert "STALE" not in render_markdown(health)
+
+
+def test_backup_health_old_success_reads_stale_not_ok(tmp_path):
+    """A 5-day-old success file is the Jul-12-16 outage, not a healthy state."""
+    health = build_backup_health(_status_file(tmp_path, "2026-07-11"), now=_utc(2026, 7, 16))
+    assert health["stale"] is True
+    assert health["days_since_success"] == 5
+    md = render_markdown(health)
+    assert "STALE" in md
+    assert "backup-error.log" in md
+    assert "Nightly: OK" not in md
+
+
+def test_backup_health_unparseable_date_reads_stale_never_green(tmp_path):
+    p = tmp_path / "backup_status.json"
+    p.write_text(json.dumps({"nightly_backup_date": "not-a-date"}))
+    health = build_backup_health(str(p), now=_utc(2026, 7, 16))
+    assert health["stale"] is True
+    assert health["days_since_success"] is None
+
+
+def test_stale_backup_reaches_the_one_action_headline():
+    """The pushed ntfy title must surface a backup outage -- during Jul 12-16
+    it said 'Nothing needs you right now' every day."""
+    from alphaos.reports.daily_brief import _one_action
+
+    quiet_needs_you = {
+        "open_incident_count": 0, "fused_jobs": [], "pending_approvals": [],
+        "hypothesis_resolution": None,
+    }
+    stale = {"stale": True, "days_since_success": 5}
+    action = _one_action(quiet_needs_you, [], {"status": "ok"}, stale)
+    assert "backup" in action.lower()
+    assert "5 day(s)" in action
+
+    fresh = {"stale": False, "days_since_success": 0}
+    action = _one_action(quiet_needs_you, [], {"status": "ok"}, fresh)
+    assert "backup" not in action.lower()

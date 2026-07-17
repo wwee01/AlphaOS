@@ -461,12 +461,23 @@ class JournalStore:
         this file's other unknown-never-zero conventions -- absence of
         evidence is not evidence of shadow-ness.
         """
+        # TTL predicate (2026-07-17 audit): 'expired' is the ONE terminal status
+        # written lazily -- only when someone attempts to approve a lapsed
+        # proposal (_mark_proposal_expired's two approval-time call sites); no
+        # sweep job exists. Without this read-time check, a proposal that
+        # quietly lapsed overnight stays in this "actionable" queue (and in
+        # every count built on it, e.g. approvals_pending_count) until touched.
+        # Same predicate digest.py's active_proposals_today already uses;
+        # NULL expiry is treated as lapsed there and here (a TTL the system
+        # failed to stamp must never read as approve-forever).
+        now_iso = timeutils.to_iso(timeutils.now_utc())
         return self.query(
             "SELECT tp.* FROM trade_proposals tp "
             "LEFT JOIN candidates c ON c.candidate_id = tp.candidate_id "
             "WHERE tp.status IN (?, ?) AND COALESCE(c.shadow_tier, 0) = 0 "
+            "AND tp.proposal_expires_at_utc IS NOT NULL AND tp.proposal_expires_at_utc > ? "
             "ORDER BY tp.id DESC LIMIT ?",
-            (*ProposalStatus.approvable(), limit),
+            (*ProposalStatus.approvable(), now_iso, limit),
         )
 
     def latest_freshness_for_symbol(self, symbol: str) -> Optional[dict]:
@@ -486,7 +497,33 @@ class JournalStore:
         )
 
     def proposed_candidates(self, limit: int = 200) -> list[dict]:
-        return self.candidates_by_status("proposed", limit)
+        """Candidates in status='proposed' whose spawned trade_proposal (if any)
+        hasn't reached a terminal state yet. `candidates.status` is set once, at
+        proposal-creation time, and never updated again when the proposal later
+        resolves (filled/rejected/expired/superseded/blocked are each written
+        directly to trade_proposals from several different call sites -- see
+        ProposalStatus.terminal()'s docstring) -- so filtering by status alone
+        would keep showing every candidate that was ever proposed, forever, long
+        after its trade already resolved one way or another. This NOT EXISTS
+        join is the fix: it's derived at read time from the always-authoritative
+        trade_proposals row, so there's nothing to keep in sync."""
+        terminal = ProposalStatus.terminal()
+        placeholders = ", ".join("?" for _ in terminal)
+        # TTL-lapse counts as resolved too (2026-07-17 audit): 'expired' is
+        # written lazily -- only at approval-attempt time, no sweep job -- so a
+        # proposal that lapsed untouched is terminal in reality but not in its
+        # status column. Same read-time predicate open_proposals()/digest.py
+        # use; without it this join re-admits the exact zombie rows it exists
+        # to exclude, via the one transition that has no eager writer.
+        now_iso = timeutils.to_iso(timeutils.now_utc())
+        return self.query(
+            "SELECT * FROM candidates c WHERE c.status = 'proposed' AND NOT EXISTS ("
+            "  SELECT 1 FROM trade_proposals tp WHERE tp.candidate_id = c.candidate_id "
+            f"  AND (tp.status IN ({placeholders}) "
+            "       OR tp.proposal_expires_at_utc IS NULL OR tp.proposal_expires_at_utc <= ?)"
+            ") ORDER BY c.id DESC LIMIT ?",
+            (*terminal, now_iso, limit),
+        )
 
     def watch_candidates(self, limit: int = 200) -> list[dict]:
         return self.candidates_by_status("watch", limit)

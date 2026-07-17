@@ -383,8 +383,22 @@ def _hypothesis_drafts_pending(journal) -> Optional[dict]:
     return {"count": len(rows), "draft_ids": [r["draft_id"] for r in rows]}
 
 
-def _todays_activity(journal, since_sgt: str) -> dict:
-    candidates_today = journal.count_rows("candidates", "created_at_utc >= ?", (since_sgt,))
+def _todays_activity(journal, since_market_day: str) -> dict:
+    """The four live-tier activity buckets since midnight ET of the current US
+    trading day (operator ruling 2026-07-17; the caller passes
+    journal.start_of_trading_day_utc() -- see build_daily_brief's comment for
+    why this block alone is market-day-keyed, not SGT-keyed).
+
+    ALL FOUR buckets are LIVE-TIER ONLY (same ruling): candidates/rejected
+    previously counted shadow-tier capture rows too while proposed/blocked
+    excluded them, so a quiet live day read as "293 candidates, 277 rejected,
+    0 proposed" -- three shadow numbers and one live number in a single row,
+    with no way for the operator to tell. Shadow-tier capture volume is a
+    measurement-health fact, not machine trading activity; it is reported by
+    its own surfaces (EXP-0/EXP-1 accumulation lines), never mixed in here."""
+    candidates_today = journal.count_rows(
+        "candidates", "created_at_utc >= ? AND COALESCE(shadow_tier, 0) = 0", (since_market_day,)
+    )
     # EXP-1 audit-fixup (scope/safety): these two counted straight off
     # trade_proposals with no shadow_tier exclusion -- the same DISPLAY-surface
     # risk shape as open_proposals()/digest.py's four buckets (see
@@ -395,14 +409,20 @@ def _todays_activity(journal, since_sgt: str) -> dict:
         f"SELECT COUNT(*) FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
         "WHERE tp.status IN ('pending_approval', 'approved', 'filled') "
         f"AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE}",
-        (since_sgt,),
+        (since_market_day,),
     ) or 0)
     blocked_today = int(journal.scalar(
         f"SELECT COUNT(*) FROM trade_proposals tp {SHADOW_SAFE_JOIN} "
         f"WHERE tp.status = 'blocked' AND tp.created_at_utc >= ? AND {SHADOW_SAFE_WHERE}",
-        (since_sgt,),
+        (since_market_day,),
     ) or 0)
-    rejected_today = journal.count_rows("rejected_candidates", "created_at_utc >= ?", (since_sgt,))
+    # Live-tier only, like the candidates count above: shadow-universe screen
+    # rejects are stamped stage='shadow_scan' and are capture-pipeline facts.
+    rejected_today = journal.count_rows(
+        "rejected_candidates",
+        "created_at_utc >= ? AND COALESCE(stage, '') != 'shadow_scan'",
+        (since_market_day,),
+    )
     return {
         "candidates_today": candidates_today,
         "proposed_today": proposed_today,
@@ -578,18 +598,30 @@ def _moonshot_gap(journal, settings, now=None) -> dict:
 MAX_SYMBOLS_IN_ONE_ACTION = 5
 
 
-def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict) -> str:
-    """Priority order per spec: incident > fused job > expiring approval >
-    EXIT_REVIEW position > hypothesis resolution > below-floor data note >
-    "nothing needs you". Hypothesis resolution ranks above the routine
-    below-floor note (a rare, decision-relevant registry event beats a
-    near-daily "still gathering data" note) but below every safety/time-
-    critical item above it."""
+def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict,
+                backup_health: Optional[dict] = None) -> str:
+    """Priority order per spec: incident > fused job > stale backup >
+    expiring approval > EXIT_REVIEW position > hypothesis resolution >
+    below-floor data note > "nothing needs you". Hypothesis resolution ranks
+    above the routine below-floor note (a rare, decision-relevant registry
+    event beats a near-daily "still gathering data" note) but below every
+    safety/time-critical item above it.
+
+    Stale backup was ADDED 2026-07-17 (audit HIGH: nightly backups failed
+    silently Jul 12-16 while this headline said "Nothing needs you") -- it
+    ranks below live-trading safety items (incidents/fuses) but above
+    approvals: an approval missed costs one trade; a backup outage during a
+    disk failure costs the whole ledger."""
     if needs_you["open_incident_count"] > 0:
         return f"{needs_you['open_incident_count']} open protection incident(s) -- review immediately."
     if needs_you["fused_jobs"]:
         names = ", ".join(j["job_type"] for j in needs_you["fused_jobs"])
         return f"Scheduler job(s) self-halted: {names} -- run `scheduler_run_job <job_type>` to clear."
+    if backup_health is not None and backup_health.get("stale"):
+        days = backup_health.get("days_since_success")
+        ago = f"{days} day(s)" if days is not None else "an unknown time"
+        return (f"Nightly ledger backup has not succeeded for {ago} -- "
+                "check ~/Library/Logs/alphaos/backup-error.log before anything else.")
     expiring = [
         p for p in needs_you["pending_approvals"]
         if p.get("seconds_remaining") is not None and 0 < p["seconds_remaining"] < EXPIRING_SOON_SECONDS
@@ -617,8 +649,18 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
     return "Nothing needs you right now."
 
 
-def build_daily_brief(journal, settings, kill_switch, market: Optional[MarketDataClient] = None) -> dict:
+def build_daily_brief(
+    journal, settings, kill_switch, market: Optional[MarketDataClient] = None, now=None,
+) -> dict:
     """The composed daily brief. Every key below is always present.
+
+    ``now``: optional fixed instant (tests only; production callers omit it).
+    Exists so the two date-window boundaries below -- SGT-midnight for the
+    operator-ritual blocks, midnight-ET for todays_activity -- can be tested
+    against a FIXED clock instead of the wall clock; a boundary assertion that
+    depends on when the suite happens to run is this repo's known false-green
+    flake class (see tests/test_scheduler.py's is_due mocking for the same
+    discipline).
 
     ``market``: optional pre-built MarketDataClient for this module's own
     positions_health sweep below. Defaults to None, in which case one is
@@ -657,8 +699,19 @@ def build_daily_brief(journal, settings, kill_switch, market: Optional[MarketDat
     nothing here gates a real decision on either count -- but real enough
     that digest and brief histograms should not be assumed to always agree
     to the row."""
-    now = timeutils.now_utc()
+    now = now or timeutils.now_utc()
     since_sgt = _start_of_today_sgt_utc(now)
+    # "Today's machine activity" is keyed to the US TRADING day (midnight ET,
+    # the same boundary the daily risk limits already use via
+    # start_of_trading_day_utc), NOT the SGT calendar day like the operator-
+    # ritual blocks below. Operator ruling 2026-07-17: with an SGT-midnight
+    # window these counters visibly wiped to zero at 00:00 SGT -- the middle
+    # of the live US session (12:00 ET) -- and the 09:00-SGT digest recap
+    # excluded the session's whole first half (09:35-11:59 ET falls before
+    # SGT midnight). Scoped to this ONE block: what-learned/best-candidate/
+    # unattended-approvals stay SGT-keyed (they summarize the operator's day,
+    # not the exchange's).
+    since_market_day = journal.start_of_trading_day_utc(now)
     digest = build_daily_digest(journal, settings, kill_switch)
     if market is None:
         market = MarketDataClient(settings, journal)
@@ -669,13 +722,17 @@ def build_daily_brief(journal, settings, kill_switch, market: Optional[MarketDat
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
     needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
-    todays_activity = _todays_activity(journal, since_sgt)
+    todays_activity = _todays_activity(journal, since_market_day)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
     best_candidate = _best_candidate_today(journal, since_sgt)
     what_learned = _what_learned(journal, since_sgt)
     moonshot_gap = _moonshot_gap(journal, settings, now)
-    one_action = _one_action(needs_you, positions_health, moonshot_gap)
+    # backup_health computed here (not with the other *_health blocks below)
+    # because one_action needs it: a stale backup must reach the pushed ntfy
+    # HEADLINE, not just the long-form markdown body (2026-07-17 audit).
+    backup_health = _backup_health()
+    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health)
 
     # REG-1 acceptance criterion: the shadow arming-map scorer's first
     # (caveated) report surfaces in the brief. Import kept local -- avoids a
@@ -688,7 +745,6 @@ def build_daily_brief(journal, settings, kill_switch, market: Optional[MarketDat
     canary_health = _canary_health(journal)
     atr_health = _atr_health(journal)
     baseline_health = _baseline_health(journal, settings)
-    backup_health = _backup_health()
     hypothesis_health = _hypothesis_health(journal)
     card_scoreboard_health = _card_scoreboard_health(journal)
 

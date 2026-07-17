@@ -333,6 +333,40 @@ def _open_incident_count(journal) -> int:
     return int((row or {}).get("n") or 0)
 
 
+def _resolve_orphaned_incidents(journal) -> int:
+    """Auto-resolve OPEN incidents whose position is no longer open (2026-07-17
+    audit HIGH finding). An incident exists to say "an open position is exposed
+    without protection"; every close path (manual close, time-stop, bracket-leg
+    reconcile, forced close) ends that exposure, but none of them resolved the
+    incident row -- and the per-position self-heal above only ever re-scores
+    positions still in journal.open_positions(). The stranded row then blocks
+    EVERY new entry via has_blocking_incident(), forever, until an operator
+    thinks to `protection_ack` an incident for a position that no longer
+    exists. Scoped tight: only incidents whose position_id resolves to a
+    positions row that is verifiably not open -- an incident whose position_id
+    matches nothing is an anomaly a human should look at, so it is left alone
+    (fail-safe: unexplained state keeps blocking; explained-closed state does
+    not)."""
+    orphans = journal.query(
+        "SELECT pc.check_id, pc.position_id, pc.symbol FROM protection_checks pc "
+        "JOIN positions p ON p.position_id = pc.position_id "
+        "WHERE pc.protection_status IN (?, ?, ?) AND pc.resolved_at_utc IS NULL "
+        "AND p.status != 'open'",
+        _INCIDENT_STATUSES,
+    )
+    for row in orphans:
+        _mark_resolved(
+            journal, row["check_id"], resolved_by="position_closed",
+            note="position closed through a normal exit path; exposure the incident guarded no longer exists",
+        )
+        journal.log_system_event(
+            Severity.INFO, "protection_watchdog",
+            f"auto-resolved orphaned incident {row['check_id']} ({row['symbol']}): its position is closed.",
+            {"check_id": row["check_id"], "position_id": row["position_id"]},
+        )
+    return len(orphans)
+
+
 def run_watchdog_pass(journal, alpaca_client, settings, scheduler_run_id: Optional[str] = None) -> dict:
     """Iterate every open, broker-managed position; check + record each. No-ops
     (all-zero summary) when there's no real paper broker connected, mirroring
@@ -341,6 +375,10 @@ def run_watchdog_pass(journal, alpaca_client, settings, scheduler_run_id: Option
     counts = {"checked": 0, "protected": 0, "degraded": 0, "unprotected": 0,
              "closed_mismatch": 0, "check_error": 0, "unverifiable": 0,
              "qty_mismatches": 0, "new_incidents": [], "dangling_orders": []}
+    # Orphan sweep runs BEFORE the broker guard and the no-open-positions
+    # early return: the "operator flattened everything" case is exactly the
+    # one where a stranded incident would otherwise never be looked at again.
+    counts["orphaned_incidents_resolved"] = _resolve_orphaned_incidents(journal)
     if not (settings.real_paper_execution and alpaca_client is not None):
         counts["open_incident_count"] = _open_incident_count(journal)
         return counts

@@ -571,6 +571,16 @@ class ProposalStatus(StrEnum):
         """Statuses a proposal must be in to be eligible for approve_proposal()."""
         return (cls.PENDING_APPROVAL.value, cls.PROPOSED.value)
 
+    @classmethod
+    def terminal(cls) -> tuple:
+        """Statuses a proposal never leaves once reached -- no further approval,
+        execution, or reconcile step changes it again. Used to tell whether the
+        candidate that spawned a proposal is still awaiting a decision (read-time
+        join in JournalStore.proposed_candidates()) without needing a second,
+        denormalized field kept in sync across every place a proposal resolves."""
+        return (cls.FILLED.value, cls.REJECTED.value, cls.EXPIRED.value,
+                cls.SUPERSEDED.value, cls.BLOCKED.value)
+
 
 class CandidateStatus(StrEnum):
     """Lifecycle of a ``candidates`` row (enum-ified during the ScanContext
