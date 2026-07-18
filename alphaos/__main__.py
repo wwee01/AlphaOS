@@ -244,6 +244,166 @@ def cmd_hypothesis_seed(orch: Orchestrator) -> int:
     return 0
 
 
+# S1b: registration/evaluation text for the paired H-PER-1P/H-PER-1N
+# hypotheses -- module-level constants (not inlined into the two command
+# functions below) so cmd_per_register's own idempotent lookup and
+# cmd_per_evaluate's own prereg_id lookup are guaranteed to agree on the
+# exact same (hypothesis, metric) strings.
+_PER_HYPOTHESIS_POS = (
+    "H-PER-1P: post_earnings_reaction_v1 candidates have a POSITIVE mean "
+    "5-trading-day market-adjusted excess outcome over contemporaneous "
+    "date x tier default-card candidates"
+)
+_PER_METRIC_POS = "per_excess_market_adjusted_5d, smooth_weight_joint_bootstrap_v1"
+_PER_HYPOTHESIS_NEG = (
+    "H-PER-1N: post_earnings_reaction_v1 candidates have a NEGATIVE mean "
+    "5-trading-day market-adjusted excess outcome over contemporaneous "
+    "date x tier default-card candidates"
+)
+_PER_METRIC_NEG = "per_excess_market_adjusted_5d_negated, smooth_weight_joint_bootstrap_v1"
+# Audit-fixup (doc-only): floor_span_days (90.0) matches per_evidence.py's
+# own MIN_SPAN_DAYS constant. floor_effective_n (20 PER clusters) has no
+# equivalent constant in per_evidence.py -- that module's own population
+# gate uses MIN_PER_RAW_N=25 on raw events; the 20-cluster EFFECTIVE-n
+# floor exists only here and is enforced solely via this registered value,
+# checked by evaluate_two_arm_hypothesis_pair() against the count of PER
+# clusters it actually builds (see that function's own
+# docstring on reusing each hypothesis's own frozen floor).
+_PER_FLOOR_EFFECTIVE_N = 20
+_PER_FLOOR_SPAN_DAYS = 90.0
+
+
+def cmd_per_register(orch: Orchestrator) -> int:
+    """SETUP-1 S1b: register BOTH H-PER-1P and H-PER-1N -- one-off,
+    operator-invoked, idempotent (refuses to create a duplicate pair if
+    either half is already registered, since register_hypothesis() itself
+    is not idempotent). Registering does NOT evaluate anything -- no
+    candidate_outcomes are read, no bootstrap runs, nothing is gated. The
+    frozen S1b statistical design (estimand, control ladder, bootstrap
+    method, floors, seed, directionality, placebo construction) is recorded
+    verbatim in each row's own ``params_json`` so a later drift between
+    this command's assumptions and the actually-implemented engine is at
+    least detectable by inspection.
+
+    NEVER invoked as part of building/testing S1b -- this command exists
+    for a human operator to run explicitly, later, once the S1b design is
+    confirmed ready for production preregistration (per the operator's own
+    explicit instruction: "do not silently write H-PER-1P or H-PER-1N into
+    an actual production journal as part of branch construction")."""
+    from alphaos.cards.selector import PER_CARD_ID, SELECTOR_VERSION
+    from alphaos.cards.per_evidence import (
+        CROSS_ARM_EXCLUSION_TRADING_DAYS, MAX_EXCLUSION_SHARE, MAX_POOLED_FALLBACK_SHARE,
+        MAX_SYMBOL_CONCENTRATION, MIN_CONTROL_RAW_N, MIN_DISTINCT_MONTHS, MIN_PER_RAW_N,
+        OUTCOME_METRIC, OUTCOME_WINDOW_TRADING_DAYS, PLACEBO_SHIFT_TRADING_DAYS,
+        PLACEBO_TOLERANCE_TRADING_DAYS, RUNG1_MIN_CONTROLS, RUNG2_MIN_CONTROLS,
+    )
+    from alphaos.stats.preregistration import register_hypothesis
+    from alphaos.stats.two_arm import DEFAULT_B, DEFAULT_CI_LEVEL, DEFAULT_SEED, MIN_VALID_REPLICATE_FRACTION
+
+    existing_pos = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (_PER_HYPOTHESIS_POS, _PER_METRIC_POS),
+    )
+    existing_neg = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (_PER_HYPOTHESIS_NEG, _PER_METRIC_NEG),
+    )
+    if existing_pos or existing_neg:
+        print("Already registered (one or both halves) -- no-op.")
+        _print({"per_register": {
+            "status": "already_registered",
+            "pos": existing_pos, "neg": existing_neg,
+        }})
+        return 0
+
+    frozen_params = {
+        "card_id": PER_CARD_ID,
+        "selector_version": SELECTOR_VERSION,
+        "outcome_metric": OUTCOME_METRIC,
+        "outcome_window_trading_days": OUTCOME_WINDOW_TRADING_DAYS,
+        "cross_arm_exclusion_trading_days": CROSS_ARM_EXCLUSION_TRADING_DAYS,
+        "rung1_min_controls": RUNG1_MIN_CONTROLS,
+        "rung2_min_controls": RUNG2_MIN_CONTROLS,
+        "max_pooled_fallback_share": MAX_POOLED_FALLBACK_SHARE,
+        "max_exclusion_share": MAX_EXCLUSION_SHARE,
+        "min_per_raw_n": MIN_PER_RAW_N,
+        "min_distinct_months": MIN_DISTINCT_MONTHS,
+        "max_symbol_concentration": MAX_SYMBOL_CONCENTRATION,
+        "min_control_raw_n": MIN_CONTROL_RAW_N,
+        "placebo_shift_trading_days": PLACEBO_SHIFT_TRADING_DAYS,
+        "placebo_tolerance_trading_days": PLACEBO_TOLERANCE_TRADING_DAYS,
+        "bootstrap_method": "smooth_weight_joint_clustered_bootstrap_v1",
+        "n_resamples": DEFAULT_B,
+        "ci_level": DEFAULT_CI_LEVEL,
+        "seed": DEFAULT_SEED,
+        "min_valid_replicate_fraction": MIN_VALID_REPLICATE_FRACTION,
+        "statistic": "arithmetic_mean",
+        "tie_rule": "inclusive_both_tails",
+        "finite_replicate_correction": "(extreme_count + 1) / (n_valid_replicates + 1)",
+    }
+    prereg_pos = register_hypothesis(
+        orch.journal, _PER_HYPOTHESIS_POS, _PER_METRIC_POS,
+        floor_effective_n=_PER_FLOOR_EFFECTIVE_N, floor_span_days=_PER_FLOOR_SPAN_DAYS,
+        analysis_not_before="2026-10-15",
+        params={**frozen_params, "direction": "positive"},
+    )
+    prereg_neg = register_hypothesis(
+        orch.journal, _PER_HYPOTHESIS_NEG, _PER_METRIC_NEG,
+        floor_effective_n=_PER_FLOOR_EFFECTIVE_N, floor_span_days=_PER_FLOOR_SPAN_DAYS,
+        analysis_not_before="2026-10-15",
+        params={**frozen_params, "direction": "negative"},
+    )
+    print(f"Registered pair: pos={prereg_pos} neg={prereg_neg}")
+    _print({"per_register": {"status": "registered", "prereg_id_pos": prereg_pos, "prereg_id_neg": prereg_neg}})
+    return 0
+
+
+def cmd_per_evaluate(orch: Orchestrator) -> int:
+    """SETUP-1 S1b: run the ONE atomic paired evaluation for H-PER-1P/
+    H-PER-1N, as of right now. Operator-invoked only -- never scheduled,
+    never run by any scan. Looks the pair up by its own registered
+    (hypothesis, metric) text (same convention as cmd_per_register) rather
+    than taking prereg_ids as arguments, so there is exactly one thing to
+    type to run this.
+
+    Population/floor failures print a 'deferred' result and touch nothing
+    (re-runnable later as more data accrues); a genuine success freezes
+    both rows plus the shared evidence snapshot in one transaction. See
+    alphaos.stats.preregistration.evaluate_two_arm_hypothesis_pair()'s own
+    docstring for the complete contract."""
+    from alphaos.stats.preregistration import (
+        PreregistrationAlreadyEvaluatedError,
+        evaluate_two_arm_hypothesis_pair,
+    )
+    from alphaos.util import timeutils
+
+    pos_row = orch.journal.one(
+        "SELECT prereg_id FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (_PER_HYPOTHESIS_POS, _PER_METRIC_POS),
+    )
+    neg_row = orch.journal.one(
+        "SELECT prereg_id FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (_PER_HYPOTHESIS_NEG, _PER_METRIC_NEG),
+    )
+    if pos_row is None or neg_row is None:
+        print("H-PER-1P/H-PER-1N are not registered yet -- run per_register first.")
+        _print({"per_evaluate": {"status": "not_registered"}})
+        return 1
+
+    as_of_utc = timeutils.now_utc().isoformat()
+    try:
+        result = evaluate_two_arm_hypothesis_pair(
+            orch.journal, pos_row["prereg_id"], neg_row["prereg_id"], as_of_utc,
+        )
+    except PreregistrationAlreadyEvaluatedError as exc:
+        print(f"Already evaluated -- evidence is immutable once written: {exc}")
+        _print({"per_evaluate": {"status": "already_evaluated"}})
+        return 0
+    print(f"Evaluation outcome: {result['outcome']}")
+    _print({"per_evaluate": result})
+    return 0
+
+
 def cmd_hypothesis_resolve(orch: Orchestrator) -> int:
     """PR12: one resolver pass -- evaluate any hypothesis_proposals row past
     its own calendar + sample-size floor, then refresh last_verdict/
@@ -1010,6 +1170,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("hypothesis_seed",
                    help="PR12: idempotently register the 8 seeded hypotheses "
                         "(hypothesis_proposals + preregistrations rows)")
+    sub.add_parser("per_register",
+                   help="SETUP-1 S1b: one-off, idempotent -- register the H-PER-1P/H-PER-1N pair "
+                        "(preregistrations rows only; never evaluates, never gates)")
+    sub.add_parser("per_evaluate",
+                   help="SETUP-1 S1b: one atomic paired evaluation of H-PER-1P/H-PER-1N as of now "
+                        "(operator-invoked only; deferred population/floor failures write nothing)")
     sub.add_parser("hypothesis_resolve",
                    help="PR12: one resolver pass -- evaluate any hypothesis past its own "
                         "calendar + sample-size floor, refresh cached verdicts for the family")
@@ -1250,6 +1416,10 @@ def main(argv=None) -> int:
             return cmd_debate_register(orch)
         if args.command == "hypothesis_seed":
             return cmd_hypothesis_seed(orch)
+        if args.command == "per_register":
+            return cmd_per_register(orch)
+        if args.command == "per_evaluate":
+            return cmd_per_evaluate(orch)
         if args.command == "hypothesis_resolve":
             return cmd_hypothesis_resolve(orch)
         if args.command == "hypothesis_report":

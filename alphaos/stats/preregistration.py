@@ -148,3 +148,201 @@ def evaluate_hypothesis(
             "between this call's read and write"
         )
     return journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (prereg_id,))
+
+
+def evaluate_two_arm_hypothesis_pair(
+    journal,
+    prereg_id_pos: str,
+    prereg_id_neg: str,
+    as_of_utc: str,
+    n_resamples: Optional[int] = None,
+    seed: Optional[int] = None,
+) -> dict[str, Any]:
+    """S1b: the two-arm counterpart to ``evaluate_hypothesis()`` above, for
+    a PAIR of directional hypotheses (H-PER-1P/H-PER-1N) sharing ONE frozen
+    evidence population. Reuses this module's one-shot-per-row guard, but
+    writes BOTH rows (plus one shared ``per_evidence_snapshots`` freeze) in
+    a SINGLE transaction: either both rows get evaluated together against
+    the identical frozen population, or neither does -- no partial,
+    single-hypothesis write is possible.
+
+    NEVER CALLED BY ANY SCAN, SCHEDULER, OR PRODUCTION DECISION PATH.
+    ``alphaos.cards.per_evidence``/``alphaos.stats.two_arm`` are imported
+    HERE, INSIDE this function, rather than at this module's top level --
+    deliberately: ``alphaos.stats.preregistration`` (this module) IS
+    imported by production-adjacent code (``alphaos.hypotheses.resolver``,
+    which runs nightly), and ``alphaos.cards.per_evidence`` itself imports
+    ``alphaos.cards.selector`` (S1a's still-unwired selector). A module-level
+    import here would transitively pull the selector into the production
+    import graph the moment ANY code imports ``preregistration.py`` --
+    which happens routinely (every hypothesis resolution run) -- even
+    though this specific function is never called from that path. The
+    local import confines that exposure to the one place this function is
+    actually INVOKED: the operator-invoked registration/evaluation CLI, and
+    this module's own test suite (against isolated fixture journals only).
+
+    Population/floor failures DEFER rather than consume the one-shot -- a
+    DELIBERATE DIFFERENCE from ``evaluate_hypothesis()`` above, approved in
+    the S1b statistical design review specifically for this card (whose
+    population grows incrementally as new earnings events occur): nothing
+    is written to either prereg row or to ``per_evidence_snapshots`` unless
+    evaluation succeeds end to end -- population gates clear, the
+    REGISTERED ``floor_effective_n``/``floor_span_days`` clear (reusing
+    each hypothesis's own already-frozen floor, never a second
+    separately-tuned number -- same principle as the Fable5 fix in
+    ``alphaos.hypotheses.queries``), and the bootstrap itself returns
+    ``status='ok'``. Only that fully-successful path freezes evidence and
+    consumes the one-shot; this pair may be re-attempted, unlimited times,
+    as more data accrues, right up until the one attempt that succeeds.
+
+    The placebo diagnostic (Section 11 of the approved spec) is computed
+    and stored in ``evidence_detail_json`` whenever it is available, but
+    its unavailability NEVER blocks the formal primary evaluation --
+    descriptive-only, no gate, no p-value, no BH-FDR membership.
+
+    Returns ``{"outcome": "deferred", "reason": ..., "detail": ...}``
+    (nothing written) or ``{"outcome": "evaluated", "snapshot_id": ...,
+    "pos": {...}, "neg": {...}}`` (both rows frozen). Raises
+    ``PreregistrationAlreadyEvaluatedError`` if either row is already
+    evaluated -- checked up front (fast, clear failure, before spending any
+    time on evidence construction or bootstrapping) AND at the write
+    itself via the same ``WHERE evaluated_at_utc IS NULL`` DB-level
+    backstop ``evaluate_hypothesis()`` uses, so a hypothetical race between
+    two callers is still caught -- and rolls back BOTH rows' writes (never
+    just one) if that race is detected.
+    """
+    import json as _json
+
+    from alphaos.cards import per_evidence
+    from alphaos.stats import two_arm
+
+    n_resamples = two_arm.DEFAULT_B if n_resamples is None else n_resamples
+    seed = two_arm.DEFAULT_SEED if seed is None else seed
+
+    pos_row = journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (prereg_id_pos,))
+    neg_row = journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (prereg_id_neg,))
+    if pos_row is None:
+        raise ValueError(f"no such preregistration: {prereg_id_pos!r}")
+    if neg_row is None:
+        raise ValueError(f"no such preregistration: {prereg_id_neg!r}")
+    if pos_row.get("evaluated_at_utc") or neg_row.get("evaluated_at_utc"):
+        raise PreregistrationAlreadyEvaluatedError(
+            f"one or both of {prereg_id_pos!r}/{prereg_id_neg!r} was already evaluated -- "
+            "evidence is immutable once written. Register a NEW hypothesis pair instead of "
+            "re-evaluating this one."
+        )
+    if (pos_row["floor_effective_n"] != neg_row["floor_effective_n"]
+            or pos_row["floor_span_days"] != neg_row["floor_span_days"]):
+        raise ValueError(
+            f"H-PER-1P/H-PER-1N floor mismatch ({prereg_id_pos!r} vs {prereg_id_neg!r}) -- both "
+            "hypotheses in a pair must share the identical floor, since they share the identical "
+            "frozen population; this indicates a registration bug, not a data condition."
+        )
+    floor_effective_n = pos_row["floor_effective_n"]
+    floor_span_days = pos_row["floor_span_days"]
+
+    primary = per_evidence.build_primary_evidence(journal, as_of_utc)
+    if primary.status != "ok":
+        return {"outcome": "deferred", "reason": primary.reason, "detail": primary.detail}
+
+    n_per_clusters = len(primary.per_clusters)
+    span_days = primary.detail.get("span_days") or 0.0
+    if n_per_clusters < floor_effective_n or span_days < floor_span_days:
+        return {
+            "outcome": "deferred",
+            "reason": "registered_floor_not_cleared",
+            "detail": {
+                **primary.detail, "n_per_clusters": n_per_clusters,
+                "floor_effective_n": floor_effective_n, "floor_span_days": floor_span_days,
+            },
+        }
+
+    boot = two_arm.two_arm_bootstrap(
+        primary.per_clusters, primary.control_clusters, n_resamples=n_resamples, seed=seed,
+    )
+    if boot["status"] != "ok":
+        return {"outcome": "deferred", "reason": f"bootstrap_{boot['status']}", "detail": boot}
+
+    placebo = per_evidence.build_placebo_evidence(journal, as_of_utc, primary.valid_events)
+    placebo_detail: dict[str, Any] = {"status": placebo.status, "reason": placebo.reason}
+    if placebo.status == "ok":
+        placebo_boot = two_arm.two_arm_bootstrap(
+            placebo.per_clusters, placebo.control_clusters, n_resamples=n_resamples, seed=seed,
+        )
+        placebo_detail["bootstrap"] = placebo_boot
+
+    snapshot_id = new_id("perev")
+    snapshot_rows = per_evidence.canonical_snapshot_rows(
+        primary, placebo if placebo.status == "ok" else None,
+    )
+
+    now = timeutils.stamp()
+    evidence_detail_common = {
+        "snapshot_id": snapshot_id,
+        "n_resamples": n_resamples,
+        "seed": seed,
+        "n_valid_replicates": boot["n_valid_replicates"],
+        "n_invalid_replicates": boot["n_invalid_replicates"],
+        "n_control_clusters": boot["n_control_clusters"],
+        "population_detail": primary.detail,
+        "placebo": placebo_detail,
+    }
+
+    cursor_pos = journal.conn.execute(
+        "UPDATE preregistrations SET evaluated_at_utc=?, effective_n=?, n_raw=?, span_days=?, "
+        "point_estimate=?, ci_low=?, ci_high=?, ci_level=?, one_sided_p_below_zero=?, evidence_status=?, "
+        "evidence_detail_json=? WHERE prereg_id=? AND evaluated_at_utc IS NULL",
+        (
+            now.utc, n_per_clusters, primary.detail.get("n_per_raw"), span_days,
+            boot["point_estimate"], boot["ci_low"], boot["ci_high"], boot["ci_level"], boot["p_pos"], "ok",
+            _json.dumps({**evidence_detail_common, "hypothesis": "H-PER-1P"}, default=str),
+            prereg_id_pos,
+        ),
+    )
+    cursor_neg = journal.conn.execute(
+        "UPDATE preregistrations SET evaluated_at_utc=?, effective_n=?, n_raw=?, span_days=?, "
+        "point_estimate=?, ci_low=?, ci_high=?, ci_level=?, one_sided_p_below_zero=?, evidence_status=?, "
+        "evidence_detail_json=? WHERE prereg_id=? AND evaluated_at_utc IS NULL",
+        (
+            # H-PER-1N's directional frame (spec Section 7): negate the
+            # estimate and swap+negate the CI bounds, never re-derive from
+            # scratch, so the two rows can never disagree about direction.
+            now.utc, n_per_clusters, primary.detail.get("n_per_raw"), span_days,
+            -boot["point_estimate"], -boot["ci_high"], -boot["ci_low"], boot["ci_level"], boot["p_neg"], "ok",
+            _json.dumps({**evidence_detail_common, "hypothesis": "H-PER-1N"}, default=str),
+            prereg_id_neg,
+        ),
+    )
+    if cursor_pos.rowcount == 0 or cursor_neg.rowcount == 0:
+        journal.conn.rollback()
+        raise PreregistrationAlreadyEvaluatedError(
+            f"one or both of {prereg_id_pos!r}/{prereg_id_neg!r} was evaluated by a concurrent "
+            "writer between this call's read and write"
+        )
+
+    for row in snapshot_rows:
+        journal.conn.execute(
+            "INSERT INTO per_evidence_snapshots (snapshot_id, arm, candidate_id, symbol, event_key, "
+            "market_date, tier, outcome_value, cluster_id, stratum_key, control_fallback, excluded_reason, "
+            "created_at_utc, created_at_sgt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                snapshot_id, row["arm"], row["candidate_id"], row["symbol"], row["event_key"],
+                row["market_date"], row["tier"], row["outcome_value"], row["cluster_id"],
+                row["stratum_key"], row["control_fallback"], row["excluded_reason"],
+                now.utc, now.local_sgt,
+            ),
+        )
+    journal.conn.commit()
+
+    return {
+        "outcome": "evaluated",
+        "snapshot_id": snapshot_id,
+        "pos": {
+            "point_estimate": boot["point_estimate"], "ci_low": boot["ci_low"], "ci_high": boot["ci_high"],
+            "p_value": boot["p_pos"],
+        },
+        "neg": {
+            "point_estimate": -boot["point_estimate"], "ci_low": -boot["ci_high"], "ci_high": -boot["ci_low"],
+            "p_value": boot["p_neg"],
+        },
+    }

@@ -1,0 +1,36 @@
+card_id: post_earnings_reaction
+version: 1
+name: "Post-Earnings Reaction (shadow, evidence-only) v1"
+state: shadow
+# S1b: cross-checked against alphaos.cards.selector.SELECTOR_VERSION by
+# alphaos.cards.per_evidence.validate_card_selector_binding() -- called by
+# this build's own test suite and available to the (also dormant)
+# registration CLI, deliberately NOT wired into sync_registry()'s real
+# production startup path. See that function's own docstring for why.
+requires_selector: card_selector_v1
+direction: any
+holding_class: swing
+regimes: [any]
+required_evidence:
+  - "earnings_calendar_cache health = ok at scan time (SETUP-1 S1a compute_cache_health)"
+  - "an eligible earnings event within the K=3 trading-day window (S1a select_card)"
+entry_rule: "N/A -- shadow-only; no candidate is ever stamped with this card in production until H-PER-1P/H-PER-1N are preregistered (S1b's own operator-invoked command) and the selector is wired (S1c, not authorized by this build)"
+stop_rule: "N/A -- shadow-only, no trading"
+target_rule: "N/A -- shadow-only, no trading"
+invalidation_rule: "the underlying earnings event is superseded/rescheduled away (S1a's supersession-before-date-filtering rule), or the K=3 trading-day eligibility window closes"
+max_holding_days_default: 5
+expected_tqs_profile:
+  interest_strength: "not applicable -- evidence-only card, no TQS scoring path reads this yet"
+notes: >
+  SETUP-1 (S1b, 2026-07-17): dormant registry entry only. This card is
+  selected by nothing in production -- alphaos/cards/selector.py's
+  select_card() has zero callers in orchestrator.py/candidate_scanner.py
+  (S1a's own invariant, unchanged through S1b). Its purpose in S1b is
+  solely to give the formal evidence machinery (alphaos/cards/
+  per_evidence.py, alphaos/stats/two_arm.py) a real setup_cards registry
+  row to join against, and to carry requires_selector so a future drift
+  between this card's assumptions and the selector's own SELECTOR_VERSION
+  is at least checkable. H-PER-1P/H-PER-1N preregistration (this card's
+  own formal evidence contract) and S1c's selector wiring are both
+  separate, future, explicitly-gated steps -- neither happens as part of
+  this build.
