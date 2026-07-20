@@ -155,21 +155,33 @@ const CLOSED_TRADE_COLUMNS = [
   { key: 'created_at_utc', label: 'closed (UTC)' },
 ];
 
-function GateFunnel({ labelSummary }) {
-  const stages = buildDecisionFunnelStages(labelSummary.by_label_decision);
+// `data` is the whole /api/v1/decisions response: the funnel counts its
+// actual decision arrays (so every bar equals the table below it, 2026-07-17
+// fix), and the "by primary label" table reads its label_summary.
+function GateFunnel({ data }) {
+  const stages = buildDecisionFunnelStages(data);
   return (
     <Block title="Gate funnel" reveal>
       {stages.length === 0 ? (
-        <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No labels yet — run an interest scan.</div>
+        <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No decisions yet — run an interest scan.</div>
       ) : (
-        <Funnel stages={stages} />
+        <>
+          <Funnel stages={stages} />
+          <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
+            Each bar equals the matching table below (current core-book candidates, one row per symbol).
+          </div>
+        </>
       )}
       <div className="label-caps" style={{ margin: '16px 0 6px' }}>by primary label</div>
       <DataTable
         columns={[{ key: 'label', label: 'label' }, { key: 'n', label: 'n', numeric: true }]}
-        rows={labelSummary.by_primary_label}
+        rows={data.label_summary.by_primary_label}
         emptyText="No labels yet — run an interest scan."
       />
+      <div className="prose" style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6 }}>
+        Label counts every labelling event across all scans (a symbol re-labelled in N scans counts N times) —
+        so these sum higher than the per-symbol tables above.
+      </div>
     </Block>
   );
 }
@@ -248,7 +260,7 @@ export default function Decisions() {
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
 
           <div className="grid reveal-stagger">
-            <div className="col-12"><GateFunnel labelSummary={data.label_summary} /></div>
+            <div className="col-12"><GateFunnel data={data} /></div>
 
             <div className="col-6">
               <Block title={`Proposed candidates (${(data.proposed ?? []).length})`}>

@@ -28,28 +28,50 @@ describe('formatHindsight', () => {
 });
 
 describe('buildDecisionFunnelStages', () => {
-  it('prepends a "candidates" stage totalling every decision bucket (real API row shape: `decision`, not `label_decision`)', () => {
-    const stages = buildDecisionFunnelStages([
-      { decision: 'propose', n: 3 },
-      { decision: 'watch', n: 6 },
-      { decision: 'reject', n: 2 },
-    ]);
-    expect(stages[0]).toEqual({ label: 'candidates', value: 11 });
-    expect(stages.slice(1)).toEqual([
-      { label: 'propose', value: 3 },
-      { label: 'watch', value: 6 },
-      { label: 'reject', value: 2 },
+  // 2026-07-17: counts the ACTUAL decision arrays (the same ones that render
+  // the tables), NOT label_summary.by_label_decision -- so every bar equals
+  // its table below. filled = open_trades + closed_trades.
+  const sample = {
+    proposed: [{}, {}, {}, {}, {}], // 5
+    watch: new Array(24).fill({}), // 24
+    rejected: new Array(32).fill({}), // 32
+    blocked: [], // 0
+    open_trades: [], // 0
+    closed_trades: [{}, {}], // 2 => filled
+  };
+
+  it('builds one stage per decision table, each value = that table length, in table order', () => {
+    expect(buildDecisionFunnelStages(sample)).toEqual([
+      { label: 'proposed', value: 5 },
+      { label: 'watch', value: 24 },
+      { label: 'rejected', value: 32 },
+      { label: 'blocked', value: 0 },
+      { label: 'filled', value: 2 },
     ]);
   });
 
-  it('returns an empty array when there is no label data yet (never a fabricated stage)', () => {
-    expect(buildDecisionFunnelStages([])).toEqual([]);
+  it('sums open + closed positions into the single "filled" stage', () => {
+    const stages = buildDecisionFunnelStages({ ...sample, open_trades: [{}, {}, {}], closed_trades: [{}] });
+    expect(stages.find((s) => s.label === 'filled').value).toBe(4);
+  });
+
+  it('never fabricates the old synthetic "candidates = sum" total stage', () => {
+    const labels = buildDecisionFunnelStages(sample).map((s) => s.label);
+    expect(labels).not.toContain('candidates');
+  });
+
+  it('returns an empty array when every stage is zero (fresh journal) or data is absent', () => {
     expect(buildDecisionFunnelStages(undefined)).toEqual([]);
+    expect(buildDecisionFunnelStages({})).toEqual([]);
+    expect(buildDecisionFunnelStages({
+      proposed: [], watch: [], rejected: [], blocked: [], open_trades: [], closed_trades: [],
+    })).toEqual([]);
   });
 
-  it('falls back to "unknown" for a missing decision field, never dropping the row silently', () => {
-    const stages = buildDecisionFunnelStages([{ decision: null, n: 4 }]);
-    expect(stages[1].label).toBe('unknown');
+  it('treats missing arrays as zero, never a crash (unknown-never-throw)', () => {
+    const stages = buildDecisionFunnelStages({ proposed: [{}], watch: null });
+    expect(stages.find((s) => s.label === 'proposed').value).toBe(1);
+    expect(stages.find((s) => s.label === 'watch').value).toBe(0);
   });
 });
 

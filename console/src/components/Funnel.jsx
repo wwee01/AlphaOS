@@ -1,7 +1,9 @@
-// ND-6: the candidates -> proposed -> blocked -> rejected attrition viz
-// (design ruling §3.4/§5 Decisions) -- horizontal proportional bars fed by
-// real counts (funnel.js:computeFunnelStages, pure and tested), never a
-// bare count table. `stages`: [{ label, value, tone? }].
+// ND-6: the proposed/watch/rejected/blocked/filled attrition viz (design
+// ruling §3.4/§5 Decisions) -- horizontal proportional bars fed by real
+// counts (funnel.js:computeFunnelStages, pure and tested), never a bare
+// count table. `stages`: [{ label, value, tone? }]. Since 2026-07-17 the
+// counts come from the actual decision arrays (decisions.js:
+// buildDecisionFunnelStages), so each bar equals its table on the page.
 //
 // ND-7 (design ruling §4.3): gradient bars (violet->cyan) with a soft glow
 // for the "alive" stages, dimmed violet for rejected/blocked -- ported from

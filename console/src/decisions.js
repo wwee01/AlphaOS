@@ -25,27 +25,42 @@ export function formatHindsight(attr) {
   return `${sign}${delta.toFixed(2)}R${suffix}`;
 }
 
-// ND-6: builds the Decisions page's gate-funnel stages (design ruling §2/§5:
-// "candidates -> proposed -> blocked -> rejected... visualize it as a
-// funnel") from /api/v1/decisions' `label_summary.by_label_decision` rows.
-// Each row's own field is `decision` (verified against the live API --
-// `journal.label_summary()`'s own row shape, e.g. `{"decision": "propose",
-// "n": 11}` -- NOT `label_decision`, which is a candidate-row field name
-// used elsewhere on this page). A "candidates" total (the sum of every
-// decision bucket's count) is prepended as the funnel's first stage, so the
-// pipeline always starts at the full evaluated population rather than at
-// whichever bucket happens to be listed first. Pure aggregation of numbers
-// already shown elsewhere on this page (the raw by_label_decision rows
-// themselves) -- not a business decision, same category as Tonight's own
-// open-R summation.
-export function buildDecisionFunnelStages(byLabelDecision) {
-  const rows = byLabelDecision ?? [];
-  if (rows.length === 0) return [];
-  const total = rows.reduce((sum, r) => sum + (r.n ?? 0), 0);
-  return [
-    { label: 'candidates', value: total },
-    ...rows.map((r) => ({ label: r.decision ?? 'unknown', value: r.n ?? null })),
+// Builds the Decisions page's gate-funnel stages (design ruling §2/§5:
+// "candidates -> proposed/watch -> rejected/blocked -> filled... visualize
+// it as a funnel").
+//
+// 2026-07-17 (operator report "gate funnel numbers seem off"): REWRITTEN to
+// source from the ACTUAL decision arrays this same /api/v1/decisions
+// response already carries -- the exact arrays that render the tables right
+// below the funnel -- so every bar is mechanically equal to the table
+// beneath it and can never disagree. The old version read
+// `label_summary.by_label_decision`: the *advisory AI labeller's* suggested
+// decision (downgrade-only, NOT the resolved outcome -- see orchestrator.py
+// `_apply_label_floor`), counted per labelling EVENT (a candidate re-labelled
+// across N scans counted N times), then prepended a synthetic sum as a
+// "candidates" total. That triple-counted the wrong thing: the funnel showed
+// watch=206/propose=9/reject=6 while the tables directly below showed
+// watch=24/proposed=5/rejected=32. Pure count of arrays already on the page
+// -- no new data, no business decision.
+//
+// Stage order mirrors the tables' own top-to-bottom order on the page
+// (proposed, watch, rejected, blocked, then the trade ledger => filled) so a
+// bar always sits directly above the table it counts. `filled` is every
+// position that reached execution (open + closed), the pipeline's endpoint.
+export function buildDecisionFunnelStages(decisions) {
+  if (!decisions) return [];
+  const n = (arr) => (Array.isArray(arr) ? arr.length : 0);
+  const stages = [
+    { label: 'proposed', value: n(decisions.proposed) },
+    { label: 'watch', value: n(decisions.watch) },
+    { label: 'rejected', value: n(decisions.rejected) },
+    { label: 'blocked', value: n(decisions.blocked) },
+    { label: 'filled', value: n(decisions.open_trades) + n(decisions.closed_trades) },
   ];
+  // All-zero => a genuinely empty/fresh journal; return [] so the caller
+  // shows its "run an interest scan" empty state rather than five 0-bars.
+  if (stages.every((s) => s.value === 0)) return [];
+  return stages;
 }
 
 // Narrative/sentiment cell (operator bug 2026-07-17: the column showed
