@@ -10,6 +10,7 @@ which asserts exactly that.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, replace
 from typing import Any, Optional
 
@@ -85,7 +86,14 @@ def replay_packet(fixture: dict, model: str, settings: Any, real_journal: Any) -
     freshness_status = fixture.get("freshness_status") or "usable"
 
     raw = client.raw_evaluate(candidate, snapshot, freshness_status)
-    final = client.post_process(raw, candidate)
+    # post_process gets a COPY: _apply_atr_stop mutates its argument in
+    # place (stop/expected_r/stop_source assignment -- fine on the live
+    # path, where nobody needs the pre-override object afterwards), which
+    # would otherwise silently clobber the raw verdict this harness exists
+    # to capture -- the stored "raw_stop" would be the ATR-overridden stop,
+    # not the model's own (caught empirically on the first RR_FLOOR demo
+    # run: raw_stop read 90.0 where the model returned 97.0).
+    final = client.post_process(copy.copy(raw), candidate)
     return ReplayResult(
         model=model, raw=raw, final=final, downgrade_reason=_downgrade_reason(raw, final),
     )

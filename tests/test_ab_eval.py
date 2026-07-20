@@ -397,6 +397,45 @@ def test_downgrade_reason_none_when_raw_decision_was_not_propose(journal):
     assert _downgrade_reason(raw, raw) is None
 
 
+def test_stored_raw_fields_survive_pipeline_mutation_end_to_end(tmp_path, journal, monkeypatch):
+    """Regression (caught empirically on the first RR_FLOOR demo run):
+    _apply_atr_stop mutates its evaluation argument IN PLACE
+    (stop/expected_r/stop_source), so replaying without isolating the raw
+    object stored the ATR-overridden stop (90.0) as 'raw_stop' where the
+    model returned 97.0 -- exactly the raw-verdict clobbering this harness
+    exists to prevent. The spec's two-layer law: raw_* columns hold the
+    model's own values AS RETURNED; pipeline_* columns hold the post-chain
+    verdict; both must be visible on the same row when the floor trips."""
+    _seed_atr(journal, "AAPL", atr_14=5.0)  # wide ATR -> stop 90.0 -> R:R 0.4 < 1.2 floor
+    settings = make_settings(ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-key-for-test",
+                             MIN_REWARD_RISK="1.2",
+                             SHADOW_AI_CAP_CALLS_PER_30D="12")
+    corpus_dir = str(tmp_path / "corpus")
+    write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-20")
+
+    def _fake_raw_evaluate(self, candidate, snapshot, freshness_status="usable"):
+        return OpenAIEvaluation(
+            eval_id="ev1", candidate_id="c1", symbol="AAPL", model=self.model,
+            direction=TradeDirection.LONG.value, entry=100.0, stop=97.0, target=104.0,
+            max_holding_days=3, expected_r=1.33, confidence=0.72,
+            decision=Decision.PROPOSE.value, reasoning_summary="raw propose", is_mock=False,
+        )
+
+    monkeypatch.setattr(OpenAIClient, "raw_evaluate", _fake_raw_evaluate)
+    monkeypatch.setattr(cost_guard, "calls_in_last_30_days", lambda journal: 0)
+
+    result = run_ab_eval(journal, settings, ["gpt-5.4-mini", "gpt-5.6-luna"], corpus_dir=corpus_dir)
+
+    rows = journal.query("SELECT * FROM ab_eval_results WHERE ab_run_id = ?", (result["ab_run_id"],))
+    assert len(rows) == 2
+    for row in rows:
+        assert row["raw_decision"] == "propose"      # spec: raw_decision='propose' preserved
+        assert row["raw_stop"] == 97.0               # the model's OWN stop, not the ATR-overridden 90.0
+        assert row["raw_expected_r"] == 1.33         # the model's OWN R:R, not the post-ATR 0.4
+        assert row["pipeline_decision"] == "reject"  # spec: pipeline_decision='reject'
+        assert row["downgrade_reason"] == "RR_FLOOR"  # spec: downgrade_reason='RR_FLOOR'
+
+
 # ------------------------------------------------------------- replay_packet
 def test_replay_packet_parameterizes_only_the_model_name(journal, monkeypatch):
     """The replay client's settings clone differs from the original ONLY in
