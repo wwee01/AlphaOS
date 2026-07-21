@@ -784,6 +784,40 @@ def cmd_canary_pin_baseline(orch: Orchestrator, run_id: str) -> int:
     return 0 if "error" not in res else 1
 
 
+def cmd_ab_eval_corpus_build(orch: Orchestrator, corpus_dir: str, total: int) -> int:
+    """AB-EVAL-1 one-off: select the default corpus (all 2026-07-09/07-10
+    kill-zone rows + a stratified later-row sample) and freeze it to disk
+    (additive; never overwrites an existing fixture). Review the fixtures,
+    then git add/commit the corpus directory -- it is never auto-committed."""
+    res = orch.ab_eval_corpus_build(corpus_dir=corpus_dir, total=total)
+    _print({"ab_eval_corpus_build": res})
+    print(
+        f"\n{res['fixtures_written']} new evaluation(s) written to {res['corpus_dir']} "
+        f"(corpus now {res['corpus_size']} evaluation(s), version {res['corpus_version']}). "
+        "Review the fixtures, then git add/commit the corpus directory -- it is never auto-committed."
+    )
+    return 0
+
+
+def cmd_ab_eval_run(orch: Orchestrator, models: list, corpus_dir: str) -> int:
+    """AB-EVAL-1: shadow, read-only replay of the frozen corpus through the
+    given models via the production evaluate core. Zero decision surface."""
+    res = orch.ab_eval_run(models, corpus_dir=corpus_dir)
+    _print({"ab_eval_run": res})
+    return 0 if "error" not in res else 1
+
+
+def cmd_ab_eval_status(orch: Orchestrator, run_id: str) -> int:
+    """AB-EVAL-1: the latest (or named) run's report -- PURE READ."""
+    from alphaos.reports.ab_eval_report import render_markdown
+
+    rep = orch.ab_eval_status(ab_run_id=run_id)
+    print(render_markdown(rep))
+    print()
+    _print({"ab_eval_status": rep})
+    return 0
+
+
 def cmd_universe_build(orch: Orchestrator) -> int:
     """EXP-0: screen the tradable universe down to the shadow-tier ADV/price
     band and write the result to the committed universe file (NOT git-add'd
@@ -1306,6 +1340,21 @@ def build_parser() -> argparse.ArgumentParser:
                          help="CANARY: mark a run as THE baseline every future run diffs against "
                               "(never automatic -- an operator decides when a run is trustworthy)")
     cpb.add_argument("run_id")
+    aeb = sub.add_parser("ab_eval_corpus_build",
+                         help="AB-EVAL-1: freeze the default A/B replay corpus (all 2026-07-09/07-10 "
+                              "kill-zone rows + a stratified later-row sample) to disk; additive, "
+                              "never auto-committed")
+    aeb.add_argument("--corpus-dir", default=None, help="defaults to data/ab_eval")
+    aeb.add_argument("--total", type=int, default=60, help="target corpus size (default 60)")
+    aer = sub.add_parser("ab_eval_run",
+                         help="AB-EVAL-1: shadow, read-only replay of the frozen corpus through 2+ "
+                              "models via the production evaluate core; never read by any live path")
+    aer.add_argument("--models", nargs="+", required=True,
+                     help="model names to compare, e.g. --models gpt-5.4-mini gpt-5.6-luna")
+    aer.add_argument("--corpus-dir", default=None, help="defaults to data/ab_eval")
+    aes = sub.add_parser("ab_eval_status",
+                         help="AB-EVAL-1: the latest (or named) run's report -- PURE READ")
+    aes.add_argument("--run-id", default=None, help="defaults to the latest run")
     dl = sub.add_parser("decision_lineage",
                         help="READ-ONLY: which code/config/model/prompt/data/scheduler context produced "
                              "one decision (accepts a candidate_id, proposal_id, rejection_id, "
@@ -1470,6 +1519,12 @@ def main(argv=None) -> int:
             return cmd_canary_status(orch)
         if args.command == "canary_pin_baseline":
             return cmd_canary_pin_baseline(orch, args.run_id)
+        if args.command == "ab_eval_corpus_build":
+            return cmd_ab_eval_corpus_build(orch, args.corpus_dir, args.total)
+        if args.command == "ab_eval_run":
+            return cmd_ab_eval_run(orch, args.models, args.corpus_dir)
+        if args.command == "ab_eval_status":
+            return cmd_ab_eval_status(orch, args.run_id)
         if args.command == "decision_lineage":
             return cmd_decision_lineage(orch, args.decision_id)
         if args.command == "dashboard":

@@ -167,22 +167,85 @@ class OpenAIClient:
 
     def evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
                 freshness_status: str = "usable") -> OpenAIEvaluation:
-        """Evaluate a candidate in no-news mode (the v1 path)."""
+        """Evaluate a candidate in no-news mode (the v1 path). Thin wrapper
+        over the two factored halves below -- kept this way (AB-EVAL-1) so
+        there is exactly ONE place that calls the raw model then the
+        post-processing chain, in that order; the A/B replay harness
+        invokes ``raw_evaluate``/``post_process`` directly (on a
+        reconstructed snapshot, through a settings clone with only the
+        model name parameterized) instead of re-deriving this sequence."""
+        evaluation = self.raw_evaluate(candidate, snapshot, freshness_status)
+        evaluation = self.post_process(evaluation, candidate)
+        # EVAL-1 addendum: journal the snapshot input alongside every real
+        # evaluation (all paths, including rejections/fail-safes -- those
+        # are precisely the examples a future replay harness needs most,
+        # same "retention starts here" law EVAL-1 already applies to the
+        # labeller). Stamped LAST, after post_process() -- that chain can
+        # swap in a brand-new rejection object of its own, which would
+        # otherwise miss the stamp if this ran before it. The primary
+        # evaluator's own snapshot input was previously never persisted
+        # anywhere, making it the one AI call in this codebase that could
+        # never be replayed after the fact.
+        evaluation.snapshot = snapshot
+        return evaluation
+
+    def raw_evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
+                     freshness_status: str = "usable") -> OpenAIEvaluation:
+        """The raw model call ONLY -- no ATR-stop override, no reward:risk
+        floor. Exactly what ``evaluate()`` used to do before its own
+        post-processing tail; factored out (AB-EVAL-1) so the A/B replay
+        harness can invoke the SAME production mock/live call path -- with
+        only ``self.model`` (via a ``dataclasses.replace`` settings clone)
+        parameterized -- and inspect the model's own verdict before any
+        pipeline override touches it. No forked second prompt: this method
+        is the only route to ``prompt_templates.build_no_news_user_prompt``
+        for the primary evaluator, live or replayed."""
         if self.use_mock:
-            evaluation = self._mock_eval(candidate, snapshot, freshness_status)
-        else:
+            return self._mock_eval(candidate, snapshot, freshness_status)
+        try:
+            return self._live_eval(candidate, snapshot, freshness_status)
+        except Exception as exc:  # pragma: no cover - live path
+            if self.journal is not None:
+                self.journal.log_system_event(
+                    Severity.ERROR, "openai",
+                    f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
+                    {"error": str(exc)},
+                )
+            return self._rejection(candidate, "OpenAI call failed; rejected for safety.",
+                                   [ReasonCode.OPENAI_REJECT.value])
+
+    def post_process(self, evaluation: OpenAIEvaluation,
+                     candidate: "Union[dict, ScanContext]") -> OpenAIEvaluation:
+        """The post-processing chain: ATR-stop override (live path only) ->
+        reward:risk floor enforcement, in that order -- factored out
+        (AB-EVAL-1) so the replay harness can apply the EXACT SAME pipeline
+        to a raw verdict a second time (under a different model) without a
+        second implementation. Behaviorally identical to the pre-refactor
+        inline sequence: ``_apply_atr_stop`` is a no-op for any
+        non-PROPOSE/no-entry evaluation (including every rejection
+        ``raw_evaluate`` can return), so gating on ``self.use_mock`` here
+        exactly reproduces the old "only after a successful live call"
+        behavior without needing to know whether the live call actually
+        succeeded. The try/except below is part of that same identity
+        (audit HIGH, 2026-07-20): pre-refactor, ``_apply_atr_stop`` ran
+        INSIDE ``evaluate()``'s live try -- a true exception (e.g. a
+        transient SQLite error on the atr_history read) was contained to
+        a journaled ERROR + safe OPENAI_REJECT rejection, never allowed
+        to abort the caller's whole scan loop. NOTE: ``_apply_atr_stop``'s
+        own NO_ATR/RR_FLOOR *rejection returns* are normal flow, not
+        exceptions -- only genuine raises are contained here."""
+        if not self.use_mock:
+            # INSTR-1: LIVE path only -- the mock baseline's stop is
+            # already a clean, deterministic, config-driven formula
+            # (stop_loss_pct) that hundreds of existing tests depend on
+            # producing PROPOSE decisions without any atr_history
+            # fixture; overriding it here would need every one of those
+            # tests to seed ATR data or start silently rejecting
+            # everything. "mock != real" (same discipline EARN-1 will
+            # apply to its own live-only provider).
             try:
-                evaluation = self._live_eval(candidate, snapshot, freshness_status)
-                # INSTR-1: LIVE path only -- the mock baseline's stop is
-                # already a clean, deterministic, config-driven formula
-                # (stop_loss_pct) that hundreds of existing tests depend on
-                # producing PROPOSE decisions without any atr_history
-                # fixture; overriding it here would need every one of those
-                # tests to seed ATR data or start silently rejecting
-                # everything. "mock != real" (same discipline EARN-1 will
-                # apply to its own live-only provider).
                 evaluation = self._apply_atr_stop(evaluation, candidate)
-            except Exception as exc:  # pragma: no cover - live path
+            except Exception as exc:
                 if self.journal is not None:
                     self.journal.log_system_event(
                         Severity.ERROR, "openai",
@@ -192,17 +255,6 @@ class OpenAIClient:
                 evaluation = self._rejection(candidate, "OpenAI call failed; rejected for safety.",
                                              [ReasonCode.OPENAI_REJECT.value])
         evaluation = self._enforce_min_reward_risk(evaluation, candidate)
-        # EVAL-1 addendum: journal the snapshot input alongside every real
-        # evaluation (all paths, including rejections/fail-safes -- those
-        # are precisely the examples a future replay harness needs most,
-        # same "retention starts here" law EVAL-1 already applies to the
-        # labeller). Stamped LAST, after _enforce_min_reward_risk -- that
-        # guard can swap in a brand-new rejection object of its own, which
-        # would otherwise miss the stamp if this ran before it. The primary
-        # evaluator's own snapshot input was previously never persisted
-        # anywhere, making it the one AI call in this codebase that could
-        # never be replayed after the fact.
-        evaluation.snapshot = snapshot
         return evaluation
 
     def _enforce_min_reward_risk(self, evaluation: OpenAIEvaluation,

@@ -2450,6 +2450,76 @@ SCHEMA: list[tuple[str, str]] = [
         )
         """,
     ),
+    (
+        # AB-EVAL-1: one row per `alphaos ab_eval_run` invocation -- a
+        # shadow, read-only replay of the frozen A/B corpus
+        # (alphaos/ab_eval/corpus.py, default data/ab_eval/) through TWO
+        # OpenAI models over IDENTICAL stored snapshots, to attribute the
+        # 2026-07-09+ propose drought between INSTR-1 floor mechanics, model
+        # temperament, and market conditions. Zero decision surface: never
+        # read by any gate/eval/risk/execution path -- same law as CANARY.
+        "ab_eval_runs",
+        """
+        CREATE TABLE IF NOT EXISTS ab_eval_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ab_run_id TEXT NOT NULL UNIQUE,
+            corpus_dir TEXT NOT NULL,
+            manifest_version INTEGER,
+            models_json TEXT,
+            is_mock INTEGER DEFAULT 0,
+            n_packets INTEGER NOT NULL DEFAULT 0,
+            n_results INTEGER NOT NULL DEFAULT 0,
+            n_corpus_errors INTEGER NOT NULL DEFAULT 0,
+            lineage_id TEXT,
+            started_at_utc TEXT NOT NULL,
+            started_at_sgt TEXT NOT NULL,
+            finished_at_utc TEXT,
+            finished_at_sgt TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
+        # AB-EVAL-1: one row per (packet, model) replayed -- BOTH the raw
+        # model verdict (decision/confidence/entry/stop/target/expected_r as
+        # returned, before any pipeline override) and the pipeline-final
+        # verdict after the SAME ATR-stop + reward:risk-floor chain the live
+        # evaluator runs (``OpenAIClient.post_process`` -- one replay
+        # engine, one truth). ``downgrade_reason`` is NULL unless a raw
+        # 'propose' was downgraded by the pipeline: 'RR_FLOOR' (reward:risk
+        # below the configured minimum) or 'NO_ATR' (no atr_history for the
+        # symbol) -- the two INSTR-1 mechanisms named in the spec. No
+        # per-row is_mock column -- a run is either fully mock or fully live
+        # (see ab_eval_runs.is_mock), same convention as canary_results.
+        "ab_eval_results",
+        """
+        CREATE TABLE IF NOT EXISTS ab_eval_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ab_result_id TEXT NOT NULL UNIQUE,
+            ab_run_id TEXT NOT NULL,
+            eval_id TEXT NOT NULL,
+            symbol TEXT,
+            model TEXT NOT NULL,
+            raw_decision TEXT,
+            raw_confidence REAL,
+            raw_entry REAL,
+            raw_stop REAL,
+            raw_target REAL,
+            raw_expected_r REAL,
+            pipeline_decision TEXT,
+            pipeline_expected_r REAL,
+            downgrade_reason TEXT,
+            reasoning_summary TEXT,
+            prompt_tokens INTEGER,
+            completion_tokens INTEGER,
+            total_tokens INTEGER,
+            lineage_id TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
 ]
 
 INDEXES: list[str] = [
@@ -2696,6 +2766,11 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_per_evidence_snapshots_unique "
     "ON per_evidence_snapshots(snapshot_id, arm, candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_per_evidence_snapshots_snapshot ON per_evidence_snapshots(snapshot_id)",
+    # AB-EVAL-1: results looked up per-run constantly (report building);
+    # (eval_id, model) is the natural per-packet-per-model lookup for the
+    # confusion-matrix/flip detection in the report builder.
+    "CREATE INDEX IF NOT EXISTS idx_ab_eval_results_run ON ab_eval_results(ab_run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_ab_eval_results_eval_model ON ab_eval_results(eval_id, model)",
 ]
 
 # Canonical table-name list (used by tests to assert completeness).

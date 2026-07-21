@@ -212,3 +212,41 @@ def test_exp_0_columns_and_table_added_to_a_pre_exp_0_db(tmp_path):
         assert SCHEMA_VERSION == 3
     finally:
         j.close()
+
+
+def test_ab_eval_tables_added_to_a_pre_ab_eval_db(tmp_path):
+    """AB-EVAL-1 added ab_eval_runs/ab_eval_results additively -- opening a
+    pre-AB-EVAL-1 DB must create both tables (CREATE TABLE IF NOT EXISTS),
+    accept inserts, and SCHEMA_VERSION must not have moved (still 3)."""
+    db = str(tmp_path / "pre_ab_eval.db")
+    raw = sqlite3.connect(db)
+    raw.execute(
+        "CREATE TABLE candidates (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "candidate_id TEXT NOT NULL UNIQUE, symbol TEXT NOT NULL, "
+        "created_at_utc TEXT NOT NULL, created_at_sgt TEXT NOT NULL)"
+    )
+    raw.execute("PRAGMA user_version = 3")
+    raw.commit()
+    raw.close()
+
+    j = JournalStore(db)
+    try:
+        tables = {r["name"] for r in j.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )}
+        assert {"ab_eval_runs", "ab_eval_results"} <= tables
+        j.insert("ab_eval_runs", {
+            "ab_run_id": "abrun_mig1", "corpus_dir": "data/ab_eval", "is_mock": 1,
+            "n_packets": 0, "started_at_utc": "2026-07-20T00:00:00+00:00",
+            "started_at_sgt": "2026-07-20T08:00:00+08:00",
+        })
+        j.insert("ab_eval_results", {
+            "ab_result_id": "abres_mig1", "ab_run_id": "abrun_mig1", "eval_id": "eval_mig1",
+            "symbol": "AAPL", "model": "gpt-5.4-mini",
+        })
+        assert j.count_rows("ab_eval_runs") == 1
+        assert j.count_rows("ab_eval_results") == 1
+        assert j.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert SCHEMA_VERSION == 3
+    finally:
+        j.close()

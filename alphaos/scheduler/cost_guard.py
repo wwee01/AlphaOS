@@ -23,6 +23,14 @@ HGEN-1 adds ``hypothesis_drafts`` (the LLM hypothesis generator) here AND
 its own separate, TIGHTER ``check_hypothesis_gen_budget``/daily sub-cap --
 same nested-cap pattern as PR14's bear-debate, never a replacement for the
 shared cap.
+
+AB-EVAL-1 adds ``ab_eval_results`` (the primary-evaluator A/B replay
+harness) here -- each row is a genuinely separate real OpenAI call (one
+packet replayed through one model), same "every real call-site counts"
+discipline as every term above; the harness's OWN cost-guard preflight
+(``alphaos/ab_eval/run.py``) also checks planned_calls = n_packets *
+n_models BEFORE spending anything, mirroring CANARY's own pre-flight
+magnitude check.
 """
 
 from __future__ import annotations
@@ -88,9 +96,17 @@ def calls_in_last_30_days(journal) -> int:
     hypothesis_gen_calls = journal.count_rows(
         "hypothesis_drafts", "model_provider IS NOT NULL AND created_at_utc >= ?", (since,),
     )
+    # ab_eval_results has no per-row is_mock column either -- a run is
+    # either fully mock or fully live (ab_eval_runs.is_mock), same
+    # rationale/join shape as canary_replays above.
+    ab_eval_replays = journal.count_rows(
+        "ab_eval_results",
+        "created_at_utc >= ? AND ab_run_id IN (SELECT ab_run_id FROM ab_eval_runs WHERE is_mock = 0)",
+        (since,),
+    )
     return (
         evaluations + labels + polarity + eval_replays + canary_replays
-        + debate_votes + hypothesis_gen_calls
+        + debate_votes + hypothesis_gen_calls + ab_eval_replays
     )
 
 

@@ -1673,6 +1673,37 @@ class Orchestrator:
 
         return build_canary_report(self.journal)
 
+    def ab_eval_corpus_build(self, corpus_dir: Optional[str] = None, total: int = 60) -> dict:
+        """AB-EVAL-1 one-off: select the spec's default corpus (all
+        2026-07-09/07-10 kill-zone rows + a stratified later-row sample up
+        to ``total``) and freeze it to disk (additive -- never overwrites
+        an existing fixture). See alphaos/ab_eval/corpus.py."""
+        from alphaos.ab_eval.corpus import DEFAULT_CORPUS_DIR, select_default_corpus, write_corpus
+
+        root = corpus_dir or DEFAULT_CORPUS_DIR
+        fixtures = select_default_corpus(self.journal, total=total)
+        manifest, written = write_corpus(root, fixtures, as_of_date=timeutils.market_date().isoformat())
+        return {
+            "corpus_dir": root, "evaluations_considered": len(fixtures),
+            "fixtures_written": len(written), "corpus_version": manifest["version"],
+            "corpus_size": len(manifest["evaluations"]),
+        }
+
+    def ab_eval_run(self, models: list, corpus_dir: Optional[str] = None) -> dict:
+        """AB-EVAL-1: replay the frozen A/B corpus through every model in
+        ``models`` via the production evaluate core. Zero decision surface.
+        See alphaos/ab_eval/run.py."""
+        from alphaos.ab_eval.run import run_ab_eval
+
+        return run_ab_eval(self.journal, self.settings, models, corpus_dir=corpus_dir)
+
+    def ab_eval_status(self, ab_run_id: Optional[str] = None) -> dict:
+        """AB-EVAL-1: the latest (or named) run's report -- PURE READ. See
+        alphaos/reports/ab_eval_report.py."""
+        from alphaos.reports.ab_eval_report import build_ab_eval_report
+
+        return build_ab_eval_report(self.journal, ab_run_id=ab_run_id)
+
     def outcomes_update(self, limit: int = 500) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/
