@@ -6,14 +6,17 @@ Unlike CANARY (which replays ``candidate_packets`` through the labeller),
 this corpus replays ``openai_evaluations`` rows -- the real market snapshot
 PLUS the candidate evidence row at scan time -- through the PRIMARY
 evaluator (``OpenAIClient``). Each fixture freezes BOTH the market snapshot
-AND the joined ``candidates`` row content to disk at freeze time (not just
-a DB reference): the live ``candidates`` table keeps mutating after scan
-time (status/decision/card-assignment columns), so a manifest that only
-recorded ``eval_id`` + a hash of the CURRENT row would silently change what
-"the same corpus" means every time something else in the codebase updates
-that row. Freezing full content once, like CANARY's own JSON fixtures,
-means a re-run replays the identical inputs it always has, or fails loudly
-on tamper -- never a silent drift.
+AND a WHITELISTED slice of the joined ``candidates`` row to disk at freeze
+time (not just a DB reference): the live ``candidates`` table keeps
+mutating after scan time (status/decision/card-assignment columns), so a
+manifest that only recorded ``eval_id`` + a hash of the CURRENT row would
+silently change what "the same corpus" means every time something else in
+the codebase updates that row -- and freezing the FULL current row would
+leak the pipeline's own downstream verdicts into the replay prompt (see
+``CANDIDATE_CREATION_FIELDS`` below). Freezing the whitelisted content
+once, like CANARY's own JSON fixtures, means a re-run replays the
+identical inputs it always has, or fails loudly on tamper -- never a
+silent drift.
 """
 
 from __future__ import annotations
@@ -39,6 +42,57 @@ _EVAL_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
 KILL_ZONE_DATES = ("2026-07-09", "2026-07-10")
 
 DEFAULT_TOTAL = 60
+
+# Audit HIGH (2026-07-20): the candidate dict frozen into a fixture is
+# serialized into the REAL no-news prompt on a live replay
+# (prompt_templates._public keeps every non-underscore key), so freezing
+# the whole current `candidates` DB row would feed both models the
+# pipeline's own downstream verdicts (status transitions, reject/watch
+# reasons, labels, polarity, card-assignment state...) -- biasing the raw
+# verdicts this harness exists to measure. Same failure class as the
+# logged 2026-07-06 `_public` prompt-leak incident, invisible to mock-only
+# tests because mock never builds a prompt. The whitelist below is exactly
+# the SCANNER-CREATION column set -- what the in-memory ScanContext.row
+# contained when `evaluate()` originally ran -- kept in lockstep with
+# `candidate_scanner.py`'s own creation insert by an AST test
+# (tests/test_ab_eval.py::test_candidate_whitelist_matches_scanner_creation_insert),
+# never by hand-maintenance alone.
+CANDIDATE_CREATION_FIELDS = (
+    "candidate_id", "scan_id", "scan_batch_id", "symbol", "direction",
+    "strategy", "momentum_score", "rel_strength", "unusual_volume",
+    "trend_quality", "liquidity_ok", "spread_ok", "news_status",
+    "price_snapshot_id", "status", "asset_type", "playbook_name",
+    "setup_classification", "card_id", "card_version", "status_reason",
+    "price_at_scan", "volume_at_scan", "interest_score",
+    "shortlist_reason", "notes_json", "lineage_id", "shadow_tier",
+    "instrument_version",
+)
+
+# Shadow-tier-only creation fields (the scanner's own `cand.update({...})`
+# extension, applied before the same insert) -- included in a fixture only
+# when the row is shadow_tier=1, mirroring the creation-time shape exactly
+# (a core-tier row never had these keys in memory).
+CANDIDATE_CREATION_SHADOW_FIELDS = (
+    "bid_size", "ask_size", "quote_age_seconds", "spread_pct_mid",
+    "adv_20d_dollar", "volume_today_pct_of_adv", "scan_window", "data_feed",
+    "crossed_or_locked_quote", "core_gate_verdict",
+    "liquidity_instrumentation_version", "interest_score_version",
+)
+
+# Two in-memory additions that were ALSO present on ScanContext.row when
+# `evaluate()` originally ran, though not part of the insert dict literal:
+# the scanner stamps `cand["last_price"]` immediately after its insert
+# (candidate_scanner.py), and the orchestrator assigns `interest_rank`
+# before evaluation (orchestrator._rank...). Neither is a downstream
+# pipeline outcome; both were genuine prompt inputs.
+CANDIDATE_IN_MEMORY_EXTRA_FIELDS = ("last_price", "interest_rank")
+
+# Creation columns whose DB VALUES mutate after evaluation (the status
+# machine moves detected -> watch/proposed/rejected once the pipeline
+# decides) -- the key itself belongs in the fixture (it was in the
+# original prompt), but only pinned back to its creation constant, so a
+# replay can never read the pipeline's own verdict out of it.
+CANDIDATE_FIELD_NORMALIZATIONS = {"status": "detected", "status_reason": "detected"}
 
 
 class CorpusTamperedError(Exception):
@@ -175,16 +229,42 @@ def _stratified_sample(rows: list, n: int) -> list:
     return selected
 
 
+def _freeze_candidate(candidate_row: dict) -> dict:
+    """Reduces a CURRENT ``candidates`` DB row to the whitelisted
+    scanner-creation field set (+ the two documented in-memory extras),
+    with post-evaluation-mutated fields pinned back to their creation
+    constants -- reconstructing what ``ScanContext.row`` contained when
+    ``evaluate()`` originally ran, and structurally excluding every
+    downstream pipeline-outcome column from ever reaching a replay
+    prompt. ``*_json`` columns are parsed back to objects (the in-memory
+    row held dicts, not JSON strings)."""
+    fields = list(CANDIDATE_CREATION_FIELDS) + list(CANDIDATE_IN_MEMORY_EXTRA_FIELDS)
+    if candidate_row.get("shadow_tier"):
+        fields += list(CANDIDATE_CREATION_SHADOW_FIELDS)
+    candidate = {}
+    for key in fields:
+        value = candidate_row.get(key)
+        if key in CANDIDATE_FIELD_NORMALIZATIONS:
+            value = CANDIDATE_FIELD_NORMALIZATIONS[key]
+        elif key.endswith("_json") and isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                pass  # keep the raw string -- a fixture must freeze, not crash
+        candidate[key] = value
+    return candidate
+
+
 def _row_to_fixture(journal, row: dict) -> dict:
     """Freezes ONE ``openai_evaluations`` row into a corpus fixture: the
-    parsed market snapshot + the joined ``candidates`` row (the same
-    ``candidates``-table-shaped dict ``ScanContext.row`` always was --
-    see ``alphaos/scanner/scan_context.py``'s own docstring -- which is
-    exactly the ``candidate`` shape ``OpenAIClient.evaluate()`` expects)."""
+    parsed market snapshot + the WHITELISTED slice of the joined
+    ``candidates`` row (see ``_freeze_candidate`` -- never the full
+    current row, which carries pipeline outcomes a replay prompt must
+    never see)."""
     candidate_row = journal.one(
         "SELECT * FROM candidates WHERE candidate_id = ?", (row["candidate_id"],),
     ) or {}
-    candidate = {k: v for k, v in candidate_row.items() if k != "id"}
+    candidate = _freeze_candidate(candidate_row)
     raw_snapshot = row.get("snapshot_json")
     snapshot = (
         json.loads(raw_snapshot) if isinstance(raw_snapshot, str) else (raw_snapshot or {})
@@ -214,7 +294,7 @@ def select_default_corpus(journal, total: int = DEFAULT_TOTAL) -> list:
     (same "never auto-committed" law as CANARY's own corpus build)."""
     kill_zone_rows = journal.query(
         "SELECT * FROM openai_evaluations WHERE is_mock = 0 AND snapshot_json IS NOT NULL "
-        "AND substr(created_at_utc, 1, 10) IN (?, ?) ORDER BY created_at_utc ASC",
+        "AND substr(created_at_utc, 1, 10) IN (?, ?) ORDER BY created_at_utc ASC, eval_id ASC",
         KILL_ZONE_DATES,
     )
     kill_zone_ids = {r["eval_id"] for r in kill_zone_rows}
@@ -224,7 +304,7 @@ def select_default_corpus(journal, total: int = DEFAULT_TOTAL) -> list:
     if remaining:
         candidates = journal.query(
             "SELECT * FROM openai_evaluations WHERE is_mock = 0 AND snapshot_json IS NOT NULL "
-            "AND substr(created_at_utc, 1, 10) NOT IN (?, ?) ORDER BY created_at_utc ASC",
+            "AND substr(created_at_utc, 1, 10) NOT IN (?, ?) ORDER BY created_at_utc ASC, eval_id ASC",
             KILL_ZONE_DATES,
         )
         candidates = [r for r in candidates if r["eval_id"] not in kill_zone_ids]

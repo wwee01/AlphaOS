@@ -19,6 +19,11 @@ from alphaos.constants import Decision, ReasonCode
 
 RR_FLOOR = "RR_FLOOR"
 NO_ATR = "NO_ATR"
+# Audit NIT (2026-07-20): a raw propose that became a final non-propose
+# WITHOUT either known reason code stamped means a third downgrade path
+# exists that this module doesn't know about -- surfaced loudly as its own
+# sentinel value rather than hidden inside NULL ("no downgrade happened").
+UNKNOWN = "UNKNOWN"
 
 
 class _ReadOnlyJournal:
@@ -57,7 +62,9 @@ def _downgrade_reason(raw: OpenAIEvaluation, final: OpenAIEvaluation) -> Optiona
     Distinguishes the two INSTR-1 mechanisms via the reason code
     ``_rejection()`` actually stamped into ``risk_flags`` -- never
     re-derives the decision independently (one source of truth: whatever
-    ``post_process()`` itself decided)."""
+    ``post_process()`` itself decided). A downgrade carrying NEITHER known
+    code returns the ``UNKNOWN`` sentinel, never NULL -- a future third
+    downgrade path must show up in the autopsy, not hide."""
     if raw.decision != Decision.PROPOSE.value or final.decision == Decision.PROPOSE.value:
         return None
     flags = final.risk_flags or []
@@ -65,7 +72,7 @@ def _downgrade_reason(raw: OpenAIEvaluation, final: OpenAIEvaluation) -> Optiona
         return NO_ATR
     if ReasonCode.REWARD_RISK_TOO_LOW.value in flags:
         return RR_FLOOR
-    return None
+    return UNKNOWN
 
 
 def replay_packet(fixture: dict, model: str, settings: Any, real_journal: Any) -> ReplayResult:

@@ -35,13 +35,17 @@ def run_ab_eval(journal: Any, settings: Any, models: list, corpus_dir: Optional[
     """
     corpus_dir = corpus_dir or DEFAULT_CORPUS_DIR
     ab_run_id = new_id("abrun")
+    # Dedupe while preserving order (audit NIT, 2026-07-20): a repeated
+    # --models entry would double every packet's call count (and the cost
+    # preflight's planned_calls) for zero comparative information.
+    models = list(dict.fromkeys(models or []))
     result: dict[str, Any] = {
         "ab_run_id": ab_run_id, "n_packets": 0, "n_results": 0,
         "n_corpus_errors": 0, "models": list(models),
     }
 
-    if not models or len(models) < 2:
-        result["error"] = "AB-EVAL-1 needs at least 2 models to compare -- refusing to start"
+    if len(models) < 2:
+        result["error"] = "AB-EVAL-1 needs at least 2 distinct models to compare -- refusing to start"
         return result
 
     manifest, fixtures = load_corpus(corpus_dir)

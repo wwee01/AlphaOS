@@ -226,7 +226,14 @@ class OpenAIClient:
         ``raw_evaluate`` can return), so gating on ``self.use_mock`` here
         exactly reproduces the old "only after a successful live call"
         behavior without needing to know whether the live call actually
-        succeeded."""
+        succeeded. The try/except below is part of that same identity
+        (audit HIGH, 2026-07-20): pre-refactor, ``_apply_atr_stop`` ran
+        INSIDE ``evaluate()``'s live try -- a true exception (e.g. a
+        transient SQLite error on the atr_history read) was contained to
+        a journaled ERROR + safe OPENAI_REJECT rejection, never allowed
+        to abort the caller's whole scan loop. NOTE: ``_apply_atr_stop``'s
+        own NO_ATR/RR_FLOOR *rejection returns* are normal flow, not
+        exceptions -- only genuine raises are contained here."""
         if not self.use_mock:
             # INSTR-1: LIVE path only -- the mock baseline's stop is
             # already a clean, deterministic, config-driven formula
@@ -236,7 +243,17 @@ class OpenAIClient:
             # tests to seed ATR data or start silently rejecting
             # everything. "mock != real" (same discipline EARN-1 will
             # apply to its own live-only provider).
-            evaluation = self._apply_atr_stop(evaluation, candidate)
+            try:
+                evaluation = self._apply_atr_stop(evaluation, candidate)
+            except Exception as exc:
+                if self.journal is not None:
+                    self.journal.log_system_event(
+                        Severity.ERROR, "openai",
+                        f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
+                        {"error": str(exc)},
+                    )
+                evaluation = self._rejection(candidate, "OpenAI call failed; rejected for safety.",
+                                             [ReasonCode.OPENAI_REJECT.value])
         evaluation = self._enforce_min_reward_risk(evaluation, candidate)
         return evaluation
 

@@ -15,13 +15,14 @@ import os
 import pytest
 
 from alphaos.ab_eval.corpus import (
-    CorpusTamperedError, KILL_ZONE_DATES,
+    CANDIDATE_CREATION_FIELDS, CANDIDATE_CREATION_SHADOW_FIELDS,
+    CANDIDATE_IN_MEMORY_EXTRA_FIELDS, CorpusTamperedError, KILL_ZONE_DATES,
     load_corpus, select_default_corpus, write_corpus,
 )
-from alphaos.ab_eval.replay import NO_ATR, RR_FLOOR, ReplayResult, replay_packet
+from alphaos.ab_eval.replay import NO_ATR, RR_FLOOR, UNKNOWN, ReplayResult, replay_packet
 from alphaos.ab_eval.run import run_ab_eval
 from alphaos.ai.openai_client import ATR_RULES_V1, OpenAIClient, OpenAIEvaluation
-from alphaos.constants import Decision, TradeDirection
+from alphaos.constants import Decision, ReasonCode, TradeDirection
 from alphaos.reports.ab_eval_report import build_ab_eval_report, render_markdown
 from alphaos.scheduler import cost_guard
 from alphaos.util.ids import new_id
@@ -191,6 +192,126 @@ def test_row_to_fixture_freezes_candidate_and_snapshot(journal):
     assert fixtures[0]["candidate"]["symbol"] == "AAPL"
     assert fixtures[0]["snapshot"] == {"last_price": 50.0}
     assert "id" not in fixtures[0]["candidate"]  # DB bookkeeping column dropped
+
+
+# All downstream pipeline-outcome columns an attacker/late pipeline stage
+# could have written onto the candidates row by corpus-build time. Values
+# are distinctive sentinels so the leak assertion can't pass by accident.
+_OUTCOME_COLUMN_SENTINELS = {
+    "status": "LEAKME_STATUS",
+    "status_reason": "LEAKME_STATUS_REASON",
+    "reject_reason": "LEAKME_REJECT_REASON",
+    "block_reason": "LEAKME_BLOCK_REASON",
+    "watch_reason": "LEAKME_WATCH_REASON",
+    "decision_adjustment": "LEAKME_DECISION_ADJUSTMENT",
+    "decision_adjustment_reason": "LEAKME_ADJUSTMENT_REASON",
+    "card_assignment_status": "LEAKME_CARD_ASSIGNMENT_STATUS",
+    "card_assignment_ref": "LEAKME_CARD_ASSIGNMENT_REF",
+    "primary_label": "LEAKME_PRIMARY_LABEL",
+    "label_decision": "LEAKME_LABEL_DECISION",
+    "label_confidence": 0.987654,
+    "sentiment_label": "LEAKME_SENTIMENT",
+    "polarity_label": "LEAKME_POLARITY",
+    "polarity_alignment": "LEAKME_POLARITY_ALIGNMENT",
+    "narrative_driver_type": "LEAKME_NARRATIVE_DRIVER",
+    "arming_classification": "LEAKME_ARMING",
+    "shortlist_reason": "momentum+relvol",  # creation field -- must SURVIVE (control)
+}
+
+
+def test_frozen_candidate_never_leaks_pipeline_outcomes_into_prompt(journal):
+    """Audit HIGH (2026-07-20): the frozen candidate dict is serialized into
+    the REAL no-news prompt on a live replay (prompt_templates._public keeps
+    every non-underscore key), so a fixture built from a candidates row that
+    the pipeline has since stamped with its own verdicts must NOT carry any
+    of those values into the prompt text -- same failure class as the logged
+    2026-07-06 _public prompt-leak incident, invisible to mock-only tests
+    because mock never builds a prompt. This test runs the REAL production
+    prompt builder on the frozen candidate and asserts every sentinel is
+    absent."""
+    from alphaos.ai.prompt_templates import build_no_news_user_prompt
+
+    journal.insert("candidates", {
+        "candidate_id": "cand_leak01", "symbol": "AAPL", "direction": "long",
+        "momentum_score": 0.7, **_OUTCOME_COLUMN_SENTINELS,
+    })
+    journal.insert("openai_evaluations", {
+        "eval_id": "eval_leak01", "candidate_id": "cand_leak01", "symbol": "AAPL",
+        "model": "gpt-5.4-mini", "decision": "reject", "is_mock": 0,
+        "snapshot_json": json.dumps({"last_price": 50.0}),
+        "data_freshness_status": "usable",
+        "created_at_utc": "2026-07-09T15:00:00+00:00",
+        "created_at_sgt": "2026-07-09T23:00:00+08:00",
+    })
+
+    fixtures = select_default_corpus(journal, total=1)
+    assert len(fixtures) == 1
+    frozen = fixtures[0]["candidate"]
+
+    prompt = build_no_news_user_prompt(frozen, fixtures[0]["snapshot"], "usable")
+
+    assert "LEAKME" not in prompt          # every text outcome sentinel absent
+    assert "0.987654" not in prompt        # the numeric one too (label_confidence)
+    # Post-evaluation status mutations pinned back to the creation constant:
+    assert frozen["status"] == "detected"
+    assert frozen["status_reason"] == "detected"
+    # Control: a genuine creation-time field with the same provenance as the
+    # sentinels (same row, same freeze pass) DID survive into the prompt --
+    # proving the assertion above isn't vacuous.
+    assert "momentum+relvol" in prompt
+    assert frozen["momentum_score"] == 0.7
+
+
+def test_candidate_whitelist_matches_scanner_creation_insert():
+    """Lockstep law for the whitelist (audit HIGH, 2026-07-20): the frozen
+    candidate field set must equal the scanner's OWN creation-insert column
+    set, introspected from the source (AST), never hand-copied -- so a
+    future scan-time column can't silently drop out of fixtures, and a
+    future post-hoc column can't silently leak in. Also pins the two
+    documented in-memory extras to their real origins: the scanner's
+    ``cand["last_price"] = ...`` post-insert stamp and the orchestrator's
+    ``["interest_rank"] = ...`` pre-evaluation assignment."""
+    import ast
+    import inspect
+
+    from alphaos import orchestrator as orchestrator_module
+    from alphaos.scanner import candidate_scanner
+
+    tree = ast.parse(inspect.getsource(candidate_scanner))
+    core_dicts, update_dicts, subscript_assigns = [], [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (isinstance(target, ast.Name) and target.id == "cand"
+                        and isinstance(node.value, ast.Dict)):
+                    core_dicts.append(
+                        [k.value for k in node.value.keys if isinstance(k, ast.Constant)])
+                if (isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name)
+                        and target.value.id == "cand" and isinstance(target.slice, ast.Constant)):
+                    subscript_assigns.append(target.slice.value)
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "update" and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "cand" and node.args
+                and isinstance(node.args[0], ast.Dict)):
+            update_dicts.append(
+                [k.value for k in node.args[0].keys if isinstance(k, ast.Constant)])
+
+    assert len(core_dicts) == 1, "expected exactly ONE `cand = {...}` creation dict in the scanner"
+    assert len(update_dicts) == 1, "expected exactly ONE `cand.update({...})` shadow extension"
+    assert set(CANDIDATE_CREATION_FIELDS) == set(core_dicts[0])
+    assert set(CANDIDATE_CREATION_SHADOW_FIELDS) == set(update_dicts[0])
+
+    # The two in-memory extras exist at their claimed origins:
+    assert "last_price" in subscript_assigns  # scanner's post-insert stamp
+    orch_tree = ast.parse(inspect.getsource(orchestrator_module))
+    orch_subscript_keys = [
+        node.slice.value
+        for assign in ast.walk(orch_tree) if isinstance(assign, ast.Assign)
+        for node in assign.targets
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+    ]
+    assert "interest_rank" in orch_subscript_keys  # orchestrator's pre-eval rank assignment
+    assert set(CANDIDATE_IN_MEMORY_EXTRA_FIELDS) == {"last_price", "interest_rank"}
 
 
 # --------------------------------------------------------------------- run
@@ -386,6 +507,29 @@ def test_downgrade_reason_none_when_raw_propose_clears_the_pipeline(journal):
     assert _downgrade_reason(raw, final) is None
 
 
+def test_downgrade_reason_unknown_when_downgrade_has_no_known_reason_code(journal):
+    """Audit NIT (2026-07-20): a raw propose that became a final non-propose
+    WITHOUT either known reason code stamped is a third downgrade path this
+    module doesn't know about -- it must surface as the UNKNOWN sentinel in
+    the autopsy, never hide inside NULL ('no downgrade happened')."""
+    from alphaos.ab_eval.replay import _downgrade_reason
+
+    raw = OpenAIEvaluation(
+        eval_id="ev1", candidate_id="c1", symbol="AAPL", model="gpt-5.4-mini",
+        direction=TradeDirection.LONG.value, entry=100.0, stop=97.0, target=110.0,
+        max_holding_days=3, expected_r=3.33, confidence=0.8,
+        decision=Decision.PROPOSE.value, reasoning_summary="raw propose",
+    )
+    final = OpenAIEvaluation(
+        eval_id="ev2", candidate_id="c1", symbol="AAPL", model="gpt-5.4-mini",
+        direction=TradeDirection.LONG.value, entry=None, stop=None, target=None,
+        max_holding_days=None, expected_r=None, confidence=0.0,
+        decision=Decision.REJECT.value, reasoning_summary="mystery downgrade",
+        risk_flags=["SOME_FUTURE_REASON_CODE"],
+    )
+    assert _downgrade_reason(raw, final) == UNKNOWN
+
+
 def test_downgrade_reason_none_when_raw_decision_was_not_propose(journal):
     raw = OpenAIEvaluation(
         eval_id="ev1", candidate_id="c1", symbol="AAPL", model="gpt-5.4-mini",
@@ -569,7 +713,63 @@ def test_evaluate_calls_raw_evaluate_then_post_process_in_order_ast():
     assert attr_calls.index("raw_evaluate") < attr_calls.index("post_process")
 
 
+def test_run_ab_eval_dedupes_repeated_models(tmp_path, journal):
+    """Audit NIT (2026-07-20): a repeated --models entry would double every
+    packet's call count (and the cost preflight's planned_calls) for zero
+    comparative information -- deduped order-preserving; two copies of ONE
+    model is still a one-model run and refuses."""
+    settings = make_settings()
+    corpus_dir = str(tmp_path / "corpus")
+    write_corpus(corpus_dir, [_FIXTURE], as_of_date="2026-07-20")
+
+    same_twice = run_ab_eval(journal, settings, ["gpt-5.4-mini", "gpt-5.4-mini"], corpus_dir=corpus_dir)
+    assert "error" in same_twice
+    assert journal.count_rows("ab_eval_runs", "1=1") == 0
+
+    result = run_ab_eval(journal, settings, ["gpt-5.4-mini", "gpt-5.4-mini", "gpt-5.6-luna"],
+                         corpus_dir=corpus_dir)
+    assert result["models"] == ["gpt-5.4-mini", "gpt-5.6-luna"]
+    assert result["n_results"] == 2  # 1 packet x 2 DISTINCT models, never 3 calls
+
+
 # -------------------------------------------------------- refactor-preserving
+def test_evaluate_contains_atr_read_exception_as_safe_reject(journal):
+    """Audit HIGH regression (2026-07-20): pre-refactor, _apply_atr_stop ran
+    INSIDE evaluate()'s live try/except -- a true exception (e.g. a transient
+    SQLite error on the atr_history read) was contained to a journaled ERROR
+    + safe OPENAI_REJECT rejection, and the scan loop continued. The
+    post_process() factoring briefly moved it outside that containment, so
+    one flaky read would have aborted the ENTIRE nightly scan mid-loop.
+    evaluate() must RETURN a reject, never raise."""
+    settings = make_settings(ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-key-for-test")
+    client = OpenAIClient(settings, journal)
+
+    def _fake_live_eval(self, candidate, snapshot, freshness_status):
+        return OpenAIEvaluation(
+            eval_id="ev1", candidate_id="c1", symbol="AAPL", model=self.model,
+            direction=TradeDirection.LONG.value, entry=100.0, stop=97.0, target=110.0,
+            max_holding_days=3, expected_r=3.33, confidence=0.8,
+            decision=Decision.PROPOSE.value, reasoning_summary="x", is_mock=False,
+        )
+
+    def _raising_scalar(sql, params=()):
+        raise Exception("simulated transient SQLite error on atr_history read")
+
+    import types
+    client._live_eval = types.MethodType(_fake_live_eval, client)
+    journal.scalar = _raising_scalar  # the read _apply_atr_stop performs
+
+    result = client.evaluate({"symbol": "AAPL"}, {"last_price": 100.0}, freshness_status="usable")
+
+    assert result.decision == Decision.REJECT.value          # returned, not raised
+    assert ReasonCode.OPENAI_REJECT.value in result.risk_flags
+    assert result.snapshot == {"last_price": 100.0}          # snapshot still stamped LAST
+    event = journal.one(
+        "SELECT * FROM system_events WHERE category = 'openai' AND severity = 'error'")
+    assert event is not None
+    assert "rejecting" in event["message"]
+
+
 def test_evaluate_mock_path_unchanged_after_refactor(journal):
     """The evaluate() refactor (raw_evaluate + post_process) must be
     byte-identical in behavior to the pre-refactor inline sequence for the
