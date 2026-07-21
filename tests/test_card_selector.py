@@ -23,7 +23,6 @@ All offline, in-memory, mock mode. No real money, no network.
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import date, datetime, timedelta
 
@@ -428,78 +427,49 @@ def test_healthy_but_ineligible_symbol_gets_default_with_ok_status(journal):
 
 
 # ------------------------------------------------------------- golden fixture
-# Pinned by computing this test's own matrix ONCE (see the docstring below)
-# and hardcoding the result here as a LITERAL -- never computed from the
-# current code at import time, which would make the "pin" a tautology that
-# passes no matter what the code does. A future semantic change to
-# selection logic will produce a DIFFERENT matrix, and this literal will
-# then correctly mismatch until a human deliberately re-pins it.
-PINNED_GOLDEN_HASH = "2751b18e58ccaec944bf14e0f140b45ab6460576beeab7f3ca4e2ddafe4d9f22"
-
-
-def _golden_fixture_context():
-    """A hand-built, journal-free SelectorContext covering the semantic
-    matrix: BMO/AMC/UNKNOWN timing, a reschedule chain, a NULL-fiscal
-    singleton, and a holiday-spanning window -- constructed directly
-    (bypassing build_selector_context) so this test is pure and fast, and
-    exercises ONLY select_card's own semantics."""
-    current_belief = {
-        "BMOSYM": [{
-            "id": 1, "symbol": "BMOSYM", "report_date": "2026-07-14",
-            "fiscal_date_ending": "2026-06-30", "timing": "pre-market",
-        }],
-        "AMCSYM": [{
-            "id": 2, "symbol": "AMCSYM", "report_date": "2026-07-17",
-            "fiscal_date_ending": "2026-06-30", "timing": "post-market",
-        }],
-        "UNKSYM": [{
-            "id": 3, "symbol": "UNKSYM", "report_date": "2026-07-14",
-            "fiscal_date_ending": None, "timing": None,
-        }],
-        "HOLSYM": [{
-            "id": 4, "symbol": "HOLSYM", "report_date": "2026-11-25",
-            "fiscal_date_ending": "2026-09-30", "timing": "pre-market",
-        }],
-    }
-    return selector.SelectorContext(
-        assignment_as_of_utc="2026-07-16T09:00:00+00:00",
-        cache_health=selector.CacheHealth.OK,
-        default_card={"card_id": "catalyst_momentum_v2", "version": 2},
-        current_belief_by_symbol=current_belief,
-    )
-
-
-def _golden_fixture_matrix():
-    ctx = _golden_fixture_context()
-    probes = [
-        ("BMOSYM", date(2026, 7, 14)), ("BMOSYM", date(2026, 7, 16)), ("BMOSYM", date(2026, 7, 17)),
-        ("AMCSYM", date(2026, 7, 17)), ("AMCSYM", date(2026, 7, 20)), ("AMCSYM", date(2026, 7, 21)),
-        ("UNKSYM", date(2026, 7, 14)), ("UNKSYM", date(2026, 7, 15)),
-        ("HOLSYM", date(2026, 11, 25)), ("HOLSYM", date(2026, 11, 27)), ("HOLSYM", date(2026, 11, 30)),
-        ("NOEVENTSYM", date(2026, 7, 16)),
-    ]
-    return [
-        {"symbol": sym, "market_date": str(d), **selector.select_card(ctx, sym, d)}
-        for sym, d in probes
-    ]
-
-
-def _canonical_hash(matrix) -> str:
-    blob = json.dumps(matrix, sort_keys=True, default=str)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
-
-
+# S1b integrity follow-up: the fixture matrix + hash computation now live
+# in PRODUCTION code (alphaos.cards.selector), not here -- this test
+# imports them rather than maintaining an independent copy (the prior
+# design had the SAME literal hash hardcoded in both this test file and,
+# after this follow-up, selector.py; keeping only one copy removes the
+# risk of the two silently drifting apart). See selector.py's own
+# "semantic identity" section for the full rationale.
 def test_golden_fixture_semantic_hash_is_pinned():
     """Pins SELECTOR_VERSION's semantic meaning: ANY change to selection
     logic (timing rules, window math, ordering, tie-breaks, status
     values) changes this hash, forcing a deliberate, reviewed re-pin --
     exactly the golden-fixture binding the mechanisms spec's Amendment 7
     calls for, independent of (and stronger than) the card YAML's own
-    content-hash check, which only covers PARAMETERS, not code semantics."""
-    matrix = _golden_fixture_matrix()
-    computed = _canonical_hash(matrix)
-    # Pinned by running this test once and copying the printed value below.
-    # A mismatch means selection semantics changed -- confirm the new
-    # matrix is INTENTIONAL, then update this constant deliberately.
+    content-hash check, which only covers PARAMETERS, not code semantics.
+    This is now a real test of PRODUCTION code (selector.compute_golden_
+    fixture_hash() against selector.GOLDEN_FIXTURE_SEMANTIC_HASH), not a
+    test-local computation -- proving the production semantic hash
+    actually matches the approved canonical selector scenarios."""
+    computed = selector.compute_golden_fixture_hash()
     print(f"\nGOLDEN FIXTURE HASH: {computed}")
-    assert computed == PINNED_GOLDEN_HASH
+    assert computed == selector.GOLDEN_FIXTURE_SEMANTIC_HASH
+
+
+def test_verify_selector_semantic_identity_returns_the_matching_hash():
+    """verify_selector_semantic_identity() is the production 'fail loudly
+    on drift' entry point -- confirm it succeeds today and returns the
+    same value the direct computation does."""
+    assert selector.verify_selector_semantic_identity() == selector.GOLDEN_FIXTURE_SEMANTIC_HASH
+
+
+def test_verify_selector_semantic_identity_raises_on_drift():
+    """Swap test: a live hash that no longer matches the pinned constant
+    must raise SelectorSemanticDriftError, not silently pass or return a
+    wrong value -- proves the 'fail loudly' mechanism the integrity
+    follow-up requires actually fires. Monkeypatches only the PINNED
+    constant (never the computation), simulating 'the code changed but
+    nobody re-pinned it' -- the exact scenario this guard exists for."""
+    import pytest
+
+    original = selector.GOLDEN_FIXTURE_SEMANTIC_HASH
+    selector.GOLDEN_FIXTURE_SEMANTIC_HASH = "deliberately-wrong-hash-to-prove-the-guard-fires"
+    try:
+        with pytest.raises(selector.SelectorSemanticDriftError):
+            selector.verify_selector_semantic_identity()
+    finally:
+        selector.GOLDEN_FIXTURE_SEMANTIC_HASH = original

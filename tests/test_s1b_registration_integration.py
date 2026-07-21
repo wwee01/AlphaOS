@@ -99,16 +99,43 @@ def _seed_population(journal, n_events=30, effect=0.5, controls_per_date=10, sym
     return dates
 
 
+def _seed_valid_card_registry(journal):
+    """S1b-integrity: idempotently inserts the ``setup_cards`` row
+    ``fetch_active_per_card_identity()`` requires before any identity can be
+    frozen. A synthetic row (not read from the real card YAML file, so this
+    suite stays independent of production card content drifting) shaped
+    exactly like a valid v1 shadow ``post_earnings_reaction`` card."""
+    existing = journal.one(
+        "SELECT card_id FROM setup_cards WHERE card_id = ? AND version = 1", (PER_CARD_ID,),
+    )
+    if existing is not None:
+        return
+    journal.insert("setup_cards", {
+        "card_id": PER_CARD_ID, "version": 1, "name": PER_CARD_ID, "state": "shadow",
+        "content_hash": "test-fixture-hash-0001",
+        "content_json": {"requires_selector": SELECTOR_VERSION},
+    })
+
+
 def _register_pair(journal, floor_effective_n=20, floor_span_days=90.0):
+    """S1b-integrity: freezes the live card/selector identity into both
+    rows' ``params_json`` -- required since ``evaluate_two_arm_hypothesis_
+    pair()``'s new identity gate (Section 3) refuses any pair whose frozen
+    identity is missing or doesn't match what's live. ``_seed_valid_card_
+    registry()`` guarantees a live identity exists to freeze."""
+    from alphaos.cards.per_evidence import fetch_active_per_card_identity
+
+    _seed_valid_card_registry(journal)
+    identity = fetch_active_per_card_identity(journal)
     prereg_pos = register_hypothesis(
         journal, hypothesis="H-PER-1P: PER excess is positive", metric="per_excess_market_adjusted_5d",
         floor_effective_n=floor_effective_n, floor_span_days=floor_span_days,
-        analysis_not_before="2026-01-01",
+        analysis_not_before="2026-01-01", params={**identity},
     )
     prereg_neg = register_hypothesis(
         journal, hypothesis="H-PER-1N: PER excess is negative", metric="per_excess_market_adjusted_5d_negated",
         floor_effective_n=floor_effective_n, floor_span_days=floor_span_days,
-        analysis_not_before="2026-01-01",
+        analysis_not_before="2026-01-01", params={**identity},
     )
     return prereg_pos, prereg_neg
 
@@ -337,18 +364,42 @@ def test_per_evaluate_cli_before_registration_returns_1(orchestrator):
     assert cmd_per_evaluate(orchestrator) == 1
 
 
-def test_per_evaluate_cli_runs_full_pipeline_and_is_idempotent_after_success(orchestrator):
+def test_per_evaluate_cli_on_the_original_v1_pair_permanently_defers(orchestrator, capsys):
+    """S1b-integrity: ``cmd_per_evaluate()`` is hardwired to the ORIGINAL
+    H-PER-1P/H-PER-1N pair registered by ``cmd_per_register()`` -- which
+    (per Section 5's decision to leave that command and the original
+    production rows untouched) never freezes identity fields. The identity
+    gate added to ``evaluate_two_arm_hypothesis_pair()`` (Section 3) means
+    this specific, real-world CLI pathway can now NEVER reach evaluation --
+    exactly the "the currently registered incomplete pair is not
+    accidentally used as the formal verdict pair" guarantee this follow-up
+    exists to provide. Proven with a full clean population (this would have
+    evaluated successfully before this follow-up) and the real, unmodified
+    CLI commands -- not a synthetic fixture. Asserts the SPECIFIC deferral
+    reason (via captured stdout), not just exit code 0 -- otherwise this
+    test would stay green even if the deferral fired for some unrelated
+    cause (architecture-audit finding)."""
     from alphaos.__main__ import cmd_per_evaluate, cmd_per_register
 
     _seed_population(orchestrator.journal, n_events=30, effect=2.0)
     assert cmd_per_register(orchestrator) == 0
-    assert cmd_per_evaluate(orchestrator) == 0
+    assert cmd_per_evaluate(orchestrator) == 0  # a clean "deferred" is still exit 0
+    assert '"reason": "identity_fields_missing"' in capsys.readouterr().out
     rows = orchestrator.journal.query(
         "SELECT evaluated_at_utc FROM preregistrations WHERE hypothesis LIKE 'H-PER-1%'"
     )
-    assert all(r["evaluated_at_utc"] is not None for r in rows)
-    # A second CLI call must not raise -- it prints "already_evaluated" and returns 0.
+    assert len(rows) == 2
+    assert all(r["evaluated_at_utc"] is None for r in rows), (
+        "the original v1 pair must never reach evaluation now that identity freezing is required"
+    )
+    assert orchestrator.journal.count_rows("per_evidence_snapshots") == 0
+    # Re-running is safe and produces the identical deferred outcome -- this
+    # pathway is durably, not just once, blocked; nothing ever accumulates.
     assert cmd_per_evaluate(orchestrator) == 0
+    rows_again = orchestrator.journal.query(
+        "SELECT evaluated_at_utc FROM preregistrations WHERE hypothesis LIKE 'H-PER-1%'"
+    )
+    assert all(r["evaluated_at_utc"] is None for r in rows_again)
 
 
 def test_production_scan_produces_zero_per_assignments(orchestrator):

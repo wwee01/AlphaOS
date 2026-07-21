@@ -358,6 +358,117 @@ def cmd_per_register(orch: Orchestrator) -> int:
     return 0
 
 
+# S1b integrity follow-up: the CORRECTED pair's identity constants
+# (PER_HYPOTHESIS_POS_V2 etc.) now live in alphaos.cards.per_evidence --
+# the single source of truth both this command and the (dormant)
+# s1c_activation_preflight() diagnostic import, so there is exactly one
+# place that can drift. See that module's own comment for why a v2 pair
+# with distinct hypothesis/metric text (never mutating or reusing
+# prereg_eb3ab6bda5a4/prereg_2821a9e1b931) is this codebase's correct,
+# disclosed way to correct a preregistration with no formal
+# supersedes/withdrawn/version field on the table itself.
+
+
+def cmd_per_register_v2(orch: Orchestrator) -> int:
+    """SETUP-1 S1b integrity follow-up: register the CORRECTED H-PER-1P-v2/
+    H-PER-1N-v2 pair -- identical statistical design to cmd_per_register()
+    above, PLUS the three identity fields the original registration
+    omitted: ``card_version``, exact ``card_content_hash`` (from
+    ``setup_cards``, PR13's own hash-guarded registry -- never hand-typed),
+    and exact ``selector_semantic_hash`` (from the live golden-fixture
+    hash, freshly verified, never assumed).
+
+    Refuses to register -- prints a clear error, writes nothing, returns
+    1 -- if ``fetch_active_per_card_identity()`` raises ``CardIdentityError``
+    (card absent / wrong version / wrong state / requires_selector
+    mismatch / selector semantic hash unavailable or drifted). Otherwise
+    idempotent exactly like cmd_per_register().
+
+    NEVER invoked as part of building/testing this follow-up -- operator-
+    invoked only, later, against the real production journal (see this
+    build's own final report for the backup-restoration reminder)."""
+    from alphaos.cards.selector import PER_CARD_ID
+    from alphaos.cards.per_evidence import (
+        CROSS_ARM_EXCLUSION_TRADING_DAYS, MAX_EXCLUSION_SHARE, MAX_POOLED_FALLBACK_SHARE,
+        MAX_SYMBOL_CONCENTRATION, MIN_CONTROL_RAW_N, MIN_DISTINCT_MONTHS, MIN_PER_RAW_N,
+        OUTCOME_METRIC, OUTCOME_WINDOW_TRADING_DAYS, PLACEBO_SHIFT_TRADING_DAYS,
+        PLACEBO_TOLERANCE_TRADING_DAYS, RUNG1_MIN_CONTROLS, RUNG2_MIN_CONTROLS,
+        PER_HYPOTHESIS_NEG_V2, PER_HYPOTHESIS_POS_V2, PER_METRIC_NEG_V2, PER_METRIC_POS_V2,
+        CardIdentityError, fetch_active_per_card_identity,
+    )
+    from alphaos.stats.preregistration import register_hypothesis
+    from alphaos.stats.two_arm import DEFAULT_B, DEFAULT_CI_LEVEL, DEFAULT_SEED, MIN_VALID_REPLICATE_FRACTION
+
+    existing_pos = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_POS_V2, PER_METRIC_POS_V2),
+    )
+    existing_neg = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_NEG_V2, PER_METRIC_NEG_V2),
+    )
+    if existing_pos or existing_neg:
+        print("Already registered (one or both halves) -- no-op.")
+        _print({"per_register_v2": {
+            "status": "already_registered",
+            "pos": existing_pos, "neg": existing_neg,
+        }})
+        return 0
+
+    try:
+        identity = fetch_active_per_card_identity(orch.journal)
+    except CardIdentityError as exc:
+        print(f"Refusing to register: {exc}")
+        _print({"per_register_v2": {"status": "refused", "reason": str(exc)}})
+        return 1
+
+    assert identity["card_id"] == PER_CARD_ID  # fetch_active_per_card_identity()'s own contract
+
+    frozen_params = {
+        "card_id": identity["card_id"],
+        "card_version": identity["card_version"],
+        "card_content_hash": identity["card_content_hash"],
+        "selector_version": identity["selector_version"],
+        "selector_semantic_hash": identity["selector_semantic_hash"],
+        "outcome_metric": OUTCOME_METRIC,
+        "outcome_window_trading_days": OUTCOME_WINDOW_TRADING_DAYS,
+        "cross_arm_exclusion_trading_days": CROSS_ARM_EXCLUSION_TRADING_DAYS,
+        "rung1_min_controls": RUNG1_MIN_CONTROLS,
+        "rung2_min_controls": RUNG2_MIN_CONTROLS,
+        "max_pooled_fallback_share": MAX_POOLED_FALLBACK_SHARE,
+        "max_exclusion_share": MAX_EXCLUSION_SHARE,
+        "min_per_raw_n": MIN_PER_RAW_N,
+        "min_distinct_months": MIN_DISTINCT_MONTHS,
+        "max_symbol_concentration": MAX_SYMBOL_CONCENTRATION,
+        "min_control_raw_n": MIN_CONTROL_RAW_N,
+        "placebo_shift_trading_days": PLACEBO_SHIFT_TRADING_DAYS,
+        "placebo_tolerance_trading_days": PLACEBO_TOLERANCE_TRADING_DAYS,
+        "bootstrap_method": "smooth_weight_joint_clustered_bootstrap_v1",
+        "n_resamples": DEFAULT_B,
+        "ci_level": DEFAULT_CI_LEVEL,
+        "seed": DEFAULT_SEED,
+        "min_valid_replicate_fraction": MIN_VALID_REPLICATE_FRACTION,
+        "statistic": "arithmetic_mean",
+        "tie_rule": "inclusive_both_tails",
+        "finite_replicate_correction": "(extreme_count + 1) / (n_valid_replicates + 1)",
+    }
+    prereg_pos = register_hypothesis(
+        orch.journal, PER_HYPOTHESIS_POS_V2, PER_METRIC_POS_V2,
+        floor_effective_n=_PER_FLOOR_EFFECTIVE_N, floor_span_days=_PER_FLOOR_SPAN_DAYS,
+        analysis_not_before="2026-10-15",
+        params={**frozen_params, "direction": "positive"},
+    )
+    prereg_neg = register_hypothesis(
+        orch.journal, PER_HYPOTHESIS_NEG_V2, PER_METRIC_NEG_V2,
+        floor_effective_n=_PER_FLOOR_EFFECTIVE_N, floor_span_days=_PER_FLOOR_SPAN_DAYS,
+        analysis_not_before="2026-10-15",
+        params={**frozen_params, "direction": "negative"},
+    )
+    print(f"Registered corrected pair: pos={prereg_pos} neg={prereg_neg}")
+    _print({"per_register_v2": {"status": "registered", "prereg_id_pos": prereg_pos, "prereg_id_neg": prereg_neg}})
+    return 0
+
+
 def cmd_per_evaluate(orch: Orchestrator) -> int:
     """SETUP-1 S1b: run the ONE atomic paired evaluation for H-PER-1P/
     H-PER-1N, as of right now. Operator-invoked only -- never scheduled,
@@ -1173,6 +1284,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("per_register",
                    help="SETUP-1 S1b: one-off, idempotent -- register the H-PER-1P/H-PER-1N pair "
                         "(preregistrations rows only; never evaluates, never gates)")
+    sub.add_parser("per_register_v2",
+                   help="SETUP-1 S1b integrity follow-up: register the CORRECTED H-PER-1P-v2/"
+                        "H-PER-1N-v2 pair with card/selector identity frozen; refuses on any "
+                        "identity mismatch (preregistrations rows only; never evaluates)")
     sub.add_parser("per_evaluate",
                    help="SETUP-1 S1b: one atomic paired evaluation of H-PER-1P/H-PER-1N as of now "
                         "(operator-invoked only; deferred population/floor failures write nothing)")
@@ -1418,6 +1533,8 @@ def main(argv=None) -> int:
             return cmd_hypothesis_seed(orch)
         if args.command == "per_register":
             return cmd_per_register(orch)
+        if args.command == "per_register_v2":
+            return cmd_per_register_v2(orch)
         if args.command == "per_evaluate":
             return cmd_per_evaluate(orch)
         if args.command == "hypothesis_resolve":

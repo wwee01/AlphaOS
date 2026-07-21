@@ -31,6 +31,7 @@ contract exists.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -408,3 +409,124 @@ def select_card(context: SelectorContext, symbol: str, market_date: date) -> dic
         "card_assignment_status": CacheHealth.OK,
         "card_selector_version": SELECTOR_VERSION,
     }
+
+
+# ------------------------------------------------------- semantic identity
+# S1b integrity follow-up: a PRODUCTION (not test-only) semantic hash for
+# this module's selection logic, so a downstream consumer (S1b's
+# registration mechanism) can freeze "which exact selector semantics
+# assigned candidates" without importing a test module. This is the SAME
+# golden-fixture matrix S1a's own test suite has pinned since it was built
+# -- moved here verbatim (not reimplemented) so the hash value is
+# unchanged; see tests/test_card_selector.py, which now imports these
+# symbols instead of maintaining an independent copy (a prior duplication
+# risk: two literals that could silently drift apart).
+#
+# Nothing below changes select_card()'s/build_selector_context()'s
+# behavior. This module remains uncalled by any production runtime path
+# (orchestrator.py/candidate_scanner.py/registry.py) -- adding pure,
+# self-contained functions here does not change that; only a NEW IMPORT
+# of alphaos.cards.selector from one of those files would.
+def _golden_fixture_context() -> "SelectorContext":
+    """A hand-built, journal-free SelectorContext covering the semantic
+    matrix: BMO/AMC/UNKNOWN timing, a reschedule chain, a NULL-fiscal
+    singleton, and a holiday-spanning window -- constructed directly
+    (bypassing build_selector_context) so hashing it is pure and fast,
+    and exercises ONLY select_card()'s own semantics."""
+    current_belief = {
+        "BMOSYM": [{
+            "id": 1, "symbol": "BMOSYM", "report_date": "2026-07-14",
+            "fiscal_date_ending": "2026-06-30", "timing": "pre-market",
+        }],
+        "AMCSYM": [{
+            "id": 2, "symbol": "AMCSYM", "report_date": "2026-07-17",
+            "fiscal_date_ending": "2026-06-30", "timing": "post-market",
+        }],
+        "UNKSYM": [{
+            "id": 3, "symbol": "UNKSYM", "report_date": "2026-07-14",
+            "fiscal_date_ending": None, "timing": None,
+        }],
+        "HOLSYM": [{
+            "id": 4, "symbol": "HOLSYM", "report_date": "2026-11-25",
+            "fiscal_date_ending": "2026-09-30", "timing": "pre-market",
+        }],
+    }
+    return SelectorContext(
+        assignment_as_of_utc="2026-07-16T09:00:00+00:00",
+        cache_health=CacheHealth.OK,
+        default_card={"card_id": "catalyst_momentum_v2", "version": 2},
+        current_belief_by_symbol=current_belief,
+    )
+
+
+def _golden_fixture_matrix() -> list:
+    """Every probe this hash is sensitive to: BMO on/around its own
+    window, AMC on/around its own (next-day) window, unknown timing, a
+    Thanksgiving-2026 holiday-spanning window, and a no-event symbol."""
+    ctx = _golden_fixture_context()
+    probes = [
+        ("BMOSYM", date(2026, 7, 14)), ("BMOSYM", date(2026, 7, 16)), ("BMOSYM", date(2026, 7, 17)),
+        ("AMCSYM", date(2026, 7, 17)), ("AMCSYM", date(2026, 7, 20)), ("AMCSYM", date(2026, 7, 21)),
+        ("UNKSYM", date(2026, 7, 14)), ("UNKSYM", date(2026, 7, 15)),
+        ("HOLSYM", date(2026, 11, 25)), ("HOLSYM", date(2026, 11, 27)), ("HOLSYM", date(2026, 11, 30)),
+        ("NOEVENTSYM", date(2026, 7, 16)),
+    ]
+    return [
+        {"symbol": sym, "market_date": str(d), **select_card(ctx, sym, d)}
+        for sym, d in probes
+    ]
+
+
+def compute_golden_fixture_hash() -> str:
+    """Fresh, deterministic SHA-256 over the canonical golden-fixture
+    matrix -- same canonicalization convention as every other semantic/
+    snapshot hash in this codebase (``json.dumps(sort_keys=True,
+    default=str)`` then sha256). Pure: no journal, no disk, no wall clock.
+    Recomputing this twice in the same process always returns the same
+    value; it changes ONLY if select_card()'s/build_selector_context()'s
+    own semantics change."""
+    blob = json.dumps(_golden_fixture_matrix(), sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+# PINNED literal -- deliberately NOT computed at import time (that would
+# make any comparison against it a tautology that passes no matter what
+# the code does). Identical to the value S1a's test suite has pinned
+# since it was written; unchanged here because select_card()'s semantics
+# are unchanged by this task. Bump this (ALONGSIDE a SELECTOR_VERSION
+# bump -- the two must move together) only after deliberately reviewing a
+# real semantic change and re-running compute_golden_fixture_hash() to
+# get the new value.
+GOLDEN_FIXTURE_SEMANTIC_HASH = "2751b18e58ccaec944bf14e0f140b45ab6460576beeab7f3ca4e2ddafe4d9f22"
+
+
+class SelectorSemanticDriftError(RuntimeError):
+    """Raised by ``verify_selector_semantic_identity()`` when the live
+    selector's computed golden-fixture hash no longer matches the pinned
+    ``GOLDEN_FIXTURE_SEMANTIC_HASH`` -- i.e. selection semantics changed
+    without a deliberate re-pin (and, by this module's own convention,
+    without a ``SELECTOR_VERSION`` bump to match)."""
+
+
+def verify_selector_semantic_identity() -> str:
+    """The 'fail loudly on semantic drift' mechanism the S1b integrity
+    follow-up requires: recomputes the golden-fixture hash fresh and
+    raises ``SelectorSemanticDriftError`` if it no longer matches the
+    pinned constant. Returns the (matching) hash on success, so a caller
+    that needs the value (e.g. S1b's registration mechanism, freezing
+    ``selector_semantic_hash`` into a preregistration's ``params_json``)
+    gets verification and retrieval in one call -- there is no path to
+    obtaining this value without also checking it."""
+    computed = compute_golden_fixture_hash()
+    if computed != GOLDEN_FIXTURE_SEMANTIC_HASH:
+        raise SelectorSemanticDriftError(
+            f"selector semantic drift detected: the live golden-fixture hash "
+            f"({computed!r}) no longer matches the pinned "
+            f"GOLDEN_FIXTURE_SEMANTIC_HASH ({GOLDEN_FIXTURE_SEMANTIC_HASH!r}). "
+            "select_card()'s/build_selector_context()'s behavior changed "
+            "without a deliberate re-pin -- if this is an intentional "
+            "semantic change, bump SELECTOR_VERSION and re-pin "
+            "GOLDEN_FIXTURE_SEMANTIC_HASH together after reviewing the new "
+            "matrix; if it is not intentional, this is a real regression."
+        )
+    return computed

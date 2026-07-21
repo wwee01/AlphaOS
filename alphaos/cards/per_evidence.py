@@ -693,3 +693,241 @@ def validate_card_selector_binding(card: dict) -> None:
             f"which no longer matches the live SELECTOR_VERSION {SELECTOR_VERSION!r} -- "
             "refusing to treat this card's evidence construction as valid until reconciled."
         )
+
+
+# --------------------------------------------------------- identity freeze
+class CardIdentityError(RuntimeError):
+    """Raised by ``fetch_active_per_card_identity()`` when the active
+    ``post_earnings_reaction`` card (or the live selector) is not in the
+    exact state the S1b integrity follow-up requires before ANY hash may
+    be frozen into a preregistration's ``params_json`` -- card absent,
+    wrong version, wrong state, ``requires_selector`` mismatch, or the
+    selector's own golden-fixture hash has drifted (see
+    ``alphaos.cards.selector.SelectorSemanticDriftError``, wrapped here
+    rather than left to propagate as a different exception type, so every
+    identity-freeze failure this module can produce shares one type a
+    caller can catch)."""
+
+
+# The ONLY (card_id, version, state) this mechanism currently freezes
+# against -- S1b never built a v2 card or a live-eligible PER card, so
+# accepting anything else here would freeze an identity nobody reviewed.
+_EXPECTED_PER_CARD_VERSION = 1
+_EXPECTED_PER_CARD_STATE = "shadow"
+
+
+def fetch_active_per_card_identity(journal) -> dict:
+    """The single source of truth for 'which exact card content and
+    selector semantics are live right now' -- reads the card's
+    content_hash from ``setup_cards`` (PR13's own hash-guarded registry,
+    populated by ``alphaos.cards.registry.sync_registry()`` at real
+    orchestrator startup; never duplicated or hand-typed here) and
+    verifies the live selector's golden-fixture hash via
+    ``alphaos.cards.selector.verify_selector_semantic_identity()`` (never
+    trusted without re-checking).
+
+    Returns ``{"card_id", "card_version", "card_content_hash",
+    "selector_version", "selector_semantic_hash"}`` on success. Raises
+    ``CardIdentityError`` -- never returns a partial/best-effort identity
+    -- if: the card row is absent; its version isn't
+    ``_EXPECTED_PER_CARD_VERSION``; its state isn't
+    ``_EXPECTED_PER_CARD_STATE``; its declared ``requires_selector``
+    (from ``content_json``) doesn't match the live ``SELECTOR_VERSION``;
+    or the live selector's semantic hash has drifted from its own pinned
+    constant. Every one of these is exactly a condition Section 2 of the
+    integrity follow-up requires registration to refuse on.
+    """
+    from alphaos.cards.selector import SelectorSemanticDriftError, verify_selector_semantic_identity
+
+    row = journal.one(
+        "SELECT card_id, version, state, content_hash, content_json FROM setup_cards "
+        "WHERE card_id = ? ORDER BY version DESC LIMIT 1",
+        (PER_CARD_ID,),
+    )
+    if row is None:
+        raise CardIdentityError(
+            f"card {PER_CARD_ID!r} is not present in setup_cards -- has "
+            "alphaos.cards.registry.sync_registry() run yet (real orchestrator startup)?"
+        )
+    if row["version"] != _EXPECTED_PER_CARD_VERSION:
+        raise CardIdentityError(
+            f"card {PER_CARD_ID!r} is at version {row['version']}, expected exactly "
+            f"{_EXPECTED_PER_CARD_VERSION} -- refusing to freeze an identity for a card "
+            "version this mechanism was never reviewed against."
+        )
+    if row["state"] != _EXPECTED_PER_CARD_STATE:
+        raise CardIdentityError(
+            f"card {PER_CARD_ID!r} v{row['version']} is in state {row['state']!r}, expected "
+            f"{_EXPECTED_PER_CARD_STATE!r} -- refusing to freeze an identity for a card that "
+            "is not (or is no longer) shadow-only."
+        )
+    try:
+        content = json.loads(row["content_json"]) if row["content_json"] else {}
+    except (TypeError, ValueError) as exc:
+        raise CardIdentityError(
+            f"card {PER_CARD_ID!r} v{row['version']}'s content_json failed to parse: {exc}"
+        ) from exc
+    try:
+        validate_card_selector_binding(content)
+    except ValueError as exc:
+        raise CardIdentityError(str(exc)) from exc
+
+    try:
+        selector_semantic_hash = verify_selector_semantic_identity()
+    except SelectorSemanticDriftError as exc:
+        raise CardIdentityError(f"selector semantic hash unavailable/invalid: {exc}") from exc
+
+    return {
+        "card_id": row["card_id"],
+        "card_version": row["version"],
+        "card_content_hash": row["content_hash"],
+        "selector_version": SELECTOR_VERSION,
+        "selector_semantic_hash": selector_semantic_hash,
+    }
+
+
+# ------------------------------------------------- S1c activation preflight
+# The CORRECTED pair's identity -- the single source of truth for "which
+# exact preregistrations rows count as THE formal H-PER-1P/1N pair" from
+# S1c's perspective. Distinct hypothesis AND metric text from the original
+# H-PER-1P/H-PER-1N pair (still registered as prereg_eb3ab6bda5a4/
+# prereg_2821a9e1b931) -- guarantees zero collision with, and no silent
+# reuse of, those rows. The original pair is left exactly as it is: this
+# codebase's own established convention for preregistrations is "immutable
+# once written, corrected by registering a NEW row, never by mutating or
+# deleting the old one" (see register_hypothesis()'s own docstring and
+# evaluate_hypothesis()'s PreregistrationAlreadyEvaluatedError guidance) --
+# there is no formal supersedes/withdrawn/version field on the
+# preregistrations table itself (confirmed by inspection: schema.py has no
+# such column on this table; the WITHDRAWN status on hypothesis_proposals is
+# a DIFFERENT table for a different, upstream HGEN-1 mechanism that
+# H-PER-1P/1N never went through). This is a real, disclosed architectural
+# gap, not silently papered over -- see this build's own final report.
+#
+# alphaos/__main__.py's cmd_per_register_v2() imports these rather than
+# keeping its own copy, so there is exactly one place that can drift.
+PER_HYPOTHESIS_POS_V2 = (
+    "H-PER-1P-v2: post_earnings_reaction_v1 candidates have a POSITIVE mean "
+    "5-trading-day market-adjusted excess outcome over contemporaneous "
+    "date x tier default-card candidates"
+)
+PER_METRIC_POS_V2 = "per_excess_market_adjusted_5d, smooth_weight_joint_bootstrap_v1, identity_frozen_v2"
+PER_HYPOTHESIS_NEG_V2 = (
+    "H-PER-1N-v2: post_earnings_reaction_v1 candidates have a NEGATIVE mean "
+    "5-trading-day market-adjusted excess outcome over contemporaneous "
+    "date x tier default-card candidates"
+)
+PER_METRIC_NEG_V2 = "per_excess_market_adjusted_5d_negated, smooth_weight_joint_bootstrap_v1, identity_frozen_v2"
+
+_IDENTITY_PARAM_KEYS = (
+    "card_id", "card_version", "card_content_hash", "selector_version", "selector_semantic_hash",
+)
+_EVIDENCE_COLUMNS = (
+    "effective_n", "n_raw", "span_days", "point_estimate", "ci_low", "ci_high",
+    "one_sided_p_below_zero", "evidence_status", "evidence_detail_json",
+)
+
+
+def s1c_activation_preflight(journal) -> dict:
+    """Read-only diagnostic: is the CORRECTED H-PER-1P-v2/H-PER-1N-v2 pair
+    in the exact state S1c activation will require? Looks the pair up by
+    ITS OWN specific (hypothesis, metric) text -- never a loose
+    ``LIKE 'H-PER-1%'`` match, which would also match the original,
+    still-incomplete ``prereg_eb3ab6bda5a4``/``prereg_2821a9e1b931`` pair.
+    That exact-identity lookup IS this function's "no older incomplete pair
+    gets selected as the active pair" guarantee.
+
+    NOT wired into any CLI command, scan, or scheduler job -- calling this
+    function has zero side effect (one read-only DB query per row plus the
+    already read-only ``fetch_active_per_card_identity()`` identity check)
+    and it is not itself an activation trigger. S1c does not exist yet;
+    nothing in this codebase calls this function. It exists so the eventual
+    S1c activation gate has one reusable, already-tested place to ask "is
+    the corrected pair ready?" instead of re-deriving these checks ad hoc.
+
+    Returns ``{"ready": bool, "reason": Optional[str], "detail": {...}}``.
+    ``reason`` is one of: ``corrected_pair_not_registered``,
+    ``already_evaluated``, ``evidence_fields_not_null``,
+    ``identity_missing_or_mismatched``, ``live_identity_unavailable``,
+    ``identity_drifted_from_live_state``,
+    ``analysis_not_before_missing_or_mismatched``, or ``None`` when ready.
+
+    Checks only structural/registration readiness -- whether
+    ``analysis_not_before`` has actually arrived yet is an EVALUATION-time
+    concern owned by ``evaluate_two_arm_hypothesis_pair()``'s own date gate
+    (spec Section 4), not a preflight concern, so it is deliberately not
+    checked here.
+    """
+    pos_row = journal.one(
+        "SELECT * FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_POS_V2, PER_METRIC_POS_V2),
+    )
+    neg_row = journal.one(
+        "SELECT * FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_NEG_V2, PER_METRIC_NEG_V2),
+    )
+    if pos_row is None or neg_row is None:
+        return {
+            "ready": False,
+            "reason": "corrected_pair_not_registered",
+            "detail": {"pos_found": pos_row is not None, "neg_found": neg_row is not None},
+        }
+
+    if pos_row.get("evaluated_at_utc") or neg_row.get("evaluated_at_utc"):
+        return {
+            "ready": False,
+            "reason": "already_evaluated",
+            "detail": {
+                "pos_evaluated_at_utc": pos_row.get("evaluated_at_utc"),
+                "neg_evaluated_at_utc": neg_row.get("evaluated_at_utc"),
+            },
+        }
+
+    non_null_evidence = {
+        label: [col for col in _EVIDENCE_COLUMNS if row.get(col) is not None]
+        for label, row in (("pos", pos_row), ("neg", neg_row))
+    }
+    if any(non_null_evidence.values()):
+        return {"ready": False, "reason": "evidence_fields_not_null", "detail": non_null_evidence}
+
+    pos_params = json.loads(pos_row["params_json"]) if pos_row.get("params_json") else {}
+    neg_params = json.loads(neg_row["params_json"]) if neg_row.get("params_json") else {}
+    pos_identity = {k: pos_params.get(k) for k in _IDENTITY_PARAM_KEYS}
+    neg_identity = {k: neg_params.get(k) for k in _IDENTITY_PARAM_KEYS}
+    if any(v is None for v in pos_identity.values()) or pos_identity != neg_identity:
+        return {
+            "ready": False,
+            "reason": "identity_missing_or_mismatched",
+            "detail": {"pos_identity": pos_identity, "neg_identity": neg_identity},
+        }
+
+    try:
+        live_identity = fetch_active_per_card_identity(journal)
+    except CardIdentityError as exc:
+        return {"ready": False, "reason": "live_identity_unavailable", "detail": {"error": str(exc)}}
+    if pos_identity != live_identity:
+        return {
+            "ready": False,
+            "reason": "identity_drifted_from_live_state",
+            "detail": {"frozen_identity": pos_identity, "live_identity": live_identity},
+        }
+
+    pos_anb = pos_row.get("analysis_not_before")
+    neg_anb = neg_row.get("analysis_not_before")
+    if not pos_anb or not neg_anb or pos_anb != neg_anb:
+        return {
+            "ready": False,
+            "reason": "analysis_not_before_missing_or_mismatched",
+            "detail": {"pos_analysis_not_before": pos_anb, "neg_analysis_not_before": neg_anb},
+        }
+
+    return {
+        "ready": True,
+        "reason": None,
+        "detail": {
+            "prereg_id_pos": pos_row["prereg_id"],
+            "prereg_id_neg": neg_row["prereg_id"],
+            "analysis_not_before": pos_anb,
+            "identity": pos_identity,
+        },
+    }
