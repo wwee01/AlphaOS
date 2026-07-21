@@ -17,6 +17,7 @@ itself; contract doc Sec 6). No PR built tonight sets it.
 
 from __future__ import annotations
 
+from datetime import date as _date
 from typing import Any, Optional
 
 from alphaos.stats.bootstrap import (
@@ -200,6 +201,20 @@ def evaluate_two_arm_hypothesis_pair(
     its unavailability NEVER blocks the formal primary evaluation --
     descriptive-only, no gate, no p-value, no BH-FDR membership.
 
+    S1b INTEGRITY FOLLOW-UP -- two additional hard gates, both checked
+    before ``build_primary_evidence()`` is ever called (cheap, params-only
+    checks first): (1) both rows must carry an IDENTICAL, COMPLETE
+    card/selector identity (``card_id``, ``card_version``,
+    ``card_content_hash``, ``selector_version``, ``selector_semantic_hash``)
+    that still matches what is LIVE right now (via
+    ``per_evidence.fetch_active_per_card_identity()``) -- a pair frozen
+    before this check existed (no identity fields at all) is refused, not
+    silently accepted; (2) both rows' ``analysis_not_before`` must be
+    present, identical, parseable, and not later than ``as_of_utc``'s own
+    date. Both gates DEFER exactly like every other gate in this function
+    (nothing written, one-shot not consumed) and are ADDITIVE to every
+    existing population/sample/evidence gate below, never a replacement.
+
     Returns ``{"outcome": "deferred", "reason": ..., "detail": ...}``
     (nothing written) or ``{"outcome": "evaluated", "snapshot_id": ...,
     "pos": {...}, "neg": {...}}`` (both rows frozen). Raises
@@ -240,6 +255,71 @@ def evaluate_two_arm_hypothesis_pair(
         )
     floor_effective_n = pos_row["floor_effective_n"]
     floor_span_days = pos_row["floor_span_days"]
+
+    # S1b integrity follow-up: verify BOTH rows carry an identical,
+    # complete card/selector identity, AND that it still matches what is
+    # actually live right now -- refuses (defers, writes nothing) rather
+    # than freeze evidence against a card/selector state that has since
+    # drifted, or a pair whose two halves were frozen against DIFFERENT
+    # states (only possible from a registration bug). A pair registered
+    # before this check existed -- whose params_json has no identity
+    # fields at all, e.g. the original H-PER-1P/H-PER-1N pair -- is
+    # refused here too: exactly the "the currently registered incomplete
+    # pair is not accidentally used as the formal verdict pair" guarantee
+    # this follow-up exists to provide.
+    identity_keys = ("card_id", "card_version", "card_content_hash", "selector_version", "selector_semantic_hash")
+    pos_params = _json.loads(pos_row["params_json"]) if pos_row.get("params_json") else {}
+    neg_params = _json.loads(neg_row["params_json"]) if neg_row.get("params_json") else {}
+    pos_identity = {k: pos_params.get(k) for k in identity_keys}
+    neg_identity = {k: neg_params.get(k) for k in identity_keys}
+    if any(v is None for v in pos_identity.values()) or any(v is None for v in neg_identity.values()):
+        return {
+            "outcome": "deferred", "reason": "identity_fields_missing",
+            "detail": {"pos_identity": pos_identity, "neg_identity": neg_identity},
+        }
+    if pos_identity != neg_identity:
+        return {
+            "outcome": "deferred", "reason": "identity_mismatch_between_paired_rows",
+            "detail": {"pos_identity": pos_identity, "neg_identity": neg_identity},
+        }
+    try:
+        live_identity = per_evidence.fetch_active_per_card_identity(journal)
+    except per_evidence.CardIdentityError as exc:
+        return {"outcome": "deferred", "reason": "live_identity_unavailable", "detail": {"error": str(exc)}}
+    if pos_identity != live_identity:
+        return {
+            "outcome": "deferred", "reason": "identity_drifted_from_live_state",
+            "detail": {"frozen_identity": pos_identity, "live_identity": live_identity},
+        }
+
+    # analysis_not_before hard gate -- additional to, never a replacement
+    # for, the population/sample/evidence gates below. Uses the SAME
+    # as_of_utc the caller already injects (never wall-clock reads
+    # anywhere in this function), matching this function's existing
+    # determinism/testability contract.
+    pos_anb = pos_row.get("analysis_not_before")
+    neg_anb = neg_row.get("analysis_not_before")
+    if not pos_anb or not neg_anb or pos_anb != neg_anb:
+        return {
+            "outcome": "deferred", "reason": "analysis_not_before_missing_or_mismatched",
+            "detail": {"pos_analysis_not_before": pos_anb, "neg_analysis_not_before": neg_anb},
+        }
+    try:
+        analysis_not_before_date = _date.fromisoformat(str(pos_anb)[:10])
+    except ValueError:
+        return {
+            "outcome": "deferred", "reason": "analysis_not_before_unparseable",
+            "detail": {"analysis_not_before": pos_anb},
+        }
+    try:
+        as_of_date = _date.fromisoformat(str(as_of_utc)[:10])
+    except ValueError:
+        raise ValueError(f"as_of_utc {as_of_utc!r} is not a parseable date") from None
+    if as_of_date < analysis_not_before_date:
+        return {
+            "outcome": "deferred", "reason": "before_analysis_not_before",
+            "detail": {"analysis_not_before": pos_anb, "as_of_utc": as_of_utc},
+        }
 
     primary = per_evidence.build_primary_evidence(journal, as_of_utc)
     if primary.status != "ok":
