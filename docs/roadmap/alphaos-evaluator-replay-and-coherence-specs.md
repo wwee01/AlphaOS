@@ -261,14 +261,29 @@ coherence fix, not a loosening: the floor stays 1.2 and the deterministic
    - `build_no_news_user_prompt(candidate, snapshot, freshness_status)`
      gains keyword `atr_policy: Optional[dict] = None` and, always,
      `pop`s `"atr_policy"` out of the dict it serializes as
-     `MARKET_SNAPSHOT` (hygiene: a v1 replay arm over a future v2-era
-     fixture must not leak the archived block into a v1 prompt; a no-op on
-     all present-day data). `_live_eval` passes
-     `atr_policy=snapshot.get("atr_policy")`. `atr_policy=None` renders a
-     prompt byte-identical to today's v1. This keeps
-     `raw_evaluate` → `_live_eval` as the only route to the one production
-     prompt builder (existing AST test
-     `test_live_eval_still_calls_the_one_production_prompt_builder_ast`
+     `MARKET_SNAPSHOT` (hygiene for the SERIALIZED JSON text: a v1 replay
+     arm over a future v2-era fixture must not leak the archived block's
+     raw key/values into the MARKET_SNAPSHOT section; a no-op on all
+     present-day data). **This pop does NOT by itself gate whether the
+     ATR_STOP_POLICY section renders** — that section is driven entirely by
+     the `atr_policy` keyword argument the caller passes in, independent of
+     what the pop leaves behind in the dict. Correcting the 2026-07-23
+     draft's own claim here (audit-caught MEDIUM, 2026-07-23 fixup): `_live_
+     eval` must NOT pass `atr_policy=snapshot.get("atr_policy")`
+     unconditionally — a snapshot dict can already carry a stale
+     `"atr_policy"` key (e.g. a real v2-era `snapshot_json` later replayed
+     as an AB-EVAL-1 fixture under a v1 control arm; `_augment_snapshot_
+     for_prompt`'s own v1/mock no-op deliberately returns `snapshot`
+     UNCHANGED, never stripping a pre-existing key), and reading it
+     unconditionally would render the full v2 section into a supposedly
+     byte-identical v1 prompt. The correct, shipped gate: `_live_eval`
+     passes `atr_policy=snapshot.get("atr_policy") if self.settings.
+     openai_prompt_version == "v2" else None` — gated on the ACTIVE
+     settings version, never on the snapshot dict's own contents.
+     `atr_policy=None` (the only value possible under v1) renders a prompt
+     byte-identical to today's v1. This keeps `raw_evaluate` → `_live_eval`
+     as the only route to the one production prompt builder (existing AST
+     test `test_live_eval_still_calls_the_one_production_prompt_builder_ast`
      stays green unmodified).
    - Note on the draft's "one fetch, shared — do not query twice": post-
      refactor, prompt-build and enforcement are separately invokable (the

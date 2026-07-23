@@ -519,12 +519,22 @@ class OpenAIClient:
         from openai import OpenAI  # lazy import; optional dependency
 
         client = OpenAI(api_key=self.settings.openai_api_key)
-        # INSTR-2: atr_policy is only ever present on ``snapshot`` when
-        # _augment_snapshot_for_prompt() (called by evaluate() before
-        # raw_evaluate()) put it there -- None on every v1 path, rendering a
-        # prompt byte-identical to before.
+        # INSTR-2 (audit fixup, MEDIUM): gated on the ACTIVE settings
+        # version, never on whatever "atr_policy" key happens to already
+        # sit in ``snapshot``. Naively passing snapshot.get("atr_policy")
+        # unconditionally was proven exploitable: a replayed v2-era fixture
+        # (e.g. a future AB-EVAL-1 corpus built from post-cutover
+        # snapshot_json, which DOES carry an archived atr_policy block)
+        # would leak the ATR_STOP_POLICY section into what's supposed to be
+        # a byte-identical v1 control-arm prompt, corrupting the exact
+        # comparison the harness exists to produce. _augment_snapshot_for_
+        # prompt()'s own v1/mock no-op deliberately returns ``snapshot``
+        # UNCHANGED (never strips a pre-existing key -- see its own
+        # docstring), so this gate is the one place that must not trust the
+        # snapshot dict's own contents.
         user_prompt = pt.build_no_news_user_prompt(
-            candidate, snapshot, freshness_status, atr_policy=snapshot.get("atr_policy"),
+            candidate, snapshot, freshness_status,
+            atr_policy=snapshot.get("atr_policy") if self.settings.openai_prompt_version == "v2" else None,
         )
         # PR4: measurement-only AI-call lineage (model provider + content hashes of
         # the actual prompt sent, never the raw prompt body) -- stamped onto

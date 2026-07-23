@@ -923,10 +923,11 @@ def cmd_ab_eval_run(orch: Orchestrator, models: Optional[list], arms: Optional[l
         parsed_arms = []
         for token in arms:
             model, sep, version = token.partition(":")
-            if not sep or version not in ("v1", "v2"):
+            if not sep or not model or version not in ("v1", "v2"):
                 _print({"ab_eval_run": {
                     "error": f"--arms token {token!r} is not MODEL:PROMPT_VERSION shaped "
-                             "(expected e.g. 'gpt-5.4-mini:v1'; version must be v1 or v2)"
+                             "(expected e.g. 'gpt-5.4-mini:v1'; model name must be non-empty, "
+                             "version must be v1 or v2)"
                 }})
                 return 1
             parsed_arms.append((model, version))

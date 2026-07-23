@@ -659,6 +659,80 @@ def test_replay_packet_v1_and_v2_arms_replaying_same_fixture_are_uncontaminated(
         assert v2_result.prompt_version == "v2"
 
 
+def test_replay_packet_v1_arm_never_leaks_a_stale_atr_policy_into_the_live_prompt(journal, monkeypatch):
+    """Audit fixup (MEDIUM, 2026-07-23): the original naive
+    ``atr_policy=snapshot.get("atr_policy")`` gate in ``_live_eval`` would
+    leak a stale v2-era ``atr_policy`` block into a supposedly
+    byte-identical v1 prompt whenever a fixture's OWN stored snapshot
+    already carried one -- exactly the shape a future AB-EVAL-1 corpus
+    built from post-cutover ``snapshot_json`` will have (``_augment_
+    snapshot_for_prompt``'s own v1/mock no-op deliberately returns the
+    snapshot UNCHANGED, never stripping a pre-existing key). Drives the
+    REAL production chain -- ``replay_packet`` -> ``raw_evaluate`` ->
+    ``_live_eval`` -> ``build_no_news_user_prompt`` -- with ONLY the OpenAI
+    SDK class itself faked (never ``_live_eval``), so the actual
+    prompt-building code under test really executes; mirrors the auditor's
+    own probe."""
+    import json as _json
+
+    import openai
+
+    captured: dict = {}
+
+    class _FakeMessage:
+        def __init__(self, content):
+            self.content = content
+
+    class _FakeChoice:
+        def __init__(self, content):
+            self.message = _FakeMessage(content)
+
+    class _FakeResponse:
+        def __init__(self, content):
+            self.choices = [_FakeChoice(content)]
+            self.usage = None
+
+    class _FakeCompletions:
+        def create(self, model, response_format, messages, timeout):
+            captured["messages"] = messages
+            payload = {
+                "symbol": "AAPL", "direction": "long", "entry": 100.0, "stop": 97.0,
+                "target": 104.0, "max_holding_days": 3, "expected_r": 1.0, "confidence": 0.5,
+                "decision": "reject", "reasoning_summary": "x",
+                "catalyst": "not_available_v1", "news_status": "disabled_v1",
+                "news_sources": [], "data_freshness_status": "usable", "risk_flags": [],
+            }
+            return _FakeResponse(_json.dumps(payload))
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeOpenAI:
+        def __init__(self, api_key=None):
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+    stale_snapshot = {
+        "last_price": 100.0,
+        "atr_policy": {
+            "atr_14": 999.0, "stop_multiplier": 42.0, "risk_per_share": 999.0,
+            "min_reward_risk": 1.2, "min_target_distance": 999.0,
+            "rules_version": "should_never_leak",
+        },
+    }
+    fixture = {**_FIXTURE, "snapshot": stale_snapshot}
+    settings = make_settings(ALPHAOS_MODE="paper", OPENAI_API_KEY="fake-key-for-test")
+
+    replay_packet(fixture, ("gpt-5.4-mini", "v1"), settings, journal)
+
+    assert "messages" in captured  # sanity: the real _live_eval genuinely ran
+    user_prompt = captured["messages"][1]["content"]
+    assert "ATR_STOP_POLICY" not in user_prompt
+    assert "999.0" not in user_prompt
+    assert "should_never_leak" not in user_prompt
+
+
 # --------------------------------------------------------------- AST/structural
 def test_replay_routes_through_production_raw_evaluate_and_post_process_ast():
     """AST test pinning the replay engine to the production evaluate core --
@@ -827,6 +901,13 @@ def test_cmd_ab_eval_run_parses_and_validates_arm_tokens(tmp_path, journal):
     assert journal.count_rows("ab_eval_runs", "1=1") == 0
 
     rc = cmd_ab_eval_run(orch, None, ["gpt-5.4-mini:v9"], corpus_dir)
+    assert rc == 1
+    assert journal.count_rows("ab_eval_runs", "1=1") == 0
+
+    # Audit NIT fixup (2026-07-23): ":v1" partitions to an EMPTY model name
+    # with a valid version -- must still refuse, not silently construct a
+    # bogus arm with model="".
+    rc = cmd_ab_eval_run(orch, None, [":v1", "gpt-5.6-luna:v2"], corpus_dir)
     assert rc == 1
     assert journal.count_rows("ab_eval_runs", "1=1") == 0
 

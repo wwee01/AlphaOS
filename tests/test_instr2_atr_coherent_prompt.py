@@ -134,11 +134,22 @@ def test_v1_golden_prompt_byte_identical_to_pre_instr2():
 
 # ------------------------------------------------------- test 3: pop hygiene
 def test_builder_pops_atr_policy_from_market_snapshot_in_both_versions():
-    """Hygiene against a replayed v2-era fixture leaking its archived
-    atr_policy block into a v1-shaped prompt: even when atr_policy=None
-    (v1 rendering), a snapshot that ALREADY carries an "atr_policy" key
-    (e.g. a stale fixture) must never see that key's values appear in the
-    serialized MARKET_SNAPSHOT section."""
+    """The builder's OWN half of the hygiene guarantee: even when
+    atr_policy=None (v1 rendering), a snapshot dict that ALREADY carries an
+    "atr_policy" key (e.g. a stale fixture) must never see that key's
+    values appear in the serialized MARKET_SNAPSHOT JSON section.
+
+    Scope note (audit-caught, 2026-07-23): this test calls
+    build_no_news_user_prompt() directly with an explicit atr_policy=None,
+    decoupled from what the snapshot dict itself carries -- it does NOT
+    exercise whether the CALLER (_live_eval) correctly decides that kwarg
+    value from a snapshot that might already carry a stale key. That
+    caller-side decision (which was the actual audit MEDIUM: naively
+    passing snapshot.get("atr_policy") unconditionally) is proven by
+    test_ab_eval.py::
+    test_replay_packet_v1_arm_never_leaks_a_stale_atr_policy_into_the_live_prompt,
+    which drives the real replay_packet -> raw_evaluate -> _live_eval ->
+    build_no_news_user_prompt chain end-to-end."""
     stale_block = {"atr_14": 999.0, "stop_multiplier": 42.0, "rules_version": "should_never_leak"}
     snapshot = {"last_price": 100.0, "atr_policy": stale_block}
 
