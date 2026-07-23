@@ -12,8 +12,6 @@ from datetime import date, timedelta
 
 import pytest
 
-import alphaos.orchestrator as orchestrator_mod
-import alphaos.scanner.candidate_scanner as candidate_scanner_mod
 from alphaos.cards import registry as cards_registry_mod
 from alphaos.cards.selector import PER_CARD_ID, SELECTOR_VERSION
 from alphaos.journal.journal_store import JournalStore
@@ -274,65 +272,21 @@ def test_evaluated_pair_integrates_with_existing_compute_verdicts_unmodified(jou
 
 
 # ------------------------------------------------------------------- isolation
-PRODUCTION_FILES = [
-    (orchestrator_mod, "orchestrator.py"),
-    (candidate_scanner_mod, "candidate_scanner.py"),
-    (cards_registry_mod, "cards/registry.py"),
-]
-
-
-@pytest.mark.parametrize("mod,name", PRODUCTION_FILES)
-def test_s1b_modules_never_referenced_by_production_files(mod, name):
-    """A substring check on each file's own source text -- catches a
-    direct reference, but a static string match can miss a differently-
-    spelled import (e.g. ``from alphaos.cards import selector``, which
-    contains neither ``"cards.selector"`` nor ``"select_card"`` as a
-    literal substring) and says nothing about the TRANSITIVE import graph.
-    ``test_s1b_production_import_graph_never_loads_dormant_modules`` below
-    is the real, load-bearing guarantee; this test is a fast first-pass
-    sanity check, kept for its historical value against a direct-reference
-    regression."""
-    text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-    for forbidden in ("cards.selector", "select_card", "per_evidence", "two_arm",
-                      "evaluate_two_arm_hypothesis_pair"):
-        assert forbidden not in text, f"{name} references {forbidden!r} -- S1b must remain unwired"
-
-
-def test_s1b_production_import_graph_never_loads_dormant_modules():
-    """Audit-fixup (architecture LOW): the real guarantee, stronger than a
-    source-text grep -- importing the full production stack (orchestrator,
-    scanner, card registry, and the nightly hypothesis resolver) must never
-    cause Python to actually LOAD any of S1b's still-dormant modules,
-    regardless of how they might be imported (aliased, re-exported,
-    star-imported, etc. -- none of which a plain substring match would
-    catch). Run in a FRESH SUBPROCESS deliberately: this test file's own
-    top-level ``from alphaos.cards.selector import ...`` (needed for its
-    other fixtures) would already be sitting in THIS process's
-    ``sys.modules`` by the time this test runs, which would make an
-    in-process check pass or fail for the wrong reason regardless of the
-    real production import graph."""
-    import subprocess
-    import sys
-
-    script = (
-        "import sys\n"
-        "import alphaos.hypotheses.resolver\n"
-        "import alphaos.orchestrator\n"
-        "import alphaos.scanner.candidate_scanner\n"
-        "import alphaos.cards.registry\n"
-        "import alphaos.stats.preregistration\n"
-        "leaked = [m for m in "
-        "('alphaos.cards.selector', 'alphaos.cards.per_evidence', 'alphaos.stats.two_arm') "
-        "if m in sys.modules]\n"
-        "print(','.join(leaked))\n"
-    )
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    leaked = [m for m in result.stdout.strip().split(",") if m]
-    assert not leaked, (
-        f"{leaked} loaded merely by importing the production stack -- S1b leaked into the "
-        "production import graph"
-    )
+# SETUP-1 S1c (candidate-level activation) legitimately wires
+# alphaos.cards.selector/alphaos.cards.per_evidence into orchestrator.py/
+# candidate_scanner.py -- the two negative "never referenced"/"never
+# loaded" proofs that used to live here are now FALSE BY DESIGN and have
+# moved to tests/test_s1c_activation.py as POSITIVE proofs of the same
+# transition (test_selector_and_per_evidence_now_legitimately_referenced,
+# test_production_import_graph_now_loads_selector_and_per_evidence,
+# test_formal_evaluation_module_still_never_referenced,
+# test_selector_never_referenced_by_risk_approval_sizing_execution_paths).
+# The ONE check below that remains TRUE post-S1c stays here: PR13's own
+# card registry never needs to know about the selector at all.
+def test_cards_registry_never_references_the_selector():
+    text = pathlib.Path(str(cards_registry_mod.__file__)).read_text(encoding="utf-8")
+    for forbidden in ("cards.selector", "select_card", "per_evidence", "two_arm"):
+        assert forbidden not in text, f"cards/registry.py references {forbidden!r} unexpectedly"
 
 
 def test_per_register_cli_registers_both_hypotheses(orchestrator):
@@ -402,18 +356,11 @@ def test_per_evaluate_cli_on_the_original_v1_pair_permanently_defers(orchestrato
     assert all(r["evaluated_at_utc"] is None for r in rows_again)
 
 
-def test_production_scan_produces_zero_per_assignments(orchestrator):
-    """The hard requirement: a full production scan at S1b HEAD must
-    produce zero post_earnings_reaction assignments -- select_card() is
-    never called, so no candidate can ever be stamped with this card_id."""
-    orchestrator.run_scan_once()
-    total_candidates = orchestrator.journal.scalar("SELECT COUNT(*) FROM candidates")
-    # Audit-fixup (architecture LOW): without this, the test would stay
-    # green even if a future change made the scan produce ZERO candidates
-    # of any kind -- a vacuous pass that proves nothing. The mock-mode scan
-    # is expected to produce real candidates every run.
-    assert total_candidates > 0, "scan produced no candidates at all -- this test can no longer prove anything"
-    count = orchestrator.journal.scalar(
-        "SELECT COUNT(*) FROM candidates WHERE card_id = ?", (PER_CARD_ID,),
-    )
-    assert count == 0
+# test_production_scan_produces_zero_per_assignments moved to
+# tests/test_s1c_activation.py as
+# test_production_scan_can_produce_a_per_assignment_when_eligible_never_
+# otherwise -- S1c wires select_card() in, so "select_card() is never
+# called" is no longer the reason a fresh orchestrator fixture (no
+# corrected pair registered) still produces zero PER assignments; the new
+# test proves the SAME zero-assignment behavior for the current reason
+# (the activation preflight fails) alongside the positive case.

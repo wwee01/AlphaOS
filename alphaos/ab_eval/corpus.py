@@ -66,6 +66,14 @@ CANDIDATE_CREATION_FIELDS = (
     "price_at_scan", "volume_at_scan", "interest_score",
     "shortlist_reason", "notes_json", "lineage_id", "shadow_tier",
     "instrument_version",
+    # SETUP-1 S1c (2026-07-23): stamped at the SAME creation-time insert as
+    # card_id/card_version above, never updated afterward (no UPDATE
+    # candidates statement ever touches these -- see tests/
+    # test_s1c_activation.py::test_no_update_statement_ever_targets_
+    # candidates_card_columns) -- so they carry the identical "stable
+    # since scan time" guarantee this whitelist requires, not a later
+    # pipeline verdict.
+    "card_assignment_status", "card_assignment_ref", "card_selector_version",
 )
 
 # Shadow-tier-only creation fields (the scanner's own `cand.update({...})`
