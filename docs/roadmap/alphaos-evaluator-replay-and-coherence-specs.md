@@ -151,52 +151,296 @@ no-op when models match; no-op on empty ledger (fresh install).
 
 ## INSTR-2 — ATR-coherent evaluator targets (prompt v2, live-path, gated)
 
+REFINED 2026-07-23 against (a) the post-AB-EVAL-1 code state of
+`alphaos/ai/openai_client.py` (the `evaluate()` → `raw_evaluate()` /
+`post_process()` refactor) and (b) the first REAL AB-EVAL-1 replay run.
+The 2026-07-20 draft's "bump the version literal, merge dark" mechanics
+were unbuildable as written and are replaced by a settings axis (Design 1).
+
+### Real evidence baseline (AB-EVAL-1 run `abrun_513b8d9441ad`, 2026-07-21)
+60 identical frozen packets replayed through both models under prompt v1:
+
+| | raw propose | raw watch | raw reject | RR_FLOOR on raw proposes | final proposes |
+|---|---|---|---|---|---|
+| gpt-5.4-mini | 40 | 20 | 0 | **40/40 (100%)** | 0 |
+| gpt-5.6-luna | 7 | 17 | 36 | **7/7 (100%)** | 0 |
+
+The floor mismatch kills 100% of raw proposes under BOTH models — the
+defect is **model-independent**, exactly the draft's premise, now with a
+real number attached (the draft's "~100%" estimate is retired; all
+acceptance criteria below reference this run). Consequence: the proof gate
+tests prompt v2 under BOTH models, so the operator's still-open
+keep-vs-revert model decision stays orthogonal to this ticket — whichever
+model survives that ruling, INSTR-2 must be proven to fix it.
+
 ### Goal
 Make target-setting and stop-setting share the ATR risk scale, so the 1.2
 floor measures real trade geometry instead of a units mismatch. **This is a
 coherence fix, not a loosening: the floor stays 1.2 and the deterministic
 2.0×ATR(14) stop override stays exactly as shipped.**
 
-### Non-goals
-- No change to `MIN_REWARD_RISK`, `ATR_STOP_MULTIPLIER_V1`, or
-  `_apply_atr_stop` / `_enforce_min_reward_risk` semantics (defense in
-  depth: the override remains even when the model cooperates).
+### Non-goals (re-verified against current code, 2026-07-23)
+- No change to `MIN_REWARD_RISK` (`settings.min_reward_risk`, default 1.2,
+  `alphaos/config/settings.py`) or `ATR_STOP_MULTIPLIER_V1` (= 2.0,
+  `alphaos/data/atr.py` — relocated there 2026-07-09; `openai_client.py`
+  re-exports it).
+- No change to `_apply_atr_stop` / `_enforce_min_reward_risk` semantics
+  (defense in depth: the override remains even when the model cooperates).
+  Post-refactor these run inside **`OpenAIClient.post_process()`** (not
+  inline in `evaluate()` as the original draft said): live-path-gated ATR
+  override, then the floor, in that order. `post_process()`'s try/except
+  around `_apply_atr_stop` is an audit-HIGH behavior (2026-07-20): a
+  genuine raise (e.g. transient SQLite error on the `atr_history` read) is
+  contained to a journaled ERROR + safe `OPENAI_REJECT` rejection and must
+  NEVER abort the caller's scan loop. **The INSTR-2 diff must preserve this
+  containment** (test 11 below pins it).
 - No change to the `NO_ATR_DATA` fail-safe reject.
 - No response-schema change (the model still returns a stop; it becomes
-  advisory).
+  advisory). `NO_NEWS_EVAL_KEYS` unchanged; `structured_json.require_keys`
+  unchanged.
+- No prompt change for the mock path (`_mock_eval` never builds a prompt;
+  hundreds of existing tests depend on its deterministic stop/target math).
 
 ### Design
-1. **Surface ATR into the prompt input.** The snapshot gains `atr_14` (and
-   the computed stop price + risk-per-share), fetched the same way
-   `_apply_atr_stop` already does (`atr_history`, `ATR_RULES_V1`). One
-   fetch, shared — do not query twice per evaluation.
-2. **Prompt v1 → v2** (bump `prompt_template_version` literal). v2 states
-   the policy plainly: "Your stop WILL be set at entry − 2.0×ATR(14) =
-   {stop_price} for longs (entry + for shorts); risk per share is
-   {risk_per_share}. Propose a target only if (|target − entry| /
-   risk_per_share) ≥ 1.2; otherwise reject." Wording must inform, not
-   coach: it may not instruct the model to prefer proposing.
-3. **Pre-cutover proof gate (uses AB-EVAL-1's harness).** Replay the frozen
-   corpus under (luna, v1) vs (luna, v2). Pre-registered expectations:
-   - `RR_FLOOR` downgrade rate on raw proposes drops from ~100% (kill-zone
-     packets) to <20%.
-   - Flip-direction check: v2 must NOT convert packets that BOTH models
-     raw-rejected narratively into proposes — that would be coaching, not
-     clarifying. If observed → revise wording, re-run; do not cut over.
-4. **Rollout.** Build + merge dark is acceptable (version literal unused
-   until cutover); **cutover is a separate explicit operator instruction**
-   after the replay report, logged as a decision row. Evaluations under v2
-   are a new selection process (new ruler): `prompt_template_version` is
-   already journaled per row, and the daily brief notes the cutover date so
-   downstream sample-floor accounting can split on it.
 
-### Tests
-Prompt-builder unit tests: v2 renders ATR numbers correctly for long and
-short; missing ATR renders nothing new (fail-safe path untouched — assert
-the `NO_ATR_DATA` reject still fires); version literal bumped exactly once;
-snapshot journaling captures the ATR fields (replayability preserved);
-structural test that live scan path still applies `_apply_atr_stop` after a
-v2 evaluation (the override is not conditionally skipped).
+1. **Version mechanics: a settings axis, not a literal bump.** The draft's
+   "bump `prompt_template_version` literal … version literal unused until
+   cutover" is factually wrong against the code: `to_row()` stamps
+   `pt.PROMPT_TEMPLATE_VERSION` into every `openai_evaluations` row today,
+   so editing the literal is a live behavior change at merge, not a dark
+   one. Instead:
+   - New frozen-settings field `openai_prompt_version: str`, env
+     `OPENAI_PROMPT_VERSION`, default `"v1"`, validated against
+     `{"v1", "v2"}` (`SettingsError` otherwise — same pattern as
+     `MIN_REWARD_RISK` validation).
+   - `OpenAIEvaluation` gains field `prompt_template_version: str = "v1"`;
+     `evaluate()` stamps it from settings on every path (mock / live /
+     rejection — stamped LAST alongside the existing snapshot stamp, for
+     the same reason: `post_process()` can swap in a new rejection object);
+     `to_row()` reads the instance field instead of the module literal.
+     Direct-constructed test objects keep working via the default.
+   - Merge dark is now genuinely dark: with the default `"v1"`, the built
+     user prompt is **byte-identical** to today's (golden test 2 below).
+   - Cutover = operator sets `OPENAI_PROMPT_VERSION=v2` in `.env`, logged
+     as a decision row; the daily brief notes the cutover date so
+     downstream sample-floor accounting can split on the new ruler.
+
+2. **Surface ATR into the prompt — without touching the v1 bytes.**
+   `build_no_news_user_prompt` serializes the WHOLE snapshot dict into the
+   `MARKET_SNAPSHOT:` section, so naively adding `atr_14` to the snapshot
+   would change v1 prompts too. Exact change instead:
+   - Extract the `atr_history` lookup in `_apply_atr_stop` (the
+     `SELECT atr_14 FROM atr_history WHERE symbol = ? AND rules_version = ?
+     ORDER BY market_date DESC LIMIT 1` scalar) into a module-level helper
+     `_latest_atr(journal, symbol)`; `_apply_atr_stop` calls it — same SQL,
+     same semantics, one query definition so prompt and enforcement can
+     never read different sources.
+   - New method `OpenAIClient._augment_snapshot_for_prompt(snapshot,
+     candidate)`: returns the snapshot UNCHANGED unless (`not use_mock` AND
+     `settings.openai_prompt_version == "v2"`). When active, returns a
+     **copy** with key `"atr_policy"` set to
+     `{"atr_14", "stop_multiplier" (= ATR_STOP_MULTIPLIER_V1),
+     "risk_per_share" (= stop_multiplier × atr_14, 4 dp),
+     "min_reward_risk" (= settings.min_reward_risk),
+     "min_target_distance" (= min_reward_risk × risk_per_share, 4 dp),
+     "rules_version" (= ATR_RULES_V1)}` — always recomputed fresh,
+     overwriting any pre-existing `"atr_policy"` key (a replayed
+     v2-era fixture must never smuggle a stale archived block past the
+     current `atr_history` state that `_apply_atr_stop` will enforce
+     against). No ATR available (`None`/`<= 0`) ⇒ no key added ⇒ the
+     unchanged `NO_ATR_DATA` fail-safe handles any raw propose. The ATR
+     read here is wrapped in its own try/except (journal ERROR, proceed
+     without the block) — this call sits OUTSIDE `raw_evaluate()`'s and
+     `post_process()`'s containment, and a transient DB error must degrade
+     to a v1-shaped prompt, never abort the scan loop.
+   - `evaluate()` becomes: `snapshot = self._augment_snapshot_for_prompt(
+     snapshot, candidate)` → `raw_evaluate` → `post_process` → stamp
+     `evaluation.snapshot = snapshot` (the augmented copy — so v2-era
+     `snapshot_json` archives exactly what the model was shown;
+     replayability test 8).
+   - `build_no_news_user_prompt(candidate, snapshot, freshness_status)`
+     gains keyword `atr_policy: Optional[dict] = None` and, always,
+     `pop`s `"atr_policy"` out of the dict it serializes as
+     `MARKET_SNAPSHOT` (hygiene: a v1 replay arm over a future v2-era
+     fixture must not leak the archived block into a v1 prompt; a no-op on
+     all present-day data). `_live_eval` passes
+     `atr_policy=snapshot.get("atr_policy")`. `atr_policy=None` renders a
+     prompt byte-identical to today's v1. This keeps
+     `raw_evaluate` → `_live_eval` as the only route to the one production
+     prompt builder (existing AST test
+     `test_live_eval_still_calls_the_one_production_prompt_builder_ast`
+     stays green unmodified).
+   - Note on the draft's "one fetch, shared — do not query twice": post-
+     refactor, prompt-build and enforcement are separately invokable (the
+     replay harness depends on that), so the shared thing is the **query
+     definition** (`_latest_atr`), executed once at augment time and once
+     in `_apply_atr_stop` — two scalar reads on the same connection against
+     a table only the nightly `run_atr_update_job` writes, so they cannot
+     disagree within one evaluation. Threading a single cached value
+     through `post_process` would change `_apply_atr_stop`'s call shape —
+     explicitly a non-goal.
+
+3. **Prompt v2 wording (exact).** When `atr_policy` is present the builder
+   inserts the following section between `MARKET_SNAPSHOT` and
+   `DATA_FRESHNESS` (values interpolated from the block; floor and
+   multiplier are NEVER hard-coded in the template — render
+   `min_reward_risk` and `stop_multiplier` so the prompt cannot lie if an
+   operator ever changes config):
+
+   ```
+   ATR_STOP_POLICY:
+   After your evaluation, this system will REPLACE your returned stop with
+   a deterministic one before any trade is considered:
+   - long:  stop = entry - {stop_multiplier} x ATR(14)
+   - short: stop = entry + {stop_multiplier} x ATR(14)
+   For this symbol ATR(14) = {atr_14}, so risk per share is fixed at
+   {stop_multiplier} x {atr_14} = {risk_per_share} regardless of the stop
+   you return. reward:risk is then recomputed as
+   |target - entry| / {risk_per_share} and the evaluation is automatically
+   rejected if that value is below {min_reward_risk}. A surviving target
+   therefore sits at least {min_target_distance} from entry on the profit
+   side. The displayed figures are rounded; the recomputation uses exact
+   values — a target placed exactly at the minimum distance can fail on
+   rounding, so leave margin above it rather than placing targets at the
+   boundary. Your returned stop is still required by the schema and is
+   recorded, but it is advisory only. This policy does not make proposing
+   more or less desirable; it only tells you the geometry any target will
+   be judged against — apply your usual evidence standards unchanged.
+   Worked example (long):  entry 100.00, ATR(14) 2.50 -> enforced stop
+   95.00, risk per share 5.00; target 106.00 computes 6.00/5.00 = 1.20.
+   Worked example (short): entry 100.00, ATR(14) 2.50 -> enforced stop
+   105.00, risk per share 5.00; target 94.00 computes 6.00/5.00 = 1.20.
+   ```
+
+   Framing rules (unchanged from draft, made testable): the section states
+   mechanism and arithmetic only. It MUST NOT instruct the model to prefer
+   any decision, mention the drought, or say "propose more" — the one
+   permitted normative clause is the anti-boundary-rounding sentence and
+   the explicit "does not make proposing more or less desirable"
+   disclaimer. Everything else in the v1 prompt (system prompt, schema,
+   rules line, sentinels) is byte-identical in v2.
+
+4. **Harness extension: prompt-version arms.** The shipped harness
+   parameterizes ONLY the model (`replay_packet` does
+   `dataclasses.replace(settings, openai_primary_model=model)`), so the
+   proof gate below needs a second axis:
+   - An arm is `(model, prompt_version)`. `replay_packet(fixture, arm, …)`
+     does `replace(settings, openai_primary_model=model,
+     openai_prompt_version=version)`. Replay mirrors `evaluate()`'s
+     three-step sequence: `_augment_snapshot_for_prompt` (a no-op for v1
+     arms, and per-arm copy semantics mean arms can never contaminate each
+     other's view of the shared fixture dict) → `raw_evaluate` →
+     `post_process` (still on a `copy.copy` of the raw verdict). Update the
+     two AST structural tests
+     (`test_replay_routes_through_production_raw_evaluate_and_post_process_ast`,
+     `test_evaluate_calls_raw_evaluate_then_post_process_in_order_ast`) to
+     pin the three-step order in BOTH places; `replay.py` must still import
+     no prompt-building code.
+   - CLI: `ab_eval_run` gains `--arms MODEL:PROMPT_VERSION …` (mutually
+     exclusive with the existing `--models`, which remains as sugar for
+     `MODEL:<configured openai_prompt_version>`). Dedupe preserves order
+     over `(model, version)` pairs; ≥2 distinct arms required; cost
+     pre-flight `planned_calls = n_packets × n_arms`.
+   - Storage (additive; `SCHEMA_VERSION` stays 3 — same law AB-EVAL-1's own
+     audits established: `schema.py`'s governing comment says additive
+     column changes never bump it, `JournalStore._migrate` reconciles them
+     automatically, and existing tests assert `SCHEMA_VERSION == 3`):
+     `ab_eval_results` gains `prompt_version TEXT`; `ab_eval_runs` gains
+     `arms_json TEXT` (`models_json` stays populated for old readers).
+     Report (`alphaos/reports/ab_eval_report.py`) groups by arm, not model.
+
+5. **Pre-cutover proof gate (pre-registered here; operator or builder runs
+   it AFTER merge-dark, BEFORE any cutover).** One four-arm run over the
+   SAME frozen corpus as `abrun_513b8d9441ad` (do NOT rebuild the corpus —
+   rebuilding changes what the baseline anchors to):
+
+   ```
+   python -m alphaos ab_eval_run \
+     --arms gpt-5.4-mini:v1 gpt-5.6-luna:v1 gpt-5.4-mini:v2 gpt-5.6-luna:v2
+   python -m alphaos ab_eval_status          # or --run-id abrun_<new>
+   ```
+
+   240 real calls (60 × 4) — confirm 30-day cost-cap headroom first (the
+   run refuses on its own pre-flight otherwise). Fresh v1 arms are included
+   deliberately: LLM calls are nondeterministic and the provider can drift,
+   so the within-run v1 arms are the concurrent control, with
+   `abrun_513b8d9441ad` as the pre-registered anchor. Gates, all evaluated
+   per model:
+   - **P0 (run validity):** each fresh v1 arm reproduces an `RR_FLOOR`
+     downgrade rate on raw proposes ≥ 90% (anchor: 100% both models,
+     2026-07-21). Below that, something upstream changed — investigate;
+     the run is not interpretable and no other gate may be read.
+   - **P1 (primary):** under v2, `RR_FLOOR` downgrade rate on raw proposes
+     **< 20%** for EACH of mini and luna (real baseline: 100% and 100%).
+     Denominator guard: a model with < 5 raw proposes under v2 makes P1
+     INDETERMINATE for that model, not passed — investigate, do not cut
+     over on a vacuous denominator.
+   - **P2 (anti-coaching):** per model, packets flipping that model's own
+     fresh-v1-arm raw `reject` → v2 raw `propose` ≤ 10% of that model's
+     v1 rejects (anchor: luna 36 rejects ⇒ ≤ 3 flips at baseline counts;
+     mini had 0 rejects ⇒ vacuous unless its fresh v1 arm differs). Every
+     flipped packet is listed in the report with both reasoning summaries;
+     **any** flip whose v2 reasoning cites the stop policy as an
+     affirmative reason to propose fails P2 regardless of count. (The
+     draft's "packets BOTH models raw-rejected" formulation is retired —
+     the real run shows mini rejected 0 packets, making the intersection
+     empty and that check permanently vacuous.)
+   - **P3 (fail-safe untouched):** `NO_ATR` downgrade counts identical
+     between each model's v1 and v2 arms (baseline: 0 — every 2026-07-21
+     downgrade was `RR_FLOOR`).
+   - **P4 (integrity):** `n_corpus_errors = 0` and 240 result rows.
+   Any P-gate failure ⇒ revise wording (or investigate), re-run the full
+   four arms; do not cut over. Passing all gates ⇒ the report goes to the
+   operator; **cutover remains a separate explicit operator instruction**
+   (decision row, per Design 1), and stays sequenced AFTER the operator's
+   keep-vs-revert model ruling from the 2026-07-21 report.
+
+### Tests (hermetic; §H.1 discipline — date-seeded mocks, direct construction)
+1. Builder v2 long/short: with an `atr_policy` block, the rendered section
+   contains the interpolated `atr_14` / `risk_per_share` /
+   `min_target_distance` values and both worked examples; long and short
+   formula lines both present.
+2. **v1 golden test:** default settings ⇒ snapshot not augmented and
+   `build_no_news_user_prompt` output byte-identical to the pre-INSTR-2
+   prompt for a fixed candidate/snapshot (the merge-dark guarantee).
+3. Builder pops `"atr_policy"` from the serialized `MARKET_SNAPSHOT` in
+   both versions (feed a snapshot containing the key with
+   `atr_policy=None` and assert the key's values appear nowhere).
+4. No hard-coded policy numbers: rendering with `min_reward_risk=1.5` /
+   `stop_multiplier=3.0` in the block shows 1.5/3.0 (the template
+   interpolates config, never literals).
+5. Missing ATR under v2: no block, prompt renders v1-shaped, and a raw
+   propose is still rejected `NO_ATR_DATA` by the unchanged fail-safe.
+6. Augment-time ATR read raising ⇒ journaled ERROR, prompt built without
+   the block, scan loop never sees the exception.
+7. `prompt_template_version` stamping: rows journal the ACTIVE settings
+   version on every path (mock, live, post_process rejection); default
+   field value keeps direct-constructed fixtures at "v1".
+8. Snapshot journaling: under v2 the journaled `snapshot_json` contains
+   the `atr_policy` block shown to the model; under v1 it does not.
+9. Settings validation: `OPENAI_PROMPT_VERSION=v3` ⇒ `SettingsError`;
+   unset ⇒ `"v1"`.
+10. Structural: live scan path still applies `_apply_atr_stop` after a v2
+    evaluation (the override is not conditionally skipped on prompt
+    version), and `_latest_atr` is the single ATR-lookup site for both
+    augment and override (AST).
+11. Containment preserved: monkeypatch `journal.scalar` to raise inside
+    `post_process` under v2 ⇒ journaled ERROR + safe `OPENAI_REJECT`
+    rejection, never a propagated exception (the existing
+    `test_evaluate_contains_atr_read_exception_as_safe_reject` must stay
+    green through the diff).
+12. Coherence: with seeded `atr_history`, the stop arithmetic implied by
+    the prompt block (`entry − stop_multiplier × atr_14`) equals
+    `_apply_atr_stop`'s enforced stop for the same entry (shared-source
+    guarantee, exercised end-to-end).
+13. Harness arms: `--arms` parsing; `(model, version)` dedupe; refusal on
+    < 2 distinct arms; `planned_calls = packets × arms` in the cost
+    pre-flight; `ab_eval_results.prompt_version` populated; a v1 arm and a
+    v2 arm replaying the SAME fixture object see uncontaminated inputs
+    (order-independence of arms).
+14. Updated AST tests per Design 4 (three-step mirror pinned in
+    `evaluate()` and `replay_packet`; `replay.py` still imports no
+    prompt-building code).
 
 ---
 
