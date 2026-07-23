@@ -8,13 +8,29 @@ defensive in case the model misbehaves.
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     from alphaos.scanner.scan_context import ScanContext
 
-# Prompt-template generation marker (recorded on each evaluation for audit).
+# Prompt-template generation marker. Historically stamped verbatim into
+# every openai_evaluations row by OpenAIEvaluation.to_row() -- INSTR-2
+# retired that (to_row() now reads the instance's own
+# prompt_template_version field, stamped from settings.openai_prompt_version
+# by evaluate()); left defined here since nothing else in this module names
+# a "v1"/"v2" prompt-shape distinction more directly, but it is no longer
+# read anywhere in the live path.
 PROMPT_TEMPLATE_VERSION = "v1"
+
+# INSTR-2: fixed illustrative anchors for the ATR_STOP_POLICY worked
+# examples -- deliberately NOT drawn from any real candidate's own ATR
+# (which varies per symbol/day and would make the two worked examples an
+# unpredictable moving target for the model to read); only the POLICY
+# numbers (stop_multiplier, min_reward_risk) are ever config-derived, never
+# hard-coded, per the spec's own "the template interpolates config, never
+# literals" rule -- these two anchors are demo geometry, not policy.
+_ATR_EXAMPLE_ENTRY = 100.00
+_ATR_EXAMPLE_ATR = 2.50
 
 
 def _public(candidate: "Union[dict, ScanContext]") -> dict:
@@ -105,10 +121,81 @@ NO_NEWS_EVAL_KEYS = [
 ]
 
 
+def _render_atr_stop_policy(atr_policy: dict) -> str:
+    """INSTR-2: the exact ATR_STOP_POLICY wording block (spec's Design item
+    3, copied verbatim). ``atr_14``/``risk_per_share``/``min_reward_risk``/
+    ``min_target_distance`` are read straight off the ``atr_policy`` dict
+    ``OpenAIClient._augment_snapshot_for_prompt`` computed for THIS
+    candidate/symbol. The two worked examples use fixed illustrative
+    entry/ATR anchors (never this symbol's own real numbers -- see
+    ``_ATR_EXAMPLE_ENTRY``/``_ATR_EXAMPLE_ATR``) but their ARITHMETIC is
+    driven entirely by ``stop_multiplier``/``min_reward_risk`` off the same
+    dict, so the examples themselves shift correctly if an operator ever
+    changes ``ATR_STOP_MULTIPLIER_V1``/``MIN_REWARD_RISK`` -- no policy
+    number is ever a hard-coded literal in this template."""
+    stop_multiplier = atr_policy["stop_multiplier"]
+    min_reward_risk = atr_policy["min_reward_risk"]
+    atr_14 = atr_policy["atr_14"]
+    risk_per_share = atr_policy["risk_per_share"]
+    min_target_distance = atr_policy["min_target_distance"]
+
+    example_risk_per_share = round(stop_multiplier * _ATR_EXAMPLE_ATR, 2)
+    example_target_distance = round(min_reward_risk * example_risk_per_share, 2)
+    long_stop = round(_ATR_EXAMPLE_ENTRY - example_risk_per_share, 2)
+    short_stop = round(_ATR_EXAMPLE_ENTRY + example_risk_per_share, 2)
+    long_target = round(_ATR_EXAMPLE_ENTRY + example_target_distance, 2)
+    short_target = round(_ATR_EXAMPLE_ENTRY - example_target_distance, 2)
+    example_rr = (
+        round(example_target_distance / example_risk_per_share, 2) if example_risk_per_share else 0.0
+    )
+
+    return (
+        "ATR_STOP_POLICY:\n"
+        "After your evaluation, this system will REPLACE your returned stop with\n"
+        "a deterministic one before any trade is considered:\n"
+        f"- long:  stop = entry - {stop_multiplier} x ATR(14)\n"
+        f"- short: stop = entry + {stop_multiplier} x ATR(14)\n"
+        f"For this symbol ATR(14) = {atr_14}, so risk per share is fixed at\n"
+        f"{stop_multiplier} x {atr_14} = {risk_per_share} regardless of the stop\n"
+        "you return. reward:risk is then recomputed as\n"
+        f"|target - entry| / {risk_per_share} and the evaluation is automatically\n"
+        f"rejected if that value is below {min_reward_risk}. A surviving target\n"
+        f"therefore sits at least {min_target_distance} from entry on the profit\n"
+        "side. The displayed figures are rounded; the recomputation uses exact\n"
+        "values — a target placed exactly at the minimum distance can fail on\n"
+        "rounding, so leave margin above it rather than placing targets at the\n"
+        "boundary. Your returned stop is still required by the schema and is\n"
+        "recorded, but it is advisory only. This policy does not make proposing\n"
+        "more or less desirable; it only tells you the geometry any target will\n"
+        "be judged against — apply your usual evidence standards unchanged.\n"
+        f"Worked example (long):  entry {_ATR_EXAMPLE_ENTRY:.2f}, ATR(14) "
+        f"{_ATR_EXAMPLE_ATR:.2f} -> enforced stop\n"
+        f"{long_stop:.2f}, risk per share {example_risk_per_share:.2f}; target "
+        f"{long_target:.2f} computes {example_target_distance:.2f}/"
+        f"{example_risk_per_share:.2f} = {example_rr:.2f}.\n"
+        f"Worked example (short): entry {_ATR_EXAMPLE_ENTRY:.2f}, ATR(14) "
+        f"{_ATR_EXAMPLE_ATR:.2f} -> enforced stop\n"
+        f"{short_stop:.2f}, risk per share {example_risk_per_share:.2f}; target "
+        f"{short_target:.2f} computes {example_target_distance:.2f}/"
+        f"{example_risk_per_share:.2f} = {example_rr:.2f}.\n"
+    )
+
+
 def build_no_news_user_prompt(
-    candidate: "Union[dict, ScanContext]", snapshot: dict, freshness_status: str
+    candidate: "Union[dict, ScanContext]", snapshot: dict, freshness_status: str,
+    atr_policy: Optional[dict] = None,
 ) -> str:
-    """User prompt for no-news mode. Forces the catalyst/news sentinels."""
+    """User prompt for no-news mode. Forces the catalyst/news sentinels.
+
+    INSTR-2: ``atr_policy`` defaults to ``None`` -- in that case the output
+    is BYTE-IDENTICAL to the pre-INSTR-2 prompt (the merge-dark guarantee;
+    see the golden test in tests/test_ab_eval.py). When present, an
+    ATR_STOP_POLICY section (see ``_render_atr_stop_policy``) is inserted
+    between MARKET_SNAPSHOT and DATA_FRESHNESS. The ``"atr_policy"`` key is
+    ALWAYS popped out of whatever gets serialized into MARKET_SNAPSHOT, in
+    BOTH versions -- hygiene against a v2-era fixture replayed under a v1
+    arm leaking the archived block into a v1-shaped prompt (a no-op on all
+    present-day live data, since no v1 snapshot ever carries the key)."""
     schema = {
         "symbol": "string",
         "direction": "long | short",
@@ -126,6 +213,9 @@ def build_no_news_user_prompt(
         "data_freshness_status": "usable | stale | unverifiable",
         "risk_flags": ["list of short risk flag strings"],
     }
+    market_snapshot = dict(snapshot)
+    market_snapshot.pop("atr_policy", None)
+    atr_policy_section = f"{_render_atr_stop_policy(atr_policy)}\n" if atr_policy else ""
     return (
         "Evaluate this candidate in NO-NEWS MODE. Return JSON ONLY matching the "
         "schema. Base the thesis ONLY on price action, volume, relative strength, "
@@ -133,7 +223,8 @@ def build_no_news_user_prompt(
         "catalyst.\n\n"
         f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
         f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
-        f"MARKET_SNAPSHOT:\n{json.dumps(snapshot, default=str)}\n\n"
+        f"MARKET_SNAPSHOT:\n{json.dumps(market_snapshot, default=str)}\n\n"
+        f"{atr_policy_section}"
         f"DATA_FRESHNESS:\n{freshness_status}\n\n"
         "Rules: stale/unverifiable data => 'reject'. Long stop below entry; short "
         "stop above entry; target on the profit side. catalyst='not_available_v1', "

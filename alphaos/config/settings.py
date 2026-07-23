@@ -187,6 +187,17 @@ class Settings:
     openai_review_model: str
     anthropic_api_key: str
     claude_review_model: str
+    # INSTR-2: settings-gated primary-evaluator prompt version. "v1" is the
+    # merge-dark default (byte-identical prompt to pre-INSTR-2); "v2" surfaces
+    # the live evaluator's own ATR-based stop policy into the prompt so the
+    # 1.2 reward:risk floor measures real trade geometry instead of a units
+    # mismatch (see OpenAIClient._augment_snapshot_for_prompt). A settings
+    # axis, not a version-literal bump -- editing prompt_templates.py's own
+    # PROMPT_TEMPLATE_VERSION module constant would be a live behavior change
+    # at merge (to_row() used to stamp that literal on every row), not a dark
+    # one; this field is what OpenAIEvaluation.prompt_template_version is
+    # actually stamped from now.
+    openai_prompt_version: str
 
     # --- market data (v1: Alpaca only, IEX feed) ---
     data_provider: str
@@ -1378,6 +1389,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     if min_reward_risk < 0:
         raise SettingsError(f"MIN_REWARD_RISK={min_reward_risk!r} must be >= 0.")
 
+    # --- INSTR-2: settings-gated primary-evaluator prompt version ------------
+    openai_prompt_version = _get(src, "OPENAI_PROMPT_VERSION", "v1")
+    if openai_prompt_version not in ("v1", "v2"):
+        raise SettingsError(
+            f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of 'v1', 'v2'."
+        )
+
     # --- earnings proximity (PR5): warning window + conservative hold-days
     # fallback. Not a safety gate (advisory only), but a nonsensical value
     # (0 hold days, a multi-year warning window) would silently make the flag
@@ -1432,6 +1450,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         openai_review_model=_get(src, "OPENAI_REVIEW_MODEL", "gpt-4o-mini"),
         anthropic_api_key=_get(src, "ANTHROPIC_API_KEY"),
         claude_review_model=_get(src, "CLAUDE_REVIEW_MODEL", "claude-sonnet-4-6"),
+        openai_prompt_version=openai_prompt_version,
         data_provider=data_provider,
         market_data_feed=_get(src, "MARKET_DATA_FEED", "iex").lower(),
         news_enabled=news_enabled,

@@ -98,6 +98,16 @@ class OpenAIEvaluation:
     # this provenance to live (a candidate's raw evaluation vs the actual
     # proposed/executed trade).
     stop_source: Optional[str] = None
+    # INSTR-2: the ACTIVE settings.openai_prompt_version at the moment
+    # evaluate() produced this evaluation -- stamped on every path (mock/
+    # live/post_process rejection), same "stamped LAST" reasoning as the
+    # snapshot field below. Defaults to "v1" so every direct-constructed
+    # test fixture (hundreds of them, across many test files) keeps working
+    # unchanged. to_row() reads THIS field now, not the
+    # prompt_templates.PROMPT_TEMPLATE_VERSION module literal -- editing
+    # that literal in place would have been a live behavior change at
+    # merge (see settings.py's own openai_prompt_version docstring).
+    prompt_template_version: str = "v1"
 
     def to_row(self) -> dict:
         return {
@@ -124,7 +134,7 @@ class OpenAIEvaluation:
             "raw_json": self.raw or {},
             "is_mock": 1 if self.is_mock else 0,
             # --- Trade Packet v1 metadata (audit only; no decision change) ---
-            "prompt_template_version": pt.PROMPT_TEMPLATE_VERSION,
+            "prompt_template_version": self.prompt_template_version,
             "schema_version": "v1",
             "thesis_summary": self.reasoning_summary,
             "expected_hold_days": self.max_holding_days,
@@ -158,6 +168,25 @@ def _extract_usage(resp) -> Optional[dict]:
     }
 
 
+def _latest_atr(journal, symbol: Optional[str]) -> Optional[float]:
+    """INSTR-2: the ONE atr_history lookup definition -- extracted from
+    ``_apply_atr_stop`` so that method and
+    ``OpenAIClient._augment_snapshot_for_prompt`` share exactly one query,
+    never two independently-written copies that could silently drift apart.
+    Same SQL, same semantics as before extraction: most recent
+    ``atr_14`` row for this symbol under the current ATR rules version.
+    ``journal=None`` (rare -- the OpenAIClient constructor allows it) fails
+    safe to ``None``, never a crash -- callers already treat "no ATR data"
+    as a normal, expected outcome."""
+    if journal is None:
+        return None
+    return journal.scalar(
+        "SELECT atr_14 FROM atr_history WHERE symbol = ? AND rules_version = ? "
+        "ORDER BY market_date DESC LIMIT 1",
+        (symbol, ATR_RULES_V1),
+    )
+
+
 class OpenAIClient:
     def __init__(self, settings, journal=None):
         self.settings = settings
@@ -168,26 +197,89 @@ class OpenAIClient:
     def evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
                 freshness_status: str = "usable") -> OpenAIEvaluation:
         """Evaluate a candidate in no-news mode (the v1 path). Thin wrapper
-        over the two factored halves below -- kept this way (AB-EVAL-1) so
-        there is exactly ONE place that calls the raw model then the
+        over the three factored steps below -- kept this way (AB-EVAL-1,
+        extended INSTR-2) so there is exactly ONE place that augments the
+        snapshot for the prompt, calls the raw model, then runs the
         post-processing chain, in that order; the A/B replay harness
-        invokes ``raw_evaluate``/``post_process`` directly (on a
-        reconstructed snapshot, through a settings clone with only the
-        model name parameterized) instead of re-deriving this sequence."""
+        mirrors this same three-step sequence directly (on a reconstructed
+        snapshot, through a settings clone with the model name AND prompt
+        version parameterized) instead of re-deriving it."""
+        snapshot = self._augment_snapshot_for_prompt(snapshot, candidate)
         evaluation = self.raw_evaluate(candidate, snapshot, freshness_status)
         evaluation = self.post_process(evaluation, candidate)
-        # EVAL-1 addendum: journal the snapshot input alongside every real
+        # EVAL-1 addendum (extended INSTR-2): journal the snapshot input
+        # (the augmented copy, when v2 is active -- so snapshot_json
+        # archives exactly what the model was shown) alongside every real
         # evaluation (all paths, including rejections/fail-safes -- those
         # are precisely the examples a future replay harness needs most,
         # same "retention starts here" law EVAL-1 already applies to the
-        # labeller). Stamped LAST, after post_process() -- that chain can
-        # swap in a brand-new rejection object of its own, which would
-        # otherwise miss the stamp if this ran before it. The primary
-        # evaluator's own snapshot input was previously never persisted
-        # anywhere, making it the one AI call in this codebase that could
-        # never be replayed after the fact.
+        # labeller), and stamp the ACTIVE prompt-template version. Both
+        # stamped LAST, after post_process() -- that chain can swap in a
+        # brand-new rejection object of its own, which would otherwise miss
+        # either stamp if this ran before it. The primary evaluator's own
+        # snapshot input was previously never persisted anywhere, making it
+        # the one AI call in this codebase that could never be replayed
+        # after the fact.
+        evaluation.prompt_template_version = self.settings.openai_prompt_version
         evaluation.snapshot = snapshot
         return evaluation
+
+    def _augment_snapshot_for_prompt(self, snapshot: dict,
+                                     candidate: "Union[dict, ScanContext]") -> dict:
+        """INSTR-2: no-op (returns ``snapshot`` UNCHANGED, same object) unless
+        BOTH live (``not self.use_mock``) AND ``settings.openai_prompt_version
+        == "v2"`` -- the mock baseline's prompt never changes (non-goal), and
+        v1 stays byte-identical to before (merge-dark guarantee).
+
+        When active, returns a COPY of ``snapshot`` with key ``"atr_policy"``
+        set to a freshly-computed block -- ALWAYS recomputed here, ALWAYS
+        overwriting any pre-existing ``"atr_policy"`` key the input snapshot
+        might already carry, never read from it: a replayed v2-era fixture
+        must never smuggle a stale archived block past the CURRENT
+        atr_history state that ``_apply_atr_stop`` will enforce against
+        later in this same evaluation (one query definition, ``_latest_atr``,
+        shared by both reads -- they cannot disagree).
+
+        No ATR data for this symbol (``None``/``<= 0``) => no key added =>
+        the unchanged ``NO_ATR_DATA`` fail-safe in ``_apply_atr_stop``
+        handles any raw propose downstream.
+
+        The ATR read here has its OWN try/except, deliberately OUTSIDE
+        ``raw_evaluate()``'s and ``post_process()``'s own containment (this
+        runs BEFORE either) -- a transient DB error must degrade to a
+        v1-shaped prompt (no block added), journaled as an ERROR, never
+        propagate and abort the caller's scan loop."""
+        if self.use_mock or self.settings.openai_prompt_version != "v2":
+            return snapshot
+
+        symbol = candidate.get("symbol")
+        try:
+            atr = _latest_atr(self.journal, symbol)
+        except Exception as exc:
+            if self.journal is not None:
+                self.journal.log_system_event(
+                    Severity.ERROR, "openai",
+                    f"{symbol}: ATR read failed while building the v2 prompt; "
+                    "degrading to a v1-shaped prompt for this evaluation.",
+                    {"error": str(exc)},
+                )
+            return snapshot
+        if atr is None or atr <= 0:
+            return snapshot
+
+        stop_multiplier = ATR_STOP_MULTIPLIER_V1
+        risk_per_share = round(stop_multiplier * atr, 4)
+        min_reward_risk = self.settings.min_reward_risk
+        augmented = dict(snapshot)
+        augmented["atr_policy"] = {
+            "atr_14": atr,
+            "stop_multiplier": stop_multiplier,
+            "risk_per_share": risk_per_share,
+            "min_reward_risk": min_reward_risk,
+            "min_target_distance": round(min_reward_risk * risk_per_share, 4),
+            "rules_version": ATR_RULES_V1,
+        }
+        return augmented
 
     def raw_evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
                      freshness_status: str = "usable") -> OpenAIEvaluation:
@@ -305,13 +397,7 @@ class OpenAIClient:
         if evaluation.decision != Decision.PROPOSE.value or evaluation.entry is None:
             return evaluation
 
-        atr = None
-        if self.journal is not None:
-            atr = self.journal.scalar(
-                "SELECT atr_14 FROM atr_history WHERE symbol = ? AND rules_version = ? "
-                "ORDER BY market_date DESC LIMIT 1",
-                (evaluation.symbol, ATR_RULES_V1),
-            )
+        atr = _latest_atr(self.journal, evaluation.symbol)
         if atr is None or atr <= 0:
             if self.journal is not None:
                 self.journal.log_system_event(
@@ -433,7 +519,13 @@ class OpenAIClient:
         from openai import OpenAI  # lazy import; optional dependency
 
         client = OpenAI(api_key=self.settings.openai_api_key)
-        user_prompt = pt.build_no_news_user_prompt(candidate, snapshot, freshness_status)
+        # INSTR-2: atr_policy is only ever present on ``snapshot`` when
+        # _augment_snapshot_for_prompt() (called by evaluate() before
+        # raw_evaluate()) put it there -- None on every v1 path, rendering a
+        # prompt byte-identical to before.
+        user_prompt = pt.build_no_news_user_prompt(
+            candidate, snapshot, freshness_status, atr_policy=snapshot.get("atr_policy"),
+        )
         # PR4: measurement-only AI-call lineage (model provider + content hashes of
         # the actual prompt sent, never the raw prompt body) -- stamped onto
         # whichever OpenAIEvaluation this call ends up returning below.
