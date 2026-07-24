@@ -210,7 +210,56 @@ def test_positions_empty_journal_returns_empty_list(tmp_path):
     journal = JournalStore(db_path)
     r = _client(settings).get("/api/v1/positions", headers=HEADERS)
     assert r.status_code == 200
-    assert r.json()["positions"] == []
+    body = r.json()
+    assert body["positions"] == []
+    assert body["working_orders"] == []  # 2026-07-24: always present, empty here
+    journal.close()
+
+
+def _insert_order(journal, symbol, state, order_id=None):
+    journal.insert("paper_orders", {
+        "order_id": order_id or f"ord_{symbol}_{state}", "symbol": symbol, "side": "buy",
+        "qty": 10, "entry_price": 100.0, "stop_loss_price": 97.0, "take_profit_price": 106.0,
+        "state": state, "broker_order_id": f"brk_{symbol}",
+    })
+
+
+def test_working_orders_surfaces_only_live_prefill_states(tmp_path):
+    """2026-07-24 operator visibility gap: an approved-but-unfilled order was
+    invisible in the console (gone from Approvals, not yet a Position).
+    working_orders() must surface exactly the live pre-fill states
+    (accepted/submitted/partially_filled) and NEVER a terminal one (filled/
+    cancelled/rejected/expired/replaced) -- a filled order becomes a position
+    and must leave this list, or it would double-count."""
+    db_path = str(tmp_path / "orders.db")
+    journal = JournalStore(db_path)
+    _insert_order(journal, "AAPL", "accepted")
+    _insert_order(journal, "MSFT", "submitted")
+    _insert_order(journal, "NVDA", "partially_filled")
+    _insert_order(journal, "TSLA", "filled")      # terminal -> excluded
+    _insert_order(journal, "AMD", "cancelled")    # terminal -> excluded
+    _insert_order(journal, "META", "rejected")    # terminal -> excluded
+
+    working = journal.working_orders()
+    assert {o["symbol"] for o in working} == {"AAPL", "MSFT", "NVDA"}
+    journal.close()
+
+
+def test_positions_endpoint_carries_working_orders(tmp_path):
+    """The /positions payload must expose the working orders so the Positions
+    page can render them even when there are zero filled positions (the exact
+    just-approved case)."""
+    db_path = str(tmp_path / "wo.db")
+    settings = make_settings(ALPHAOS_DB_PATH=db_path)
+    journal = JournalStore(db_path)
+    _insert_order(journal, "AAPL", "accepted")
+
+    r = _client(settings).get("/api/v1/positions", headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["positions"] == []  # nothing filled
+    assert [o["symbol"] for o in body["working_orders"]] == ["AAPL"]
+    assert body["working_orders"][0]["state"] == "accepted"
     journal.close()
 
 

@@ -13,7 +13,7 @@
 // changed.
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getPositions } from '../api.js';
-import { Block, Badge, badgeTone } from '../components/ui.jsx';
+import { Block, Badge, badgeTone, DataTable } from '../components/ui.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { StatTile } from '../components/StatTile.jsx';
@@ -22,6 +22,37 @@ import { describeUnreachable, formatClockUTC, formatR } from '../format.js';
 import { computeRLadder, verdictIcon } from '../positions.js';
 
 const POLL_MS = 10000;
+
+// 2026-07-24: orders approved + placed at the broker but not yet filled.
+// This section exists because that state had no home in the console -- an
+// approved order is gone from Approvals (no longer pending) but not yet a
+// Position (no position until it fills), so a just-approved operator had to
+// open Alpaca to confirm it worked. Rendered at the TOP of the page, amber,
+// and (critically) OUTSIDE the "No open positions" early-return, so a
+// pending buy with zero filled positions still shows.
+const WORKING_ORDER_COLUMNS = [
+  { key: 'symbol', label: 'symbol' },
+  { key: 'side', label: 'side', render: (o) => String(o.side || o.direction || '').toUpperCase() },
+  { key: 'qty', label: 'qty', numeric: true },
+  { key: 'entry_price', label: 'entry', numeric: true, render: (o) => (o.entry_price ?? o.limit_price ?? '—') },
+  { key: 'stop_loss_price', label: 'stop', numeric: true },
+  { key: 'take_profit_price', label: 'target', numeric: true },
+  { key: 'state', label: 'state', render: (o) => <Badge tone="warn" caps>{o.state}</Badge> },
+  { key: 'submitted_at', label: 'placed (UTC)', render: (o) => formatClockUTC(o.submitted_at || o.created_at_utc) },
+];
+
+function WorkingOrders({ orders }) {
+  if (!orders || orders.length === 0) return null;
+  return (
+    <Block title={`Working orders — awaiting fill (${orders.length})`} style={{ borderColor: 'var(--amber)' }}>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+        Approved and placed at the broker, not yet filled. Each becomes a position below once it fills —
+        checked automatically every monitor cycle (~15 min). Your approval is confirmed the moment it appears here.
+      </div>
+      <DataTable columns={WORKING_ORDER_COLUMNS} rows={orders} />
+    </Block>
+  );
+}
 
 // ND-7 (design ruling §4.4): the hero numeral is tone-colored by sign --
 // green positive / red negative / ink neutral (unmeasurable). Mirrors
@@ -150,6 +181,7 @@ function PositionCard({ p }) {
 
 export default function Positions() {
   const [positions, setPositions] = useState(null);
+  const [workingOrders, setWorkingOrders] = useState([]);
   const [unreachable, setUnreachable] = useState(false);
   const [lastGoodAsOf, setLastGoodAsOf] = useState(null);
   const [asOf, setAsOf] = useState(null);
@@ -160,6 +192,7 @@ export default function Positions() {
       const r = await getPositions();
       if (!mountedRef.current) return;
       setPositions(r.positions ?? []);
+      setWorkingOrders(r.working_orders ?? []);
       setAsOf(r.as_of ?? null);
       setUnreachable(false);
       setLastGoodAsOf(r.as_of ?? null);
@@ -191,32 +224,50 @@ export default function Positions() {
 
       {!positions ? (
         <div className="label-caps">loading positions…</div>
-      ) : positions.length === 0 ? (
-        <Block title="Positions">
-          <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>No open positions.</div>
-        </Block>
       ) : (
         <>
-          <div className="grid reveal-stagger" style={{ marginBottom: 4 }}>
-            <div className="col-12">
-              <Block>
-                <StatTile
-                  label="total open R"
-                  value={formatR(totalR)}
-                  tone={rTone(totalR)}
-                  context={`${positions.length} open position(s)${measurable.length !== positions.length ? ` · ${positions.length - measurable.length} unmeasurable` : ''}`}
-                />
-              </Block>
+          {/* Working orders render FIRST and unconditionally -- a pending
+              buy with zero filled positions (the exact just-approved case)
+              must still be visible, never swallowed by the empty-positions
+              branch below. */}
+          {workingOrders.length > 0 && (
+            <div className="grid reveal-stagger" style={{ marginBottom: 12 }}>
+              <div className="col-12"><WorkingOrders orders={workingOrders} /></div>
             </div>
-          </div>
+          )}
 
-          <div className="grid reveal-stagger">
-            {positions.map((p) => (
-              <div className="col-6" key={p.position_id}>
-                <PositionCard p={p} />
+          {positions.length === 0 ? (
+            <Block title="Positions">
+              <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+                {workingOrders.length > 0
+                  ? 'No filled positions yet — see the working order(s) above, awaiting fill.'
+                  : 'No open positions.'}
               </div>
-            ))}
-          </div>
+            </Block>
+          ) : (
+            <>
+              <div className="grid reveal-stagger" style={{ marginBottom: 4 }}>
+                <div className="col-12">
+                  <Block>
+                    <StatTile
+                      label="total open R"
+                      value={formatR(totalR)}
+                      tone={rTone(totalR)}
+                      context={`${positions.length} open position(s)${measurable.length !== positions.length ? ` · ${positions.length - measurable.length} unmeasurable` : ''}`}
+                    />
+                  </Block>
+                </div>
+              </div>
+
+              <div className="grid reveal-stagger">
+                {positions.map((p) => (
+                  <div className="col-6" key={p.position_id}>
+                    <PositionCard p={p} />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </>
       )}
     </div>

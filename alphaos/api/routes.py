@@ -150,8 +150,18 @@ def positions(
 ) -> dict:
     """`assess_positions()`'s list, verbatim -- the exact function
     streamlit_app.tab_positions_health() renders from (verdicts, R fields,
-    symbol, days held, etc.). No reshaping."""
-    return {"positions": assess_positions(journal, settings, market), "as_of": _as_of()}
+    symbol, days held, etc.). No reshaping.
+
+    Also carries `working_orders` (2026-07-24): broker orders that are
+    approved + placed but not yet filled, so an operator who just approved
+    can confirm it went through without opening Alpaca -- the window where
+    the trade is gone from Approvals but not yet a Position. Read-only, same
+    as everything else here."""
+    return {
+        "positions": assess_positions(journal, settings, market),
+        "working_orders": journal.working_orders(),
+        "as_of": _as_of(),
+    }
 
 
 # ============================================================== ND-2 routes

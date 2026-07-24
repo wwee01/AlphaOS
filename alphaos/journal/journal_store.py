@@ -417,6 +417,31 @@ class JournalStore:
     def open_positions(self) -> list[dict]:
         return self.query("SELECT * FROM positions WHERE status = 'open' ORDER BY id DESC")
 
+    def working_orders(self, limit: int = 50) -> list[dict]:
+        """Orders placed at the broker but not yet filled or terminal --
+        'awaiting fill' (2026-07-24, operator visibility gap): after an
+        approval, the order goes to ``paper_orders`` in a live pre-fill state
+        and the proposal flips to 'submitted', but NO position exists until
+        reconcile detects the fill. During that window the trade showed
+        NOWHERE in the console -- gone from Approvals (no longer
+        pending_approval) and not yet in Positions (no position row) -- so an
+        operator who'd just approved had to open Alpaca to confirm it worked.
+
+        'submitted'/'accepted'/'partially_filled' are exactly the non-terminal
+        states in alphaos/broker/order_mapping.py's _STATUS_MAP (every live
+        Alpaca status -- new/accepted/pending_new/held/done_for_day/
+        partially_filled -- normalizes into one of these three); FILLED /
+        CANCELLED / REJECTED / EXPIRED / REPLACED are terminal and correctly
+        excluded. Once reconcile flips the order to 'filled' and opens the
+        position, it leaves this list and appears in open_positions()
+        instead."""
+        return self.query(
+            "SELECT * FROM paper_orders "
+            "WHERE state IN ('submitted', 'accepted', 'partially_filled') "
+            "ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+
     def closed_outcomes(self, limit: int = 200) -> list[dict]:
         return self.query(
             "SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,)
