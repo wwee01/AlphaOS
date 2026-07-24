@@ -65,6 +65,7 @@ from alphaos.regime.service import ensure_regime_for_today
 from alphaos.scanner.candidate_scanner import CURRENT_INSTRUMENT_VERSION, DEFAULT_UNIVERSE
 from alphaos.universe.builder import load_universe_file
 from alphaos.cards import registry as cards
+from alphaos.cards.activation import build_scan_card_activation
 from alphaos.util import timeutils
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.data.market_data import MarketDataClient
@@ -285,7 +286,45 @@ class Orchestrator:
             },
         )
 
-        scan = self.scanner.scan(scan_batch_id=scan_batch_id)
+        # S1c: load the shadow-tier universe file's SYMBOL LIST early --
+        # purely to build the core+shadow union the selector context needs
+        # (a performance bound only, per build_selector_context's own
+        # docstring) -- before EITHER scan runs. The shadow-tier SCAN
+        # itself still runs later, at its existing call site below, reusing
+        # this same universe_doc/shadow_symbols/adv_by_symbol rather than
+        # re-reading the file a second time.
+        universe_doc = None
+        shadow_symbols: list[str] = []
+        adv_by_symbol: dict = {}
+        if self.settings.shadow_tier_enabled:
+            universe_doc = load_universe_file(self.settings.shadow_tier_universe_file)
+            if universe_doc and universe_doc.get("symbols"):
+                shadow_symbols = [s["symbol"] for s in universe_doc["symbols"] if s.get("symbol")]
+                adv_by_symbol = {
+                    s["symbol"]: s.get("adv_20d_usd") for s in universe_doc["symbols"] if s.get("symbol")
+                }
+
+        # S1c: ONE activation decision + ONE frozen SelectorContext per scan
+        # batch, built before either scan() or scan_shadow_tier() runs, and
+        # reused for every candidate (core AND shadow) this batch produces
+        # -- see alphaos.cards.activation's own module docstring for the
+        # full fail-closed contract. A preflight failure degrades every
+        # candidate this batch to the existing default card; it never
+        # blocks the scan itself. assignment_as_of_utc reuses `st.utc`
+        # (already minted above for scan_batches/scheduler_runs) rather than
+        # a second wall-clock read, so every candidate this batch produces
+        # shares one instant, never a drifting one.
+        card_activation = build_scan_card_activation(
+            self.journal, st.utc, set(DEFAULT_UNIVERSE) | set(shadow_symbols),
+        )
+        if not card_activation.active:
+            self.journal.log_system_event(
+                Severity.WARNING, "cards",
+                f"S1c PER-card activation unavailable this scan (reason={card_activation.reason}) -- "
+                "every candidate this batch falls back to the default card.",
+            )
+
+        scan = self.scanner.scan(scan_batch_id=scan_batch_id, card_activation=card_activation)
         summary = ScanSummary(
             scan_id=scan.scan_id, candidates=len(scan.candidates),
             scan_batch_id=scan_batch_id, scheduler_run_id=scheduler_run_id,
@@ -318,15 +357,7 @@ class Orchestrator:
         # shadow-tier candidate to that loop. Zero AI calls, zero enrichment:
         # this block calls only the scanner + universe_days journaling. ---
         if self.settings.shadow_tier_enabled:
-            universe_doc = load_universe_file(self.settings.shadow_tier_universe_file)
             if universe_doc and universe_doc.get("symbols"):
-                shadow_symbols = [s["symbol"] for s in universe_doc["symbols"] if s.get("symbol")]
-                # EXP-1 mechanism 10: per-symbol ADV context from the committed
-                # universe file (already reviewed/versioned -- never a new
-                # screen), threaded through for volume_today_pct_of_adv.
-                adv_by_symbol = {
-                    s["symbol"]: s.get("adv_20d_usd") for s in universe_doc["symbols"] if s.get("symbol")
-                }
                 # EXP-1 mechanisms 4/8/10: this scan's own window label, shared
                 # verbatim with the SHADOW_LABEL job's cadence (cadence.py's
                 # scan_windows/window_containing) so liquidity instrumentation
@@ -343,6 +374,7 @@ class Orchestrator:
                     shadow_symbols, scan_batch_id=scan_batch_id,
                     universe_file_version=universe_doc.get("version"),
                     scan_window=scan_window_label, adv_by_symbol=adv_by_symbol,
+                    card_activation=card_activation,
                 )
                 self._record_universe_days(shadow_result, universe_doc)
                 summary.shadow_tier_scanned = shadow_result.snapshots

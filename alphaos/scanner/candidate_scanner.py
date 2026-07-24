@@ -13,6 +13,7 @@ the orchestrator (the scanner does not touch news).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Optional
 
 from alphaos.constants import (
@@ -30,7 +31,9 @@ from alphaos.constants import (
 from alphaos.data.freshness_guard import FreshnessGuard, quote_crossed_or_invalid
 from alphaos.data.market_data import MarketDataClient
 from alphaos import lineage
+from alphaos.cards.activation import ACTIVATION_ERROR_STATUS, PREFLIGHT_FAILED_STATUS, ScanCardActivation
 from alphaos.cards.registry import get_default_card
+from alphaos.cards.selector import SELECTOR_VERSION, select_card
 from alphaos.scanner.interest_scanner import InterestScanner
 from alphaos.scanner.scan_context import ScanContext
 from alphaos.scanner.trend import compute_trend_score
@@ -187,7 +190,8 @@ class CandidateScanner:
         return symbols
 
     def scan(
-        self, symbols: Optional[list[str]] = None, scan_batch_id: Optional[str] = None
+        self, symbols: Optional[list[str]] = None, scan_batch_id: Optional[str] = None,
+        card_activation: Optional[ScanCardActivation] = None,
     ) -> ScanResult:
         # When the orchestrator mints a scan_batch_id, use it as the scan_id so
         # candidates.scan_id == the batch id and a candidate row also carries the
@@ -229,7 +233,7 @@ class CandidateScanner:
                 self._reject(None, sym, "scan", reason, "tradeability gate", snapshot)
                 continue
 
-            cand = self._maybe_candidate(scan_id, sym, snapshot, snapshot_id)
+            cand = self._maybe_candidate(scan_id, sym, snapshot, snapshot_id, card_activation=card_activation)
             if cand is not None:
                 result.candidates.append(cand)
 
@@ -244,7 +248,7 @@ class CandidateScanner:
     def scan_shadow_tier(
         self, symbols: list[str], scan_batch_id: Optional[str] = None,
         universe_file_version: Optional[int] = None, scan_window: Optional[str] = None,
-        adv_by_symbol: Optional[dict] = None,
+        adv_by_symbol: Optional[dict] = None, card_activation: Optional[ScanCardActivation] = None,
     ) -> ScanResult:
         """EXP-0: the shadow-tier pass -- same 3 windows (batch snapshot ->
         freshness assess -> deterministic interest score) as ``scan()``, but
@@ -304,6 +308,7 @@ class CandidateScanner:
                 scan_window=scan_window,
                 adv_20d_dollar=(adv_by_symbol or {}).get(sym),
                 quote_age_seconds=report.quote_age_seconds,
+                card_activation=card_activation,
             )
             if cand is not None:
                 result.candidates.append(cand)
@@ -335,12 +340,71 @@ class CandidateScanner:
             return ReasonCode.WIDE_SPREAD.value
         return None
 
+    def _resolve_card_assignment(self, card_activation: Optional[ScanCardActivation], symbol: str) -> dict:
+        """S1c: the ONE place a new candidate's ``card_id``/``card_version``/
+        ``card_assignment_status``/``card_assignment_ref``/
+        ``card_selector_version`` are decided. Three cases, in order:
+
+        1. ``card_activation`` is ``None`` -- no S1c activation was built
+           for this call (a caller outside ``Orchestrator.run_scan_once``,
+           e.g. ``seed_demo``). BYTE-IDENTICAL to pre-S1c behavior: the
+           unconditional default card, with the three S1c-only fields left
+           unstamped (``None`` -- exactly what they were before this
+           column existed).
+        2. ``card_activation.active`` is ``False`` -- this scan's S1c
+           activation preflight failed (see ``alphaos.cards.activation``'s
+           own docstring for the full fail-closed contract). The default
+           card, tagged ``PREFLIGHT_FAILED_STATUS`` so it is diagnosable
+           and never confused with a cache-health degradation.
+        3. ``card_activation.active`` is ``True`` -- the frozen
+           ``SelectorContext`` is consulted via ``select_card()``, once
+           per candidate, using the SAME context (and therefore the SAME
+           point-in-time cache boundary) for every candidate this scan
+           batch produces, core or shadow.
+        """
+        if card_activation is None:
+            card = get_default_card()
+            return {
+                "card_id": card["card_id"], "card_version": card["version"],
+                "card_assignment_status": None, "card_assignment_ref": None,
+                "card_selector_version": None,
+            }
+        if not card_activation.active:
+            card = get_default_card()
+            return {
+                "card_id": card["card_id"], "card_version": card["version"],
+                "card_assignment_status": PREFLIGHT_FAILED_STATUS, "card_assignment_ref": None,
+                "card_selector_version": SELECTOR_VERSION,
+            }
+        context = card_activation.context
+        assert context is not None  # ScanCardActivation's own contract: active=True implies a context
+        market_date = date.fromisoformat(context.assignment_as_of_utc[:10])
+        try:
+            result = select_card(context, symbol, market_date)
+        except Exception:  # noqa: BLE001 -- audit finding: a hand-corrupted earnings_calendar_cache
+            # row (e.g. an unparseable report_date) must degrade this ONE candidate to the default
+            # card, never crash the whole scan -- select_card() itself makes no never-raises promise,
+            # unlike build_scan_card_activation() (see that function's own docstring for the same fix).
+            card = get_default_card()
+            return {
+                "card_id": card["card_id"], "card_version": card["version"],
+                "card_assignment_status": ACTIVATION_ERROR_STATUS, "card_assignment_ref": None,
+                "card_selector_version": SELECTOR_VERSION,
+            }
+        return {
+            "card_id": result["card_id"], "card_version": result["card_version"],
+            "card_assignment_status": result["card_assignment_status"],
+            "card_assignment_ref": result["card_assignment_ref"],
+            "card_selector_version": result["card_selector_version"],
+        }
+
     def _maybe_candidate(
         self, scan_id, sym, snapshot, snapshot_id,
         shadow_tier: bool = False, instrument_version: Optional[str] = None,
         interest_scanner: Optional[InterestScanner] = None,
         core_gate_verdict: Optional[str] = None, scan_window: Optional[str] = None,
         adv_20d_dollar: Optional[float] = None, quote_age_seconds: Optional[float] = None,
+        card_activation: Optional[ScanCardActivation] = None,
     ) -> Optional[ScanContext]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
@@ -379,7 +443,7 @@ class CandidateScanner:
 
         candidate_id = new_id("cand")
         asset_type = "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock"
-        card = get_default_card()
+        assignment = self._resolve_card_assignment(card_activation, sym)
         cand = {
             "candidate_id": candidate_id,
             "scan_id": scan_id,
@@ -402,8 +466,11 @@ class CandidateScanner:
             "asset_type": asset_type,
             "playbook_name": PLAYBOOK_V1,
             "setup_classification": "momentum_continuation",
-            "card_id": card["card_id"],
-            "card_version": card["version"],
+            "card_id": assignment["card_id"],
+            "card_version": assignment["card_version"],
+            "card_assignment_status": assignment["card_assignment_status"],
+            "card_assignment_ref": assignment["card_assignment_ref"],
+            "card_selector_version": assignment["card_selector_version"],
             "status_reason": CandidateStatus.DETECTED.value,
             "price_at_scan": snapshot.get("last_price"),
             "volume_at_scan": snapshot.get("volume"),

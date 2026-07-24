@@ -257,6 +257,20 @@ def _card_scoreboard_health(journal) -> Optional[dict]:
     return None if rep["n_cards"] == 0 else rep
 
 
+def _per_selector_health(journal, since_market_day: str) -> Optional[dict]:
+    """S1c's own PER-card selector activity report, or None if zero
+    candidates carry ANY card_assignment_status yet today (S1c not yet
+    activated, or a quiet day before the first scan) -- same "omit, don't
+    fabricate" idiom as every other section here. A day with zero PER
+    assignments but SOME default/degraded activity still shows (n_total>0
+    matters, not per_assignments>0 -- a zero PER count outside earnings
+    season is normal, never itself a reason to omit the section)."""
+    from alphaos.cards.selector_health import build_per_selector_report
+
+    rep = build_per_selector_report(journal, since_market_day)
+    return None if rep["n_total"] == 0 else rep
+
+
 def _eval_health(journal) -> Optional[dict]:
     """The latest eval-harness run's summary, or None if no operator has
     ever run `alphaos eval` yet -- an expected, honest empty state (EVAL-1
@@ -747,6 +761,7 @@ def build_daily_brief(
     baseline_health = _baseline_health(journal, settings)
     hypothesis_health = _hypothesis_health(journal)
     card_scoreboard_health = _card_scoreboard_health(journal)
+    per_selector_health = _per_selector_health(journal, since_market_day)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -768,6 +783,7 @@ def build_daily_brief(
         "backup_health": backup_health,
         "hypothesis_health": hypothesis_health,
         "card_scoreboard_health": card_scoreboard_health,
+        "per_selector_health": per_selector_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -938,6 +954,12 @@ def render_markdown(brief: dict) -> str:
         from alphaos.cards.scoreboard import render_markdown as _render_card_scoreboard
 
         lines += [_render_card_scoreboard(csh), ""]
+
+    psh = brief.get("per_selector_health")
+    if psh:
+        from alphaos.cards.selector_health import render_markdown as _render_per_selector
+
+        lines += [_render_per_selector(psh), ""]
 
     mg = brief["moonshot_gap"]
     lines += ["## Moonshot gap (10% MoM target)"]

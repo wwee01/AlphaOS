@@ -197,6 +197,19 @@ def test_row_to_fixture_freezes_candidate_and_snapshot(journal):
 # All downstream pipeline-outcome columns an attacker/late pipeline stage
 # could have written onto the candidates row by corpus-build time. Values
 # are distinctive sentinels so the leak assertion can't pass by accident.
+#
+# card_assignment_status/card_assignment_ref were listed here (2026-07-20,
+# before SETUP-1 S1c wired the selector in) as a defensive guess: at the
+# time, nothing wrote these dormant columns at all, so whether a future
+# writer would be creation-time or downstream was still open. SETUP-1 S1c
+# (2026-07-23) resolved that: candidate_scanner.py stamps both at the SAME
+# creation-time insert as card_id/card_version (already whitelisted below)
+# and NO UPDATE statement ever touches them afterward (see tests/
+# test_s1c_activation.py::test_no_update_statement_ever_targets_
+# candidates_card_columns) -- the exact "stable since scan time" guarantee
+# CANDIDATE_CREATION_FIELDS requires, not a later pipeline verdict. Moved
+# out of this sentinel set accordingly; both are now asserted to SURVIVE
+# into the prompt below, same as the existing shortlist_reason control.
 _OUTCOME_COLUMN_SENTINELS = {
     "status": "LEAKME_STATUS",
     "status_reason": "LEAKME_STATUS_REASON",
@@ -205,8 +218,6 @@ _OUTCOME_COLUMN_SENTINELS = {
     "watch_reason": "LEAKME_WATCH_REASON",
     "decision_adjustment": "LEAKME_DECISION_ADJUSTMENT",
     "decision_adjustment_reason": "LEAKME_ADJUSTMENT_REASON",
-    "card_assignment_status": "LEAKME_CARD_ASSIGNMENT_STATUS",
-    "card_assignment_ref": "LEAKME_CARD_ASSIGNMENT_REF",
     "primary_label": "LEAKME_PRIMARY_LABEL",
     "label_decision": "LEAKME_LABEL_DECISION",
     "label_confidence": 0.987654,
@@ -233,7 +244,13 @@ def test_frozen_candidate_never_leaks_pipeline_outcomes_into_prompt(journal):
 
     journal.insert("candidates", {
         "candidate_id": "cand_leak01", "symbol": "AAPL", "direction": "long",
-        "momentum_score": 0.7, **_OUTCOME_COLUMN_SENTINELS,
+        "momentum_score": 0.7,
+        # SETUP-1 S1c creation-time fields (see _OUTCOME_COLUMN_SENTINELS'
+        # own comment for why these moved out of the sentinel set) --
+        # real, distinguishable values so the survive-assertion below isn't
+        # vacuous, same purpose as the existing shortlist_reason control.
+        "card_assignment_status": "ok", "card_assignment_ref": "12345",
+        **_OUTCOME_COLUMN_SENTINELS,
     })
     journal.insert("openai_evaluations", {
         "eval_id": "eval_leak01", "candidate_id": "cand_leak01", "symbol": "AAPL",
@@ -260,6 +277,14 @@ def test_frozen_candidate_never_leaks_pipeline_outcomes_into_prompt(journal):
     # proving the assertion above isn't vacuous.
     assert "momentum+relvol" in prompt
     assert frozen["momentum_score"] == 0.7
+    # SETUP-1 S1c's own creation-time fields are the SAME kind of control --
+    # they must survive too, confirming they were correctly re-categorized
+    # out of _OUTCOME_COLUMN_SENTINELS above rather than silently dropped.
+    # "12345" (the ref) is distinctive enough on its own; "ok" alone would
+    # be too common a substring to prove anything by itself.
+    assert "12345" in prompt
+    assert frozen["card_assignment_status"] == "ok"
+    assert frozen["card_assignment_ref"] == "12345"
 
 
 def test_candidate_whitelist_matches_scanner_creation_insert():
