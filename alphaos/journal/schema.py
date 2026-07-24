@@ -291,6 +291,19 @@ SCHEMA: list[tuple[str, str]] = [
             card_assignment_status TEXT,
             card_assignment_ref TEXT,
             card_selector_version TEXT,
+            -- INSTR-3: the honest trend_rules_v1 measure (alphaos/scanner/
+            -- trend.py), computed at candidate-creation time from the
+            -- persisted `daily_bars` table + the same ATR(14) ruler
+            -- `_latest_atr` uses -- additive, NEVER a replacement for
+            -- `trend_quality` above (that column's semantics are frozen
+            -- for existing consumers, per the spec's own Non-goals).
+            -- trend_score is NULL whenever fewer than 10 completed daily
+            -- sessions or no ATR(14) is available (honest absence, never
+            -- a fallback to trend_quality's own abs(change_pct)*10
+            -- formula) -- the v3 prompt then omits the trend line
+            -- entirely rather than showing a fabricated number.
+            trend_score REAL,
+            trend_rules_version TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL
         )
@@ -1896,6 +1909,39 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # INSTR-3: persisted daily OHLCV bars -- the nightly ATR job
+        # (alphaos/reports/atr_service.py) already fetches these to compute
+        # atr_history's own ATR(14) scalar; this table is what stops it
+        # discarding them afterward (see this table's own read consumers:
+        # alphaos/scanner/trend.py's trend_rules_v1 measure, and
+        # OpenAIClient._augment_snapshot_for_prompt's v3-only
+        # MULTI_DAY_CONTEXT block). One row per (symbol, market_date) --
+        # idempotent upsert (INSERT, IntegrityError caught on the unique
+        # index below -- same idiom as benchmark_bars/universe_days/
+        # regime_days). Never written by, or read from, the live scan/eval
+        # path directly -- alpaca_bars.py's own module docstring keeps
+        # declaring itself measurement-layer-only; this table is what the
+        # live path reads INSTEAD of ever calling that provider (see
+        # alphaos/data/daily_bars.py).
+        "daily_bars",
+        """
+        CREATE TABLE IF NOT EXISTS daily_bars (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bar_id TEXT NOT NULL UNIQUE,
+            symbol TEXT NOT NULL,
+            market_date TEXT NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            source_feed TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         # PORT-1: the pre-registration registry (ported from NightDesk's
         # Thesis Research Layer -- see
         # docs/roadmap/ported/nightdesk-stats-contract.md). One row per
@@ -2687,6 +2733,10 @@ INDEXES: list[str] = [
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_atr_history_symbol_date_version "
     "ON atr_history(symbol, market_date, rules_version)",
     "CREATE INDEX IF NOT EXISTS idx_atr_history_symbol ON atr_history(symbol)",
+    # INSTR-3: idempotent-insert idiom, same role as idx_benchmark_bars_symbol_date
+    # -- a re-fetch of an already-persisted date is a no-op, never a duplicate row.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_bars_symbol_date ON daily_bars(symbol, market_date)",
+    "CREATE INDEX IF NOT EXISTS idx_daily_bars_symbol ON daily_bars(symbol)",
     # BASELINE: candidate_id/rule_version are both always populated (never
     # null), so a plain UNIQUE index is NULL-safe here -- unlike attribution_
     # records' proposal_id/override_id, no partial-index trick needed (house

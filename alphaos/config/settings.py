@@ -1389,11 +1389,14 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     if min_reward_risk < 0:
         raise SettingsError(f"MIN_REWARD_RISK={min_reward_risk!r} must be >= 0.")
 
-    # --- INSTR-2: settings-gated primary-evaluator prompt version ------------
+    # --- INSTR-2/INSTR-3: settings-gated primary-evaluator prompt version ----
+    # v3 (INSTR-3) adds MULTI_DAY_CONTEXT on top of v2's ATR_STOP_POLICY --
+    # see openai_client.py's two membership-check gates (`in ("v2", "v3")`)
+    # for why v3 must never regress to a literal `== "v2"` check.
     openai_prompt_version = _get(src, "OPENAI_PROMPT_VERSION", "v1")
-    if openai_prompt_version not in ("v1", "v2"):
+    if openai_prompt_version not in ("v1", "v2", "v3"):
         raise SettingsError(
-            f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of 'v1', 'v2'."
+            f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of 'v1', 'v2', 'v3'."
         )
 
     # --- earnings proximity (PR5): warning window + conservative hold-days

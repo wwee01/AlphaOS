@@ -37,8 +37,18 @@ from alphaos.data.atr import (  # noqa: F401 -- ATR_STOP_MULTIPLIER_V1 re-export
     ATR_STOP_MULTIPLIER_V1,
     atr_stop_price,
 )
-from alphaos.util import structured_json
+from alphaos.data.daily_bars import get_recent_daily_bars
+from alphaos.util import structured_json, timeutils
 from alphaos.util.ids import new_id
+
+# INSTR-3: MULTI_DAY_CONTEXT sizing constants -- how many completed daily
+# bars to show (up to), the floor below which the section is omitted
+# entirely ("no block, no section, no mention" -- a normal, expected
+# condition on day one post-merge, never an error), and the window used
+# for the recent_high_10d/recent_low_10d derived levels.
+_MULTI_DAY_CONTEXT_BARS = 15
+_MULTI_DAY_CONTEXT_MIN_BARS = 5
+_MULTI_DAY_CONTEXT_LEVEL_SESSIONS = 10
 
 HTTP_TIMEOUT = 30
 PROPOSE_MOMENTUM_THRESHOLD = 0.40
@@ -226,10 +236,18 @@ class OpenAIClient:
 
     def _augment_snapshot_for_prompt(self, snapshot: dict,
                                      candidate: "Union[dict, ScanContext]") -> dict:
-        """INSTR-2: no-op (returns ``snapshot`` UNCHANGED, same object) unless
-        BOTH live (``not self.use_mock``) AND ``settings.openai_prompt_version
-        == "v2"`` -- the mock baseline's prompt never changes (non-goal), and
-        v1 stays byte-identical to before (merge-dark guarantee).
+        """INSTR-2/INSTR-3: no-op (returns ``snapshot`` UNCHANGED, same
+        object) unless BOTH live (``not self.use_mock``) AND
+        ``settings.openai_prompt_version in ("v2", "v3")`` -- the mock
+        baseline's prompt never changes (non-goal), and v1 stays
+        byte-identical to before (merge-dark guarantee). INSTR-3 widened
+        this from a literal ``== "v2"`` check to a membership check
+        deliberately: a prior audit-MEDIUM fix (the twin gate in
+        ``_live_eval`` below) already established that regressing either
+        gate back to a literal ``== "v2"`` silently strips v3 of the
+        ATR_STOP_POLICY block it still needs (incoherent by construction --
+        see ``tests/test_instr3_trend_context.py``'s version-gate
+        regression tests).
 
         When active, returns a COPY of ``snapshot`` with key ``"atr_policy"``
         set to a freshly-computed block -- ALWAYS recomputed here, ALWAYS
@@ -242,14 +260,23 @@ class OpenAIClient:
 
         No ATR data for this symbol (``None``/``<= 0``) => no key added =>
         the unchanged ``NO_ATR_DATA`` fail-safe in ``_apply_atr_stop``
-        handles any raw propose downstream.
+        handles any raw propose downstream (true for v3 too -- MULTI_DAY_
+        CONTEXT's own dist_to_recent_*_atr fields need the same ATR14, so a
+        missing ATR degrades a v3 evaluation exactly as far as a v2 one).
 
         The ATR read here has its OWN try/except, deliberately OUTSIDE
         ``raw_evaluate()``'s and ``post_process()``'s own containment (this
         runs BEFORE either) -- a transient DB error must degrade to a
         v1-shaped prompt (no block added), journaled as an ERROR, never
-        propagate and abort the caller's scan loop."""
-        if self.use_mock or self.settings.openai_prompt_version != "v2":
+        propagate and abort the caller's scan loop.
+
+        INSTR-3: under v3 ONLY, additionally attempts
+        ``_build_multi_day_context`` (its OWN separate try/except, covering
+        the ``daily_bars`` read -- a failure there degrades independently
+        of the ATR read above: ATR already computed successfully means the
+        returned snapshot still carries ``atr_policy``, i.e. a v2-shaped
+        prompt, even though this evaluation is nominally v3)."""
+        if self.use_mock or self.settings.openai_prompt_version not in ("v2", "v3"):
             return snapshot
 
         symbol = candidate.get("symbol")
@@ -259,7 +286,7 @@ class OpenAIClient:
             if self.journal is not None:
                 self.journal.log_system_event(
                     Severity.ERROR, "openai",
-                    f"{symbol}: ATR read failed while building the v2 prompt; "
+                    f"{symbol}: ATR read failed while building the prompt; "
                     "degrading to a v1-shaped prompt for this evaluation.",
                     {"error": str(exc)},
                 )
@@ -279,7 +306,79 @@ class OpenAIClient:
             "min_target_distance": round(min_reward_risk * risk_per_share, 4),
             "rules_version": ATR_RULES_V1,
         }
+
+        if self.settings.openai_prompt_version == "v3":
+            multi_day_context = self._build_multi_day_context(symbol, candidate, snapshot, atr)
+            if multi_day_context is not None:
+                augmented["multi_day_context"] = multi_day_context
+
         return augmented
+
+    def _build_multi_day_context(self, symbol: Optional[str],
+                                 candidate: "Union[dict, ScanContext]", snapshot: dict,
+                                 atr: float) -> Optional[dict]:
+        """INSTR-3, v3-only: up to the last 15 completed daily bars (from
+        ``daily_bars``, excluding the scan day) plus derived
+        ``recent_high_10d``/``recent_low_10d`` (over the last 10 of those
+        bars) and ``dist_to_recent_high_atr``/``dist_to_recent_low_atr``
+        (both expressed in multiples of the SAME ATR14 ``_augment_
+        snapshot_for_prompt`` already read), plus this candidate's own
+        ``trend_score``/``trend_rules_version`` -- read straight off the
+        candidate row (stamped once, at scan-creation time by
+        ``alphaos.scanner.trend.compute_trend_score``), NEVER recomputed
+        here (one computation, one ruler).
+
+        Its OWN try/except, separate from the ATR read in the caller: a
+        transient ``daily_bars`` read failure degrades THIS evaluation to a
+        v2-shaped prompt (``atr_policy`` already computed by the caller
+        survives; only this block is dropped), journaled as an ERROR, never
+        propagated. Fewer than 5 bars is a normal, expected condition (not
+        every symbol has 15 trading days of persisted history on day one
+        post-merge) -- returns ``None`` quietly, no journal entry, no
+        exception, matching the "no ATR data" branch's own quiet degrade."""
+        try:
+            before_date = timeutils.market_date().isoformat()
+            bars = get_recent_daily_bars(self.journal, symbol, before_date, _MULTI_DAY_CONTEXT_BARS)
+        except Exception as exc:
+            if self.journal is not None:
+                self.journal.log_system_event(
+                    Severity.ERROR, "openai",
+                    f"{symbol}: daily bars read failed while building the v3 prompt; "
+                    "omitting MULTI_DAY_CONTEXT for this evaluation.",
+                    {"error": str(exc)},
+                )
+            return None
+        if len(bars) < _MULTI_DAY_CONTEXT_MIN_BARS:
+            return None
+
+        last_price = snapshot.get("last_price")
+        window = bars[-_MULTI_DAY_CONTEXT_LEVEL_SESSIONS:]
+        highs = [b["high"] for b in window if b.get("high") is not None]
+        lows = [b["low"] for b in window if b.get("low") is not None]
+        recent_high = max(highs) if highs else None
+        recent_low = min(lows) if lows else None
+        dist_to_recent_high_atr = (
+            round((recent_high - last_price) / atr, 4)
+            if (recent_high is not None and last_price is not None) else None
+        )
+        dist_to_recent_low_atr = (
+            round((last_price - recent_low) / atr, 4)
+            if (recent_low is not None and last_price is not None) else None
+        )
+
+        return {
+            "bars": [
+                {"date": b["market_date"], "open": b["open"], "high": b["high"],
+                 "low": b["low"], "close": b["close"], "volume": b["volume"]}
+                for b in bars
+            ],
+            "recent_high_10d": recent_high,
+            "recent_low_10d": recent_low,
+            "dist_to_recent_high_atr": dist_to_recent_high_atr,
+            "dist_to_recent_low_atr": dist_to_recent_low_atr,
+            "trend_score": candidate.get("trend_score"),
+            "trend_rules_version": candidate.get("trend_rules_version"),
+        }
 
     def raw_evaluate(self, candidate: "Union[dict, ScanContext]", snapshot: dict,
                      freshness_status: str = "usable") -> OpenAIEvaluation:
@@ -519,22 +618,37 @@ class OpenAIClient:
         from openai import OpenAI  # lazy import; optional dependency
 
         client = OpenAI(api_key=self.settings.openai_api_key)
-        # INSTR-2 (audit fixup, MEDIUM): gated on the ACTIVE settings
-        # version, never on whatever "atr_policy" key happens to already
-        # sit in ``snapshot``. Naively passing snapshot.get("atr_policy")
-        # unconditionally was proven exploitable: a replayed v2-era fixture
-        # (e.g. a future AB-EVAL-1 corpus built from post-cutover
-        # snapshot_json, which DOES carry an archived atr_policy block)
-        # would leak the ATR_STOP_POLICY section into what's supposed to be
-        # a byte-identical v1 control-arm prompt, corrupting the exact
-        # comparison the harness exists to produce. _augment_snapshot_for_
-        # prompt()'s own v1/mock no-op deliberately returns ``snapshot``
-        # UNCHANGED (never strips a pre-existing key -- see its own
-        # docstring), so this gate is the one place that must not trust the
-        # snapshot dict's own contents.
+        # INSTR-2 (audit fixup, MEDIUM), widened by INSTR-3: gated on the
+        # ACTIVE settings version, never on whatever "atr_policy"/
+        # "multi_day_context" keys happen to already sit in ``snapshot``.
+        # Naively passing snapshot.get(...) unconditionally was proven
+        # exploitable: a replayed v2/v3-era fixture (e.g. a future
+        # AB-EVAL-1 corpus built from post-cutover snapshot_json, which DOES
+        # carry an archived block) would leak a section into what's
+        # supposed to be a byte-identical v1 (or v2) control-arm prompt,
+        # corrupting the exact comparison the harness exists to produce.
+        # _augment_snapshot_for_prompt()'s own v1/mock no-op deliberately
+        # returns ``snapshot`` UNCHANGED (never strips a pre-existing key --
+        # see its own docstring), so this gate is the one place that must
+        # not trust the snapshot dict's own contents. The two membership
+        # checks below are the same audit-MEDIUM fix as before, widened
+        # from a literal ``== "v2"`` to ``in ("v2", "v3")`` for atr_policy
+        # (regressing this re-opens the original finding) plus a NEW,
+        # v3-only gate for multi_day_context.
+        version = self.settings.openai_prompt_version
+        prompt_candidate = candidate
+        if version == "v3":
+            # INSTR-3: under v3 ONLY, the model never sees the dishonest
+            # legacy `trend_quality` field (candidate_scanner.py's own
+            # abs(change_pct)*10 formula) -- a plain dict copy so the
+            # original candidate/ScanContext (persisted, reused elsewhere)
+            # is never mutated. v1/v2 prompts are unaffected (byte-identity
+            # preserved for both golden tests).
+            prompt_candidate = {k: v for k, v in candidate.items() if k != "trend_quality"}
         user_prompt = pt.build_no_news_user_prompt(
-            candidate, snapshot, freshness_status,
-            atr_policy=snapshot.get("atr_policy") if self.settings.openai_prompt_version == "v2" else None,
+            prompt_candidate, snapshot, freshness_status,
+            atr_policy=snapshot.get("atr_policy") if version in ("v2", "v3") else None,
+            multi_day_context=snapshot.get("multi_day_context") if version == "v3" else None,
         )
         # PR4: measurement-only AI-call lineage (model provider + content hashes of
         # the actual prompt sent, never the raw prompt body) -- stamped onto

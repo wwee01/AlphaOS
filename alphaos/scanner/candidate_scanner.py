@@ -33,6 +33,8 @@ from alphaos import lineage
 from alphaos.cards.registry import get_default_card
 from alphaos.scanner.interest_scanner import InterestScanner
 from alphaos.scanner.scan_context import ScanContext
+from alphaos.scanner.trend import compute_trend_score
+from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 # A small, deliberately liquid default universe for v1 (core tier). Illiquid
@@ -365,6 +367,15 @@ class CandidateScanner:
             min(1.0, (abs(change) / momentum_change_cap) * 0.6 + min(rel_vol / momentum_relvol_cap, 1.0) * 0.4), 3,
         )
         trend_quality = round(min(1.0, abs(change) * 10), 3)
+        # INSTR-3: the honest replacement (alphaos/scanner/trend.py) --
+        # additive, never overwrites trend_quality above (frozen for
+        # existing consumers). NULL/NULL when daily_bars/ATR history isn't
+        # deep enough yet (honest absence -- see compute_trend_score's own
+        # docstring); the v3 prompt omits the trend line in that case
+        # rather than falling back to trend_quality's own formula.
+        trend_score, trend_rules_version = compute_trend_score(
+            self.journal, self.settings, sym, direction, timeutils.market_date().isoformat(),
+        )
 
         candidate_id = new_id("cand")
         asset_type = "etf" if sym in {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLE", "XLF", "SMH"} else "stock"
@@ -380,6 +391,8 @@ class CandidateScanner:
             "rel_strength": round(change, 4),
             "unusual_volume": rel_vol,
             "trend_quality": trend_quality,
+            "trend_score": trend_score,
+            "trend_rules_version": trend_rules_version,
             "liquidity_ok": 1,
             "spread_ok": 1,
             "news_status": NewsStatus.NEWS_UNAVAILABLE.value,  # set later by orchestrator

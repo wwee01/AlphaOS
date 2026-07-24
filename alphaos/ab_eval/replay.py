@@ -30,9 +30,12 @@ class _ReadOnlyJournal:
     """Minimal read-through proxy handed to the replay ``OpenAIClient``:
     forwards ``.scalar()`` (so ``_apply_atr_stop`` sees REAL
     ``atr_history`` coverage -- a replay that always saw "no ATR data"
-    would fabricate every downgrade as NO_ATR) but swallows
-    ``.log_system_event()`` so a shadow replay call never writes an
-    indistinguishable-from-live INFO row into the production
+    would fabricate every downgrade as NO_ATR) and ``.query()`` (INSTR-3:
+    so a v3 arm's ``_build_multi_day_context`` sees REAL ``daily_bars``
+    coverage -- without this, every v3 replay would silently degrade to a
+    v2-shaped prompt, defeating the whole point of replaying a v3 arm) but
+    swallows ``.log_system_event()`` so a shadow replay call never writes
+    an indistinguishable-from-live INFO/ERROR row into the production
     ``system_events`` table. Shadow/read-only law: the harness's OWN
     per-packet-isolation logging goes through the REAL journal directly,
     tagged ``category='ab_eval'`` (see ``alphaos/ab_eval/run.py``) -- the
@@ -44,6 +47,9 @@ class _ReadOnlyJournal:
 
     def scalar(self, sql: str, params: tuple = ()) -> Any:
         return self._real.scalar(sql, params) if self._real is not None else None
+
+    def query(self, sql: str, params: tuple = ()) -> list:
+        return self._real.query(sql, params) if self._real is not None else []
 
     def log_system_event(self, *args: Any, **kwargs: Any) -> None:
         return None

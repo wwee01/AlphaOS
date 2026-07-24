@@ -181,9 +181,53 @@ def _render_atr_stop_policy(atr_policy: dict) -> str:
     )
 
 
+def _render_multi_day_context(multi_day_context: dict) -> str:
+    """INSTR-3: the exact MULTI_DAY_CONTEXT wording (spec's Design item 3).
+    Data only -- states the bars/derived levels/trend score and nothing
+    else; MUST NOT characterize the data (no "supports"/"strong"/"weak"/
+    "bullish"/"bearish" -- see the neutrality test in
+    tests/test_instr3_trend_context.py, same discipline as
+    ATR_STOP_POLICY). ``trend_score`` is read straight off the dict
+    ``OpenAIClient._augment_snapshot_for_prompt`` computed (itself read
+    straight off the candidate row, never recomputed here) -- when it is
+    ``None`` (fewer than 10 completed sessions or no ATR at candidate-
+    creation time), the trend line is omitted entirely, never rendered as
+    a fabricated "trend_score=None" line."""
+    bars = multi_day_context.get("bars") or []
+    bars_lines = "\n".join(
+        f"  {b.get('date')}: O={b.get('open')} H={b.get('high')} L={b.get('low')} "
+        f"C={b.get('close')} V={b.get('volume')}"
+        for b in bars
+    )
+    recent_high = multi_day_context.get("recent_high_10d")
+    recent_low = multi_day_context.get("recent_low_10d")
+    dist_high = multi_day_context.get("dist_to_recent_high_atr")
+    dist_low = multi_day_context.get("dist_to_recent_low_atr")
+    trend_score = multi_day_context.get("trend_score")
+    trend_rules_version = multi_day_context.get("trend_rules_version")
+
+    trend_line = (
+        f"trend_score={trend_score} (trend_rules_version={trend_rules_version}; "
+        "range -1..+1, sign aligned to this candidate's own trade direction)\n"
+        if trend_score is not None else ""
+    )
+
+    return (
+        "MULTI_DAY_CONTEXT:\n"
+        f"Last {len(bars)} completed daily session(s) (oldest first):\n"
+        f"{bars_lines}\n"
+        f"recent_high_10d={recent_high}, recent_low_10d={recent_low}\n"
+        f"dist_to_recent_high_atr={dist_high}, dist_to_recent_low_atr={dist_low} "
+        "(distance expressed in multiples of ATR(14))\n"
+        f"{trend_line}"
+        "This context does not make proposing more or less desirable; apply your "
+        "usual evidence standards unchanged.\n"
+    )
+
+
 def build_no_news_user_prompt(
     candidate: "Union[dict, ScanContext]", snapshot: dict, freshness_status: str,
-    atr_policy: Optional[dict] = None,
+    atr_policy: Optional[dict] = None, multi_day_context: Optional[dict] = None,
 ) -> str:
     """User prompt for no-news mode. Forces the catalyst/news sentinels.
 
@@ -195,7 +239,21 @@ def build_no_news_user_prompt(
     ALWAYS popped out of whatever gets serialized into MARKET_SNAPSHOT, in
     BOTH versions -- hygiene against a v2-era fixture replayed under a v1
     arm leaking the archived block into a v1-shaped prompt (a no-op on all
-    present-day live data, since no v1 snapshot ever carries the key)."""
+    present-day live data, since no v1 snapshot ever carries the key).
+
+    INSTR-3: ``multi_day_context`` defaults to ``None`` (v1/v2-shaped
+    output unaffected -- both golden tests stay byte-identical). When
+    present, a MULTI_DAY_CONTEXT section (see ``_render_multi_day_context``)
+    is inserted between MARKET_SNAPSHOT and ATR_STOP_POLICY (order:
+    MARKET_SNAPSHOT -> MULTI_DAY_CONTEXT -> ATR_STOP_POLICY ->
+    DATA_FRESHNESS). Same hygiene law as ``atr_policy``: the
+    ``"multi_day_context"`` key is ALWAYS popped from the serialized
+    MARKET_SNAPSHOT in every version, and rendering is driven ONLY by this
+    keyword argument -- never by whatever a snapshot dict happens to carry
+    (a v3-era fixture replayed under a v1/v2 arm must never leak this
+    section). The caller decides both kwargs from the ACTIVE settings
+    version, never from the snapshot dict's own contents (see
+    ``OpenAIClient._live_eval``'s own gate)."""
     schema = {
         "symbol": "string",
         "direction": "long | short",
@@ -215,6 +273,10 @@ def build_no_news_user_prompt(
     }
     market_snapshot = dict(snapshot)
     market_snapshot.pop("atr_policy", None)
+    market_snapshot.pop("multi_day_context", None)
+    multi_day_context_section = (
+        f"{_render_multi_day_context(multi_day_context)}\n" if multi_day_context else ""
+    )
     atr_policy_section = f"{_render_atr_stop_policy(atr_policy)}\n" if atr_policy else ""
     return (
         "Evaluate this candidate in NO-NEWS MODE. Return JSON ONLY matching the "
@@ -224,6 +286,7 @@ def build_no_news_user_prompt(
         f"SCHEMA:\n{json.dumps(schema, indent=2)}\n\n"
         f"CANDIDATE:\n{json.dumps(_public(candidate), default=str)}\n\n"
         f"MARKET_SNAPSHOT:\n{json.dumps(market_snapshot, default=str)}\n\n"
+        f"{multi_day_context_section}"
         f"{atr_policy_section}"
         f"DATA_FRESHNESS:\n{freshness_status}\n\n"
         "Rules: stale/unverifiable data => 'reject'. Long stop below entry; short "

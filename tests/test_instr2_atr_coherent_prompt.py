@@ -300,11 +300,18 @@ def test_snapshot_journaling_carries_atr_policy_under_v2_not_under_v1(journal):
 
 # ------------------------------------------------------ test 9: settings gate
 def test_settings_validates_openai_prompt_version():
+    """INSTR-3 (2026-07-24) widened the valid set from {"v1", "v2"} to
+    {"v1", "v2", "v3"} -- this test's own original assertion
+    (OPENAI_PROMPT_VERSION="v3" raises) is now the EXPECTED spec change,
+    not a regression; "v4" takes v3's old place as the still-refused value.
+    See tests/test_instr3_trend_context.py::test_settings_validates_v3_and_rejects_v4
+    for the dedicated INSTR-3 version of this test."""
     with pytest.raises(SettingsError):
-        make_settings(OPENAI_PROMPT_VERSION="v3")
+        make_settings(OPENAI_PROMPT_VERSION="v4")
 
     assert make_settings().openai_prompt_version == "v1"
     assert make_settings(OPENAI_PROMPT_VERSION="v2").openai_prompt_version == "v2"
+    assert make_settings(OPENAI_PROMPT_VERSION="v3").openai_prompt_version == "v3"
 
 
 # --------------------------------------------------- test 10: structural AST
