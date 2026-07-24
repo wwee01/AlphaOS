@@ -2466,6 +2466,13 @@ SCHEMA: list[tuple[str, str]] = [
             corpus_dir TEXT NOT NULL,
             manifest_version INTEGER,
             models_json TEXT,
+            -- INSTR-2: the (model, prompt_version) arms this run actually
+            -- replayed, as "MODEL:VERSION" strings -- additive; SCHEMA_VERSION
+            -- stays 3 (_reconcile_columns handles this on an existing DB, same
+            -- law AB-EVAL-1's own audits established). models_json stays
+            -- populated too (distinct model names, order-preserved) so any
+            -- pre-INSTR-2 reader keeps working unchanged.
+            arms_json TEXT,
             is_mock INTEGER DEFAULT 0,
             n_packets INTEGER NOT NULL DEFAULT 0,
             n_results INTEGER NOT NULL DEFAULT 0,
@@ -2501,6 +2508,11 @@ SCHEMA: list[tuple[str, str]] = [
             eval_id TEXT NOT NULL,
             symbol TEXT,
             model TEXT NOT NULL,
+            -- INSTR-2: the prompt version this specific (packet, arm) replay
+            -- ran under -- additive (SCHEMA_VERSION stays 3). NULL on every
+            -- pre-INSTR-2 row (they all ran under the only version that
+            -- existed, "v1", but were never asked to record it).
+            prompt_version TEXT,
             raw_decision TEXT,
             raw_confidence REAL,
             raw_entry REAL,

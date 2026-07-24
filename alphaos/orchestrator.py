@@ -1689,13 +1689,16 @@ class Orchestrator:
             "corpus_size": len(manifest["evaluations"]),
         }
 
-    def ab_eval_run(self, models: list, corpus_dir: Optional[str] = None) -> dict:
-        """AB-EVAL-1: replay the frozen A/B corpus through every model in
-        ``models`` via the production evaluate core. Zero decision surface.
-        See alphaos/ab_eval/run.py."""
+    def ab_eval_run(self, models: Optional[list] = None, corpus_dir: Optional[str] = None,
+                    arms: Optional[list] = None) -> dict:
+        """AB-EVAL-1: replay the frozen A/B corpus through every arm
+        (INSTR-2: ``(model, prompt_version)`` pairs) via the production
+        evaluate core. Zero decision surface. ``models`` remains supported
+        as sugar for a single-prompt-version comparison. See
+        alphaos/ab_eval/run.py."""
         from alphaos.ab_eval.run import run_ab_eval
 
-        return run_ab_eval(self.journal, self.settings, models, corpus_dir=corpus_dir)
+        return run_ab_eval(self.journal, self.settings, models, corpus_dir=corpus_dir, arms=arms)
 
     def ab_eval_status(self, ab_run_id: Optional[str] = None) -> dict:
         """AB-EVAL-1: the latest (or named) run's report -- PURE READ. See

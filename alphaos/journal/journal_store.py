@@ -304,6 +304,11 @@ class JournalStore:
             # canary_tier2_label_diff_pct, etc. -- see the fields above).
             "openai_primary_model": settings.openai_primary_model,
             "openai_review_model": settings.openai_review_model,
+            # INSTR-2: which prompt version the live evaluator is actually
+            # showing the model is a real behavior axis (same rationale as
+            # the openai_primary_model fix above) -- a v1<->v2 cutover must
+            # move the config fingerprint.
+            "openai_prompt_version": settings.openai_prompt_version,
             "hypothesis_gen_shadow_enabled": settings.hypothesis_gen_shadow_enabled,
             "hypothesis_gen_recurring_enabled": settings.hypothesis_gen_recurring_enabled,
             "hypothesis_gen_max_calls_per_day": settings.hypothesis_gen_max_calls_per_day,

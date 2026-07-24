@@ -52,6 +52,9 @@ class _ReadOnlyJournal:
 @dataclass
 class ReplayResult:
     model: str
+    # INSTR-2: the prompt version this replay actually ran under -- the
+    # second half of the (model, prompt_version) arm.
+    prompt_version: str
     raw: OpenAIEvaluation
     final: OpenAIEvaluation
     downgrade_reason: Optional[str]
@@ -75,23 +78,34 @@ def _downgrade_reason(raw: OpenAIEvaluation, final: OpenAIEvaluation) -> Optiona
     return UNKNOWN
 
 
-def replay_packet(fixture: dict, model: str, settings: Any, real_journal: Any) -> ReplayResult:
-    """Replays ONE corpus fixture through ONE model, via the production
-    ``OpenAIClient.raw_evaluate()`` -> ``.post_process()`` chain -- the
-    exact same two methods ``evaluate()`` itself calls, in the same order.
-    Only ``settings.openai_primary_model`` is parameterized
-    (``dataclasses.replace`` on the frozen ``Settings`` dataclass);
-    everything else -- the prompt-build path, validation, the ATR-stop/
-    reward:risk post-processing -- is the exact same production code the
-    live evaluator runs. ``real_journal`` is wrapped in ``_ReadOnlyJournal``
-    (read-through for ATR lookups, write-swallowing for log events) --
-    shadow, read-only, per the spec's own non-goals."""
-    replay_settings = replace(settings, openai_primary_model=model)
+def replay_packet(fixture: dict, arm: tuple, settings: Any, real_journal: Any) -> ReplayResult:
+    """Replays ONE corpus fixture through ONE arm (``(model,
+    prompt_version)``), via the production ``OpenAIClient
+    ._augment_snapshot_for_prompt()`` -> ``.raw_evaluate()`` ->
+    ``.post_process()`` chain (INSTR-2) -- the exact same three steps
+    ``evaluate()`` itself calls, in the same order. Only
+    ``settings.openai_primary_model``/``settings.openai_prompt_version`` are
+    parameterized (``dataclasses.replace`` on the frozen ``Settings``
+    dataclass); everything else -- the prompt-build path, validation, the
+    ATR-stop/reward:risk post-processing -- is the exact same production
+    code the live evaluator runs. ``real_journal`` is wrapped in
+    ``_ReadOnlyJournal`` (read-through for ATR lookups, write-swallowing
+    for log events) -- shadow, read-only, per the spec's own non-goals.
+
+    ``_augment_snapshot_for_prompt`` returns a fresh COPY of
+    ``fixture["snapshot"]`` when a v2 arm is active, and the SAME object
+    unchanged for a v1/mock arm -- neither path ever mutates the shared
+    fixture dict, so multiple arms replaying the SAME fixture object (the
+    normal multi-arm run shape) can never contaminate each other's view of
+    it, regardless of call order."""
+    model, prompt_version = arm
+    replay_settings = replace(settings, openai_primary_model=model, openai_prompt_version=prompt_version)
     client = OpenAIClient(replay_settings, journal=_ReadOnlyJournal(real_journal))
     candidate = fixture["candidate"]
     snapshot = fixture["snapshot"]
     freshness_status = fixture.get("freshness_status") or "usable"
 
+    snapshot = client._augment_snapshot_for_prompt(snapshot, candidate)
     raw = client.raw_evaluate(candidate, snapshot, freshness_status)
     # post_process gets a COPY: _apply_atr_stop mutates its argument in
     # place (stop/expected_r/stop_source assignment -- fine on the live
@@ -102,5 +116,6 @@ def replay_packet(fixture: dict, model: str, settings: Any, real_journal: Any) -
     # run: raw_stop read 90.0 where the model returned 97.0).
     final = client.post_process(copy.copy(raw), candidate)
     return ReplayResult(
-        model=model, raw=raw, final=final, downgrade_reason=_downgrade_reason(raw, final),
+        model=model, prompt_version=prompt_version, raw=raw, final=final,
+        downgrade_reason=_downgrade_reason(raw, final),
     )

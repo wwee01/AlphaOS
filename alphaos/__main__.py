@@ -910,10 +910,28 @@ def cmd_ab_eval_corpus_build(orch: Orchestrator, corpus_dir: str, total: int) ->
     return 0
 
 
-def cmd_ab_eval_run(orch: Orchestrator, models: list, corpus_dir: str) -> int:
+def cmd_ab_eval_run(orch: Orchestrator, models: Optional[list], arms: Optional[list],
+                    corpus_dir: str) -> int:
     """AB-EVAL-1: shadow, read-only replay of the frozen corpus through the
-    given models via the production evaluate core. Zero decision surface."""
-    res = orch.ab_eval_run(models, corpus_dir=corpus_dir)
+    given models/arms via the production evaluate core. Zero decision
+    surface. INSTR-2: ``arms`` (each a "MODEL:VERSION" CLI token, parsed
+    below) takes precedence over ``models`` when both were somehow given --
+    argparse's own mutually-exclusive group already prevents that in
+    practice."""
+    parsed_arms = None
+    if arms:
+        parsed_arms = []
+        for token in arms:
+            model, sep, version = token.partition(":")
+            if not sep or not model or version not in ("v1", "v2"):
+                _print({"ab_eval_run": {
+                    "error": f"--arms token {token!r} is not MODEL:PROMPT_VERSION shaped "
+                             "(expected e.g. 'gpt-5.4-mini:v1'; model name must be non-empty, "
+                             "version must be v1 or v2)"
+                }})
+                return 1
+            parsed_arms.append((model, version))
+    res = orch.ab_eval_run(models, corpus_dir=corpus_dir, arms=parsed_arms)
     _print({"ab_eval_run": res})
     return 0 if "error" not in res else 1
 
@@ -1463,9 +1481,15 @@ def build_parser() -> argparse.ArgumentParser:
     aeb.add_argument("--total", type=int, default=60, help="target corpus size (default 60)")
     aer = sub.add_parser("ab_eval_run",
                          help="AB-EVAL-1: shadow, read-only replay of the frozen corpus through 2+ "
-                              "models via the production evaluate core; never read by any live path")
-    aer.add_argument("--models", nargs="+", required=True,
-                     help="model names to compare, e.g. --models gpt-5.4-mini gpt-5.6-luna")
+                              "models/arms via the production evaluate core; never read by any live path")
+    aer_group = aer.add_mutually_exclusive_group(required=True)
+    aer_group.add_argument("--models", nargs="+", default=None,
+                           help="model names to compare, e.g. --models gpt-5.4-mini gpt-5.6-luna "
+                                "(sugar for --arms MODEL:<configured OPENAI_PROMPT_VERSION>)")
+    aer_group.add_argument("--arms", nargs="+", default=None,
+                           help="INSTR-2: MODEL:PROMPT_VERSION pairs to compare, e.g. --arms "
+                                "gpt-5.4-mini:v1 gpt-5.6-luna:v1 gpt-5.4-mini:v2 gpt-5.6-luna:v2 "
+                                "-- mutually exclusive with --models")
     aer.add_argument("--corpus-dir", default=None, help="defaults to data/ab_eval")
     aes = sub.add_parser("ab_eval_status",
                          help="AB-EVAL-1: the latest (or named) run's report -- PURE READ")
@@ -1639,7 +1663,7 @@ def main(argv=None) -> int:
         if args.command == "ab_eval_corpus_build":
             return cmd_ab_eval_corpus_build(orch, args.corpus_dir, args.total)
         if args.command == "ab_eval_run":
-            return cmd_ab_eval_run(orch, args.models, args.corpus_dir)
+            return cmd_ab_eval_run(orch, args.models, args.arms, args.corpus_dir)
         if args.command == "ab_eval_status":
             return cmd_ab_eval_status(orch, args.run_id)
         if args.command == "decision_lineage":
