@@ -1,12 +1,25 @@
 """INSTR-1 part 2: ATR(14) capture -- the daily write side of ATR-scaled
-stops. Write-only: computes ATR(14) once per symbol per trading day from
-daily-bar history fetched via the EXISTING ``AlpacaBarsProvider.get_daily_bars``
-(no new provider/client code -- that function already exists, it was simply
+stops. Computes ATR(14) once per symbol per trading day from daily-bar
+history fetched via the EXISTING ``AlpacaBarsProvider.get_daily_bars`` (no
+new provider/client code -- that function already exists, it was simply
 never called from a live/scheduled path before tonight; see
 ``docs/roadmap/ported`` decision log). Stores results in ``atr_history``,
 read ONLY by ``OpenAIClient``'s live-only stop override
 (``alphaos/ai/openai_client.py``) -- never by any gate/risk/execution path
 directly.
+
+INSTR-3 addendum (2026-07-24): this job used to compute its one ATR scalar
+and discard the fetched bars. It no longer does -- ``alphaos.data.
+daily_bars.persist_daily_bars`` now writes them to the ``daily_bars`` table
+BEFORE they are used for the ATR calculation, so two new measurement-time
+consumers (``alphaos.scanner.trend``'s honest trend measure, and
+``OpenAIClient``'s v3-only MULTI_DAY_CONTEXT prompt block) can read real
+history without a second network fetch. This is NOT a new network call, a
+new provider, or a live-path change: it is the SAME already-scheduled fetch
+this job has always made, now persisting a byproduct it used to throw away.
+The live scan/eval path still never calls ``AlpacaBarsProvider`` (or any
+bars provider) directly -- see ``alphaos/data/providers/alpaca_bars.py``'s
+own module docstring, and this module's own persistence call site below.
 
 Deliberately a ONCE-DAILY job, not a live per-scan fetch: ATR only changes
 once a day (it is built from completed daily bars), so fetching it on every
@@ -27,6 +40,7 @@ from typing import Optional
 
 from alphaos.constants import Severity
 from alphaos.data.atr import ATR_PERIOD, ATR_RULES_V1, compute_atr
+from alphaos.data.daily_bars import persist_daily_bars
 from alphaos.data.providers.alpaca_bars import make_bars_provider
 from alphaos.scanner.candidate_scanner import DEFAULT_UNIVERSE
 from alphaos.util import timeutils
@@ -40,7 +54,7 @@ _LOOKBACK_CALENDAR_DAYS = 30
 _BARS_LIMIT = 60
 
 
-def _update_atr_for_symbol(journal, provider, symbol: str, market_dt: date) -> bool:
+def _update_atr_for_symbol(journal, settings, provider, symbol: str, market_dt: date) -> bool:
     """Returns True iff a NEW row was written (idempotent per (symbol, date,
     rules_version) -- the unique index is the real backstop, this check is
     just to skip an unnecessary fetch on a same-day re-run)."""
@@ -53,6 +67,17 @@ def _update_atr_for_symbol(journal, provider, symbol: str, market_dt: date) -> b
 
     start = market_dt - timedelta(days=_LOOKBACK_CALENDAR_DAYS)
     bars = provider.get_daily_bars(symbol, start.isoformat(), market_dt.isoformat(), limit=_BARS_LIMIT)
+    # INSTR-3: persist BEFORE computing ATR -- see this module's own
+    # docstring and alphaos/data/daily_bars.py. Best-effort: a persistence
+    # hiccup must never turn into a missing/skipped ATR row (the ATR
+    # calculation below is unaffected either way -- it reads straight off
+    # the `bars` list just fetched, not back through daily_bars).
+    try:
+        persist_daily_bars(journal, symbol, bars or [], settings.market_data_feed)
+    except Exception as exc:  # noqa: BLE001 - persistence is best-effort, never blocks ATR
+        journal.log_system_event(
+            Severity.WARNING, "atr_update", f"{symbol}: daily_bars persistence failed: {exc}",
+        )
     atr = compute_atr([
         {"high": b.get("high"), "low": b.get("low"), "close": b.get("close")} for b in (bars or [])
     ])
@@ -109,7 +134,7 @@ def update_atr_history(
 
     for symbol in symbols:
         try:
-            if _update_atr_for_symbol(journal, provider, symbol, market_dt):
+            if _update_atr_for_symbol(journal, settings, provider, symbol, market_dt):
                 result["n_written"] += 1
         except Exception as exc:  # noqa: BLE001 - one symbol's failure must never abort the run
             msg = f"{symbol}: ATR update failed: {exc}"

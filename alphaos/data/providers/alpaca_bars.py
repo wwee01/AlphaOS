@@ -3,7 +3,21 @@
 A separate, narrow capability from ``MarketDataClient`` (which only serves the
 CURRENT snapshot): this fetches historical daily OHLCV bars for a symbol/date
 range, used by the measurement layer (MFE/MAE backfill, forward-outcome
-tracking, bracket replay) — never by the live scan/eval/risk/execution path.
+tracking, bracket replay, the nightly ATR job) — never by the live
+scan/eval/risk/execution path.
+
+INSTR-3 note (2026-07-24) on a deliberate boundary crossing: the nightly ATR
+job (``alphaos/reports/atr_service.py``, itself a measurement-layer consumer
+of THIS provider, unchanged) now persists the daily bars it fetches here
+into the ``daily_bars`` table instead of discarding them after computing its
+one ATR scalar. Two NEW live-path-adjacent readers
+(``alphaos.scanner.trend``'s trend measure, and
+``OpenAIClient._augment_snapshot_for_prompt``'s v3-only MULTI_DAY_CONTEXT
+block) consume that persisted table -- see ``alphaos/data/daily_bars.py`` --
+and neither imports or calls this module. This provider itself gains no new
+callers and makes no new network calls; the live scan/eval path still never
+reaches this file directly, by construction (see the AST test pinning that
+in ``tests/test_instr3_trend_context.py``).
 
 Same pattern as ``alpaca_data.py``: raw REST (no SDK response-shape surprises),
 fails safe to an empty list on any error (never raises, never blocks a caller),

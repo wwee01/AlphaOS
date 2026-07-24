@@ -60,7 +60,8 @@ DEFAULT_TOTAL = 60
 CANDIDATE_CREATION_FIELDS = (
     "candidate_id", "scan_id", "scan_batch_id", "symbol", "direction",
     "strategy", "momentum_score", "rel_strength", "unusual_volume",
-    "trend_quality", "liquidity_ok", "spread_ok", "news_status",
+    "trend_quality", "trend_score", "trend_rules_version", "liquidity_ok",
+    "spread_ok", "news_status",
     "price_snapshot_id", "status", "asset_type", "playbook_name",
     "setup_classification", "card_id", "card_version", "status_reason",
     "price_at_scan", "volume_at_scan", "interest_score",
