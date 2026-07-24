@@ -17,6 +17,26 @@ Two phases, both idempotent and both safe to call repeatedly / on a schedule:
 
 Both use SQL ``NOT EXISTS`` / status filters to only touch un-worked rows, so
 re-running converges rather than reprocessing.
+
+HOLD-1 (2026-07-24, ``docs/roadmap/alphaos-hold1-10day-shadow-horizon-spec.md``):
+``update_pending_outcomes`` also drives a SEPARATE continuation pass
+(``_update_hold1_10d_family``) for the additive 10-trading-day shadow
+horizon. Kept structurally apart from the 1d/3d/5d loop above -- deliberately
+NOT folded into it -- for two reasons: (1) a 10-day window can only resolve
+strictly LATER than the 5-day window (10 > 5 trading days, always), so a row
+still in ``pending``/``partial`` (5d not yet resolved) can never have a
+resolved 10d family either -- there is nothing for a combined pass to do for
+those rows that a later call, after the row reaches ``outcome_status =
+'complete'``, doesn't already cover; (2) it keeps the existing 1d/3d/5d/
+replay computation and write path for already-``complete`` rows byte-for-byte
+unchanged (the ticket's own non-goal: "any change to the 1/3/5-day columns
+or their consumers" is out of scope) -- the continuation pass reads rows the
+main loop above no longer touches (``outcome_status = 'complete'``) and
+writes ONLY the 6 HOLD-1 columns + its own ``outcome_status_10d`` marker,
+never ``forward_1d_*``/``forward_3d_*``/``forward_5d_*``/``replay_*``. Same
+bar source (``bars_provider.get_daily_bars``), same pure ``forward_window_
+stats()`` call the 1d/3d/5d family already uses -- no second excursion
+engine.
 """
 
 from __future__ import annotations
@@ -385,7 +405,8 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     rows = journal.query(
         "SELECT * FROM candidate_outcomes WHERE outcome_status IN ('pending','partial') "
         "ORDER BY id ASC LIMIT ?", (limit,))
-    counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
+              "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     if bars_provider is None:
         counts["skipped"] = len(rows)
         return counts
@@ -470,6 +491,68 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
         _update_row(journal, row["outcome_id"], update)
         counts["updated"] += 1
         if resolved:
+            counts["completed"] += 1
+
+    # HOLD-1: give already-'complete' rows (5d resolved) further passes to
+    # reach the 10-day horizon too -- run in the SAME call so a backlog
+    # catch-up row that jumps straight past both the 5d and 10d windows in
+    # one pass (e.g. a very late seed) resolves both immediately, not one
+    # scheduler tick apart. See module docstring for why this is a separate
+    # pass rather than folded into the loop above.
+    counts["hold1_10d"] = _update_hold1_10d_family(journal, bars_provider, limit=limit)
+    return counts
+
+
+def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
+    """HOLD-1 continuation pass: resolve the additive 10-trading-day shadow
+    horizon for rows whose 5d family has already gone ``outcome_status =
+    'complete'`` but whose 10d family (``outcome_status_10d``) has not.
+    Writes ONLY the 6 HOLD-1 value columns + ``outcome_status_10d`` --
+    ``outcome_status`` itself, and every 1d/3d/5d/replay column, are never
+    touched here (see module docstring). Same bar source and the same pure
+    ``forward_window_stats()`` the 1d/3d/5d family already uses -- no second
+    excursion engine, no new data fetch.
+
+    Known gap (accepted, not fixed here — see the spec's own narrow scope):
+    unlike the row-level ``UNAVAILABLE_AFTER_DAYS`` convergence for a row
+    with ZERO forward bars at all, a row whose forward bars exist but
+    permanently plateau below 10 (e.g. a delisted symbol) has no analogous
+    give-up path here -- it stays ``outcome_status_10d = 'partial'``
+    indefinitely rather than ever converging to a 10d-specific
+    'unavailable'. Low practical risk (this codebase's core-book universe is
+    continuously-traded megacaps) but a real limitation if ever observed."""
+    if bars_provider is None:
+        return {"updated": 0, "completed": 0, "skipped": 0}
+
+    rows = journal.query(
+        "SELECT * FROM candidate_outcomes WHERE outcome_status = 'complete' "
+        "AND (outcome_status_10d IS NULL OR outcome_status_10d != 'complete') "
+        "ORDER BY id ASC LIMIT ?", (limit,))
+    counts = {"updated": 0, "completed": 0, "skipped": 0}
+    now = timeutils.now_utc()
+    for row in rows:
+        decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
+        if decision_at is None:   # pragma: no cover -- defensive only; a row
+            counts["skipped"] += 1  # can't reach outcome_status='complete'
+            continue                # without decision_at_utc already set.
+        decision_date = decision_at.date().isoformat()
+        bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
+        forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
+        if not forward_bars:
+            counts["skipped"] += 1
+            continue
+
+        ref, stop, direction = row.get("entry_reference_price"), row.get("stop_price"), row.get("direction_hint")
+        f10 = forward_window_stats(ref, stop, direction, forward_bars, 10)
+        resolved_10d = f10["bars_used"] >= 10
+        _update_row(journal, row["outcome_id"], {
+            "forward_10d_return_pct": f10["return_pct"], "forward_10d_r": f10["r"],
+            "max_favorable_10d_r": f10["max_favorable_r"], "max_adverse_10d_r": f10["max_adverse_r"],
+            "bars_to_favorable_10d": f10["bars_to_favorable"], "bars_to_adverse_10d": f10["bars_to_adverse"],
+            "outcome_status_10d": "complete" if resolved_10d else "partial",
+        })
+        counts["updated"] += 1
+        if resolved_10d:
             counts["completed"] += 1
 
     return counts

@@ -257,6 +257,18 @@ def _card_scoreboard_health(journal) -> Optional[dict]:
     return None if rep["n_cards"] == 0 else rep
 
 
+def _hold1_health(journal) -> dict:
+    """HOLD-1's own accumulation line (Design Sec 4, spec 2026-07-24):
+    unlike every other ``_xxx_health`` above, this is NEVER omitted even at
+    0/30 -- the whole point is watching the pre-registered revisit floor
+    accumulate "without anyone remembering to query" (the spec's own
+    words), which an omit-until-nonzero idiom would silently defeat for the
+    first weeks after merge."""
+    from alphaos.reports.hold1_report import compute_hold1_report
+
+    return compute_hold1_report(journal)
+
+
 def _eval_health(journal) -> Optional[dict]:
     """The latest eval-harness run's summary, or None if no operator has
     ever run `alphaos eval` yet -- an expected, honest empty state (EVAL-1
@@ -747,6 +759,7 @@ def build_daily_brief(
     baseline_health = _baseline_health(journal, settings)
     hypothesis_health = _hypothesis_health(journal)
     card_scoreboard_health = _card_scoreboard_health(journal)
+    hold1_health = _hold1_health(journal)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -768,6 +781,7 @@ def build_daily_brief(
         "backup_health": backup_health,
         "hypothesis_health": hypothesis_health,
         "card_scoreboard_health": card_scoreboard_health,
+        "hold1_health": hold1_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -938,6 +952,12 @@ def render_markdown(brief: dict) -> str:
         from alphaos.cards.scoreboard import render_markdown as _render_card_scoreboard
 
         lines += [_render_card_scoreboard(csh), ""]
+
+    h1h = brief.get("hold1_health")
+    if h1h:
+        from alphaos.reports.hold1_report import hold1_digest_line as _hold1_digest_line
+
+        lines += [f"- {_hold1_digest_line(h1h)}", ""]
 
     mg = brief["moonshot_gap"]
     lines += ["## Moonshot gap (10% MoM target)"]

@@ -483,7 +483,10 @@ def test_update_with_no_provider_skips_safely_and_stays_pending():
     o = _orch()
     row = _seeded_row(o)
     res = update_pending_outcomes(o.journal, bars_provider=None)
-    assert res == {"total": 1, "updated": 0, "completed": 0, "skipped": 1, "unavailable": 0}
+    # HOLD-1: the hold1_10d sub-dict is always present, zeroed here since a
+    # missing provider short-circuits before either pass can run.
+    assert res == {"total": 1, "updated": 0, "completed": 0, "skipped": 1, "unavailable": 0,
+                   "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     still = o.journal.one("SELECT outcome_status FROM candidate_outcomes WHERE outcome_id = ?",
                           (row["outcome_id"],))
     assert still["outcome_status"] == "pending"
@@ -520,18 +523,28 @@ def test_update_marks_unavailable_after_window_with_no_bars():
 
 
 def test_update_is_idempotent_once_complete():
+    # HOLD-1: extended to 10 bars (was 5) so BOTH the 5d and 10d families
+    # genuinely resolve within this fixture -- with only 5 bars the row would
+    # stay outcome_status_10d='partial' forever (a real, documented gap; see
+    # _update_hold1_10d_family's own docstring), and the row would keep
+    # being reprocessed by HOLD-1's continuation pass, breaking true
+    # idempotency. 10 bars lets both families reach 'complete' in the SAME
+    # first call (see test_hold1_10day_shadow.py for the dedicated HOLD-1
+    # resolution tests).
     o = _orch()
     row = _seeded_row(o)
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
     bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
-            "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 6)]
+            "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 11)]
     provider = _FakeBars({"AAPL": bars})
     first = update_pending_outcomes(o.journal, bars_provider=provider)
     assert first["completed"] == 1
+    assert first["hold1_10d"]["completed"] == 1
     second = update_pending_outcomes(o.journal, bars_provider=provider)
-    assert second == {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    assert second == {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
+                      "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     o.close()
 
 

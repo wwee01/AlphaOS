@@ -1491,6 +1491,38 @@ SCHEMA: list[tuple[str, str]] = [
             replay_r REAL,
             replay_exit_reason TEXT,
             outcome_status TEXT NOT NULL DEFAULT 'pending',
+            -- HOLD-1 (2026-07-24, docs/roadmap/alphaos-hold1-10day-shadow-
+            -- horizon-spec.md): additive 10-trading-day shadow horizon,
+            -- exact same semantics as the 1d/3d/5d family above (same
+            -- forward_window_stats() call, same R-denomination/direction
+            -- conventions -- see outcomes_tracker.py). SCHEMA_VERSION stays
+            -- 3 (reconciler handles the additive columns on an existing DB).
+            -- Measurement-only: NEVER read by any scan/eval/labeller/risk/
+            -- execution path (zero-decision-surface law, same as every
+            -- other column in this table) -- report/digest surfaces only.
+            -- No market_adjusted_return_10d_pct: the spec names exactly
+            -- these 6 value columns, not the EVID-1 benchmark-adjusted
+            -- family (out of scope for this ticket).
+            forward_10d_return_pct REAL,
+            forward_10d_r REAL,
+            max_favorable_10d_r REAL,
+            max_adverse_10d_r REAL,
+            bars_to_favorable_10d INTEGER,
+            bars_to_adverse_10d INTEGER,
+            -- HOLD-1 deviation from the spec's literal 6-column list
+            -- (flagged in the build report): the 10d family necessarily
+            -- resolves LATER than outcome_status (which is driven purely by
+            -- the 5d family and must stay that way -- the ticket's own
+            -- non-goal forbids touching "the 1/3/5-day columns or their
+            -- consumers"). Without a 10d-scoped status, "rows where BOTH
+            -- families have resolved" (the pre-registered report's own
+            -- filter) is not reconstructable from stored data without
+            -- re-deriving bar counts at report time. Mirrors outcome_status
+            -- exactly (NULL -> 'partial' -> 'complete'), but is its OWN
+            -- column so outcome_status's value/timing/consumers are
+            -- provably unchanged (see test_hold1_row_outcome_status_
+            -- never_depends_on_10d_family).
+            outcome_status_10d TEXT,
             data_quality_status TEXT,
             updated_at_utc TEXT,
             updated_at_sgt TEXT,

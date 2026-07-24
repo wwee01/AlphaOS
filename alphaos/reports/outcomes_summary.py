@@ -97,6 +97,14 @@ def build_outcomes_report(journal, settings, limit: int = 2000) -> dict:
     rep = compute_outcomes_summary(rows)
     rep["as_of"] = timeutils.market_date().isoformat()
     rep["mode"] = settings.mode.value
+
+    # HOLD-1 (2026-07-24): the pre-registered 10-day shadow-horizon section,
+    # in the SAME outcomes report surface the spec's own Design Sec 3 names.
+    # Local import (this module's own existing style) avoids a needless
+    # import at module load for callers that never render this section.
+    from alphaos.reports.hold1_report import compute_hold1_report
+
+    rep["hold1"] = compute_hold1_report(journal)
     return rep
 
 
@@ -129,4 +137,10 @@ def render_markdown(rep: dict) -> str:
         "",
         f"> ⚠️ {rep['caveat']}",
     ]
+
+    if rep.get("hold1"):
+        from alphaos.reports.hold1_report import render_markdown as _render_hold1
+
+        lines += ["", _render_hold1(rep["hold1"])]
+
     return "\n".join(lines)
