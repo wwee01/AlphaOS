@@ -123,8 +123,18 @@ INSTR-2 used, with anti-coaching gates.
    ends with "This context does not make proposing more or less desirable;
    apply your usual evidence standards unchanged." It must NOT characterize
    the bars (no "supports continuation", no "strong/weak" adjectives).
-   All block contents are frozen into `evaluation.snapshot` → `snapshot_json`
-   (replayability, same law as `atr_policy`).
+   All block contents are journaled into `evaluation.snapshot` →
+   `snapshot_json` for AUDIT (what the model was actually shown, same law
+   as `atr_policy`) — **but a replay does NOT read this frozen block back**.
+   `_augment_snapshot_for_prompt` always recomputes `multi_day_context`
+   fresh from whatever `daily_bars` holds at replay time (identical
+   current-state precedent to `_latest_atr`/`atr_policy`), so v3 replay
+   context is NOT point-in-time to the packet's original scan date: a bar
+   persisted after a fixture was frozen will appear in a later replay of
+   that same fixture, with no manifest/sha change and no tamper error.
+   Audited (2026-07-24, two independent Opus reviews, converged finding);
+   see Design 5's own caveat paragraph for what this does and does not
+   invalidate about the proof gate.
 
 4. **Version mechanics.** `OPENAI_PROMPT_VERSION` validation set becomes
    `{"v1","v2","v3"}` (`settings.py:1394`). **Two existing `== "v2"` gates
@@ -165,6 +175,27 @@ INSTR-2 used, with anti-coaching gates.
    - **Q4 fail-safes:** NO_ATR downgrade counts unchanged v2 vs v3 per model.
    Cutover to v3 remains a separate explicit operator decision (decision
    row), sequenced with the pending model ruling.
+
+   **Replay-currency caveat (added 2026-07-24, two independent Opus audits,
+   converged finding).** MULTI_DAY_CONTEXT is recomputed from the CURRENT
+   `daily_bars` state at replay time, never read back from the frozen
+   `snapshot_json` (see Design 3's own corrected replayability note).
+   Consequences for reading this gate's results:
+   (i) the four-arm run above is valid as designed — all four arms replay
+   in the same run, against the identical `daily_bars` state, so the
+   cross-arm (v2-vs-v3, mini-vs-luna) comparison is bar-identical and
+   unaffected;
+   (ii) cross-RUN v3 comparisons are NOT bar-identical — `daily_bars`
+   accumulates daily, so a later re-run of the same corpus can see
+   additional/different bars than an earlier run did. Do not compare v3
+   arms across two runs taken on different days without accounting for
+   this drift;
+   (iii) when reading Q3 anti-coaching flips, a bar or level the v3
+   reasoning cites may postdate the packet's own original decision date —
+   this does not invalidate Q3 itself (the flip's reasoning is judged on
+   whether it cites concrete bar-derived structure at all), but it is not
+   a point-in-time reconstruction of what the market looked like on the
+   packet's original scan date.
 
 ## Tests (hermetic, §H.1; the builder implements ALL of these)
 

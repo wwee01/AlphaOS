@@ -17,6 +17,18 @@ leak the pipeline's own downstream verdicts into the replay prompt (see
 once, like CANARY's own JSON fixtures, means a re-run replays the
 identical inputs it always has, or fails loudly on tamper -- never a
 silent drift.
+
+INSTR-3 note (2026-07-24, two independent Opus audits, converged finding):
+this freeze/tamper guarantee covers the candidate + snapshot content
+written above -- it does NOT cover v3's MULTI_DAY_CONTEXT block.
+``OpenAIClient._augment_snapshot_for_prompt`` recomputes that block fresh
+from the LIVE ``daily_bars`` table at replay time on every replay (same
+current-state precedent as its ``atr_policy``/``_latest_atr`` read), so a
+v3 replay of a fixture frozen here can see bars that did not exist -- or
+were not yet persisted -- when the fixture was originally frozen, with no
+MANIFEST/sha256 change and no ``CorpusTamperedError``. See
+``docs/roadmap/alphaos-instr3-trend-context-spec.md`` Design 3/5 for the
+full caveat.
 """
 
 from __future__ import annotations
