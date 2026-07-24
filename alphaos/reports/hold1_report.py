@@ -83,16 +83,23 @@ def _resolved_5d_and_10d_rows(journal) -> list[dict]:
     )
 
 
+def _failed_by_day5(rows: list[dict], cohort: Optional[str] = None) -> list[dict]:
+    """Rows that FAILED to reach TARGET_R by day 5 (the spec's own
+    denominator), optionally restricted to one named cohort."""
+    return [
+        r for r in rows
+        if (cohort is None or _cohort_of(r.get("candidate_type")) == cohort)
+        and r.get("max_favorable_5d_r") is not None
+        and r["max_favorable_5d_r"] < TARGET_R
+    ]
+
+
 def _cohort_stats(rows: list[dict], threshold: float) -> dict:
-    """Among rows that FAILED to reach TARGET_R by day 5 (the spec's own
-    denominator, regardless of which threshold this call reports on): count
-    and fraction that reached ``threshold`` by day 10, per cohort."""
+    """Among rows that FAILED to reach TARGET_R by day 5, per cohort: count
+    and fraction that reached ``threshold`` by day 10."""
     out = {}
     for cohort in _COHORTS:
-        failed_by_day5 = [
-            r for r in rows
-            if _cohort_of(r.get("candidate_type")) == cohort and r["max_favorable_5d_r"] < TARGET_R
-        ]
+        failed_by_day5 = _failed_by_day5(rows, cohort)
         reached = [r for r in failed_by_day5 if r["max_favorable_10d_r"] >= threshold]
         n = len(failed_by_day5)
         out[cohort] = {
@@ -103,17 +110,52 @@ def _cohort_stats(rows: list[dict], threshold: float) -> dict:
     return out
 
 
+def _pre_registered_population(rows: list[dict]) -> list[dict]:
+    """The pre-registered question's OWN population: rows in one of the 3
+    reported cohorts (proposed/watch/rejected) that failed to reach TARGET_R
+    by day 5 -- exactly the union, across cohorts, of what ``_cohort_stats``
+    already uses as each cohort's own denominator. This is what the revisit
+    floor/``effective_n``/digest line must count.
+
+    Audit fixup (2026-07-25, Auditor A MEDIUM): the floor previously counted
+    EVERY resolved row regardless of population -- bare 'candidate' rows
+    (created for every scanned name, never acted on either way),
+    'user_override' rows (a different, human-decision population), and rows
+    that already cleared 2.4R by day 5 (not "failed by day 5" at all, so
+    outside the pre-registered question entirely). In production,
+    'candidate' rows dominate the ledger, so the unscoped count could
+    report "floor cleared" while the cohorts the operator's ruling actually
+    depends on still held a handful of real observations -- a premature-
+    ruling risk on exactly the decision this instrument exists to gate.
+    Corrected here, one day after the 2026-07-24 registration and before
+    ANY real 10d observation had resolved -- an implementation-matches-
+    registration correction, not a post-hoc analysis change (see the
+    spec's own dated clarification)."""
+    return _failed_by_day5(
+        [r for r in rows if _cohort_of(r.get("candidate_type")) is not None]
+    )
+
+
 def compute_hold1_report(journal) -> dict:
     """Pure aggregation. Never raises on an empty/early-stage ledger --
     zero resolved rows is an expected, honest state (this is a NEW measure
     with a multi-week accumulation horizon), not an error."""
     rows = _resolved_5d_and_10d_rows(journal)
+    population = _pre_registered_population(rows)
     en = _effective_n([
-        {**r, "decision_date": (r.get("decision_at_utc") or "")[:10]} for r in rows
+        {**r, "decision_date": (r.get("decision_at_utc") or "")[:10]} for r in population
     ])
     return {
         "as_of": timeutils.market_date().isoformat(),
-        "n_resolved_both_families": len(rows),
+        # UNSCOPED diagnostic only -- every candidate_type, including bare
+        # 'candidate'/'user_override' rows and rows that already cleared
+        # 2.4R by day 5. NOT what the revisit floor gates on -- see
+        # n_pre_registered_population/effective_n below.
+        "n_resolved_both_families_unscoped": len(rows),
+        # The pre-registered question's own population (proposed/watch/
+        # rejected cohorts, failed-by-day5 only) -- this is what
+        # effective_n/revisit_condition_met/the digest line count.
+        "n_pre_registered_population": len(population),
         "effective_n": en["effective_n"],
         "revisit_floor": REVISIT_FLOOR,
         "revisit_condition_met": en["effective_n"] >= REVISIT_FLOOR,
@@ -125,9 +167,11 @@ def compute_hold1_report(journal) -> dict:
 
 def hold1_digest_line(rep: dict) -> str:
     """The exact accumulation line the daily brief surfaces (Design Sec 4) --
-    counted in independent clusters, matching the revisit floor's own units,
-    NOT the raw resolved-row count (also reported, separately, in the fuller
-    markdown section below)."""
+    counted in independent clusters OF THE PRE-REGISTERED POPULATION
+    (proposed/watch/rejected cohorts, failed-by-day5 only -- see
+    ``_pre_registered_population``), matching the revisit floor's own units.
+    NOT the unscoped raw resolved-row count (also reported, separately, and
+    clearly labeled as unscoped, in the fuller markdown section below)."""
     return f"HOLD-1: {rep['effective_n']}/{rep['revisit_floor']} resolved 10d observations"
 
 
@@ -147,7 +191,9 @@ def _render_cohort_block(title: str, threshold_label: str, by_cohort: dict) -> l
 def render_markdown(rep: dict) -> str:
     lines = [
         "## HOLD-1: 10-day shadow outcome horizon (pre-registered)",
-        f"- {hold1_digest_line(rep)} (raw resolved rows: {rep['n_resolved_both_families']})",
+        f"- {hold1_digest_line(rep)} "
+        f"(diagnostic, UNSCOPED -- all candidate types incl. non-cohort/already-cleared rows: "
+        f"{rep['n_resolved_both_families_unscoped']} raw resolved rows)",
         "",
     ]
     lines += _render_cohort_block(

@@ -300,6 +300,17 @@ def test_report_arithmetic_on_seeded_ledger_exact_fractions():
     # 'rejected' cohort: 1 failed-by-day5, 0 reach 2.4R by day 10.
     _insert_resolved_row(j, "reject", "R1", "2026-01-05", -0.2, 0.1)
 
+    # Audit fixup (2026-07-25, Auditor A MEDIUM): rows OUTSIDE the
+    # pre-registered question's own population -- a bare 'candidate' row
+    # (never acted on either way) and a 'user_override' row (a different,
+    # human-decision population), both otherwise resolved and failed-by-
+    # day5 -- must be counted in the UNSCOPED diagnostic but NOT in
+    # n_pre_registered_population/effective_n/the revisit gate. (P5 above,
+    # already cleared 2.4R by day 5, is the third excluded case -- outside
+    # the population for a different reason: not "failed by day 5" at all.)
+    _insert_resolved_row(j, "candidate", "C1", "2026-01-05", 1.0, 2.5)
+    _insert_resolved_row(j, "user_override", "U1", "2026-01-05", 1.0, 2.5)
+
     rep = compute_hold1_report(j)
     prop = rep["by_cohort_target_2_4r"]["proposed"]
     assert prop["n_failed_by_day5"] == 4
@@ -324,20 +335,41 @@ def test_report_arithmetic_on_seeded_ledger_exact_fractions():
     assert prop_half["n_reached_days6_10"] == 4
     assert prop_half["fraction"] == 1.0
 
-    assert rep["n_resolved_both_families"] == 8   # P1-P5, W1-W2, R1
+    # Unscoped diagnostic: EVERY resolved row, all candidate_types --
+    # P1-P5, W1-W2, R1, C1 (candidate), U1 (user_override) = 10.
+    assert rep["n_resolved_both_families_unscoped"] == 10
+
+    # Pre-registered population (Auditor A MEDIUM fix): only the 3 named
+    # cohorts, only rows that failed 2.4R by day 5 -- P1,P2,P3,P4 (proposed;
+    # P5 excluded, already cleared 2.4R by day 5) + W1,W2 (watch) + R1
+    # (rejected) = 7. C1/U1 excluded entirely (wrong population), even
+    # though both are otherwise resolved AND failed-by-day5.
+    assert rep["n_pre_registered_population"] == 7
+    # Every population row here is on a distinct symbol -> no clustering.
+    assert rep["effective_n"] == 7
+    assert rep["revisit_condition_met"] is False   # 7 < REVISIT_FLOOR (30)
+
+    # The reported cohort fractions themselves are UNCHANGED by C1/U1 --
+    # they were never in any cohort's denominator to begin with (proven
+    # again here, post-fix, not just pre-fix above).
+    assert prop["n_failed_by_day5"] == 4 and prop["n_reached_days6_10"] == 3
+
     assert rep["caveat"] == CAVEAT
     assert "no significance claimed" in rep["caveat"]
 
     md = render_hold1_markdown(rep)
     assert CAVEAT in md
     assert "HOLD-1" in md
+    assert "UNSCOPED" in md
+    assert f"{rep['n_resolved_both_families_unscoped']} raw resolved rows" in md
     o.close()
 
 
 def test_report_empty_ledger_is_a_safe_no_op_not_an_error():
     o = _orch()
     rep = compute_hold1_report(o.journal)
-    assert rep["n_resolved_both_families"] == 0
+    assert rep["n_resolved_both_families_unscoped"] == 0
+    assert rep["n_pre_registered_population"] == 0
     assert rep["effective_n"] == 0
     assert rep["revisit_condition_met"] is False
     for cohort_stats in rep["by_cohort_target_2_4r"].values():
@@ -349,39 +381,66 @@ def test_report_empty_ledger_is_a_safe_no_op_not_an_error():
 
 
 # ---------------------------------------------------------------- Spec test 5
+# Audit fixup (2026-07-25, Auditor A NIT + Auditor B LOW, convergent): the
+# original guard spot-checked 5 hand-picked modules. Both auditors'
+# independent greps confirmed nothing violates the law TODAY -- this widens
+# it to glob the whole decision-surface (regression-guard hardening, not a
+# fix to a found violation). Globs directories rather than hand-listing
+# every file, so a NEW file added later to any of these packages is
+# automatically covered without anyone remembering to add it here.
+_DECISION_SURFACE_PACKAGES = (
+    "risk", "strategy", "execution", "tqs", "scanner", "ai",
+)
+_DECISION_SURFACE_ROOT_FILES = ("approval.py", "safety.py")
+# Auditor B's own enumerated candidate_outcomes consumers that sit OUTSIDE
+# the globbed packages above (ai/label_validation.py is already covered by
+# the "ai" package glob).
+_DECISION_SURFACE_EXTRA_FILES = (
+    "hypotheses/proposer.py",
+    "scheduler/shadow_label.py",
+)
+
+_HOLD1_NEW_COLUMNS = (
+    "forward_10d_return_pct", "forward_10d_r", "max_favorable_10d_r",
+    "max_adverse_10d_r", "bars_to_favorable_10d", "bars_to_adverse_10d",
+    "outcome_status_10d",
+)
+
+
+def _decision_surface_files() -> list:
+    import pathlib
+
+    import alphaos
+
+    root = pathlib.Path(alphaos.__file__).parent
+    files = []
+    for pkg in _DECISION_SURFACE_PACKAGES:
+        files += sorted((root / pkg).rglob("*.py"))
+    for fname in _DECISION_SURFACE_ROOT_FILES:
+        files.append(root / fname)
+    for rel in _DECISION_SURFACE_EXTRA_FILES:
+        files.append(root / rel)
+    files = [f for f in files if "__pycache__" not in f.parts]
+    assert files, "decision-surface glob found nothing -- package layout changed, fix the glob"
+    return files
+
+
 def test_no_live_scan_eval_risk_execution_module_reads_the_new_columns_ast():
     """Structural proof, same zero-decision-surface pattern as
     tests/test_pr12_hypotheses.py::test_risk_engine_and_approval_never_
     reference_hypotheses_at_all and test_ab_eval.py's own AST/structural
-    checks: none of the gate/eval/labeller/risk/execution/scan modules may
-    reference ANY of HOLD-1's 7 new column names, in any form (a docstring
-    mention would still show up as source text -- this check is
-    intentionally source-text-based, not AST-Call-based, so it also catches
-    a stray comment/string reference, not just a live code read)."""
-    import pathlib
-
-    import alphaos.approval as approval_mod
-    import alphaos.risk.risk_engine as risk_mod
-    import alphaos.execution.order_manager as order_mod
-    import alphaos.ai.openai_client as openai_client_mod
-    import alphaos.scanner.candidate_scanner as scanner_mod
-
-    new_columns = (
-        "forward_10d_return_pct", "forward_10d_r", "max_favorable_10d_r",
-        "max_adverse_10d_r", "bars_to_favorable_10d", "bars_to_adverse_10d",
-        "outcome_status_10d",
-    )
-
-    for mod, name in (
-        (approval_mod, "approval.py"),
-        (risk_mod, "risk_engine.py"),
-        (order_mod, "order_manager.py"),
-        (openai_client_mod, "openai_client.py"),
-        (scanner_mod, "candidate_scanner.py"),
-    ):
-        text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-        for col in new_columns:
-            assert col not in text, f"{name} references HOLD-1 column {col!r}"
+    checks: no file anywhere under the decision-surface packages (risk/,
+    strategy/, execution/, tqs/, scanner/, ai/), nor approval.py/safety.py,
+    nor the specific candidate_outcomes consumers Auditor B enumerated that
+    live outside those packages, may reference ANY of HOLD-1's 7 new column
+    names, in any form (a docstring mention would still show up as source
+    text -- this check is intentionally source-text-based, not AST-Call-
+    based, so it also catches a stray comment/string reference, not just a
+    live code read)."""
+    for path in _decision_surface_files():
+        text = path.read_text(encoding="utf-8")
+        for col in _HOLD1_NEW_COLUMNS:
+            assert col not in text, f"{path} references HOLD-1 column {col!r}"
 
 
 def test_hold1_report_module_never_writes_and_never_touches_gates():
