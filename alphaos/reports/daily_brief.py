@@ -391,6 +391,19 @@ def _needs_you(
     }
 
 
+def _working_orders(journal) -> list[dict]:
+    """Orders approved + placed at the broker but not yet filled (2026-07-24,
+    operator visibility gap -- see JournalStore.working_orders()'s docstring
+    for the full window this covers). Deliberately its own top-level brief
+    key rather than a ``needs_you`` entry: a working order needs NOTHING from
+    the operator -- it is already approved and the broker owns it from here.
+    It answers "did my approval actually go through", a status question, not
+    "what must I act on". Empty list (never None) on the quiet path: an
+    always-present key, same first-class-empty-state law as every other
+    section here."""
+    return journal.working_orders()
+
+
 def _hypothesis_drafts_pending(journal) -> Optional[dict]:
     """HGEN-1: a named, always-visible "Needs you" line when quarantined
     drafts await operator review -- follows ``_unattended_approvals_today``'s
@@ -748,6 +761,7 @@ def build_daily_brief(
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
     needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
+    working_orders = _working_orders(journal)
     todays_activity = _todays_activity(journal, since_market_day)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
@@ -785,6 +799,7 @@ def build_daily_brief(
         "regime": regime,
         "regime_arming": regime_arming,
         "needs_you": needs_you,
+        "working_orders": working_orders,
         "positions_health": positions_health,
         "todays_activity": todays_activity,
         "unattended_approvals": unattended_approvals,
@@ -878,6 +893,25 @@ def render_markdown(brief: dict) -> str:
     else:
         lines.append("- (none)")
     lines.append("")
+
+    # 2026-07-24: approved-but-unfilled orders sit between Approvals and
+    # Positions -- placed here, directly after Positions, because that is
+    # exactly the gap they fill ("my approval went through, it just hasn't
+    # filled yet"). Section omitted entirely when there are none: an empty
+    # "Working orders (0)" heading every quiet day is noise, and unlike a
+    # health section its absence carries no information worth printing.
+    wo = brief.get("working_orders") or []
+    if wo:
+        lines += [f"## Working orders — awaiting fill ({len(wo)})"]
+        for o in wo:
+            side = str(o.get("side") or o.get("direction") or "").upper()
+            entry = o.get("entry_price") if o.get("entry_price") is not None else o.get("limit_price")
+            lines.append(
+                f"- {o['symbol']} ({side}): qty={o.get('qty')}, entry={entry}, "
+                f"stop={o.get('stop_loss_price')}, target={o.get('take_profit_price')} "
+                f"— {o.get('state')} at broker"
+            )
+        lines.append("")
 
     ta = brief["todays_activity"]
     lines += [
@@ -1023,6 +1057,18 @@ def render_compact(brief: dict) -> str:
         f"Pending approvals: {ny['pending_approval_count']}",
         f"Open incidents: {ny['open_incident_count']}  |  Fused jobs: {len(ny['fused_jobs'])}",
     ]
+    # 2026-07-24: one extra line ONLY when something is actually awaiting
+    # fill -- the quiet path (the overwhelming majority of days) is byte-for-
+    # byte unchanged, so this can't erode the 1000-char alert budget this
+    # function's own docstring guards. Symbols are capped for the same
+    # reason the docstring cites for EXIT_REVIEW: an unbounded join could
+    # truncate mid-ticker.
+    wo = brief.get("working_orders") or []
+    if wo:
+        shown = [str(o.get("symbol")) for o in wo[:MAX_SYMBOLS_IN_ONE_ACTION]]
+        more = len(wo) - len(shown)
+        syms = ", ".join(shown) + (f", +{more} more" if more > 0 else "")
+        lines.append(f"Awaiting fill: {len(wo)} ({syms}) -- approved, placed, not yet filled.")
     if not brief.get("is_trading_day_today", True):
         lines.append("Not a trading day (weekend/NYSE holiday) -- no live scanning occurred.")
     return "\n".join(lines)

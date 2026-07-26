@@ -123,7 +123,7 @@ function NeedsYou({ needsYou, exitReview }) {
   );
 }
 
-function OpenRisk({ positionsHealth }) {
+function OpenRisk({ positionsHealth, workingOrders }) {
   const measurable = positionsHealth.filter((p) => p.current_r !== null && p.current_r !== undefined);
   const totalR = measurable.length
     ? measurable.reduce((sum, p) => sum + p.current_r, 0)
@@ -131,6 +131,14 @@ function OpenRisk({ positionsHealth }) {
   const worst = measurable.length
     ? measurable.reduce((min, p) => (p.current_r < min.current_r ? p : min))
     : null;
+  // 2026-07-24: approved-but-unfilled orders belong in THIS block -- it
+  // already answers "what is my exposure right now", and a placed order is
+  // pending exposure. Rendered whether or not there are open positions (an
+  // order awaiting fill with zero positions is the exact just-approved case
+  // that was previously invisible everywhere in the console). Shown as
+  // amber, and never folded into the R total -- an unfilled order has no
+  // entry price yet, so it has no R (unknown-never-zero).
+  const wo = workingOrders ?? [];
   return (
     <Block title="③ open risk now" style={{ height: '100%' }}>
       {positionsHealth.length === 0 ? (
@@ -146,6 +154,21 @@ function OpenRisk({ positionsHealth }) {
             </div>
           )}
         </>
+      )}
+      {wo.length > 0 && (
+        <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 13, color: 'var(--amber)', fontWeight: 600 }}>
+            {wo.length} order(s) awaiting fill
+          </div>
+          {wo.map((o) => (
+            <div key={o.order_id} className="num" style={{ fontSize: 12, color: 'var(--text-dim)', padding: '2px 0' }}>
+              {o.symbol} {String(o.side || o.direction || '').toUpperCase()} qty {o.qty} — {o.state} at broker
+            </div>
+          ))}
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+            approved and placed · becomes a position once filled (see Positions)
+          </div>
+        </div>
       )}
     </Block>
   );
@@ -326,20 +349,36 @@ export default function Tonight() {
           <div className="grid reveal-stagger" style={{ marginTop: 16 }}>
             {(() => {
               const ny = brief.needs_you;
+              const workingOrders = brief.working_orders ?? [];
               const exitReview = (brief.positions_health ?? []).filter((p) => p.verdict === 'EXIT_REVIEW');
               const quiet = ny.pending_approval_count === 0 && ny.open_incident_count === 0
                 && (ny.fused_jobs ?? []).length === 0 && exitReview.length === 0;
               if (quiet) {
+                // 2026-07-24: even on an all-clear day, an order awaiting
+                // fill must still be visible -- the quiet branch renders
+                // ONLY Quiet(), so without this the just-approved case
+                // (nothing pending, one order placed) would show "nothing
+                // needs you" and hide the order entirely. Quiet() is still
+                // honest: a working order genuinely needs nothing from the
+                // operator, it's status, so it sits beside the all-clear
+                // rather than contradicting it.
                 return (
-                  <div className="col-12">
-                    <Quiet />
-                  </div>
+                  <>
+                    <div className={workingOrders.length ? 'col-6' : 'col-12'}>
+                      <Quiet />
+                    </div>
+                    {workingOrders.length > 0 && (
+                      <div className="col-6">
+                        <OpenRisk positionsHealth={brief.positions_health ?? []} workingOrders={workingOrders} />
+                      </div>
+                    )}
+                  </>
                 );
               }
               return (
                 <>
                   <div className="col-6"><NeedsYou needsYou={ny} exitReview={exitReview} /></div>
-                  <div className="col-6"><OpenRisk positionsHealth={brief.positions_health ?? []} /></div>
+                  <div className="col-6"><OpenRisk positionsHealth={brief.positions_health ?? []} workingOrders={workingOrders} /></div>
                 </>
               );
             })()}

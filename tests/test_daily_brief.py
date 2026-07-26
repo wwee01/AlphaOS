@@ -38,11 +38,12 @@ def test_brief_renders_every_key_on_an_empty_journal(orchestrator):
 
     expected_keys = {
         "date_sgt", "kill_switch_engaged", "kill_switch_reason", "market_condition",
-        "needs_you", "positions_health", "todays_activity", "best_candidate",
-        "what_learned", "moonshot_gap", "one_action",
+        "needs_you", "working_orders", "positions_health", "todays_activity",
+        "best_candidate", "what_learned", "moonshot_gap", "one_action",
     }
     assert expected_keys <= brief.keys()
     assert brief["positions_health"] == []
+    assert brief["working_orders"] == []  # always present, empty on a quiet journal
     assert brief["best_candidate"] is None
     assert brief["one_action"]  # always a non-empty string
     assert brief["moonshot_gap"]["status"] == "below_sample_floor"
@@ -1063,3 +1064,68 @@ def test_digest_position_health_mirrors_tqs_shadow_shape(orchestrator):
     assert "verdict_histogram" in ph
     assert "thesis_histogram" in ph
     assert sum(ph["verdict_histogram"].values()) == ph["open_position_count"]
+
+
+# ----------------------------------------- working orders (2026-07-24)
+# An approved-but-unfilled order was invisible everywhere: gone from
+# Approvals (no longer pending_approval), not yet in Positions (no position
+# until reconcile sees the fill). These pin it into the brief -- which feeds
+# BOTH the Tonight tab (/api/v1/tonight returns the brief verbatim) and the
+# nightly digest push (render_compact).
+
+def _insert_working_order(journal, symbol="AAPL", state="accepted"):
+    journal.insert("paper_orders", {
+        "order_id": f"ord_{symbol}_{state}", "symbol": symbol, "side": "buy", "qty": 67,
+        "entry_price": 331.87, "stop_loss_price": 317.06, "take_profit_price": 350.75,
+        "state": state, "broker_order_id": f"brk_{symbol}",
+    })
+
+
+def test_brief_surfaces_a_working_order(orchestrator):
+    _insert_working_order(orchestrator.journal)
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    assert [o["symbol"] for o in brief["working_orders"]] == ["AAPL"]
+
+
+def test_brief_working_orders_excludes_filled(orchestrator):
+    """A filled order becomes a position -- it must leave this list, or the
+    operator would see it counted in both places."""
+    _insert_working_order(orchestrator.journal, symbol="NVDA", state="filled")
+    brief = build_daily_brief(orchestrator.journal, orchestrator.settings, orchestrator.kill_switch)
+    assert brief["working_orders"] == []
+
+
+def test_render_markdown_includes_a_working_orders_section(orchestrator):
+    _insert_working_order(orchestrator.journal)
+    md = render_markdown(build_daily_brief(
+        orchestrator.journal, orchestrator.settings, orchestrator.kill_switch))
+    assert "Working orders" in md
+    assert "AAPL" in md
+
+
+def test_render_markdown_omits_the_section_entirely_when_none(orchestrator):
+    """A "Working orders (0)" heading every quiet day is noise -- unlike a
+    health section, its absence carries no information worth printing."""
+    md = render_markdown(build_daily_brief(
+        orchestrator.journal, orchestrator.settings, orchestrator.kill_switch))
+    assert "Working orders" not in md
+
+
+def test_render_compact_announces_awaiting_fill_and_stays_under_the_alert_cap(orchestrator):
+    """The pushed ntfy digest must say an order is awaiting fill -- that push
+    is the operator's at-a-glance surface -- without breaching alerts.py's
+    1000-char truncation cap."""
+    _insert_working_order(orchestrator.journal)
+    compact = render_compact(build_daily_brief(
+        orchestrator.journal, orchestrator.settings, orchestrator.kill_switch))
+    assert "Awaiting fill: 1 (AAPL)" in compact
+    assert len(compact) < 1000
+
+
+def test_render_compact_is_unchanged_on_the_quiet_path(orchestrator):
+    """The overwhelming majority of days have zero working orders -- the
+    compact push must be byte-for-byte identical then, so this can never
+    erode the alert budget on a normal day."""
+    before = render_compact(build_daily_brief(
+        orchestrator.journal, orchestrator.settings, orchestrator.kill_switch))
+    assert "Awaiting fill" not in before
