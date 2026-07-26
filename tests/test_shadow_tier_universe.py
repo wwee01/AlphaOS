@@ -354,6 +354,29 @@ def _orch_with_shadow_universe(tmp_path, symbols, **extra_env):
     return Orchestrator(settings=settings, journal=journal), path
 
 
+def _force_momentum_candidates(monkeypatch, orch):
+    """``MockDataProvider.get_snapshot`` seeds its RNG with
+    ``f"{symbol}:{market_date()}"``, so whether a seeded symbol clears the
+    shadow-tier momentum/interest gate (``_maybe_candidate`` in
+    candidate_scanner.py) is a function of the CALENDAR DATE, not just the
+    symbol. Any test asserting a shadow candidate exists must therefore pin
+    momentum past the 2% gate itself rather than hope today's date happens
+    to cooperate -- this repo's known false-green/date-seeded flake class
+    (same helper, same reason, as test_exp1_shadow_labelling.py's own
+    ``_force_momentum_candidates``). Added 2026-07-25 after
+    ``test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval``
+    -- a SAFETY-guard regression test -- silently stopped exercising its
+    guard because SSSS1 missed the gate on that day's seed."""
+    orig_get_snapshot = orch.market.provider.get_snapshot
+
+    def _forced(symbol):
+        snap = orig_get_snapshot(symbol)
+        snap["change_pct"] = 0.05
+        return snap
+
+    monkeypatch.setattr(orch.market.provider, "get_snapshot", _forced)
+
+
 def test_shadow_candidates_never_reach_ai_evaluation_or_proposals(tmp_path):
     """Behavior probe (not just testimony): run a real scan with shadow tier
     enabled + labelling on, then directly query openai_evaluations/
@@ -380,7 +403,7 @@ def test_shadow_candidates_never_reach_ai_evaluation_or_proposals(tmp_path):
     orch.journal.close()
 
 
-def test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval(tmp_path):
+def test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval(tmp_path, monkeypatch):
     """Regression for scope/safety audit finding F-1: _override_open_trade
     builds its own proposal independently of _handle_proposal's guard, so a
     user_override on a shadow-tier candidate needed its OWN guard. Reproduces
@@ -390,6 +413,7 @@ def test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval(t
     from alphaos.constants import OverrideBlockedReason, UserOverrideAction
 
     orch, _ = _orch_with_shadow_universe(tmp_path, [{"symbol": "SSSS1"}])
+    _force_momentum_candidates(monkeypatch, orch)
     orch.run_scan_once()
     shadow = orch.journal.one("SELECT * FROM candidates WHERE shadow_tier = 1 LIMIT 1")
     assert shadow, "expected at least one shadow-tier candidate"
