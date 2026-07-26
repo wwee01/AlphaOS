@@ -20,6 +20,20 @@ resolved 10-day observations (independent-cluster counting per the PORT-1
 effective-N law). The answer drives an operator ruling on extension (likely
 8–10 trading days if material); it never auto-changes anything.
 
+> **Clarification, 2026-07-25 (implementation-matches-registration, not a
+> post-hoc analysis change — made one day after registration, before ANY
+> real 10d observation had resolved):** the "≥30 resolved 10-day
+> observations" floor counts observations *of the pre-registered question's
+> own population* — rows in the three reported cohorts (proposed / watch /
+> rejected) that failed to reach 2.4×ATR by day 5 (both the 5d and 10d
+> families resolved). It explicitly does NOT count bare `candidate` rows
+> (created for every scanned name, never acted on either way),
+> `user_override` rows (a different, human-decision population), or rows
+> that already cleared 2.4×ATR by day 5 (outside the question entirely —
+> not "failed by day 5"). An unscoped raw-resolved-row diagnostic is still
+> reported separately, clearly labeled as unscoped, but the revisit floor
+> and the daily-brief accumulation line count the scoped population only.
+
 ## Non-goals
 - `max_holding_days` and every live gate/floor/sizing parameter unchanged.
 - No new data fetches — the tracker's existing bar source covers 10 days the
