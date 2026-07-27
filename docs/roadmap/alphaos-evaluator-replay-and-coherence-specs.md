@@ -309,6 +309,83 @@ Excluded, with reasons:
    Suppressed scans journal nothing — `system_events` stays clean; the
    mismatch state is re-derivable from the ledger at any time.
 
+   > **STATUS CORRECTION (2026-07-28, audit-fixup after two independent
+   > Opus audits both returned REQUEST CHANGES on the same convergent
+   > root cause):** the dedupe reasoning above is WRONG, not just its
+   > implementation. It considered the silent REVERT case (bullet 4
+   > above) but never the RE-APPLY case, and never considered an
+   > undelivered alert. Message-only dedupe has two real gaps, both
+   > reproduced end-to-end against the build:
+   > 1. **Re-apply is silently suppressed forever.** A message string can
+   >    recur verbatim across two genuinely different reference rows —
+   >    e.g. an operator trials a model on a day that produces zero real
+   >    eval rows (mock trial / `ai_degraded` / empty shortlist / cost
+   >    cap), gets paged, reverts; weeks later, after real evaluations
+   >    under the OLD identity keep landing and a proper A/B + decision
+   >    log ships the SAME model for real, the transition message is
+   >    byte-identical to the first page even though the reference row
+   >    has moved on. Message-only dedupe suppresses this second, REAL
+   >    transition forever — reproduced with 33 real verdicts landing
+   >    unpaged, via exactly the workflow a careful operator uses.
+   > 2. **An undelivered page is burned.** `alerts.send_alert` returns a
+   >    bool and never raises: it returns `False` silently when
+   >    `NTFY_TOPIC` is unset (no log at all), and `False` + a WARNING
+   >    log on any network/HTTP failure. The original design journaled
+   >    the dedupe row unconditionally, discarding that return value —
+   >    one ntfy blip on the single scan a transition occurs burns the
+   >    transition's only page forever, with no record it was ever
+   >    undelivered.
+   >
+   > **Corrected dedupe condition:** fire iff no prior tripwire event for
+   > this axis has ALL THREE of — (a) the identical candidate message,
+   > (b) the identical `reference_eval_id` (already present in
+   > `detail_json`, no new data needed), AND (c) `alert_sent is True` in
+   > that event's `detail_json`. `alert_sent` is written `False` at
+   > insert time (event inserts still happen strictly before the alert
+   > send — durability ordering unchanged) and flipped to `True` in a
+   > follow-up `UPDATE` only once `alerts.send_alert`'s return value
+   > confirms delivery — the same insert-then-update-on-success pattern
+   > `alphaos/cards/demotion.py` already uses for its own `alert_sent`
+   > column. This also closes a third gap (found independently by the
+   > second audit): per-axis events are journaled inside the mismatch
+   > loop, before the single shared alert send; if an exception unwinds
+   > between one axis's event insert and the send being reached, that
+   > axis's row is left with `alert_sent: False` by construction, so the
+   > next scan retries it rather than an orphaned, never-alerted event
+   > being mistaken for "handled." The dedupe lookup itself also moved
+   > from a SQL `LIKE 'TRIP-1 {axis}:%'` pattern to an exact-prefix
+   > `substr(message, 1, N) = ?` comparison — `_` is a LIKE wildcard and
+   > both current axis names contain underscores; today's two names
+   > cannot cross-match, but the spec's own maintenance trigger (Scope
+   > rule, above) says a third axis joins later, and a LIKE pattern would
+   > silently mismatch it. Implementation: `alphaos/tripwire.py`; tests:
+   > `tests/test_trip1_evaluator_tripwire.py`'s `test_fix1a_*`,
+   > `test_fix1b_*`, `test_fix1c_*`, `test_fix1_delivered_alert_*`, and
+   > `test_fix5_*`.
+   >
+   > **Severity also corrected 2026-07-28 (MUST FIX 2):** the mismatch
+   > event's severity is `ERROR`, not `WARNING` — the daily digest
+   > (`scheduler/digest.py:141`) only surfaces `system_events` rows at
+   > severity `error`/`critical`, so a WARNING-only event was invisible
+   > everywhere except a direct ntfy push, a single point of failure.
+   > Verified before raising it that this cannot trip anything: the only
+   > self-halt mechanism in this codebase, `scheduler/cadence.py::
+   > is_fused`, counts consecutive `job_runs.status == 'failed'` rows and
+   > never reads `system_events` at all.
+   >
+   > **Edge case added (A LOW-3): the kill-switch window is BLIND.**
+   > Bullet 3 above (Zero-eval day) lists "kill switch" alongside
+   > `ai_degraded`/empty shortlist/non-trading day as a case where "the
+   > check still runs" against a stale-but-true reference. That is
+   > WRONG for the kill switch specifically: `scheduler/jobs.py:104`
+   > skips `run_scan_once` — and therefore `check_evaluator_identity`
+   > itself — ENTIRELY while the switch is engaged, so an identity change
+   > made during that window is not paged until the switch is released
+   > and a scan actually runs. This is defensible (no verdicts are
+   > produced during the window either, so there is nothing yet to
+   > protect), but the spec text as originally written implied the check
+   > runs regardless, which it does not.
+
 5. **Intentional changes: NO acknowledgment mechanism — decided, with
    reasons.** TRIP-1 fires identically on deliberate and accidental
    changes, exactly once per transition. Why this is right and not alert

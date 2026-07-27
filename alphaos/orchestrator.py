@@ -62,8 +62,8 @@ from alphaos.constants import (
     UniverseTier,
 )
 from alphaos.regime.service import ensure_regime_for_today
-from alphaos.tripwire import check_evaluator_identity
 from alphaos.scanner.candidate_scanner import CURRENT_INSTRUMENT_VERSION, DEFAULT_UNIVERSE
+from alphaos.tripwire import check_evaluator_identity
 from alphaos.universe.builder import load_universe_file
 from alphaos.cards import registry as cards
 from alphaos.cards.activation import build_scan_card_activation
