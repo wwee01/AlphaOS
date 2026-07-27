@@ -385,6 +385,38 @@ Excluded, with reasons:
    > produced during the window either, so there is nothing yet to
    > protect), but the spec text as originally written implied the check
    > runs regardless, which it does not.
+   >
+   > **Behavior change from the corrected dedupe (2026-07-28, second
+   > audit round — both auditors independently flagged this): while a
+   > transition is mismatched AND undeliverable** (`NTFY_TOPIC` unset, or
+   > an ntfy outage — `alert_sent` never reaches `True`) **the tripwire
+   > now re-fires every scan, indefinitely, writing 2 ERROR
+   > `system_events` rows per scan for as long as the condition
+   > persists** (3 scans → 3 fire episodes → up to 6 rows if both axes
+   > are mismatched; 10 scans → up to 20 rows) — where the ORIGINAL
+   > (pre-correction) design cost exactly 2 rows total, once, regardless
+   > of how long delivery stayed broken. This directly contradicts this
+   > same Design 4's own line above: "Suppressed scans journal
+   > nothing — `system_events` stays clean" — that claim is now FALSE
+   > for the undeliverable case specifically (it remains true for the
+   > genuinely-suppressed case: same message, same reference, AND a
+   > confirmed delivery). Both auditors judged this the RIGHT trade —
+   > loud-and-repeated beats silent-and-lost, it matches this project's
+   > own ping-over-silence doctrine (`project_digest_alert_always_sends`
+   > house convention), and it is self-limiting the moment any one send
+   > succeeds (the very next scan's dedupe then holds cleanly). Deliberate,
+   > fire-biased, and accepted — not a defect. **Operational
+   > consequence:** an install that never configures `NTFY_TOPIC` will
+   > accumulate two ERROR `system_events` rows per scan after any
+   > identity change, indefinitely, and — per the MUST FIX 2 severity
+   > correction above — every one of those rows is digest-visible, so
+   > the daily digest's `errors_and_failures.system_events` list grows
+   > without bound until `NTFY_TOPIC` is set (or the identity reverts,
+   > which is itself its own fresh transition and pages once more).
+   > Setting `NTFY_TOPIC` remains the one thing that makes any of this
+   > ticket's paging real; TRIP-1 has never had a mechanism to detect
+   > that it's unset (out of scope — see `alerts.py`'s own documented
+   > silent-no-op contract).
 
 5. **Intentional changes: NO acknowledgment mechanism — decided, with
    reasons.** TRIP-1 fires identically on deliberate and accidental

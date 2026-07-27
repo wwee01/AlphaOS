@@ -48,8 +48,10 @@ undelivered-page fix against production code, not a stub.
 from __future__ import annotations
 
 import json
+import types
 
 from alphaos import tripwire as tripwire_module
+from alphaos.ai.openai_client import OpenAIEvaluation
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
@@ -789,23 +791,72 @@ def test_fix6_behavioral_placement_real_scan_fires_when_identity_changed(monkeyp
     (test_tripwire_runs_before_first_openai_evaluations_insert_ast above).
     That test only proves SOURCE order; it would stay green even if the
     call were wrapped in a never-taken conditional, silently defeating the
-    tripwire at runtime. This test seeds a ledger under an OLD identity,
-    runs a REAL run_scan_once that (via the mock evaluator) will itself
-    insert fresh openai_evaluations rows under the CURRENT (new)
-    settings identity, and asserts the tripwire still fired -- which is
-    only possible if it read the reference BEFORE this scan's own inserts
-    could move it, i.e. the call genuinely executes before the insert at
-    runtime, not merely earlier in source text."""
+    tripwire at runtime.
+
+    2026-07-28, SECOND round: the first version of this test (below,
+    superseded) let the scan run in ordinary mock mode, which writes ZERO
+    real (is_mock=0) rows. Auditor A mutation-tested it -- moved the
+    check_evaluator_identity() call to immediately AFTER the production
+    openai_evaluations insert (the exact blindness this test exists to
+    catch) -- and it PASSED AGAINST THE MUTANT: with no real rows landing
+    either way, the tripwire fires off the stale seeded reference
+    regardless of WHERE the hook sits, so hook placement never actually
+    entered the assertion. Only the AST test caught that mutation. A
+    behavioral test that cannot fail is worse than no test (this is the
+    same failure shape that let
+    test_shadow_candidate_override_to_trade_is_blocked_even_with_a_stored_eval
+    sit green while its own precondition silently no-opped elsewhere in
+    this codebase).
+
+    Fixed per Auditor A's own working pattern (probe2_placement.py Sec2a):
+    force the scan's real candidate loop to write a REAL (is_mock=0) row
+    UNDER THE NEW IDENTITY, by monkeypatching OpenAIClient._live_eval on
+    the orchestrator's own instance and flipping use_mock=False (the
+    established house pattern -- see tests/test_instr2_atr_coherent_
+    prompt.py's _fake_propose_eval / client._live_eval usage). Only market
+    data / scanning / candidate generation stay in mock mode; only the AI
+    evaluator's own use_mock flag is overridden, so this exercises the
+    real production insert at the real production call site. With a real
+    row now landing under the new identity, correct placement (before the
+    insert) reads the OLD reference and fires; the mutant placement
+    (after the insert) would read the NEW reference and stay silent --
+    which is exactly what discriminates hook placement. A sanity
+    assertion below confirms the real row genuinely landed, so this test
+    cannot pass vacuously again."""
     sent = _patch_alerts(monkeypatch)
     journal = _journal()
     _seed_real_eval(journal, model="gpt-5.4-mini", prompt_version="v1")
-    settings = make_settings(OPENAI_PRIMARY_MODEL="gpt-5.6-luna", OPENAI_PROMPT_VERSION="v1")
+    new_model = "gpt-5.6-luna"
+    settings = make_settings(OPENAI_PRIMARY_MODEL=new_model, OPENAI_PROMPT_VERSION="v1")
     orch = Orchestrator(settings=settings, journal=journal)
+
+    def _fake_live_eval(self, candidate, snapshot, freshness_status):
+        return OpenAIEvaluation(
+            eval_id=new_id("eval"), candidate_id=candidate.get("candidate_id", "c1"),
+            symbol=candidate.get("symbol", "AAPL"), model=new_model,
+            direction="long", entry=100.0, stop=95.0, target=110.0, max_holding_days=3,
+            expected_r=2.0, confidence=0.7, decision="propose",
+            reasoning_summary="t", is_mock=False,
+        )
+
+    orch.openai.use_mock = False
+    orch.openai._live_eval = types.MethodType(_fake_live_eval, orch.openai)
 
     orch.run_scan_once()
 
+    # Sanity: the scan really did write a real row under the NEW identity --
+    # without this, the test would (again) pass vacuously regardless of
+    # hook placement, exactly the gap the mutation test found.
+    real_rows_under_new_identity = journal.query(
+        "SELECT model FROM openai_evaluations WHERE is_mock = 0 AND model = ?", (new_model,),
+    )
+    assert real_rows_under_new_identity, (
+        "the scan must actually write a real (is_mock=0) row under the NEW "
+        "identity, or this test cannot discriminate hook placement at all"
+    )
+
     events = [e for e in _tripwire_events(journal) if e["message"].startswith("TRIP-1 openai_primary_model:")]
     assert len(events) == 1
-    assert events[0]["message"] == "TRIP-1 openai_primary_model: 'gpt-5.4-mini' -> 'gpt-5.6-luna'"
+    assert events[0]["message"] == f"TRIP-1 openai_primary_model: 'gpt-5.4-mini' -> '{new_model}'"
     assert len(sent) == 1
     journal.close()
