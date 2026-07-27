@@ -126,26 +126,267 @@ isolation law as CANARY/EVAL-1).
 
 ---
 
-## TRIP-1 — Primary-model identity tripwire (tiny)
+## TRIP-1 — Evaluator identity tripwire (tiny, rides the scan)
+
+REFINED 2026-07-27 against the post-v3-cutover code and ledger state. The
+2026-07-20 draft (a) watched `openai_primary_model` only — but
+`prompt_template_version` has since moved three times in production
+(ledger, verified read-only 2026-07-27: `gpt-5.6-luna|v3|5 rows`,
+`gpt-5.6-luna|v2|21`, `gpt-5.6-luna|v1|261`, `gpt-5.4-mini|v1|74`) and the
+§9 KEEP-luna ruling (2026-07-26) names TRIP-1 as the tripwire for the NEXT
+swap on either axis; and (b) rested idempotency entirely on "the most
+recent eval row moves" — disproven below (Design 4): an `ai_degraded` scan,
+an empty shortlist, or a mock-mode day produces zero real eval rows, so the
+reference cannot be relied on to move.
 
 ### Goal
-Close the blind spot the mini→luna swap walked through: CANARY watches
-`label_model` only; `openai_primary_model` changes are unwatched.
+Make the NEXT silent evaluator-identity change loud: exactly one page per
+distinct change, at the first scan that would produce verdicts under the
+new identity, before those verdicts accumulate. Closes the blind spot the
+2026-07-13 mini→luna swap walked through (CANARY replays the LABELLER,
+`settings.label_model`, against a baseline that was itself pinned on luna).
+House doctrine served: **a model change is a strategy change** (§9,
+2026-07-26) — replay before trusting new verdicts, log the decision.
+
+### Scope rule (which axes belong to TRIP-1)
+An axis belongs to TRIP-1 iff BOTH hold:
+
+- **(a)** it changes the PRIMARY evaluator's judgment identity — which
+  model judges, or which prompt contract that model is shown; and
+- **(b)** it is stamped per-row into `openai_evaluations` — the ledger
+  itself records which identity produced every verdict, so the last real
+  row is a valid detection reference with zero new state.
+
+Future sessions answer "does axis X belong in TRIP-1?" from this rule
+alone. Today exactly two axes qualify:
+
+| Watched axis | Settings field | Stamped column |
+|---|---|---|
+| primary model | `openai_primary_model` | `openai_evaluations.model` |
+| prompt version | `openai_prompt_version` | `openai_evaluations.prompt_template_version` |
+
+Excluded, with reasons:
+- `label_model`: fails (a) — labeller identity is CANARY's job (pinned
+  baseline, corpus replay; a different instrument answering a different
+  question). TRIP-1 must not duplicate it.
+- `openai_review_model`: fails BOTH today. Grep-verified 2026-07-27: no
+  non-test code reads it except `settings.py` and the config fingerprint —
+  it drives no call path and stamps no rows. There is no verdict stream to
+  protect. The day a review path actually consumes it AND stamps its rows,
+  it satisfies the rule and joins TRIP-1 — that is the maintenance
+  trigger, not a re-litigation.
+- Provider-side aliasing (the API silently serving a different underlying
+  model for the same configured name): out of scope — the `model` column
+  stamps the CONFIGURED name (`OpenAIClient.model`), so settings-vs-ledger
+  comparison cannot see it. Response-identity drift is CANARY's Tier-1
+  concept (`response_models_json`); an evaluator-side analog would first
+  need response identity persisted per eval row — a prerequisite, same
+  shape as §9's EVAL-1 scope ruling.
+
+### Non-goals (frozen)
+- No acknowledgment mechanism, ack CLI, or "expected change"
+  pre-registration of any kind (Design 5 defends the decision).
+- No blocking, no gating, no scan abort under ANY branch (Design 6).
+- No new tables, no schema change, no `SCHEMA_VERSION` bump —
+  `system_events` is both the audit record and the dedupe store.
+- No new scheduler job, cadence, or lock key — rides `run_scan_once`.
+- Does not read, diff, or extend `config_versions` (Design 2 justifies).
+- No auto-revert; nothing here ever writes settings or `.env`.
+- Not a CANARY replacement or extension; zero decision surface (never read
+  by any gate/eval/risk/execution path — same law as CANARY/AB-EVAL-1).
 
 ### Design
-At scan start, compare `settings.openai_primary_model` against the `model`
-column of the most recent real (`is_mock=0`) `openai_evaluations` row. On
-mismatch: journal a `system_event` (severity WARNING, component `openai`) and
-send one alert — "primary evaluator model changed {old}→{new}; a model change
-is a strategy change: run the AB-EVAL replay and log the decision before
-trusting new verdicts." No new tables, no blocking — a tripwire, not a gate
-(fail-open by design: it must never stop a scan; it exists to page, and the
-scan's own evaluations remain journaled either way).
+1. **Module + hook point.** New module `alphaos/tripwire.py`, one public
+   function `check_evaluator_identity(journal, settings) -> dict`.
+   `Orchestrator.run_scan_once` calls it immediately after
+   `self._ensure_startup()` and DISCARDS the return value (the dict —
+   `{"checked", "fired", "suppressed", "reference_eval_id"}` — exists for
+   tests only). Placement is load-bearing: the check MUST run before this
+   scan's first `openai_evaluations` insert (single production insert
+   site: `orchestrator.py` ~line 517, inside the candidate loop). If it
+   ran after, the scan's own rows would move the reference to the new
+   identity before it was ever compared, and the tripwire would be
+   structurally silent forever — Design 4 depends on this ordering.
 
-### Tests
-Mismatch fires exactly one event+alert per change (idempotent across
-subsequent scans of the same new model — the "most recent eval row" moves);
-no-op when models match; no-op on empty ledger (fresh install).
+2. **Detection reference = the last real eval row, NOT `config_versions`.**
+   One query, both axes:
+   `SELECT eval_id, model, prompt_template_version, created_at_utc FROM
+   openai_evaluations WHERE is_mock = 0 ORDER BY id DESC LIMIT 1`.
+   - `ORDER BY id DESC`, not `created_at_utc DESC`: `id` is
+     `AUTOINCREMENT` insertion order (authoritative); `created_at_utc` is
+     ISO text stamped by `JournalStore.insert` and can tie within the same
+     instant. Test 11 pins this.
+   - `is_mock = 0` because mock rows stamp `model='mock'` — including them
+     would fire a spurious `'mock'→<configured>` page on any mock-era
+     install.
+   - Compare `settings.openai_primary_model` vs `row.model`, and
+     `settings.openai_prompt_version` vs `row.prompt_template_version`.
+   Why NOT build on `config_versions` (decided; don't re-litigate): the
+   fingerprint already contains both axes (HGEN-1 fixup + INSTR-2), but it
+   is a per-process-startup RECORD, not a pager — rows accumulate
+   silently, nothing diffs them, the hash moves on any of ~25 axes, and it
+   records config blips that never produced a verdict (flip model → run
+   one CLI command → flip back). The doctrine object is *the identity the
+   ledger's verdicts were actually produced under*, and that ground truth
+   lives in `openai_evaluations` itself — both axes deliberately stamped
+   per-row (EVAL-1 addendum + INSTR-2 Design 1). TRIP-1 stays independent:
+   `config_versions` remains the forensic record, TRIP-1 is the pager;
+   they can never disagree because both read the same frozen settings
+   object.
+   Edge cases, specified:
+   - Empty ledger / fresh install / pure-mock install (no real rows):
+     silent no-op — nothing to protect yet; same stance as CANARY's
+     `get_baseline_run` returning "no baseline pinned yet" rather than
+     fabricating a verdict.
+   - `NULL` in a reference column (legacy or hand-tampered row): no-op for
+     THAT axis only; never a crash, never an alert on an unknowable old
+     value; the other axis is still checked.
+   - Zero-eval day (cost-cap `ai_degraded`, empty shortlist, kill switch,
+     non-trading day): the reference is stale-but-true — the last real
+     identity — which is exactly the durable comparison wanted.
+     Idempotency then comes from Design 4's dedupe, NOT from hoping the
+     reference moves.
+   - Mock-mode scan (`use_mock`): the check still runs, against the last
+     REAL rows. A model changed while mock is on pages once — correct: the
+     change will bite the moment live resumes, and one early page beats a
+     surprise later.
+
+3. **On mismatch: journal + one alert.** Per mismatched axis, one
+   `system_events` row: severity `WARNING`, category `"tripwire"` (its own
+   category so the dedupe query in Design 4 is exact; the draft's
+   `component openai` is retired), message EXACTLY
+   `TRIP-1 {axis}: '{old}' -> '{new}'`
+   (e.g. `TRIP-1 openai_primary_model: 'gpt-5.4-mini' -> 'gpt-5.6-luna'`)
+   — this string is the dedupe key, so it is deterministic: no timestamps,
+   no free text. `detail_json` = `{"axis", "old", "new",
+   "reference_eval_id", "reference_created_at_utc"}`.
+   Then ONE `alerts.send_alert` per scan covering ALL fired axes (both
+   axes flipping at once is one operator event, not two pages), title
+   `AlphaOS TRIP-1: evaluator identity changed`, priority `"high"` (same
+   as CANARY Tier-1/2), `journal=` passed, message (plain ASCII, one
+   transition line per fired axis):
+
+   ```
+   {axis}: {old} -> {new}   (last real eval under old identity: {eval_id} @ {created_at_utc})
+   A model change is a strategy change (S9 ruling, 2026-07-26). Before trusting any new verdicts:
+   1) replay the frozen corpus through old and new identities:
+      alphaos ab_eval_run --arms {old_model}:{old_version} {new_model}:{new_version}
+   2) log the keep/revert decision in the S9 decision log.
+   Deliberate change? This page is the receipt -- confirm the decision row exists.
+   Not deliberate? Revert .env, restart, and investigate what changed it.
+   ```
+
+   The `--arms` line interpolates the current old/new pair across both
+   axes (unchanged axis uses its current value on both arms). Event
+   inserts happen BEFORE the alert send, so a failed send never loses the
+   audit row (test 13).
+
+4. **Idempotency — exactly one alert per distinct transition, proven in
+   both orderings.** Before firing an axis, dedupe against the latest
+   tripwire event for that axis:
+   `SELECT message FROM system_events WHERE category = 'tripwire' AND
+   message LIKE 'TRIP-1 {axis}:%' ORDER BY id DESC LIMIT 1`
+   — fire iff no row exists or the stored message differs from the
+   candidate message.
+   - **Ordering A (evals land):** scan N detects, fires, logs the event;
+     scan N's own candidate loop then inserts rows under the new identity;
+     scan N+1's reference row matches settings → no mismatch. One alert.
+   - **Ordering B (no evals land** — `ai_degraded`, empty shortlist,
+     labelling off, mock day**):** scan N fires; scan N+1 still
+     mismatches, but the latest tripwire event for the axis equals the
+     candidate message → suppressed: no event, no alert. Still one alert.
+     This is the case the draft's "the most recent eval row moves"
+     hand-wave got wrong.
+   - **Flip-flop A→B→A→B:** each transition's message differs from the
+     latest stored one for that axis, so each fires exactly once — a
+     revert is its own page (correct: reverting is also a strategy
+     change).
+   - **Accepted quiet case:** change fires; operator reverts BEFORE any
+     real eval lands under the new identity → settings match the untouched
+     reference again → the revert itself is silent. Acceptable: no verdict
+     was ever produced under the new identity, and the original page
+     already covered the episode.
+   Suppressed scans journal nothing — `system_events` stays clean; the
+   mismatch state is re-derivable from the ledger at any time.
+
+5. **Intentional changes: NO acknowledgment mechanism — decided, with
+   reasons.** TRIP-1 fires identically on deliberate and accidental
+   changes, exactly once per transition. Why this is right and not alert
+   fatigue:
+   - Desensitization needs repetition. Design 4 caps a transition at ONE
+     page, and identity transitions are rare — four in the entire
+     production ledger (mini→luna, v1→v2, v2→v3, and the ratified swap
+     itself). One page per rare event cannot train anyone to ignore it.
+   - Every candidate ack mechanism (an ack CLI, an env ack token, an
+     expected-identity file) is performable by an automated session — and
+     an ack channel a session can operate is a tripwire a session can
+     disarm, recreating the exact blind spot this ticket closes. The only
+     genuinely operator-only channel this project has is the human reading
+     the page, which is what this design uses.
+   - The page on a deliberate cutover is positive value, not noise: it is
+     a free end-to-end self-test of the tripwire on every real cutover
+     (the v2 and v3 cutovers would each have produced exactly one
+     confirmation receipt), and house doctrine is explicitly ping-over-
+     silence until reliability is proven. The alert text (Design 3) does
+     the disambiguation an ack mechanism would have done: deliberate →
+     receipt, confirm the decision row; not deliberate → revert and
+     investigate.
+
+6. **Fail-open containment (named pattern).** The ENTIRE check body —
+   reference read, dedupe reads, event inserts, alert send — is wrapped in
+   one try/except at the `check_evaluator_identity` boundary: any
+   exception is journaled (`Severity.ERROR`, category `"tripwire"`,
+   message `TRIP-1 check failed: {exc} -- scan continues`) and swallowed;
+   nothing ever propagates to `run_scan_once`. This is the established
+   auxiliary-read containment pattern (the INSTR-2 audit-HIGH fix in
+   `post_process`; INSTR-3's augment-time read) combined with §9's
+   per-item-isolation law: wrap the WHOLE body, not just the step that
+   looks riskiest — the dedupe `LIKE` or the event insert can raise as
+   legitimately as the reference read. Belt-and-suspenders on alerting per
+   `alerts.py`'s own contract: `send_alert` never raises AND the wrapper
+   would swallow it anyway. A failure while journaling the failure itself
+   is also swallowed (same best-effort stance as `send_alert`'s own
+   failure log).
+
+### Tests (hermetic; §H.1 discipline — direct construction; seed `openai_evaluations` reference rows by direct insert)
+1. Model-axis mismatch (seed real row `model='gpt-5.4-mini'`, settings
+   `gpt-5.6-luna`): exactly one `system_events` row (WARNING, category
+   `tripwire`, message exactly
+   `TRIP-1 openai_primary_model: 'gpt-5.4-mini' -> 'gpt-5.6-luna'`) and
+   exactly one alert whose body contains the transition line, the
+   `ab_eval_run --arms` instruction, and both the receipt and revert
+   sentences.
+2. Prompt-axis mismatch alone (v2→v3 shape) fires with message
+   `TRIP-1 openai_prompt_version: 'v2' -> 'v3'`; model axis silent.
+3. Both axes mismatch in one scan → two `system_events` rows (one per
+   axis), ONE alert naming both transitions.
+4. Match on both axes → no event, no alert, `fired == []`.
+5. Empty ledger (no rows at all) → silent no-op.
+6. Only mock rows (`is_mock=1`, `model='mock'`) → silent no-op (never a
+   `'mock'`→real page).
+7. `NULL` `prompt_template_version` on the reference row → model axis
+   still checked and can fire; prompt axis no-ops; no exception.
+8. Ordering A self-heal: fire once, insert a real row under the new
+   identity, re-run → silent (no second event, no second alert).
+9. Ordering B dedupe: fire once, insert NO new rows, re-run → suppressed
+   (no second event, no second alert; `suppressed` lists the axis).
+10. Flip-flop: A→B fires; seed a real row under B; B→A fires; seed under
+    A; A→B fires AGAIN — three events, three alerts total.
+11. Reference ordering: two real rows sharing one `created_at_utc`, the
+    higher `id` carrying the currently configured identity → no fire
+    (proves `id DESC`, not `created_at_utc`).
+12. Fail-open: monkeypatch the reference read (`journal.one`) to raise →
+    ERROR event journaled (category `tripwire`), `run_scan_once` completes
+    normally, no exception propagates.
+13. Alert-failure isolation: monkeypatch `alerts.send_alert` to raise →
+    swallowed, and the per-axis WARNING event STILL exists (event insert
+    precedes alert send).
+14. Placement structural test (house AST / call-order pattern): in
+    `run_scan_once`, `check_evaluator_identity` is invoked before the
+    scan's first `openai_evaluations` insert.
+15. Zero decision surface: scan output (candidates, proposals,
+    `ScanSummary` fields) is identical with the tripwire firing vs.
+    silent — same direct-comparison proof REG-1's scope audit used.
 
 ---
 
