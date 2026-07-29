@@ -63,6 +63,7 @@ from alphaos.constants import (
 )
 from alphaos.regime.service import ensure_regime_for_today
 from alphaos.scanner.candidate_scanner import CURRENT_INSTRUMENT_VERSION, DEFAULT_UNIVERSE
+from alphaos.tripwire import check_evaluator_identity
 from alphaos.universe.builder import load_universe_file
 from alphaos.cards import registry as cards
 from alphaos.cards.activation import build_scan_card_activation
@@ -227,6 +228,15 @@ class Orchestrator:
         cost-cap-breach day. Every existing caller omits this parameter and
         is completely unaffected (default False -- byte-identical)."""
         self._ensure_startup()
+
+        # TRIP-1: evaluator identity tripwire. MUST run here, before this
+        # scan's own first `openai_evaluations` insert (below, in the
+        # candidate loop) -- otherwise this scan's own fresh rows would
+        # move the detection reference to the new identity before it was
+        # ever compared, and the tripwire would be structurally silent
+        # forever (see alphaos/tripwire.py's module docstring, Design 1).
+        # Return value discarded -- zero decision surface, measurement only.
+        check_evaluator_identity(self.journal, self.settings)
 
         # --- Mint a scan batch + a scheduler run (records exist even though v1
         #     has no real scheduler; trigger defaults to manual CLI). ---------
