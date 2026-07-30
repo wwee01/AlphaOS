@@ -942,3 +942,16 @@ SHADOW_SELECTION_ARM_EXPLORE = "explore"
 # ever changes.
 SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS = 10
 SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS = 20
+
+
+# The ONE prompt-version allowlist (TRIP-1 audit L3, 2026-07-28): the valid
+# set was previously duplicated as a literal ("v1","v2","v3") in BOTH
+# settings.py's OPENAI_PROMPT_VERSION validation and __main__.py's
+# `--arms MODEL:VERSION` token parser. A future v4 that updated only one of
+# them would either be unconfigurable-but-CLI-accepted or the reverse -- and
+# the second site is the one TRIP-1's own alert text tells a woken operator
+# to run (`alphaos ab_eval_run --arms old:ver new:ver`), so a drifted CLI
+# would reject the remediation command the pager just handed them. Both
+# sites now import this tuple; a new version is added HERE, once.
+# Ordered oldest-first; the last entry is the newest version.
+PROMPT_VERSIONS = ("v1", "v2", "v3")

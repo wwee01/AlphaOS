@@ -27,6 +27,7 @@ from alphaos.constants import (
     DataProvider,
     ExecutionProvider,
     MarketDataMode,
+    PROMPT_VERSIONS,
     REAL_TRADING_REQUIRED_VALUE,
     RuntimeMode,
     Severity,
@@ -184,7 +185,12 @@ class Settings:
     # --- AI ---
     openai_api_key: str
     openai_primary_model: str
-    openai_review_model: str
+    # NOTE: there is deliberately no `openai_review_model` here. It existed
+    # from inception, was consumed by NOTHING (the only reviewer is Claude's,
+    # which reads `claude_review_model` below), and was removed 2026-07-28
+    # after the TRIP-1 audits grep-verified it drove no call path and stamped
+    # no rows -- see the S9 decision-log row. Do not re-add it "for
+    # symmetry"; an OpenAI reviewer would add its own setting when it exists.
     anthropic_api_key: str
     claude_review_model: str
     # INSTR-2: settings-gated primary-evaluator prompt version. "v1" is the
@@ -1394,9 +1400,10 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     # see openai_client.py's two membership-check gates (`in ("v2", "v3")`)
     # for why v3 must never regress to a literal `== "v2"` check.
     openai_prompt_version = _get(src, "OPENAI_PROMPT_VERSION", "v1")
-    if openai_prompt_version not in ("v1", "v2", "v3"):
+    if openai_prompt_version not in PROMPT_VERSIONS:
+        _valid = ", ".join(repr(v) for v in PROMPT_VERSIONS)
         raise SettingsError(
-            f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of 'v1', 'v2', 'v3'."
+            f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of {_valid}."
         )
 
     # --- earnings proximity (PR5): warning window + conservative hold-days
@@ -1450,7 +1457,6 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     return Settings(
         openai_api_key=_get(src, "OPENAI_API_KEY"),
         openai_primary_model=_get(src, "OPENAI_PRIMARY_MODEL", "gpt-4o-mini"),
-        openai_review_model=_get(src, "OPENAI_REVIEW_MODEL", "gpt-4o-mini"),
         anthropic_api_key=_get(src, "ANTHROPIC_API_KEY"),
         claude_review_model=_get(src, "CLAUDE_REVIEW_MODEL", "claude-sonnet-4-6"),
         openai_prompt_version=openai_prompt_version,
