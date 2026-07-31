@@ -101,7 +101,7 @@ hardcoded.
 | `APPROVAL_MODE` | `manual` \| `auto` (default `manual`). |
 | `REAL_TRADING_ENABLED` | Must be exactly `false`. |
 | `RUN_MODE`, `OFFLINE_MODE` | Explicit mock/offline toggles (mock is always labelled). |
-| `OPENAI_API_KEY`, `OPENAI_PRIMARY_MODEL`, `OPENAI_REVIEW_MODEL` | OpenAI primary engine. |
+| `OPENAI_API_KEY`, `OPENAI_PRIMARY_MODEL` | OpenAI primary engine. |
 | `ANTHROPIC_API_KEY`, `CLAUDE_REVIEW_MODEL` | Optional Claude manual reviewer. |
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER`, `ALPACA_BASE_URL` | Alpaca **paper** broker + live market data. |
 | `NTFY_TOPIC` | Optional ntfy.sh push alerts (job failures, scheduler self-halt fuse, dead-man heartbeat). Blank = silent no-op. |

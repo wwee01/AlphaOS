@@ -295,15 +295,22 @@ class JournalStore:
             # previously captured only has_openai_key/has_anthropic_key --
             # WHICH model those keys drive was invisible to config_hash, so
             # a same-day model switch (e.g. gpt-5.6-luna) moved zero bits of
-            # the fingerprint. openai_primary_model/openai_review_model are
-            # config, not secrets (unlike the API key itself), so they
-            # belong in the safe snapshot alongside every other non-secret
-            # setting above. Also captures the new HGEN flags/caps this
-            # build ships, for the same reason every other feature's own
-            # flags/caps already appear here (debate_max_calls_per_day,
-            # canary_tier2_label_diff_pct, etc. -- see the fields above).
+            # the fingerprint. openai_primary_model is config, not a secret
+            # (unlike the API key itself), so it belongs in the safe snapshot
+            # alongside every other non-secret setting above. Also captures
+            # the new HGEN flags/caps this build ships, for the same reason
+            # every other feature's own flags/caps already appear here
+            # (debate_max_calls_per_day, canary_tier2_label_diff_pct, etc.).
+            #
+            # 2026-07-28: the companion `openai_review_model` key was REMOVED
+            # from this snapshot when that setting was deleted -- it drove no
+            # call path, so its presence let a no-op edit move the config
+            # fingerprint, which is a false "config changed" signal in the
+            # provenance record. Consequence, deliberately accepted and
+            # logged in S9: config_hash values computed before 2026-07-28 are
+            # not byte-comparable with later ones. Same class of one-time
+            # shift as INSTR-2 ADDING openai_prompt_version here.
             "openai_primary_model": settings.openai_primary_model,
-            "openai_review_model": settings.openai_review_model,
             # INSTR-2: which prompt version the live evaluator is actually
             # showing the model is a real behavior axis (same rationale as
             # the openai_primary_model fix above) -- a v1<->v2 cutover must

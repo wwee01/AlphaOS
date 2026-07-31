@@ -111,3 +111,64 @@ def test_benchmark_spine_time_malformed_fails_fast():
 def test_benchmark_spine_time_valid_hhmm_accepted():
     s = make_settings(SCHEDULER_BENCHMARK_SPINE_TIME="09:00")
     assert s.scheduler_benchmark_spine_time == "09:00"
+
+
+# --- TRIP-1 audit L3 (2026-07-28): the prompt-version allowlist is ONE list ---
+
+
+def test_prompt_version_allowlist_is_single_sourced_no_literal_duplicates():
+    """The valid prompt-version set was once duplicated as a literal
+    ("v1","v2","v3") in BOTH settings.py's OPENAI_PROMPT_VERSION validation
+    and __main__.py's `--arms MODEL:VERSION` parser. A future v4 updating
+    only one would make the version either unconfigurable-but-CLI-accepted
+    or the reverse -- and the CLI is the site TRIP-1's own alert text tells
+    a woken operator to run, so a drifted parser would reject the exact
+    remediation command the pager handed them.
+
+    Source-text guard (same honest-naming caveat as TRIP-1's own sweep: it
+    catches the realistic accidental case -- someone re-typing the tuple --
+    not a deliberately obfuscated one)."""
+    import pathlib
+    import re
+
+    from alphaos.constants import PROMPT_VERSIONS
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "alphaos"
+    # Any re-typed tuple of two-or-more "vN" string literals in the two
+    # historical offender modules is the drift this guards against.
+    # Comments are stripped first: settings.py legitimately *describes* the
+    # `in ("v2", "v3")` gates in prose, and prose is not drift. (This test
+    # caught that false positive on its own first run -- kept as a comment
+    # so the next person does not "simplify" the stripping away.)
+    pattern = re.compile(r"""\(\s*["']v\d["']\s*,\s*["']v\d["']""")
+    for rel in ("config/settings.py", "__main__.py"):
+        raw = (root / rel).read_text()
+        text = "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+        assert not pattern.search(text), (
+            f"{rel} re-inlines a prompt-version tuple literal; import "
+            f"PROMPT_VERSIONS from alphaos.constants instead (single source)"
+        )
+        assert "PROMPT_VERSIONS" in raw, f"{rel} must consume PROMPT_VERSIONS"
+
+    # And the constant itself is well-formed / ordered oldest-first.
+    assert PROMPT_VERSIONS[0] == "v1"
+    assert list(PROMPT_VERSIONS) == sorted(PROMPT_VERSIONS)
+
+
+def test_openai_review_model_setting_is_gone_and_stays_gone():
+    """Removed 2026-07-28: consumed by nothing (the only reviewer is
+    Claude's, reading `claude_review_model`). Pins the removal so it is not
+    silently re-added 'for symmetry' with openai_primary_model, and so the
+    config fingerprint cannot start moving on a no-op setting again."""
+    import pathlib
+
+    from alphaos.config.settings import Settings
+
+    assert not hasattr(Settings, "openai_review_model")
+    assert "openai_review_model" not in getattr(Settings, "__annotations__", {})
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    fingerprint = (root / "alphaos/journal/journal_store.py").read_text()
+    assert '"openai_review_model": settings.' not in fingerprint, (
+        "config fingerprint must not capture a setting that drives no call path"
+    )

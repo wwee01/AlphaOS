@@ -16,6 +16,7 @@ import sys
 from typing import Optional
 
 from alphaos.config.settings import SettingsError, load_settings
+from alphaos.constants import PROMPT_VERSIONS
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch
 from alphaos.scheduler import JobRunner
@@ -923,11 +924,12 @@ def cmd_ab_eval_run(orch: Orchestrator, models: Optional[list], arms: Optional[l
         parsed_arms = []
         for token in arms:
             model, sep, version = token.partition(":")
-            if not sep or not model or version not in ("v1", "v2", "v3"):
+            if not sep or not model or version not in PROMPT_VERSIONS:
+                _valid = ", ".join(PROMPT_VERSIONS)
                 _print({"ab_eval_run": {
                     "error": f"--arms token {token!r} is not MODEL:PROMPT_VERSION shaped "
-                             "(expected e.g. 'gpt-5.4-mini:v1'; model name must be non-empty, "
-                             "version must be v1, v2, or v3)"
+                             f"(expected e.g. 'gpt-5.4-mini:{PROMPT_VERSIONS[0]}'; model name "
+                             f"must be non-empty, version must be one of {_valid})"
                 }})
                 return 1
             parsed_arms.append((model, version))
