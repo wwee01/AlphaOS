@@ -380,6 +380,9 @@ class ReasonCode(StrEnum):
     SHADOW_TIER_EXCLUDED = "SHADOW_TIER_EXCLUDED"
     # --- PR10: setup cards / exit-first invariant ---
     EXIT_PLAN_INCOMPLETE = "EXIT_PLAN_INCOMPLETE"
+    # --- ENTRY-TTL-1: working-order staleness watchdog ---
+    ORDER_STALE_CANCELLED = "ORDER_STALE_CANCELLED"
+    ORDER_CANCELLED_BY_OPERATOR = "ORDER_CANCELLED_BY_OPERATOR"
 
 
 # --- Labels & sentinels ------------------------------------------------------

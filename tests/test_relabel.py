@@ -22,6 +22,7 @@ import pytest
 
 from alphaos.journal.journal_store import JournalStore
 from alphaos.relabel import relabel_candidates
+from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 from conftest import make_settings
 
@@ -291,17 +292,29 @@ def test_live_run_refuses_when_cost_cap_is_reached(journal):
         # default of 500 only clears the default global cap of 2000.
         SHADOW_AI_CAP_CALLS_PER_30D="12",
     )
-    _seed_packet(journal, symbol="AAPL")
+    today = timeutils.market_date().isoformat()
+    # Packet dated today too, so it falls inside the relabel range below.
+    _seed_packet(journal, symbol="AAPL", sgt_date=today)
+    # The 50 seeded calls must land INSIDE cost_guard's trailing-30-day
+    # window, so they are stamped relative to today -- never a hardcoded
+    # literal. This test previously seeded "2026-07-01" and passed only
+    # until the calendar rolled past 2026-07-31, at which point the rows
+    # aged out of the window, the cap stopped tripping, and a genuine
+    # safety assertion ("a live relabel run refuses once the AI cost cap is
+    # reached") started failing every day. Same date-seeded flake class as
+    # the shadow-tier override guard (fixed 233c74b) and the EXP-1
+    # selection-pool test (6ffbc2d) -- see the repo's own flake record.
+    seeded_at = f"{timeutils.market_date().isoformat()}T00:00:00+00:00"
     for _ in range(50):
         journal.conn.execute(
             "INSERT INTO openai_evaluations (eval_id, candidate_id, symbol, model, direction, "
             "decision, reasoning_summary, is_mock, created_at_utc, created_at_sgt) "
             "VALUES (?, ?, 'AAPL', 'gpt-4o-mini', 'long', 'reject', 'x', 0, ?, ?)",
-            (new_id("eval"), new_id("cand"), "2026-07-01T00:00:00+00:00", "2026-07-01T00:00:00+00:00"),
+            (new_id("eval"), new_id("cand"), seeded_at, seeded_at),
         )
     journal.conn.commit()
 
-    result = relabel_candidates(journal, settings, "2026-07-01", "2026-07-01", dry_run=False)
+    result = relabel_candidates(journal, settings, today, today, dry_run=False)
 
     assert "error" in result
     assert "cost cap" in result["error"].lower()

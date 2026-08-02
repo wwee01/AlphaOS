@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Optional
 
 from alphaos.data.market_data import MarketDataClient
+from alphaos.execution import entry_staleness
 from alphaos.proposals import seconds_remaining
 from alphaos.reports.attribution import ATTRIBUTION_V2_CAVEAT
 from alphaos.reports.position_health import VERDICT_EXIT_REVIEW, assess_positions
@@ -391,7 +392,7 @@ def _needs_you(
     }
 
 
-def _working_orders(journal) -> list[dict]:
+def _working_orders(journal, now) -> list[dict]:
     """Orders approved + placed at the broker but not yet filled (2026-07-24,
     operator visibility gap -- see JournalStore.working_orders()'s docstring
     for the full window this covers). Deliberately its own top-level brief
@@ -400,8 +401,29 @@ def _working_orders(journal) -> list[dict]:
     It answers "did my approval actually go through", a status question, not
     "what must I act on". Empty list (never None) on the quiet path: an
     always-present key, same first-class-empty-state law as every other
-    section here."""
-    return journal.working_orders()
+    section here.
+
+    ENTRY-TTL-1 (spec 3.8): each row additionally carries
+    ``age_trading_days`` (computed against ``now``, the SAME injected clock
+    ``build_daily_brief`` already threads through for its other date-window
+    boundaries -- no wall-clock-dependent test behavior) and ``drift_pct``.
+
+    ``drift_pct`` is deliberately left None here. (Audit F1 corrected this
+    comment's earlier justification: the brief as a whole is NOT
+    network-free -- ``assess_positions()`` already fetches live snapshots
+    per open position; "pure read" in this module means NO WRITES, not no
+    network.) The honest reason drift is skipped: it would add one MORE
+    live snapshot fetch per working order to every brief build for a
+    purely cosmetic column, moments-stale by the time it's read. The real,
+    freshness-guard-checked drift evaluation happens where it matters:
+    inside ``OrderManager._cancel_stale_entries``. The renderer reads
+    ``drift_pct`` honestly (never hardcodes "n/a"), so populating it later
+    needs no renderer change."""
+    rows = journal.working_orders()
+    for row in rows:
+        row["age_trading_days"] = entry_staleness.trading_day_age(row.get("submitted_at"), now)
+        row["drift_pct"] = None
+    return rows
 
 
 def _hypothesis_drafts_pending(journal) -> Optional[dict]:
@@ -761,7 +783,7 @@ def build_daily_brief(
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
     needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
-    working_orders = _working_orders(journal)
+    working_orders = _working_orders(journal, now)
     todays_activity = _todays_activity(journal, since_market_day)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
     text_archive_health = _text_archive_health(journal, since_sgt)
@@ -906,10 +928,20 @@ def render_markdown(brief: dict) -> str:
         for o in wo:
             side = str(o.get("side") or o.get("direction") or "").upper()
             entry = o.get("entry_price") if o.get("entry_price") is not None else o.get("limit_price")
+            # ENTRY-TTL-1 (spec 3.8): read-only age/drift columns. age is
+            # "n/a" only when submitted_at itself is missing/unparseable;
+            # drift renders whatever _working_orders() populated (currently
+            # always None -- see its docstring for the honest reason) --
+            # audit F2: read the field, never hardcode the literal, so a
+            # future populate needs no renderer change.
+            age = o.get("age_trading_days")
+            age_str = f"{age}td" if age is not None else "n/a"
+            drift = o.get("drift_pct")
+            drift_str = f"{drift:+.2f}%" if drift is not None else "n/a"
             lines.append(
                 f"- {o['symbol']} ({side}): qty={o.get('qty')}, entry={entry}, "
                 f"stop={o.get('stop_loss_price')}, target={o.get('take_profit_price')} "
-                f"— {o.get('state')} at broker"
+                f"— {o.get('state')} at broker · age={age_str} · drift={drift_str}"
             )
         lines.append("")
 

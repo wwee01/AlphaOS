@@ -150,9 +150,25 @@ def run_monitor_job(orch, runner) -> dict:
     """Scheduler wrapper around ``orch.run_monitor_once()``.
 
     No kill-switch or cost-cap gating: monitor/protection must keep running
-    even when the kill switch is engaged (it only detects + blocks, it never
-    submits/cancels/closes on its own). Never calls close_position/cancel/
-    resolve_incident/acknowledge_incident.
+    even when the kill switch is engaged (it only detects + blocks; it never
+    submits or closes on its own, and it never touches the protective legs
+    of a filled position). Never calls close_position/resolve_incident/
+    acknowledge_incident.
+
+    ENTRY-TTL-1 LAW AMENDMENT (2026-07-31, spec
+    docs/roadmap/entry-ttl-1-working-order-staleness.md 3.2): the monitor may
+    now initiate exactly ONE class of broker action -- cancelling an UNFILLED
+    ENTRY order via ``OrderManager.reconcile()``'s own staleness pass
+    (``OrderManager._cancel_stale_entries``), when that order's thesis has
+    aged out (TTL) or the market has moved decisively past it (adverse
+    drift). This is deliberately exempted from the "never cancels" rule
+    above because it is exposure-REDUCING only -- it never re-prices, never
+    submits, never closes a position, and never cancels the protective
+    (stop/target) legs of a FILLED position. Everything else in the previous
+    law still holds without exception: still never submits an order, still
+    never closes a position, still never touches a filled position's
+    protective legs. The staleness cancel also runs regardless of the kill
+    switch, for the same "cancel-only can only reduce exposure" reasoning.
     """
     monitor_result = orch.run_monitor_once(trigger_source=TriggerSource.SCHEDULER.value)
     blocking = protection_watchdog.has_blocking_incident(orch.journal)
