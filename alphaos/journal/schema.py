@@ -2193,6 +2193,18 @@ SCHEMA: list[tuple[str, str]] = [
             drift_tier TEXT,
             drift_detail_json TEXT,
             lineage_id TEXT,
+            -- CANARY-2: NULL for a normal (trigger) run; the triggering
+            -- run's own run_id when THIS row is a same-day confirmation
+            -- replay spawned by the caller layer (alphaos/canary/run.py's
+            -- run_canary_confirmed) after a confirmable drift trip.
+            -- Additive; SCHEMA_VERSION stays 3 (_reconcile_columns handles
+            -- this on an existing DB, same law every prior additive column
+            -- here established). Doubles as the structural loop guard: a
+            -- confirmation run is always created via a raw run_canary()
+            -- call, never run_canary_confirmed() -- this column exists so
+            -- that fact is provable from the data, not just from the
+            -- caller-layer code path.
+            confirmation_of TEXT,
             started_at_utc TEXT NOT NULL,
             started_at_sgt TEXT NOT NULL,
             finished_at_utc TEXT,
@@ -2795,6 +2807,9 @@ INDEXES: list[str] = [
     # drift comparison reads the one pinned baseline) and per-run result joins.
     "CREATE INDEX IF NOT EXISTS idx_canary_runs_started ON canary_runs(started_at_utc)",
     "CREATE INDEX IF NOT EXISTS idx_canary_runs_is_baseline ON canary_runs(is_baseline)",
+    # CANARY-2: confirmation lineage lookups (report/status resolves the
+    # confirmation row for a given trigger run_id).
+    "CREATE INDEX IF NOT EXISTS idx_canary_runs_confirmation_of ON canary_runs(confirmation_of)",
     "CREATE INDEX IF NOT EXISTS idx_canary_results_run ON canary_results(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_canary_results_packet ON canary_results(packet_id)",
     # PR14: one vote per (proposal, role) -- a re-run of the same batch's

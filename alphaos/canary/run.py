@@ -6,6 +6,21 @@ baseline run. Answers only "did the configured model change under us?", NOT
 "is this prompt better?" (that's EVAL-1) -- but the two share corpus
 machinery by design (see alphaos/canary/corpus.py). Zero decision surface:
 never read by any gate/eval/labeller/risk/execution path.
+
+CANARY-2 (docs/roadmap/alphaos-canary2-drift-confirmation-spec.md) adds a
+caller-layer confirmation policy on top of the above, in ``run_canary_confirmed``:
+a confirmable trip (TIER_1/failsafe-only or TIER_2/label-drift -- both
+sampling-sensitive) is re-run once, same-day, same process, before paging;
+an identity change (TIER_1/identity, deterministic) still pages immediately.
+The ONE fail direction that shapes every branch: any failure in the
+confirmation machinery degrades to paging the ORIGINAL trip immediately,
+marked UNCONFIRMED -- never to silence. ``run_canary`` itself keeps its
+original, unconditional "page on any TIER_1/TIER_2 trip" behavior when
+called directly (unchanged contract, still exercised by CANARY's own direct
+tests and by manual `alphaos canary_run`) -- ``run_canary_confirmed`` calls
+it with ``suppress_alert=True`` and owns all paging decisions itself, so the
+weekly scheduled job (the only caller of ``run_canary_confirmed`` -- see
+``alphaos/scheduler/jobs.py::run_canary_run_job``) never double-pages.
 """
 
 from __future__ import annotations
@@ -25,6 +40,43 @@ DRIFT_TIER_1 = "TIER_1"
 DRIFT_TIER_2 = "TIER_2"
 DRIFT_TIER_3 = "TIER_3"
 DRIFT_NONE = "none"
+
+# CANARY-2 Design 1: the two TIER_1 trigger classes. Identity is deterministic
+# (no sampling involved -- the model literally reports a different name/
+# fingerprint) and pages immediately; a fail-safe appearance CAN be a sampling
+# phenomenon (proven 2026-08-02: COST's verbosity tail crossed the token
+# ceiling once in nine runs) and must be confirmed first, same as TIER_2.
+CANARY_TRIGGER_IDENTITY = "identity"
+CANARY_TRIGGER_FAILSAFE = "failsafe"
+
+# CANARY-2 Design 3: the stable/boundary split, "canary_stability_v1", frozen
+# 2026-08-03 from the full 9-run characterization vs baseline
+# canaryrun_de5814877cc1 (see the spec's own "Motivating evidence" section).
+# A packet is STABLE iff its primary_label never differed from baseline in
+# any of the 9 non-baseline runs. Membership is FROZEN -- changing it means
+# a new version (canary_stability_v2), a new registration, never an in-place
+# edit (same versioning law as regime_rules_v1/trend_rules_v1). The 13
+# stable ids are copied verbatim from the spec (its literal registration).
+CANARY_STABILITY_VERSION = "canary_stability_v1"
+
+CANARY_STABLE_PACKETS_V1 = frozenset({
+    "pkt_077c103ae10b", "pkt_1eeb01e36b6d", "pkt_25ad8d71eedf", "pkt_31bc21eccf10",
+    "pkt_33cc39aec8c7", "pkt_4b424842d943", "pkt_a7c1bcae7175", "pkt_af6a10c6ea2b",
+    "pkt_d27d1d035916", "pkt_d74e3608adc2", "pkt_d9bc552ddc8e", "pkt_f182ebbce06b",
+    "pkt_fe03feceab9c",
+})
+
+# The other 7 packets of the frozen 20-packet v1 corpus (data/canary/,
+# MANIFEST-pinned) -- derived here (corpus packet ids minus
+# CANARY_STABLE_PACKETS_V1), computed 2026-08-03, and frozen the same way:
+# these are the ids that WERE in the corpus at v1-registration time and are
+# NOT stable. A packet absent from BOTH this set and the stable set (i.e.
+# added to the corpus after this registration) buckets as "unclassified_new"
+# (Design 3) -- never silently folded into either bucket.
+CANARY_BOUNDARY_PACKETS_V1 = frozenset({
+    "pkt_5f60f021b855", "pkt_660af7b8b2c0", "pkt_789ce514f70a", "pkt_7948511988dc",
+    "pkt_ab841c53a1f3", "pkt_c089156ab4e0", "pkt_e91598e03a4b",
+})
 
 
 def _reconstruct_packet(fixture: dict):
@@ -83,6 +135,69 @@ def _json_set(raw: Optional[str]) -> set:
     return set(parsed) if parsed else set()
 
 
+def _stability_bucket(packet_id: str) -> str:
+    """CANARY-2 Design 3: classify one packet id against the frozen
+    ``canary_stability_v1`` registration. Any id absent from BOTH frozen sets
+    (added to the corpus after the v1 registration) is ``unclassified_new`` --
+    never silently folded into stable or boundary (test 9)."""
+    if packet_id in CANARY_STABLE_PACKETS_V1:
+        return "stable"
+    if packet_id in CANARY_BOUNDARY_PACKETS_V1:
+        return "boundary"
+    return "unclassified_new"
+
+
+def _label_comparison(current_by_packet: dict, baseline_by_packet: dict, label_diff_pct: float) -> Optional[dict]:
+    """CANARY-2 Design 3: computed "wherever mismatches are computed (all
+    tiers, including clean runs -- the split is cheap and the history is
+    useful)" -- i.e. unconditionally whenever there is at least one
+    comparable (packet present in both current and baseline) packet, not
+    only when the TIER_2 threshold is crossed. Returns ``None`` when nothing
+    is comparable (empty intersection), same as the pre-CANARY-2 code's own
+    ``compared == 0`` no-op."""
+    compared = label_mismatches = decision_mismatches = 0
+    stable_total = boundary_total = unclassified_new_total = 0
+    stable_flips = boundary_flips = unclassified_new_flips = 0
+    for packet_id, cur in current_by_packet.items():
+        base = baseline_by_packet.get(packet_id)
+        if base is None:  # corpus grew/shrank since baseline -- compare only the intersection
+            continue
+        compared += 1
+        bucket = _stability_bucket(packet_id)
+        if bucket == "stable":
+            stable_total += 1
+        elif bucket == "boundary":
+            boundary_total += 1
+        else:
+            unclassified_new_total += 1
+
+        flipped = cur["primary_label"] != base["primary_label"]
+        if flipped:
+            label_mismatches += 1
+            if bucket == "stable":
+                stable_flips += 1
+            elif bucket == "boundary":
+                boundary_flips += 1
+            else:
+                unclassified_new_flips += 1
+        if cur["label_decision"] != base["label_decision"]:
+            decision_mismatches += 1
+
+    if compared == 0:
+        return None
+    label_rate = label_mismatches / compared
+    decision_rate = decision_mismatches / compared
+    return {
+        "compared": compared, "label_mismatches": label_mismatches,
+        "label_mismatch_rate": round(label_rate, 3), "decision_mismatches": decision_mismatches,
+        "decision_mismatch_rate": round(decision_rate, 3), "threshold": label_diff_pct,
+        "stable_flips": stable_flips, "stable_total": stable_total,
+        "boundary_flips": boundary_flips, "boundary_total": boundary_total,
+        "unclassified_new": unclassified_new_total, "unclassified_new_flips": unclassified_new_flips,
+        "tripped": bool(label_rate >= label_diff_pct or decision_rate >= label_diff_pct),
+    }
+
+
 def _compute_drift(
     current_agg: dict, current_by_packet: dict, baseline_run: Optional[dict],
     baseline_by_packet: dict, label_diff_pct: float, confidence_shift_band: float,
@@ -92,7 +207,12 @@ def _compute_drift(
     computed, since a changed model identity already explains any downstream
     label movement (mirrors the spec's own D4 lineage-joint rationale: a
     silent model shift that also moves behavior must be attributed to the
-    model, never double-counted as a separate label-drift finding)."""
+    model, never double-counted as a separate label-drift finding). CANARY-2
+    preserves this exact short-circuit order -- it only ADDS a
+    ``detail["trigger_class"]`` tag (identity/failsafe) to the Tier 1 branch,
+    for the caller layer's confirmation-vs-immediate-page policy, and makes
+    the stable/boundary split (Design 3) unconditional wherever label
+    mismatches are computed at all."""
     if baseline_run is None:
         return DRIFT_NONE, {"reason": "no baseline pinned yet"}
 
@@ -127,27 +247,16 @@ def _compute_drift(
         detail["failsafe_rate_change"] = {"baseline_rate": baseline_rate, "current_rate": round(current_rate, 4)}
 
     if identity_changed or failsafe_appeared:
+        # Identity takes priority when both fire together: it's the more
+        # certain, deterministic signal, and per policy pages immediately
+        # regardless of whether a failsafe also appeared this run.
+        detail["trigger_class"] = CANARY_TRIGGER_IDENTITY if identity_changed else CANARY_TRIGGER_FAILSAFE
         return DRIFT_TIER_1, detail
 
-    compared = label_mismatches = decision_mismatches = 0
-    for packet_id, cur in current_by_packet.items():
-        base = baseline_by_packet.get(packet_id)
-        if base is None:  # corpus grew/shrank since baseline -- compare only the intersection
-            continue
-        compared += 1
-        if cur["primary_label"] != base["primary_label"]:
-            label_mismatches += 1
-        if cur["label_decision"] != base["label_decision"]:
-            decision_mismatches += 1
-    if compared > 0:
-        label_rate = label_mismatches / compared
-        decision_rate = decision_mismatches / compared
-        if label_rate >= label_diff_pct or decision_rate >= label_diff_pct:
-            detail["label_drift"] = {
-                "compared": compared, "label_mismatches": label_mismatches,
-                "label_mismatch_rate": round(label_rate, 3), "decision_mismatches": decision_mismatches,
-                "decision_mismatch_rate": round(decision_rate, 3), "threshold": label_diff_pct,
-            }
+    label_comparison = _label_comparison(current_by_packet, baseline_by_packet, label_diff_pct)
+    if label_comparison is not None:
+        detail["label_drift"] = label_comparison
+        if label_comparison["tripped"]:
             return DRIFT_TIER_2, detail
 
     baseline_conf = baseline_run.get("mean_confidence")
@@ -164,7 +273,10 @@ def _compute_drift(
     return DRIFT_NONE, detail
 
 
-def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
+def run_canary(
+    journal, settings, corpus_dir: Optional[str] = None,
+    confirmation_of: Optional[str] = None, suppress_alert: bool = False,
+) -> dict:
     """Replays every corpus packet once through the current playbook
     classifier, storing every result (including fail-safe), then compares
     against the pinned baseline run (if any) and alerts on Tier 1/2 drift.
@@ -179,7 +291,25 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
     MANIFEST sha256 -- per spec this must be a loud, fuse-eligible job
     failure, which only an uncaught exception reaching
     ``JobRunner.run_job``'s own handler produces (a returned ``"error"``
-    key would be swallowed into a 'completed' job_runs row instead)."""
+    key would be swallowed into a 'completed' job_runs row instead).
+
+    CANARY-2 additions, both opt-in and both default to the pre-CANARY-2
+    behavior so every existing direct call/test of this function is
+    unaffected:
+
+    - ``confirmation_of``: when set, this run IS a same-day confirmation
+      replay of the named trigger run_id -- stamped onto the new
+      ``canary_runs.confirmation_of`` column for lineage/query, and (the
+      structural half of the loop guard) this function never itself reads
+      or acts on the column, so a confirmation run cannot cascade into
+      spawning another confirmation -- only ``run_canary_confirmed`` (never
+      called with ``confirmation_of`` set) initiates confirmation replays.
+    - ``suppress_alert``: when True, ``run_canary`` computes and stores
+      drift exactly as always but never calls ``alerts.send_alert`` itself
+      -- the caller (``run_canary_confirmed``) owns 100% of the paging
+      decision instead. Defaults False so a direct call (manual
+      `alphaos canary_run`, or any pre-CANARY-2 test) keeps its original
+      "page immediately on Tier 1/2" contract unchanged."""
     from alphaos.ai.playbook_classifier import PlaybookClassifier
 
     corpus_dir = corpus_dir or DEFAULT_CORPUS_DIR
@@ -222,6 +352,7 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
         "corpus_version": (manifest or {}).get("version"),
         "configured_model": settings.label_model, "is_mock": 1 if is_mock else 0,
         "n_prompts": len(packets), "lineage_id": lineage_id,
+        "confirmation_of": confirmation_of,
         "started_at_utc": started.utc, "started_at_sgt": started.local_sgt,
     })
 
@@ -313,7 +444,7 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
         )
         journal.conn.commit()
 
-        if drift_tier in (DRIFT_TIER_1, DRIFT_TIER_2):
+        if drift_tier in (DRIFT_TIER_1, DRIFT_TIER_2) and not suppress_alert:
             alerts.send_alert(
                 settings,
                 title=f"AlphaOS CANARY: model drift detected ({drift_tier})",
@@ -331,5 +462,209 @@ def run_canary(journal, settings, corpus_dir: Optional[str] = None) -> dict:
             (finished.utc, finished.local_sgt, run_id),
         )
         journal.conn.commit()
+
+    return result
+
+
+# ------------------------------------------------------ CANARY-2 confirmation
+
+# Severity order for "did the confirmation trip the same class or worse?"
+# (spec Design 2) -- lower rank is more severe. TIER_1 (identity/failsafe)
+# outranks TIER_2 (label drift), which outranks TIER_3, which outranks a
+# clean run.
+_TIER_RANK = {DRIFT_TIER_1: 1, DRIFT_TIER_2: 2, DRIFT_TIER_3: 3, DRIFT_NONE: 4}
+
+
+def _update_drift_detail(journal, run_id: str, detail: dict) -> None:
+    """Annotates a TRIGGER run's own ``drift_detail_json`` with its eventual
+    confirmation outcome (a ``"confirmation"`` sub-dict), after the fact.
+    This is why ``canary_status``/the daily brief can read the confirmed
+    state directly off the trigger row (Design 5) without any special-casing
+    in the report layer -- the trigger row IS the confirmed state once this
+    runs."""
+    journal.conn.execute(
+        "UPDATE canary_runs SET drift_detail_json = ? WHERE run_id = ?",
+        (json.dumps(detail), run_id),
+    )
+    journal.conn.commit()
+
+
+def _split_summary_text(detail: dict) -> str:
+    """The spec's own fixed interpretive sentence (Design 3, verbatim --
+    neutrality-disciplined: states a measured fact, prescribes nothing)."""
+    label_drift = detail.get("label_drift") or {}
+    return (
+        f"flips: {label_drift.get('stable_flips', 0)}/{label_drift.get('stable_total', 0)} stable, "
+        f"{label_drift.get('boundary_flips', 0)}/{label_drift.get('boundary_total', 0)} boundary. "
+        "Stable-packet flips are high-signal (never flipped in the 9-run characterization); "
+        "boundary flips are the labeller's known decision-boundary wobble."
+    )
+
+
+def _confirmed_detail_text(detail: dict, confirm_detail: dict) -> str:
+    """Renders "both mismatch counts" (spec's Alert text bullet) for whichever
+    confirmable trigger class actually fired -- TIER_2 label drift carries a
+    label_drift block (and therefore the stable/boundary split); a TIER_1
+    failsafe-only trip never computes label_drift at all (the Tier-1
+    short-circuit in ``_compute_drift`` returns before the label-compare loop
+    even runs, deliberately preserved), so it renders its own fail-safe-rate
+    pair instead -- there is no "mismatch count" for a fail-safe trip to
+    literally report."""
+    label_drift = detail.get("label_drift")
+    if label_drift:
+        confirm_label_drift = confirm_detail.get("label_drift") or {}
+        return (
+            f"mismatch counts: trigger={label_drift.get('label_mismatches')}, "
+            f"confirmation={confirm_label_drift.get('label_mismatches')}. {_split_summary_text(detail)}"
+        )
+    failsafe = detail.get("failsafe_rate_change")
+    if failsafe:
+        confirm_failsafe = confirm_detail.get("failsafe_rate_change") or {}
+        return (
+            f"fail-safe rate: trigger={failsafe.get('current_rate')}, "
+            f"confirmation={confirm_failsafe.get('current_rate')} (baseline {failsafe.get('baseline_rate')})."
+        )
+    return ""
+
+
+def _send_drift_alert(journal, settings, title: str, message: str) -> None:
+    """CANARY-2's own event-before-send discipline, reusing
+    ``cards/demotion.py``'s established pattern: the durable system_events
+    audit row for a page is journaled BEFORE the network call, so the record
+    survives even if ``alerts.send_alert`` itself fails or is unreachable
+    (test 12 -- "the confirmed-drift system_event persists")."""
+    journal.log_system_event(Severity.WARNING, "canary", message, {"title": title})
+    alerts.send_alert(settings, title=title, message=message, priority="high", journal=journal)
+
+
+def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) -> dict:
+    """CANARY-2's caller-layer confirmation policy (spec Design 1/2), wrapping
+    ``run_canary``. This is the ONLY intended entry point for the weekly
+    scheduled job (``alphaos/scheduler/jobs.py::run_canary_run_job``) -- the
+    confirmation happens inside this SAME process/caller layer, never as a
+    second scheduler job type or lock key. Manual `alphaos canary_run` keeps
+    calling ``run_canary`` directly (unconfirmed, unchanged) via
+    ``Orchestrator.canary_run``.
+
+    Policy (spec's own table):
+      TIER_1 / identity   -> page immediately, no confirmation run.
+      TIER_1 / failsafe-only -> confirm first (or unconfirmed-page on failure).
+      TIER_2 / label drift    -> confirm first (or unconfirmed-page on failure).
+      TIER_3 / none            -> never paged (unchanged).
+
+    The ONE law that shapes every branch below (spec's "fail direction"):
+    any failure in the confirmation machinery -- cost preflight refusal,
+    exception, corpus tamper, anything -- pages the ORIGINAL trip
+    immediately, marked UNCONFIRMED. Never silence.
+
+    The loop guard is structural, not conventional: the confirmation replay
+    is always a raw ``run_canary(confirmation_of=...)`` call, never a
+    recursive ``run_canary_confirmed`` call -- a confirmation run therefore
+    cannot itself spawn a confirmation, independent of anything this
+    function computes (exactly one confirmation per trigger run, ever)."""
+    result = run_canary(journal, settings, corpus_dir=corpus_dir, suppress_alert=True)
+    result["paged"] = False
+    result["confirmation_run_id"] = None
+    if "error" in result:
+        # The FIRST run itself couldn't execute (empty corpus / cost-cap
+        # refusal) -- pre-existing behavior, unrelated to CANARY-2's
+        # confirmation policy (which only concerns a CONFIRMATION run's own
+        # failure). Nothing tripped, nothing to confirm, nothing to page.
+        return result
+
+    drift_tier = result["drift_tier"]
+    detail = result.get("drift_detail") or {}
+    trigger_run_id = result["run_id"]
+    baseline_run = get_baseline_run(journal)
+    baseline_run_id = baseline_run["run_id"] if baseline_run else None
+
+    if drift_tier == DRIFT_TIER_1 and detail.get("trigger_class") == CANARY_TRIGGER_IDENTITY:
+        title = f"AlphaOS CANARY: model drift detected ({drift_tier})"
+        message = (
+            f"Weekly canary run {trigger_run_id} flagged {drift_tier}/identity drift vs the pinned "
+            f"baseline ({baseline_run_id or '?'}) -- deterministic model-identity change, no "
+            f"confirmation needed. {json.dumps(detail)}"
+        )
+        _send_drift_alert(journal, settings, title, message)
+        result["paged"] = True
+        return result
+
+    if drift_tier not in (DRIFT_TIER_1, DRIFT_TIER_2):
+        return result  # TIER_3 / none -- never paged, unchanged
+
+    trigger_class = detail.get("trigger_class", "label_drift")
+    journal.log_system_event(
+        Severity.WARNING, "canary",
+        f"drift trip pending confirmation: {drift_tier}/{trigger_class}, run {trigger_run_id}",
+        {"run_id": trigger_run_id, "drift_tier": drift_tier, "trigger_class": trigger_class},
+    )
+
+    confirm_result: Optional[dict] = None
+    confirm_error: Optional[str] = None
+    try:
+        confirm_result = run_canary(
+            journal, settings, corpus_dir=corpus_dir,
+            confirmation_of=trigger_run_id, suppress_alert=True,
+        )
+        if confirm_result.get("error"):
+            confirm_error = confirm_result["error"]
+    except Exception as exc:  # noqa: BLE001 -- fail TOWARD paging (the one law); never swallow
+        confirm_error = f"{type(exc).__name__}: {exc}"
+
+    if confirm_error is not None:
+        annotated = {**detail, "confirmation": {"status": "unconfirmed_page", "reason": confirm_error}}
+        _update_drift_detail(journal, trigger_run_id, annotated)
+        journal.log_system_event(
+            Severity.ERROR, "canary",
+            f"canary confirmation run for {trigger_run_id} could not execute: {confirm_error} "
+            "-- paging the original trip UNCONFIRMED.",
+            {"run_id": trigger_run_id, "reason": confirm_error},
+        )
+        title = f"AlphaOS CANARY: model drift detected, UNCONFIRMED ({drift_tier})"
+        message = (
+            f"Weekly canary run {trigger_run_id} flagged {drift_tier} drift vs the pinned baseline "
+            f"({baseline_run_id or '?'}). UNCONFIRMED -- confirmation run could not execute: "
+            f"{confirm_error}. {json.dumps(detail)}"
+        )
+        _send_drift_alert(journal, settings, title, message)
+        result["paged"] = True
+        result["unconfirmed"] = True
+        return result
+
+    assert confirm_result is not None  # confirm_error is None here -> the try block completed cleanly
+    confirm_tier = confirm_result["drift_tier"]
+    confirm_detail = confirm_result.get("drift_detail") or {}
+    confirm_run_id = confirm_result["run_id"]
+    result["confirmation_run_id"] = confirm_run_id
+    confirmed = _TIER_RANK[confirm_tier] <= _TIER_RANK[drift_tier]
+
+    if confirmed:
+        annotated = {**detail, "confirmation": {
+            "status": "confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+        }}
+        _update_drift_detail(journal, trigger_run_id, annotated)
+        title = f"AlphaOS CANARY: model drift CONFIRMED ({drift_tier})"
+        message = (
+            f"Weekly canary run {trigger_run_id} flagged {drift_tier} drift vs the pinned baseline "
+            f"({baseline_run_id or '?'}), confirmed by same-day re-run {confirm_run_id}. "
+            f"{_confirmed_detail_text(detail, confirm_detail)} {json.dumps(detail)}"
+        )
+        _send_drift_alert(journal, settings, title, message)
+        result["paged"] = True
+        result["confirmed"] = True
+    else:
+        annotated = {**detail, "confirmation": {
+            "status": "not_confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+        }}
+        _update_drift_detail(journal, trigger_run_id, annotated)
+        journal.log_system_event(
+            Severity.WARNING, "canary",
+            f"transient wobble -- trip not confirmed: run {trigger_run_id} tripped {drift_tier}, "
+            f"confirmation run {confirm_run_id} did not ({confirm_tier})",
+            {"run_id": trigger_run_id, "confirming_run_id": confirm_run_id,
+             "original_tier": drift_tier, "confirming_tier": confirm_tier},
+        )
+        result["paged"] = False
+        result["confirmed"] = False
 
     return result

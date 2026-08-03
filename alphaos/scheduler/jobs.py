@@ -254,19 +254,25 @@ def run_shadow_label_job(orch, runner) -> dict:
 
 
 def run_canary_run_job(orch, runner) -> dict:
-    """Scheduler wrapper around ``canary.run.run_canary()`` (CANARY). Gated
-    on ``CANARY_ENABLED`` (same pattern as run_text_archive_pull_job) --
-    unlike ATR/benchmark-spine, this makes a REAL weekly OpenAI call, so it
-    stays opt-in until an operator has curated `data/canary/` and decided
-    the recurring cost is worth it. `run_canary()` itself already handles
-    the empty-corpus safe-no-op case and its own cost-guard pre-flight
-    check; this wrapper's only job is the enable gate."""
-    from alphaos.canary.run import run_canary
+    """Scheduler wrapper around ``canary.run.run_canary_confirmed()``
+    (CANARY, then CANARY-2's confirmation-before-paging policy). Gated on
+    ``CANARY_ENABLED`` (same pattern as run_text_archive_pull_job) --
+    unlike ATR/benchmark-spine, this makes a REAL weekly OpenAI call (and,
+    on a confirmable trip, a second same-day one), so it stays opt-in until
+    an operator has curated `data/canary/` and decided the recurring cost is
+    worth it. ``run_canary_confirmed()`` itself already handles the
+    empty-corpus safe-no-op case, its own cost-guard pre-flight check(s),
+    and the confirmation-or-immediate-page decision (CANARY-2 spec Design 1/
+    2/5 -- "the weekly scheduled job path drives all of this"); this
+    wrapper's only job is the enable gate. NOT ``run_canary()`` directly --
+    that would restore the pre-CANARY-2 unconfirmed-page-on-first-trip
+    behavior on the one path (the scheduled job) the spec exists to change."""
+    from alphaos.canary.run import run_canary_confirmed
 
     if not orch.settings.canary_enabled:
         return {"status": "skipped", "reason": "CANARY_ENABLED is false"}
 
-    result = run_canary(orch.journal, orch.settings)
+    result = run_canary_confirmed(orch.journal, orch.settings)
     return {"status": "completed", "canary_result": result}
 
 
