@@ -1486,7 +1486,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="EXP-1: also consider shadow-tier (small/mid) packets (default: excluded)")
     cr = sub.add_parser("canary_run",
                         help="CANARY: replay the frozen golden corpus through the current playbook "
-                             "classifier and compare against the pinned baseline run")
+                             "classifier and compare against the pinned baseline run. Manual/raw: pages "
+                             "on the FIRST trip, WITHOUT CANARY-2's weekly confirmation policy -- use "
+                             "`scheduler_run_job canary_run` for the confirm-before-page path.")
     cr.add_argument("--corpus-dir", default=None, help="defaults to data/canary")
     sub.add_parser("canary_status",
                    help="CANARY: the latest canary run's report (drift tier, parse/fail-safe rate)")

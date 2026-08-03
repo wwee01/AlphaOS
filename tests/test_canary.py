@@ -972,6 +972,299 @@ def test_canary2_canary_status_renders_confirmation_lineage_not_confirmed(tmp_pa
     assert "NOT confirmed" in md
 
 
+# ---------------------------------------------- CANARY-2: audit-fixup regressions
+# Both Opus post-build audits (2026-08-03) independently converged on MUST FIX
+# 1 (the rank rule ate a page across trigger classes) and flagged several
+# other real gaps -- see docs/roadmap/alphaos-canary2-drift-confirmation-spec.md's
+# own dated correction notes for the full adjudication. One test per named
+# finding that specifically needs a NEW regression (existing tests already
+# covered the rest, per the audit's own "core held" verdict).
+
+def _identity_detail(baseline_models, current_models):
+    return {
+        "trigger_class": CANARY_TRIGGER_IDENTITY,
+        "identity_change": {
+            "baseline_response_models": baseline_models, "current_response_models": current_models,
+            "baseline_system_fingerprints": [], "current_system_fingerprints": [],
+        },
+    }
+
+
+def _failsafe_detail(baseline_rate=0.0, current_rate=0.15):
+    return {
+        "trigger_class": CANARY_TRIGGER_FAILSAFE,
+        "failsafe_rate_change": {"baseline_rate": baseline_rate, "current_rate": current_rate},
+    }
+
+
+def test_canary2_auditfix_cross_class_failsafe_trigger_confirmed_by_tier2(tmp_path, journal, monkeypatch):
+    """MUST FIX 1 (both reviewers, CONVERGENT HIGH): a TIER_1/failsafe
+    trigger confirmed by a TIER_2/label-drift re-run -- two consecutive
+    genuinely pageable trips -- must page: the old rank-only rule
+    (confirmed = rank(confirm) <= rank(trigger)) fell through to "not
+    confirmed"/"transient wobble" here (TIER_2 outranks TIER_1 numerically),
+    which was factually false -- the re-run DID trip."""
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import alphaos.canary.run as run_module
+    responses = iter([(DRIFT_TIER_1, _failsafe_detail()), (DRIFT_TIER_2, _label_drift_detail(4, 1, 3))])
+    monkeypatch.setattr(run_module, "_compute_drift", lambda *a, **kw: next(responses))
+    sent = []
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: sent.append(kw) or True)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+
+    assert result["confirmed"] is True
+    assert result["paged"] is True
+    assert len(sent) == 1
+    body = sent[0]["message"]
+    assert "TIER_1" in body and "TIER_2" in body
+    assert "failsafe" in body and "label drift" in body
+    assert "TIER_1" in sent[0]["title"]  # title = the WORSE tier (TIER_1 outranks TIER_2)
+    events = journal.query("SELECT * FROM system_events WHERE category = 'canary'")
+    assert not any("transient wobble" in e["message"] for e in events)  # never for a pageable confirmation
+
+
+def test_canary2_auditfix_cross_class_tier2_confirmed_by_identity_keeps_diff(tmp_path, journal, monkeypatch):
+    """MUST FIX 3 (both reviewers, CONVERGENT MEDIUM): a TIER_2 trigger
+    confirmed by a TIER_1/identity re-run must render the identity diff --
+    the single most actionable fact -- never a literal "confirmation=None"."""
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import alphaos.canary.run as run_module
+    responses = iter([
+        (DRIFT_TIER_2, _label_drift_detail(4, 1, 3)),
+        (DRIFT_TIER_1, _identity_detail(["gpt-5.6-luna"], ["gpt-9.9-SWAPPED"])),
+    ])
+    monkeypatch.setattr(run_module, "_compute_drift", lambda *a, **kw: next(responses))
+    sent = []
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: sent.append(kw) or True)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+
+    assert result["confirmed"] is True
+    assert result["paged"] is True
+    assert len(sent) == 1
+    body = sent[0]["message"]
+    assert "gpt-9.9-SWAPPED" in body  # the identity diff -- never dropped
+    assert "confirmation=None" not in body
+    assert "TIER_1" in sent[0]["title"]  # TIER_1/identity outranks TIER_2/label-drift
+
+
+def test_canary2_auditfix_locked_db_on_pending_event_still_pages(tmp_path, journal, monkeypatch):
+    """MUST FIX 2 (Auditor A HIGH): a momentarily-locked DB on the
+    "drift trip pending confirmation" journal write (run.py's own
+    pre-confirmation event) must not crash the flow -- the eventual page
+    must still happen."""
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import sqlite3
+
+    import alphaos.canary.run as run_module
+    responses = iter([
+        (DRIFT_TIER_2, _label_drift_detail(4, 1, 3)),
+        (DRIFT_TIER_2, _label_drift_detail(5, 2, 3)),
+    ])
+    monkeypatch.setattr(run_module, "_compute_drift", lambda *a, **kw: next(responses))
+    sent = []
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: sent.append(kw) or True)
+
+    real_log_system_event = journal.log_system_event
+    call_count = {"n": 0}
+
+    def flaky_log_system_event(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:  # the FIRST call is the pending-confirmation event
+            raise sqlite3.OperationalError("database is locked")
+        return real_log_system_event(*a, **kw)
+
+    monkeypatch.setattr(journal, "log_system_event", flaky_log_system_event)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+
+    assert result["paged"] is True
+    assert result["confirmed"] is True
+    assert len(sent) == 1
+
+
+def test_canary2_auditfix_locked_db_on_send_path_event_still_pages(tmp_path, journal, monkeypatch):
+    """MUST FIX 2 (Auditor A HIGH): a locked DB on the event write INSIDE
+    _send_drift_alert (the send-path event, distinct from the
+    pending-confirmation event above) must not prevent the actual send --
+    proven here with EVERY log_system_event call failing, on the
+    identity-immediate path (the highest-stakes page in the system, per
+    Auditor A's own probe)."""
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import sqlite3
+
+    import alphaos.canary.run as run_module
+    monkeypatch.setattr(
+        run_module, "_compute_drift",
+        lambda *a, **kw: (DRIFT_TIER_1, _identity_detail(["gpt-5.1"], ["gpt-5.2"])),
+    )
+    sent = []
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: sent.append(kw) or True)
+
+    def always_locked(*a, **kw):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(journal, "log_system_event", always_locked)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+
+    assert result["paged"] is True
+    assert len(sent) == 1  # the page still went out despite every log_system_event call failing
+
+
+def test_canary2_auditfix_corpus_tampered_on_confirmation_pages_then_reraises(tmp_path, monkeypatch):
+    """MUST FIX 5 (Auditor A HIGH): a CorpusTamperedError discovered during
+    the CONFIRMATION run pages UNCONFIRMED first, THEN re-raises, so the
+    weekly job still lands 'failed'/fuse-eligible -- run_canary's own
+    loud-failure contract for a tampered corpus (spec non-goals: unchanged)
+    must survive even when the tamper is found on a confirmation replay,
+    not just the first run of the week. Driven through JobRunner.run_job
+    (the real production entry point that catches/records job failures),
+    not the raw run_canary_run_job wrapper, so the "job lands failed" claim
+    is actually proven, not assumed."""
+    settings = make_settings(CANARY_ENABLED="true", NTFY_TOPIC="test-topic")
+    journal = JournalStore(":memory:")
+    orch = Orchestrator(settings=settings, journal=journal)
+    try:
+        import alphaos.canary.run as run_module
+        corpus_dir = str(tmp_path / "corpus")
+        monkeypatch.setattr(run_module, "DEFAULT_CORPUS_DIR", corpus_dir)
+        _seed_pinned_baseline(journal, settings, corpus_dir)
+
+        call_count = {"n": 0}
+
+        def flaky_compute_drift(*a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return (DRIFT_TIER_2, _label_drift_detail(1, 0, 0, 0, 0))
+            raise CorpusTamperedError("pkt_canarytest01.json content no longer matches its frozen sha256")
+
+        monkeypatch.setattr(run_module, "_compute_drift", flaky_compute_drift)
+        sent = []
+        monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: sent.append(kw) or True)
+
+        job_result = JobRunner(orch).run_job(cadence.JobType.CANARY_RUN)
+
+        # The exception WAS re-raised out of run_canary_confirmed -- JobRunner's
+        # own try/except around job_func() catches it and marks the job_runs
+        # row 'failed' (fuse-eligible), never silently 'completed'.
+        assert job_result["status"] == "failed"
+        # Order proven, not assumed: the UNCONFIRMED page (sent[0]) went out
+        # BEFORE the raise; JobRunner's own generic job-failure alert
+        # (sent[1], its pre-existing contract, unrelated to CANARY-2) follows.
+        assert len(sent) == 2
+        assert "UNCONFIRMED" in sent[0]["title"]
+        assert "canary_run" in sent[1]["title"]
+    finally:
+        journal.close()
+
+
+def test_canary2_auditfix_tier1_detail_includes_label_drift_split():
+    """ALSO FIX 4: the stable/boundary split is computed on TIER_1 runs too
+    (Design 3: "all tiers, including clean runs") -- WITHOUT promoting the
+    tier decision (the Tier-1-before-Tier-2 short-circuit RETURN order is
+    otherwise unchanged)."""
+    baseline_row = {
+        "run_id": "baserun", "n_prompts": 1, "n_parse_or_failsafe": 0,
+        "response_models_json": json.dumps(["gpt-5.1"]), "system_fingerprints_json": json.dumps(["fp_a"]),
+        "mean_confidence": 0.7,
+    }
+    current_agg = {
+        "n_prompts": 1, "n_parse_or_failsafe": 0,
+        "response_models_json": json.dumps(["gpt-5.2"]),  # identity changed -> TIER_1
+        "system_fingerprints_json": json.dumps(["fp_a"]), "mean_confidence": 0.7,
+    }
+    stable_id = sorted(CANARY_STABLE_PACKETS_V1)[0]
+    current_by_packet = {stable_id: {"primary_label": "Breakout", "label_decision": "watch"}}
+    baseline_by_packet = {stable_id: {"primary_label": "Momentum", "label_decision": "watch"}}  # also flips
+
+    tier, detail = _compute_drift(current_agg, current_by_packet, baseline_row, baseline_by_packet, 0.2, 0.15)
+
+    assert tier == DRIFT_TIER_1  # the short-circuit DECISION is unchanged
+    assert "label_drift" in detail  # but the split's COMPUTATION is now unconditional
+    assert detail["label_drift"]["stable_flips"] == 1
+
+
+def test_canary2_auditfix_unclassified_new_rendered_in_flips_text():
+    """ALSO FIX 7: the human-readable flips line names the unclassified_new
+    bucket when nonzero -- spec says "rendered", not just carried in the
+    JSON dump."""
+    from alphaos.canary.run import _split_summary_text
+
+    detail = {"label_drift": {
+        "stable_flips": 1, "stable_total": 13, "boundary_flips": 3, "boundary_total": 7,
+        "unclassified_new": 2, "unclassified_new_flips": 1,
+    }}
+
+    text = _split_summary_text(detail)
+
+    assert "1/2 new-unclassified" in text
+
+
+def test_canary2_auditfix_unclassified_new_omitted_when_zero():
+    """Companion to the above: the segment stays silent (not "0/0") on the
+    common case where the corpus hasn't grown since v1."""
+    from alphaos.canary.run import _split_summary_text
+
+    detail = {"label_drift": {
+        "stable_flips": 1, "stable_total": 13, "boundary_flips": 3, "boundary_total": 7,
+        "unclassified_new": 0, "unclassified_new_flips": 0,
+    }}
+
+    text = _split_summary_text(detail)
+
+    assert "new-unclassified" not in text
+
+
+def test_canary2_auditfix_identity_immediate_lineage_annotated(tmp_path, journal, monkeypatch):
+    """ALSO FIX 6: the identity-immediate trigger row gets a lineage
+    annotation too, so it's never indistinguishable from a raw
+    pre-CANARY-2 trip when read back through canary_status."""
+    from alphaos.reports.canary_report import build_canary_report
+
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import alphaos.canary.run as run_module
+    monkeypatch.setattr(
+        run_module, "_compute_drift",
+        lambda *a, **kw: (DRIFT_TIER_1, _identity_detail(["gpt-5.1"], ["gpt-5.2"])),
+    )
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: True)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+
+    rep = build_canary_report(journal)
+    assert rep["run_id"] == result["run_id"]
+    assert rep["confirmation"]["status"] == "identity_immediate"
+
+
+def test_canary2_auditfix_cli_help_names_confirmation_policy_gap():
+    """ALSO FIX 9: the manual `canary_run` CLI command's help text names the
+    confirmation-policy gap explicitly (behavior unchanged -- Design 5's
+    split is defensible -- just made discoverable), pointing an operator at
+    `scheduler_run_job canary_run` for the confirmed path."""
+    from alphaos.__main__ import build_parser
+
+    help_text = build_parser().format_help()
+
+    assert "scheduler_run_job canary_run" in help_text
+
+
 # -------------------------------------------------------------- daily brief
 def test_canary_health_none_when_no_runs(journal):
     from alphaos.reports.daily_brief import _canary_health

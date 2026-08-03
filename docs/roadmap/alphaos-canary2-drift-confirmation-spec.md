@@ -3,8 +3,13 @@
 Same laws as every spec in this directory: spec → build → independent review →
 **merge only on explicit human instruction**. Additive migrations only
 (`SCHEMA_VERSION` stays 3). §H.1 test discipline. Measurement/alerting-layer
-only: zero decision surface (CANARY is never read by any
-gate/eval/labeller/risk/execution path — unchanged law).
+only: zero decision surface on the LIVE trading path (CANARY is never read by
+any gate/eval/labeller/risk/execution path — unchanged law). **Correction
+(post-build audit, 2026-08-03):** this is narrower than "never read by any
+code" — `shadow_label.check_auto_suspend` (EXP-1, itself a shadow/
+measurement mechanism, not a live decision path) DOES read
+`canary_runs.drift_tier` to gate shadow-labelling suspension; see Out of
+scope below for the follow-up this surfaces.
 
 ## Motivating evidence (9-run characterization, 2026-08-03, operator-instructed)
 
@@ -95,16 +100,50 @@ is worse than no confirmation mechanism.
 2. **Confirmation mechanic.** When a run trips a confirmable class:
    - Journal a `system_events` row (severity `warning`, category `canary`,
      "drift trip pending confirmation: {tier}/{class}, run {id}") — the
-     audit record exists even if everything after this fails.
+     audit record exists even if everything after this fails. **Correction
+     (post-build audit, 2026-08-03, two independent Opus reviews, both
+     CONVERGENT):** this journal write, and the one inside the send path,
+     must be BEST-EFFORT (try/except, mirroring `JobRunner
+     ._log_failure_best_effort`'s own established pattern) — an unwrapped
+     write let a momentarily-locked DB escape the confirmation flow
+     entirely and turn the drift page itself into a content-free generic
+     "AlphaOS job failed: canary_run" alert. The audit record is best-effort
+     precisely so it can never gate the page it exists to protect.
    - Immediately execute ONE more `run_canary` replay in the same process
      (same corpus, ~20 calls; subject to the normal cost preflight).
-   - Confirmation run ALSO trips (same tier class or worse) → **page
-     once**, with both run ids, both mismatch counts, and the
-     stable/boundary split (Design 3) in the alert body, plus the line
-     "confirmed by same-day re-run".
+   - ~~Confirmation run ALSO trips (same tier class or worse) → **page
+     once**~~ **Correction (post-build audit, 2026-08-03, two independent
+     Opus reviews, both CONVERGENT on this exact hole):** "same tier class
+     or worse" was read literally as a rank-only rule
+     (`rank(confirm) <= rank(trigger)`) and treated TIER_1/failsafe and
+     TIER_2/label-drift as one ordered ladder. A TIER_1/failsafe trigger
+     confirmed by a TIER_2 re-run — two consecutive genuinely PAGEABLE
+     trips — fell through to "not confirmed", was journaled as "transient
+     wobble" (factually false: the re-run DID trip), and produced ZERO
+     pages. One reviewer's correlation argument: a real model swap that
+     pushes verbosity past the token ceiling (failsafe) is the same swap
+     that moves labels (TIER_2) — this hole preferentially opened in
+     exactly the scenario CANARY exists to catch. **Adjudicated semantics:**
+     confirmed = the confirmation run trips ANY pageable tier (TIER_1 or
+     TIER_2), regardless of which specific tier/class the trigger was →
+     **page once**, titled with the WORSE of the two tiers, stating BOTH
+     tiers/classes explicitly (e.g. "trigger TIER_1/failsafe, confirmed by
+     TIER_2 label drift"), with both run ids, the stable/boundary split
+     (Design 3, from whichever side is TIER_2) in the alert body, and the
+     line "confirmed by same-day re-run". When the confirmation's own
+     signal shape differs from the trigger's (e.g. a TIER_2 trigger
+     confirmed by a TIER_1/identity re-run), the confirmation's own
+     detail — never a borrowed or absent one, never a literal
+     "confirmation=None" — supplies its half of the body; TIER_2 → TIER_2
+     (the common case) keeps this Design's original literal "mismatch
+     counts: trigger=N, confirmation=M" + split format. TIER_2 → TIER_3 and
+     TIER_2 → clean remain correctly "not confirmed" (neither is pageable).
    - Confirmation run clean → NO page; journal "transient wobble — trip
      not confirmed" (severity `warning`) with both run ids. The weekly
-     history keeps both rows; nothing is deleted.
+     history keeps both rows; nothing is deleted. This language is now
+     reachable ONLY when the confirmation's own tier is genuinely
+     non-pageable (TIER_3/none) — never when it tripped TIER_1 or TIER_2,
+     per the correction above.
    - Confirmation cannot execute (preflight refusal / exception) → page
      the ORIGINAL trip immediately with the UNCONFIRMED marker (see fail
      direction). Never swallowed.
@@ -196,3 +235,14 @@ CANARY-2 semantics); per-set thresholds; provider-fingerprint blind spot
 (`system_fingerprint` NULL on 100% of results — a provider-side silent
 swap behind the same model name remains undetectable; separate ticket if
 ever addressable); TIER_3 paging.
+
+**Added (post-build audit, 2026-08-03):** `shadow_label.check_auto_suspend`'s
+own `canary_runs.drift_tier = 'TIER_1'` latch is pre-existing on `main` and
+CANARY-2 deliberately does not touch that query — but one reviewer proved the
+latch is ALREADY mis-armed there independent of this ticket (a 2026-08-02
+truncation TIER_1 row), currently unreachable only because
+`SHADOW_LABELLING_ENABLED=false`. A proper fix needs real operator-owned
+semantic decisions (does an `unconfirmed_page` trigger count toward suspend?
+must legacy rows NOT be silently un-armed by a query change? does it need a
+time window?) — filed as a follow-up ticket, and it must land before EXP-1
+arms (`SHADOW_LABELLING_ENABLED=true`), not before this ticket merges.

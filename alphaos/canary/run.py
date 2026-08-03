@@ -4,8 +4,15 @@ and the live labeller both use ("one replay engine, one truth") -- weekly,
 comparing model-identity fields and label outputs against the ONE pinned
 baseline run. Answers only "did the configured model change under us?", NOT
 "is this prompt better?" (that's EVAL-1) -- but the two share corpus
-machinery by design (see alphaos/canary/corpus.py). Zero decision surface:
-never read by any gate/eval/labeller/risk/execution path.
+machinery by design (see alphaos/canary/corpus.py). Zero decision surface on
+the LIVE trading path: never read by any gate/eval/labeller/risk/execution
+path. Correction (audit finding, 2026-08-03): this is narrower than "never
+read by any code" -- ``alphaos/scheduler/shadow_label.py``'s
+``check_auto_suspend`` (EXP-1, itself a shadow/measurement-layer mechanism,
+not a live decision path) DOES read ``canary_runs.drift_tier`` to decide
+whether to suspend shadow labelling. That is the one deliberate, named
+exception; see that function's own docstring for the (currently pre-existing,
+out-of-scope-for-CANARY-2) semantics gap it carries forward.
 
 CANARY-2 (docs/roadmap/alphaos-canary2-drift-confirmation-spec.md) adds a
 caller-layer confirmation policy on top of the above, in ``run_canary_confirmed``:
@@ -29,7 +36,7 @@ import json
 from typing import Any, Optional
 
 from alphaos import lineage
-from alphaos.canary.corpus import DEFAULT_CORPUS_DIR, load_corpus
+from alphaos.canary.corpus import CorpusTamperedError, DEFAULT_CORPUS_DIR, load_corpus
 from alphaos.constants import LabelSource, Severity
 from alphaos.scanner.candidate_packet import reconstruct_from_stored
 from alphaos.scheduler import cost_guard
@@ -208,11 +215,16 @@ def _compute_drift(
     label movement (mirrors the spec's own D4 lineage-joint rationale: a
     silent model shift that also moves behavior must be attributed to the
     model, never double-counted as a separate label-drift finding). CANARY-2
-    preserves this exact short-circuit order -- it only ADDS a
+    preserves this exact short-circuit RETURN order -- it only ADDS a
     ``detail["trigger_class"]`` tag (identity/failsafe) to the Tier 1 branch,
-    for the caller layer's confirmation-vs-immediate-page policy, and makes
-    the stable/boundary split (Design 3) unconditional wherever label
-    mismatches are computed at all."""
+    for the caller layer's confirmation-vs-immediate-page policy. Audit fix
+    (2026-08-03, both reviewers/ALSO FIX 4): the stable/boundary split
+    (Design 3 -- "computed wherever mismatches are computed ... including
+    clean runs") is now computed BEFORE the Tier-1 check, so it lands in
+    ``detail`` on every tier including TIER_1 -- the split's own COMPUTATION
+    is unconditional, only the TIER DECISION still short-circuits at Tier 1
+    exactly as before (a label_drift block being present, even "tripped",
+    never itself promotes a TIER_1 result to TIER_2)."""
     if baseline_run is None:
         return DRIFT_NONE, {"reason": "no baseline pinned yet"}
 
@@ -246,6 +258,14 @@ def _compute_drift(
     if failsafe_appeared:
         detail["failsafe_rate_change"] = {"baseline_rate": baseline_rate, "current_rate": round(current_rate, 4)}
 
+    # ALSO FIX 4: computed here, BEFORE the Tier-1 return, so it lands in
+    # drift_detail on every tier -- the decision below still only acts on it
+    # when Tier 1 did NOT already fire, preserving the exact prior severity
+    # order for TIER DECISIONS.
+    label_comparison = _label_comparison(current_by_packet, baseline_by_packet, label_diff_pct)
+    if label_comparison is not None:
+        detail["label_drift"] = label_comparison
+
     if identity_changed or failsafe_appeared:
         # Identity takes priority when both fire together: it's the more
         # certain, deterministic signal, and per policy pages immediately
@@ -253,11 +273,8 @@ def _compute_drift(
         detail["trigger_class"] = CANARY_TRIGGER_IDENTITY if identity_changed else CANARY_TRIGGER_FAILSAFE
         return DRIFT_TIER_1, detail
 
-    label_comparison = _label_comparison(current_by_packet, baseline_by_packet, label_diff_pct)
-    if label_comparison is not None:
-        detail["label_drift"] = label_comparison
-        if label_comparison["tripped"]:
-            return DRIFT_TIER_2, detail
+    if label_comparison is not None and label_comparison["tripped"]:
+        return DRIFT_TIER_2, detail
 
     baseline_conf = baseline_run.get("mean_confidence")
     current_conf = current_agg.get("mean_confidence")
@@ -491,40 +508,128 @@ def _update_drift_detail(journal, run_id: str, detail: dict) -> None:
 
 def _split_summary_text(detail: dict) -> str:
     """The spec's own fixed interpretive sentence (Design 3, verbatim --
-    neutrality-disciplined: states a measured fact, prescribes nothing)."""
+    neutrality-disciplined: states a measured fact, prescribes nothing).
+    ALSO FIX 7: renders the unclassified_new bucket too, when nonzero --
+    spec says "rendered", not just carried in the JSON dump."""
     label_drift = detail.get("label_drift") or {}
+    segments = [
+        f"{label_drift.get('stable_flips', 0)}/{label_drift.get('stable_total', 0)} stable",
+        f"{label_drift.get('boundary_flips', 0)}/{label_drift.get('boundary_total', 0)} boundary",
+    ]
+    unclassified_total = label_drift.get("unclassified_new", 0)
+    if unclassified_total:
+        segments.append(f"{label_drift.get('unclassified_new_flips', 0)}/{unclassified_total} new-unclassified")
     return (
-        f"flips: {label_drift.get('stable_flips', 0)}/{label_drift.get('stable_total', 0)} stable, "
-        f"{label_drift.get('boundary_flips', 0)}/{label_drift.get('boundary_total', 0)} boundary. "
+        "flips: " + ", ".join(segments) + ". "
         "Stable-packet flips are high-signal (never flipped in the 9-run characterization); "
         "boundary flips are the labeller's known decision-boundary wobble."
     )
 
 
-def _confirmed_detail_text(detail: dict, confirm_detail: dict) -> str:
-    """Renders "both mismatch counts" (spec's Alert text bullet) for whichever
-    confirmable trigger class actually fired -- TIER_2 label drift carries a
-    label_drift block (and therefore the stable/boundary split); a TIER_1
-    failsafe-only trip never computes label_drift at all (the Tier-1
-    short-circuit in ``_compute_drift`` returns before the label-compare loop
-    even runs, deliberately preserved), so it renders its own fail-safe-rate
-    pair instead -- there is no "mismatch count" for a fail-safe trip to
-    literally report."""
-    label_drift = detail.get("label_drift")
-    if label_drift:
+def _tier_headline(tier: str, detail: dict) -> str:
+    """One self-describing sentence for whichever concrete signal a (tier,
+    detail) pair actually carries. Branches on the TIER itself, not on
+    inferred detail shape -- ALSO FIX 4 means ``label_drift`` is now present
+    on every tier's detail, so "label_drift present" alone no longer implies
+    TIER_2. Used for BOTH the trigger side and the confirmation side of a
+    confirmed page (MUST FIX 3, audit 2026-08-03): a TIER_2 trigger confirmed
+    by a TIER_1/identity re-run must never render a literal
+    "confirmation=None" for the identity diff -- the single most actionable
+    fact -- it must fall back to THIS, the confirmation run's own headline
+    fact, read from its own detail."""
+    if tier == DRIFT_TIER_1:
+        identity = detail.get("identity_change")
+        if identity:
+            return (
+                f"{tier}/identity: response_model {identity.get('baseline_response_models')} -> "
+                f"{identity.get('current_response_models')}, system_fingerprint "
+                f"{identity.get('baseline_system_fingerprints')} -> {identity.get('current_system_fingerprints')}"
+            )
+        failsafe = detail.get("failsafe_rate_change")
+        if failsafe:
+            return (
+                f"{tier}/failsafe: parse/fail-safe rate {failsafe.get('baseline_rate')} -> "
+                f"{failsafe.get('current_rate')}"
+            )
+        return f"{tier}: (no identity/failsafe detail recorded on this run)"
+    if tier == DRIFT_TIER_2:
+        label_drift = detail.get("label_drift") or {}
+        return (
+            f"{tier}/label drift: {label_drift.get('label_mismatches')}/{label_drift.get('compared')} "
+            f"mismatches ({label_drift.get('label_mismatch_rate')})"
+        )
+    return f"{tier}"
+
+
+def _worse_tier(tier_a: str, tier_b: str) -> str:
+    """Lower _TIER_RANK is more severe (worse)."""
+    return tier_a if _TIER_RANK[tier_a] <= _TIER_RANK[tier_b] else tier_b
+
+
+def _confirmed_message_body(drift_tier: str, detail: dict, confirm_tier: str, confirm_detail: dict) -> str:
+    """MUST FIX 1 + 3 (audit 2026-08-03): a confirmed page's body must never
+    assume the confirmation shares the trigger's own signal shape -- the
+    rank-only "confirmed" check that used to gate this function's caller
+    already let a TIER_1/failsafe trigger get cross-confirmed by a TIER_2
+    label-drift re-run (or vice versa), and the OLD renderer here silently
+    produced "confirmation=None" for that case because it only ever looked
+    at ``detail["label_drift"]``/``detail["failsafe_rate_change"]`` (the
+    TRIGGER's own shape), never the confirmation's.
+
+    Same-class case (both TIER_2) keeps the spec's own literal Design-3
+    format verbatim (test 4's own literal assertions pin this). Every other
+    combination (TIER_1+TIER_1, TIER_1+TIER_2, TIER_2+TIER_1) states BOTH
+    tiers/classes explicitly, each read from its OWN detail -- never a
+    borrowed or absent one -- plus the stable/boundary split from whichever
+    side is TIER_2, if either is."""
+    if drift_tier == DRIFT_TIER_2 and confirm_tier == DRIFT_TIER_2:
+        trigger_label_drift = detail.get("label_drift") or {}
         confirm_label_drift = confirm_detail.get("label_drift") or {}
         return (
-            f"mismatch counts: trigger={label_drift.get('label_mismatches')}, "
+            f"mismatch counts: trigger={trigger_label_drift.get('label_mismatches')}, "
             f"confirmation={confirm_label_drift.get('label_mismatches')}. {_split_summary_text(detail)}"
         )
-    failsafe = detail.get("failsafe_rate_change")
-    if failsafe:
-        confirm_failsafe = confirm_detail.get("failsafe_rate_change") or {}
-        return (
-            f"fail-safe rate: trigger={failsafe.get('current_rate')}, "
-            f"confirmation={confirm_failsafe.get('current_rate')} (baseline {failsafe.get('baseline_rate')})."
-        )
-    return ""
+    parts = [
+        f"trigger {_tier_headline(drift_tier, detail)}; "
+        f"confirmation {_tier_headline(confirm_tier, confirm_detail)}."
+    ]
+    if drift_tier == DRIFT_TIER_2:
+        parts.append(_split_summary_text(detail))
+    elif confirm_tier == DRIFT_TIER_2:
+        parts.append(_split_summary_text(confirm_detail))
+    return " ".join(parts)
+
+
+def _log_canary_event_best_effort(
+    journal, severity: Severity, message: str, detail: Optional[dict] = None,
+) -> None:
+    """MUST FIX 2 (audit 2026-08-03, both reviewers): mirrors
+    ``JobRunner._log_failure_best_effort``'s own established try/except
+    pattern (job_runner.py) -- a momentarily-locked DB (a live failure mode)
+    must never crash the confirmation flow on top of, or instead of, the
+    page it exists to protect. Audit-proven: without this wrap, a locked-DB
+    write here escaped ``run_canary_confirmed`` entirely and turned the
+    highest-stakes page in the system (the drift page itself, including the
+    deterministic identity-immediate path) into a content-free generic
+    "AlphaOS job failed: canary_run" alert. Audit logging is best-effort and
+    must never gate/mask the actual alert send."""
+    try:
+        journal.log_system_event(severity, "canary", message, detail)
+    except Exception:  # noqa: BLE001 -- best-effort, see docstring
+        pass
+
+
+def _update_drift_detail_best_effort(journal, run_id: str, detail: dict) -> None:
+    """Same best-effort law as ``_log_canary_event_best_effort``, applied to
+    the lineage annotation UPDATE -- and (see call sites below) always
+    invoked AFTER the page has already been sent, never before, so a
+    locked-DB failure here can degrade the report/brief layer's lineage
+    accuracy but can never suppress a page that was otherwise ready to
+    send."""
+    try:
+        _update_drift_detail(journal, run_id, detail)
+    except Exception:  # noqa: BLE001 -- best-effort, see docstring
+        pass
 
 
 def _send_drift_alert(journal, settings, title: str, message: str) -> None:
@@ -532,8 +637,11 @@ def _send_drift_alert(journal, settings, title: str, message: str) -> None:
     ``cards/demotion.py``'s established pattern: the durable system_events
     audit row for a page is journaled BEFORE the network call, so the record
     survives even if ``alerts.send_alert`` itself fails or is unreachable
-    (test 12 -- "the confirmed-drift system_event persists")."""
-    journal.log_system_event(Severity.WARNING, "canary", message, {"title": title})
+    (test 12 -- "the confirmed-drift system_event persists"). MUST FIX 2:
+    the journal write itself is now best-effort -- it must record the page
+    when it can, but a DB hiccup here must never prevent the send that
+    follows it (the PAGE is the protected asset, not the audit row)."""
+    _log_canary_event_best_effort(journal, Severity.WARNING, message, {"title": title})
     alerts.send_alert(settings, title=title, message=message, priority="high", journal=journal)
 
 
@@ -544,7 +652,8 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
     confirmation happens inside this SAME process/caller layer, never as a
     second scheduler job type or lock key. Manual `alphaos canary_run` keeps
     calling ``run_canary`` directly (unconfirmed, unchanged) via
-    ``Orchestrator.canary_run``.
+    ``Orchestrator.canary_run`` -- see that CLI command's own help text for
+    the explicit "no confirmation policy" callout (ALSO FIX 9).
 
     Policy (spec's own table):
       TIER_1 / identity   -> page immediately, no confirmation run.
@@ -555,7 +664,31 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
     The ONE law that shapes every branch below (spec's "fail direction"):
     any failure in the confirmation machinery -- cost preflight refusal,
     exception, corpus tamper, anything -- pages the ORIGINAL trip
-    immediately, marked UNCONFIRMED. Never silence.
+    immediately, marked UNCONFIRMED. Never silence. MUST FIX 5 (audit
+    2026-08-03): a ``CorpusTamperedError`` on the confirmation run is paged
+    UNCONFIRMED first, exactly like every other confirmation failure, but
+    THEN re-raised -- ``run_canary``'s own loud-failure/fuse-eligible
+    contract for a tampered corpus (spec non-goals: unchanged) must survive
+    even when the tamper is discovered on a confirmation replay rather than
+    the first run of the week; a returned ``"error"`` key here would let
+    ``JobRunner`` mark the job merely 'completed', exactly the swallow
+    ``tests/test_canary.py``'s own
+    ``test_run_canary_propagates_corpus_tampered_error_uncaught`` exists to
+    prevent for the single-run case.
+
+    MUST FIX 1 (audit 2026-08-03, CONVERGENT, both reviewers): "confirmed"
+    means the confirmation run tripped ANY pageable tier (TIER_1 or TIER_2),
+    not "the same or a numerically worse tier than the trigger". The old
+    rank-only rule treated TIER_1/failsafe and TIER_2/label-drift as one
+    ordered ladder -- a TIER_1/failsafe trigger confirmed by a TIER_2
+    re-run (two consecutive genuinely pageable trips) fell through to "not
+    confirmed", got journaled as "transient wobble" (factually false: the
+    re-run DID trip), and produced zero pages. Auditor B's correlation
+    argument: a real model swap that pushes verbosity past the token ceiling
+    (failsafe) is the same swap that moves labels (TIER_2) -- this was
+    preferentially open in exactly the scenario CANARY exists to catch.
+    TIER_2 -> TIER_3 and TIER_2 -> clean remain correctly "not confirmed"
+    (neither is pageable).
 
     The loop guard is structural, not conventional: the confirmation replay
     is always a raw ``run_canary(confirmation_of=...)`` call, never a
@@ -587,20 +720,27 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         )
         _send_drift_alert(journal, settings, title, message)
         result["paged"] = True
+        # ALSO FIX 6: lineage-annotate even the immediate-page path, so a
+        # trigger row is never indistinguishable from a raw pre-CANARY-2
+        # trip -- best-effort, AFTER the send (never gates it).
+        _update_drift_detail_best_effort(
+            journal, trigger_run_id, {**detail, "confirmation": {"status": "identity_immediate"}},
+        )
         return result
 
     if drift_tier not in (DRIFT_TIER_1, DRIFT_TIER_2):
         return result  # TIER_3 / none -- never paged, unchanged
 
     trigger_class = detail.get("trigger_class", "label_drift")
-    journal.log_system_event(
-        Severity.WARNING, "canary",
+    _log_canary_event_best_effort(
+        journal, Severity.WARNING,
         f"drift trip pending confirmation: {drift_tier}/{trigger_class}, run {trigger_run_id}",
         {"run_id": trigger_run_id, "drift_tier": drift_tier, "trigger_class": trigger_class},
     )
 
     confirm_result: Optional[dict] = None
     confirm_error: Optional[str] = None
+    confirm_exc: Optional[BaseException] = None
     try:
         confirm_result = run_canary(
             journal, settings, corpus_dir=corpus_dir,
@@ -610,12 +750,11 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
             confirm_error = confirm_result["error"]
     except Exception as exc:  # noqa: BLE001 -- fail TOWARD paging (the one law); never swallow
         confirm_error = f"{type(exc).__name__}: {exc}"
+        confirm_exc = exc
 
     if confirm_error is not None:
-        annotated = {**detail, "confirmation": {"status": "unconfirmed_page", "reason": confirm_error}}
-        _update_drift_detail(journal, trigger_run_id, annotated)
-        journal.log_system_event(
-            Severity.ERROR, "canary",
+        _log_canary_event_best_effort(
+            journal, Severity.ERROR,
             f"canary confirmation run for {trigger_run_id} could not execute: {confirm_error} "
             "-- paging the original trip UNCONFIRMED.",
             {"run_id": trigger_run_id, "reason": confirm_error},
@@ -629,36 +768,62 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         _send_drift_alert(journal, settings, title, message)
         result["paged"] = True
         result["unconfirmed"] = True
+        _update_drift_detail_best_effort(
+            journal, trigger_run_id,
+            {**detail, "confirmation": {"status": "unconfirmed_page", "reason": confirm_error}},
+        )
+        if isinstance(confirm_exc, CorpusTamperedError):
+            # MUST FIX 5: page first (done above), THEN re-raise -- order
+            # matters. The UNCONFIRMED page is durable and sent regardless;
+            # this re-raise is what makes JobRunner mark the job
+            # failed/fuse-eligible, matching run_canary's own frozen
+            # loud-failure contract for a tampered corpus.
+            raise confirm_exc
         return result
 
-    assert confirm_result is not None  # confirm_error is None here -> the try block completed cleanly
+    if confirm_result is None:
+        # Structurally unreachable: confirm_error is None here only when the
+        # try block above completed without raising AND without an "error"
+        # key, which is the one path that assigns confirm_result. Made an
+        # explicit loud failure rather than a bare `assert` (ALSO FIX 8 --
+        # asserts strip under -O, and this is a safety-relevant path where
+        # silently falling through would be worse than a clear crash).
+        raise RuntimeError(
+            "run_canary_confirmed: unreachable state -- confirm_error is None but "
+            "confirm_result is None (structural invariant violated)"
+        )
+
     confirm_tier = confirm_result["drift_tier"]
     confirm_detail = confirm_result.get("drift_detail") or {}
     confirm_run_id = confirm_result["run_id"]
     result["confirmation_run_id"] = confirm_run_id
-    confirmed = _TIER_RANK[confirm_tier] <= _TIER_RANK[drift_tier]
+    # MUST FIX 1: "confirmed" = the confirmation tripped ANY pageable tier,
+    # not "the same-or-worse tier on one ladder" (see the function docstring
+    # for the full cross-class-hole rationale).
+    confirmed = confirm_tier in (DRIFT_TIER_1, DRIFT_TIER_2)
 
     if confirmed:
-        annotated = {**detail, "confirmation": {
-            "status": "confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
-        }}
-        _update_drift_detail(journal, trigger_run_id, annotated)
-        title = f"AlphaOS CANARY: model drift CONFIRMED ({drift_tier})"
+        worse = _worse_tier(drift_tier, confirm_tier)
+        title = f"AlphaOS CANARY: model drift CONFIRMED ({worse})"
         message = (
-            f"Weekly canary run {trigger_run_id} flagged {drift_tier} drift vs the pinned baseline "
-            f"({baseline_run_id or '?'}), confirmed by same-day re-run {confirm_run_id}. "
-            f"{_confirmed_detail_text(detail, confirm_detail)} {json.dumps(detail)}"
+            f"Weekly canary run {trigger_run_id} (trigger {drift_tier}) flagged drift vs the pinned "
+            f"baseline ({baseline_run_id or '?'}), confirmed by same-day re-run {confirm_run_id} "
+            f"({confirm_tier}). {_confirmed_message_body(drift_tier, detail, confirm_tier, confirm_detail)} "
+            f"{json.dumps({'trigger_detail': detail, 'confirmation_detail': confirm_detail})}"
         )
         _send_drift_alert(journal, settings, title, message)
         result["paged"] = True
         result["confirmed"] = True
+        _update_drift_detail_best_effort(journal, trigger_run_id, {**detail, "confirmation": {
+            "status": "confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+        }})
     else:
-        annotated = {**detail, "confirmation": {
-            "status": "not_confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
-        }}
-        _update_drift_detail(journal, trigger_run_id, annotated)
-        journal.log_system_event(
-            Severity.WARNING, "canary",
+        # Only reachable when confirm_tier is TIER_3 or none -- genuinely
+        # non-pageable, so "transient wobble / not confirmed" stays accurate
+        # (MUST FIX 1's own requirement: never emit this language when the
+        # confirmation run's own drift_tier IS pageable).
+        _log_canary_event_best_effort(
+            journal, Severity.WARNING,
             f"transient wobble -- trip not confirmed: run {trigger_run_id} tripped {drift_tier}, "
             f"confirmation run {confirm_run_id} did not ({confirm_tier})",
             {"run_id": trigger_run_id, "confirming_run_id": confirm_run_id,
@@ -666,5 +831,8 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         )
         result["paged"] = False
         result["confirmed"] = False
+        _update_drift_detail_best_effort(journal, trigger_run_id, {**detail, "confirmation": {
+            "status": "not_confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+        }})
 
     return result

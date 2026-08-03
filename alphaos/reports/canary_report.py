@@ -90,12 +90,15 @@ def render_markdown(rep: dict) -> str:
     if confirmation:
         status = confirmation.get("status")
         cid = confirmation.get("confirming_run_id")
+        ctier = confirmation.get("confirming_drift_tier")
         if status == "confirmed":
-            drift_line += f" -- CONFIRMED by same-day re-run {cid}"
+            drift_line += f" -- CONFIRMED by same-day re-run {cid} ({ctier})"
         elif status == "not_confirmed":
             drift_line += f" -- NOT confirmed by re-run {cid} (transient wobble, no page sent)"
         elif status == "unconfirmed_page":
             drift_line += f" -- UNCONFIRMED (confirmation could not execute: {confirmation.get('reason')})"
+        elif status == "identity_immediate":
+            drift_line += " -- deterministic identity change, paged immediately (no confirmation run)"
     lines.append(drift_line)
     if rep.get("confirmation_of"):
         lines.append(f"- This run is a same-day confirmation replay of {rep['confirmation_of']}.")
