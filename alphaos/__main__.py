@@ -1034,6 +1034,18 @@ def cmd_flatten(orch: Orchestrator) -> int:
     return 0 if res.get("ok") else 1
 
 
+def cmd_cancel_order(orch: Orchestrator, identifier: str) -> int:
+    """ENTRY-TTL-1 spec 3.7: targeted manual cancel of one unfilled
+    alpaca_paper entry order, by proposal_id or order_id, through the SAME
+    code path the automated staleness watchdog uses (reason
+    ORDER_CANCELLED_BY_OPERATOR). Refuses -- prints the reason, exit 1 --
+    for an unknown id or a non-cancellable order (already filled/cancelled,
+    not an alpaca_paper order, or the broker isn't connected)."""
+    res = orch.orders.cancel_order_operator(identifier)
+    _print({"cancel_order": res})
+    return 0 if res.get("ok") else 1
+
+
 def cmd_reconcile_report(orch: Orchestrator) -> int:
     _print({"broker_ledger_reconciliation": orch.broker_ledger_report()})
     return 0
@@ -1255,6 +1267,13 @@ def build_parser() -> argparse.ArgumentParser:
     rj.add_argument("--reason", default="cli rejected")
     sub.add_parser("calibration_report", help="cost-model calibration: modeled vs actual paper execution")
     sub.add_parser("flatten", help="PAPER-ONLY: cancel open Alpaca paper orders + close paper positions")
+    co = sub.add_parser(
+        "cancel_order",
+        help="ENTRY-TTL-1: targeted cancel of ONE unfilled alpaca_paper entry order (proposal_id "
+             "or order_id), same code path as the automated staleness watchdog "
+             "(reason ORDER_CANCELLED_BY_OPERATOR)",
+    )
+    co.add_argument("identifier", help="a proposal_id or order_id")
     sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
     sub.add_parser("protection_status",
                    help="broker protection watchdog status: unprotected/mismatched positions, open incidents")
@@ -1554,6 +1573,8 @@ def main(argv=None) -> int:
             return cmd_calibration_report(orch)
         if args.command == "flatten":
             return cmd_flatten(orch)
+        if args.command == "cancel_order":
+            return cmd_cancel_order(orch, args.identifier)
         if args.command == "reconcile_report":
             return cmd_reconcile_report(orch)
         if args.command == "protection_status":

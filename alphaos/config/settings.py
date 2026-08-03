@@ -244,6 +244,20 @@ class Settings:
     # be silently treated as safe forever.
     protection_check_error_escalation_threshold: int
 
+    # --- ENTRY-TTL-1: working-order staleness watchdog ---
+    # AlphaOS's staleness protection previously ended at broker submission: a
+    # GTC bracket entry (protective legs must survive overnight, so the entry
+    # leg inherits GTC too) could sit unfilled at the broker indefinitely --
+    # unbounded thesis age, in the exact adverse-selection direction (the
+    # order can now only fill on a pullback through the limit, i.e. precisely
+    # when the momentum thesis that justified the trade is failing). This is
+    # exposure-REDUCING (cancel-only, never re-prices/resubmits/closes a
+    # position), so -- unlike unattended auto-approval, which ships opt-in
+    # because it ADDS exposure -- this defaults ON.
+    entry_order_staleness_enabled: bool
+    entry_order_ttl_trading_days: int
+    entry_order_max_adverse_drift_pct: float
+
     # --- scheduler v1.5 (cadence layer; scan/monitor/outcomes/digest jobs) ---
     scheduler_ai_cost_cap_calls_per_30d: int
     scheduler_scan_windows: str
@@ -974,6 +988,30 @@ class Settings:
                 )
             )
 
+        # 8) ENTRY-TTL-1 configured-but-inert trap: master switch ON with
+        # BOTH trigger legs at 0 silently does nothing forever -- every
+        # unfilled entry order lives at the broker indefinitely while
+        # ENTRY_ORDER_STALENESS_ENABLED reports "true". WARNING, not ERROR/
+        # CRITICAL: this degrades safety (loses the staleness guard) but
+        # never makes the system's other behavior unsafe/undefined, so it
+        # must not block startup -- same severity class as the unattended-
+        # window alignment check above.
+        both_legs_off = self.entry_order_ttl_trading_days == 0 and self.entry_order_max_adverse_drift_pct == 0
+        if self.entry_order_staleness_enabled and both_legs_off:
+            checks.append(
+                StartupCheck(
+                    "entry_order_staleness_configured_but_inert",
+                    False,
+                    "ENTRY_ORDER_STALENESS_ENABLED=true but both "
+                    "ENTRY_ORDER_TTL_TRADING_DAYS and ENTRY_ORDER_MAX_ADVERSE_DRIFT_PCT are 0 "
+                    "-- the master switch is on but neither trigger leg can ever fire, so no "
+                    "unfilled entry order will ever be auto-cancelled. Set at least one leg "
+                    "above 0, or set ENTRY_ORDER_STALENESS_ENABLED=false to make the disabled "
+                    "state explicit.",
+                    Severity.WARNING,
+                )
+            )
+
         return checks
 
     def startup_ok(self) -> bool:
@@ -1097,6 +1135,34 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"disables escalation and reintroduces fail-open behavior for an unverifiable "
             f"position."
         )
+
+    # --- ENTRY-TTL-1: working-order staleness watchdog. Master switch defaults
+    # ON (exposure-reducing; see the dataclass field comment). The two trigger
+    # legs are independently disableable via 0 -- 0 is a valid, deliberate
+    # "this leg is off" value, not an error, so the bound checks below start
+    # at 0 rather than 1.
+    entry_order_staleness_enabled = _get_bool(src, "ENTRY_ORDER_STALENESS_ENABLED", True)
+    entry_order_ttl_trading_days = _get_int(src, "ENTRY_ORDER_TTL_TRADING_DAYS", 2)
+    if not (0 <= entry_order_ttl_trading_days <= 20):
+        raise SettingsError(
+            f"ENTRY_ORDER_TTL_TRADING_DAYS={entry_order_ttl_trading_days!r} must be between "
+            f"0 and 20. 0 deliberately disables this leg (drift-only mode); a month of "
+            f"trading days (20) is already far past any legitimate momentum thesis's shelf "
+            f"life, so an unbounded value would defeat the point of a staleness guard."
+        )
+    entry_order_max_adverse_drift_pct = _get_float(src, "ENTRY_ORDER_MAX_ADVERSE_DRIFT_PCT", 2.0)
+    if not (0 <= entry_order_max_adverse_drift_pct <= 25.0):
+        raise SettingsError(
+            f"ENTRY_ORDER_MAX_ADVERSE_DRIFT_PCT={entry_order_max_adverse_drift_pct!r} must be "
+            f"between 0 and 25. 0 deliberately disables this leg (TTL-only mode); beyond a "
+            f"25% adverse move even the most patient limit order should be reviewed by a "
+            f"human, so an unbounded value would defeat the point of a staleness guard."
+        )
+    # Configured-but-inert trap (master ON with BOTH legs at 0 -- see
+    # validate_startup()'s "entry_order_staleness_configured_but_inert" check
+    # below) is a legal combination that silently does nothing: every
+    # unfilled entry would live forever with the master switch reporting
+    # "enabled". Surfaced as a Tier-B WARNING there, not raised here.
 
     # --- scheduler v1.5: AI cost cap, scan windows, monitor/outcomes cadence,
     # digest time, stale-job threshold (all cadence-layer, none change scan/
@@ -1478,6 +1544,9 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         requires_persistent_protection=_get_bool(src, "REQUIRES_PERSISTENT_PROTECTION", True),
         allow_day_tif_for_multiday_positions=allow_day_tif_for_multiday_positions,
         protection_check_error_escalation_threshold=protection_check_error_escalation_threshold,
+        entry_order_staleness_enabled=entry_order_staleness_enabled,
+        entry_order_ttl_trading_days=entry_order_ttl_trading_days,
+        entry_order_max_adverse_drift_pct=entry_order_max_adverse_drift_pct,
         scheduler_ai_cost_cap_calls_per_30d=scheduler_ai_cost_cap_calls_per_30d,
         scheduler_scan_windows=scheduler_scan_windows,
         scheduler_monitor_interval_minutes=scheduler_monitor_interval_minutes,

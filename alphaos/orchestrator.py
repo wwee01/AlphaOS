@@ -164,7 +164,8 @@ class Orchestrator:
         self.approvals = ApprovalEngine(self.settings, self.journal)
         self.positions = PositionManager(self.settings, self.journal, self.market)
         self.orders = OrderManager(
-            self.settings, self.journal, position_manager=self.positions, kill_switch=self.kill_switch
+            self.settings, self.journal, position_manager=self.positions, kill_switch=self.kill_switch,
+            market_data=self.market,  # ENTRY-TTL-1: drift-leg price snapshots share the same client
         )
         self.recon = DailyRecon(self.settings, self.journal)
         self._startup_logged = False
