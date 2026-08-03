@@ -1523,9 +1523,19 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         # thesis / invalidation / risk + advisory readiness). That needs ~250
         # completion tokens; the old 220 default truncated it (finish_reason=
         # length) so JSON parsing raised and EVERY candidate failed safe to
-        # reject — the live pipeline could never propose. 800 leaves headroom and
-        # costs nothing extra (billed on actual tokens; the model stops ~260).
-        label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 800),
+        # reject — the live pipeline could never propose. Raised to 800, then to
+        # 1200 on 2026-08-02 after the SAME failure recurred at the 800 ceiling:
+        # CANARY run canaryrun_f607c73a2589 flagged TIER_1 because one packet
+        # (COST) truncated. Evidence for the raise: this comment's own "the model
+        # stops ~260" no longer holds — measured completion tokens per canary
+        # packet have roughly doubled since it was written (9063/20 = ~453 avg on
+        # 2026-08-02, and ~470-510 on every run back to 2026-07-12), i.e. the
+        # model has drifted more verbose while the ceiling stayed put. Costs
+        # nothing extra (billed on ACTUAL tokens, not the ceiling); a bigger
+        # ceiling only lets a long answer finish instead of being destroyed.
+        # If truncation recurs, raise again and check whether verbosity is still
+        # climbing — a moving ceiling is a symptom, not the disease.
+        label_max_output_tokens=_get_int(src, "LABEL_MAX_OUTPUT_TOKENS", 1200),
         label_propose_threshold=_get_float(src, "LABEL_PROPOSE_THRESHOLD", 0.40),
         label_min_confidence_to_propose=_get_float(src, "LABEL_MIN_CONFIDENCE_TO_PROPOSE", 0.50),
         # Labeller fail-safe VISIBILITY thresholds (warn/critical on high fail-safe
