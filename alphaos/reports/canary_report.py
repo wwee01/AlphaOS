@@ -21,7 +21,13 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from alphaos.canary.run import DRIFT_NONE
+from alphaos.constants import (
+    CANARY_CONFIRMATION_STATUS_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE,
+    CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE,
+    DRIFT_NONE,
+)
 
 
 def build_canary_report(journal, run_id: Optional[str] = None) -> dict:
@@ -91,13 +97,13 @@ def render_markdown(rep: dict) -> str:
         status = confirmation.get("status")
         cid = confirmation.get("confirming_run_id")
         ctier = confirmation.get("confirming_drift_tier")
-        if status == "confirmed":
+        if status == CANARY_CONFIRMATION_STATUS_CONFIRMED:
             drift_line += f" -- CONFIRMED by same-day re-run {cid} ({ctier})"
-        elif status == "not_confirmed":
+        elif status == CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED:
             drift_line += f" -- NOT confirmed by re-run {cid} (transient wobble, no page sent)"
-        elif status == "unconfirmed_page":
+        elif status == CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE:
             drift_line += f" -- UNCONFIRMED (confirmation could not execute: {confirmation.get('reason')})"
-        elif status == "identity_immediate":
+        elif status == CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE:
             drift_line += " -- deterministic identity change, paged immediately (no confirmation run)"
     lines.append(drift_line)
     if rep.get("confirmation_of"):

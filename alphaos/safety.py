@@ -99,14 +99,24 @@ class ShadowLabelSuspendSwitch:
     reason: presence of the marker file means "engaged", survives restarts,
     and any process (scheduler/dashboard/CLI) agrees without shared state.
 
-    Auto-suspend triggers (trailing feed_coverage below the arming floor for
-    3 consecutive trading days; any CANARY Tier-1 drift event) engage this
-    switch programmatically -- see ``alphaos.scheduler.shadow_label.
-    check_auto_suspend``. Clearing it is a deliberate operator action
-    (delete the file, or a future CLI command), never automatic -- an
-    auto-suspend is "force off + page, don't wait to finish the week," not
-    a condition that should silently self-heal the moment the metric
-    recovers for one good tick.
+    Auto-suspend triggers on either of two arms (SUSP-1, docs/roadmap/
+    alphaos-susp1-canary-aware-suspend-spec.md, audit-fixup round 2):
+    trailing feed_coverage below the arming floor for 3 consecutive trading
+    days; OR a recent CANARY trigger row (within
+    ``SHADOW_SUSPEND_CANARY_WINDOW_DAYS``) whose confirmation status is not
+    an explicit system-proven-transient all-clear -- a TIER_1 trigger
+    latches on identity/confirmed/unconfirmed_page/legacy/unrecognized
+    (only ``not_confirmed`` releases it), and a TIER_2 trigger latches ONLY
+    when cross-class-confirmed by a TIER_1-severity same-day re-run. Engaged
+    programmatically -- see ``alphaos.scheduler.shadow_label.
+    check_auto_suspend`` and its own ``_canary_confirmation_latch`` for the
+    exact, current per-tier semantics (this docstring intentionally does not
+    re-derive them -- it went stale once already after SUSP-1's own
+    confirmation filtering, before the cross-class arm even existed).
+    Clearing it is a deliberate operator action (delete the file, or a
+    future CLI command), never automatic -- an auto-suspend is "force off +
+    page, don't wait to finish the week," not a condition that should
+    silently self-heal the moment the metric recovers for one good tick.
     """
 
     def __init__(self, path: str = "data/SHADOW_LABEL_SUSPENDED"):

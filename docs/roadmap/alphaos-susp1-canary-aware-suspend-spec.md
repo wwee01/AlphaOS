@@ -65,7 +65,9 @@ metadata is broken); only an explicit `not_confirmed` verdict releases.
 
 ## Latch semantics (the whole ticket)
 
-A TIER_1 row latches the suspend iff ALL of:
+~~A TIER_1 row~~ A TIER_1 row (or a TIER_2 row via `confirmed-cross-class`
+— see the STATUS CORRECTION after clause 3 below) latches the suspend iff
+ALL of:
 
 1. **It is a trigger row** — `confirmation_of IS NULL`. Confirmation runs
    never latch independently; their verdict lives on their trigger row's
@@ -81,6 +83,14 @@ A TIER_1 row latches the suspend iff ALL of:
    - Key absent / JSON malformed / legacy pre-CANARY-2 row → LATCHES
      (conservative default; legacy rows are never silently un-armed by
      code — see the operator decision below).
+   - *(added, STATUS CORRECTION below)* a real, non-None status matching
+     NONE of the four literals above → LATCHES too, but under its OWN
+     `unrecognized-status` arm, not lumped in with the legacy case — a
+     legacy row ages out of the window on its own; an unrecognized status
+     does not, since current code is writing it every cycle.
+   - *(TIER_2 rows only, STATUS CORRECTION below)* `confirmed` with
+     `confirming_drift_tier == TIER_1` → LATCHES (`confirmed-cross-class`).
+     Every other TIER_2 outcome does NOT latch.
 3. **It is within the recency window** — `started_at_utc` within the last
    `SHADOW_SUSPEND_CANARY_WINDOW_DAYS` (new setting, default **14**,
    validated [7, 90]). Rationale: real drift is persistent and the canary
@@ -95,6 +105,54 @@ A TIER_1 row latches the suspend iff ALL of:
 The suspend reason string names which arm latched (identity / confirmed /
 unconfirmed / legacy-conservative) and the run id, so the suspend's own
 page tells the operator what class of evidence tripped it.
+
+> **STATUS CORRECTION (2026-08, audit-fixup round 2 — two independent Opus
+> audits, both convergent on this finding as their own recommendation, both
+> re-verified the scoping in round 3):** the "A TIER_1 row latches..."
+> framing above, and Design 1's `drift_tier = 'TIER_1'` query further down,
+> are narrower than what actually ships. **The operator's D1–D3 ruling
+> below was given against this TIER_1-only text — D1–D3 themselves still
+> hold, nothing here reopens them** — but the selection widened after
+> build, for a reason the ruling never had in front of it:
+>
+> **The gap (a proven regression vs pre-SUSP-1 `main`):** CANARY-2 can
+> confirm a TIER_2/label-drift trigger with a TIER_1-severity (identity or
+> failsafe) same-day re-run — a genuine, currently-pageable "model drift
+> CONFIRMED (TIER_1)" event. A TIER_1-only query never sees that row (its
+> own `drift_tier` is TIER_2), so round-1 SUSP-1 code did NOT suspend on a
+> confirmed TIER_1-severity drift — worse than pre-SUSP-1 `main`, whose
+> original unfiltered query would have caught it via the confirming row.
+>
+> **The fix:** the canary arm now selects trigger rows with
+> `drift_tier IN ('TIER_1', 'TIER_2')`. A fifth latch arm,
+> `confirmed-cross-class`, fires iff BOTH: the trigger row's own
+> `confirmation.status == confirmed` AND
+> `confirmation.confirming_drift_tier == TIER_1` — i.e. ONLY a
+> TIER_1-severity confirmed outcome, regardless of which row's own
+> `drift_tier` carried the original trigger. Every other TIER_2 outcome
+> (not_confirmed, unconfirmed_page, a same-tier TIER_2-confirmed-by-TIER_2,
+> legacy/malformed/unrecognized) stays UNLATCHED — pre-SUSP-1 `main` never
+> read TIER_2 rows at all, so there is no regression to guard against in
+> that direction, and **whether a same-tier confirmed TIER_2 should EVER
+> suspend is an open operator policy question, deliberately left unbuilt
+> and unruled here** (not decided by this correction, not decided by
+> D1–D3 — a separate future ruling if the operator ever wants one).
+>
+> Also round 3: a sixth case was added to clause 2's own table — a real,
+> non-None confirmation status matching NONE of the four known literals
+> (e.g. a future deployment's new status, or a hand-edited row) latches
+> under its own `unrecognized-status` arm, not `legacy-conservative` — the
+> two look alike (both latch, both are "the system has no proof this was
+> transient") but carry opposite operator implications: a legacy row ages
+> out of the recency window on its own; an unrecognized status means
+> CURRENT code is writing it every cycle and will not. The reason string
+> now names six arms (identity / confirmed / unconfirmed /
+> legacy-conservative / confirmed-cross-class / unrecognized-status), not
+> four, and for the two new arms it also names the specific trigger tier
+> and (for unrecognized-status) the offending status value itself. See
+> `alphaos/scheduler/shadow_label.py::_canary_confirmation_latch`'s own
+> docstring for the exact, current per-tier branching — this correction
+> describes intent and history; that docstring is the executable truth.
 
 ## Operator decisions required BEFORE build (CK — rule on these)
 
@@ -131,16 +189,25 @@ page tells the operator what class of evidence tripped it.
 
 1. **`check_auto_suspend` canary arm** replaced with a query selecting
    recent trigger rows (`confirmation_of IS NULL`,
-   `drift_tier = 'TIER_1'`, `started_at_utc >= now − window`) ordered
-   newest first, then per-row latch evaluation per the semantics above —
-   first latching row wins. Reason string per above.
+   ~~`drift_tier = 'TIER_1'`~~ `drift_tier IN ('TIER_1', 'TIER_2')` — see
+   the STATUS CORRECTION above, `confirmed-cross-class` —
+   `started_at_utc >= now − window`) ordered newest first, then per-row
+   latch evaluation per the semantics above — first latching row wins.
+   Reason string per above (six arms as of the STATUS CORRECTION, not
+   four).
 2. **New setting** `shadow_suspend_canary_window_days` /
    `SHADOW_SUSPEND_CANARY_WINDOW_DAYS`, default 14, validated [7, 90],
    documented in `.env.example` next to the other shadow-label settings.
 3. **Docstring updates**: `shadow_label.py`'s auto-suspend docstring and
    `canary/run.py`'s consumer note both describe the new semantics; the
    CANARY-2 spec's Out-of-scope pointer gains a "resolved by SUSP-1"
-   banner (append-style).
+   banner (append-style). Audit-fixup rounds 2–3 additionally touch
+   `alphaos/safety.py`'s `ShadowLabelSuspendSwitch` docstring (was still
+   describing the pre-SUSP-1 "any CANARY Tier-1 drift event" trigger) and
+   `alphaos/reports/canary_report.py` (third independent spelling of the
+   confirmation-status vocabulary, now importing the same
+   `alphaos.constants` symbols as the other two, and covered by the same
+   AST lockstep test).
 
 ## Tests (hermetic, §H.1)
 

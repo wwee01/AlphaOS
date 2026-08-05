@@ -571,6 +571,7 @@ class Settings:
     shadow_ai_cap_calls_per_30d: int         # <= 25% of scheduler_ai_cost_cap_calls_per_30d
     shadow_ai_cap_calls_per_day: int         # independent of both 30-day caps (default 3*K)
     shadow_label_min_feed_coverage: float    # trailing-14-day median feed_coverage arming gate
+    shadow_suspend_canary_window_days: int   # SUSP-1: recency window for the canary auto-suspend arm
 
     # --- REG-1: regime classifier + packet stamping ---
     # Shadow/measurement only -- no arming, no gating, no allocation changes.
@@ -1301,6 +1302,23 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
 
     shadow_labelling_enabled = _get_bool(src, "SHADOW_LABELLING_ENABLED", False)
 
+    # --- SUSP-1: canary-aware shadow-label auto-suspend recency window
+    # (docs/roadmap/alphaos-susp1-canary-aware-suspend-spec.md, D1, operator-
+    # ruled 2026-08-05: 14 recommended, [7, 90] bounds). The canary runs
+    # weekly, so genuine drift refreshes this window with a new TIER_1 row
+    # every cycle and can never age out; an operator-resolved event stops
+    # generating rows and self-releases after the window passes -- this is
+    # what removes the need for any bespoke un-arm mechanism (D2: no code
+    # ever deletes/dismisses an armed row, it only ages out).
+    shadow_suspend_canary_window_days = _get_int(src, "SHADOW_SUSPEND_CANARY_WINDOW_DAYS", 14)
+    if not (7 <= shadow_suspend_canary_window_days <= 90):
+        raise SettingsError(
+            f"SHADOW_SUSPEND_CANARY_WINDOW_DAYS={shadow_suspend_canary_window_days!r} must be "
+            f"between 7 and 90 (spec's own validated range -- shorter than 7 risks a single "
+            f"missed weekly canary run aging out real drift; longer than 90 defeats the window's "
+            f"purpose of self-releasing resolved history)."
+        )
+
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
@@ -1667,6 +1685,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         shadow_ai_cap_calls_per_30d=shadow_ai_cap_calls_per_30d,
         shadow_ai_cap_calls_per_day=shadow_ai_cap_calls_per_day,
         shadow_label_min_feed_coverage=shadow_label_min_feed_coverage,
+        shadow_suspend_canary_window_days=shadow_suspend_canary_window_days,
         regime_enabled=_get_bool(src, "REGIME_ENABLED", True),
         regime_backfill_lookback_days=_get_int(src, "REGIME_BACKFILL_LOOKBACK_DAYS", 900),
         text_archive_enabled=_get_bool(src, "TEXT_ARCHIVE_ENABLED", False),

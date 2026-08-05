@@ -11,8 +11,15 @@ read by any code" -- ``alphaos/scheduler/shadow_label.py``'s
 ``check_auto_suspend`` (EXP-1, itself a shadow/measurement-layer mechanism,
 not a live decision path) DOES read ``canary_runs.drift_tier`` to decide
 whether to suspend shadow labelling. That is the one deliberate, named
-exception; see that function's own docstring for the (currently pre-existing,
-out-of-scope-for-CANARY-2) semantics gap it carries forward.
+exception; see that function's own docstring for the semantics.
+**SUSP-1 (docs/roadmap/alphaos-susp1-canary-aware-suspend-spec.md) narrows
+that consumer's own query**: it reads ``confirmation_of`` (trigger rows
+only) and this module's own ``drift_detail_json -> confirmation.status``
+annotation (written by ``run_canary_confirmed`` below) within a recency
+window, instead of latching on any historical TIER_1 row forever. SUSP-1 is
+its own ticket with its own merge/operator-instruction gate (see that
+spec's header law) -- this note describes what the consumer code does, not
+a claim about which branch is deployed where.
 
 CANARY-2 (docs/roadmap/alphaos-canary2-drift-confirmation-spec.md) adds a
 caller-layer confirmation policy on top of the above, in ``run_canary_confirmed``:
@@ -37,16 +44,32 @@ from typing import Any, Optional
 
 from alphaos import lineage
 from alphaos.canary.corpus import CorpusTamperedError, DEFAULT_CORPUS_DIR, load_corpus
-from alphaos.constants import LabelSource, Severity
+from alphaos.constants import (
+    CANARY_CONFIRMATION_STATUS_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE,
+    CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE,
+    DRIFT_NONE,
+    DRIFT_TIER_1,
+    DRIFT_TIER_2,
+    DRIFT_TIER_3,
+    LabelSource,
+    Severity,
+)
 from alphaos.scanner.candidate_packet import reconstruct_from_stored
 from alphaos.scheduler import cost_guard
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
-DRIFT_TIER_1 = "TIER_1"
-DRIFT_TIER_2 = "TIER_2"
-DRIFT_TIER_3 = "TIER_3"
-DRIFT_NONE = "none"
+# SUSP-1 audit-fixup (2026-08, MUST FIX 1): DRIFT_TIER_1/2/3/NONE now live in
+# alphaos.constants (a leaf module with zero alphaos.* imports -- this used
+# to be a real circular import, since alphaos.canary imports this module,
+# which imports alphaos.scheduler.cost_guard, which chains through
+# alphaos.scheduler.digest into alphaos.scheduler.shadow_label, which
+# formerly imported DRIFT_TIER_1 back from THIS still-initializing module).
+# Imported (not re-assigned) here so this remains a valid backward-compat
+# re-export -- ``tests/test_canary.py`` and others still do
+# ``from alphaos.canary.run import DRIFT_TIER_1`` etc.
 
 # CANARY-2 Design 1: the two TIER_1 trigger classes. Identity is deterministic
 # (no sampling involved -- the model literally reports a different name/
@@ -724,7 +747,8 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         # trigger row is never indistinguishable from a raw pre-CANARY-2
         # trip -- best-effort, AFTER the send (never gates it).
         _update_drift_detail_best_effort(
-            journal, trigger_run_id, {**detail, "confirmation": {"status": "identity_immediate"}},
+            journal, trigger_run_id,
+            {**detail, "confirmation": {"status": CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE}},
         )
         return result
 
@@ -770,7 +794,9 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         result["unconfirmed"] = True
         _update_drift_detail_best_effort(
             journal, trigger_run_id,
-            {**detail, "confirmation": {"status": "unconfirmed_page", "reason": confirm_error}},
+            {**detail, "confirmation": {
+                "status": CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE, "reason": confirm_error,
+            }},
         )
         if isinstance(confirm_exc, CorpusTamperedError):
             # MUST FIX 5: page first (done above), THEN re-raise -- order
@@ -815,7 +841,8 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         result["paged"] = True
         result["confirmed"] = True
         _update_drift_detail_best_effort(journal, trigger_run_id, {**detail, "confirmation": {
-            "status": "confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+            "status": CANARY_CONFIRMATION_STATUS_CONFIRMED,
+            "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
         }})
     else:
         # Only reachable when confirm_tier is TIER_3 or none -- genuinely
@@ -832,7 +859,8 @@ def run_canary_confirmed(journal, settings, corpus_dir: Optional[str] = None) ->
         result["paged"] = False
         result["confirmed"] = False
         _update_drift_detail_best_effort(journal, trigger_run_id, {**detail, "confirmation": {
-            "status": "not_confirmed", "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
+            "status": CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED,
+            "confirming_run_id": confirm_run_id, "confirming_drift_tier": confirm_tier,
         }})
 
     return result

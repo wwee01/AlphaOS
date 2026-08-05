@@ -246,3 +246,23 @@ semantic decisions (does an `unconfirmed_page` trigger count toward suspend?
 must legacy rows NOT be silently un-armed by a query change? does it need a
 time window?) — filed as a follow-up ticket, and it must land before EXP-1
 arms (`SHADOW_LABELLING_ENABLED=true`), not before this ticket merges.
+
+**This is the named follow-up ticket — SUSP-1** (`docs/roadmap/alphaos-susp1-
+canary-aware-suspend-spec.md`, operator D1–D3 ruling 2026-08-05, built on
+branch `feat/susp-1`, holding for audit + explicit operator merge
+instruction per this project's own change-control law, same as every other
+ticket in this file): its own design has `check_auto_suspend`'s canary arm
+read only trigger rows (`confirmation_of IS NULL`) within a
+`SHADOW_SUSPEND_CANARY_WINDOW_DAYS` (default 14) recency window, latching on
+every confirmation status except an explicit `not_confirmed`; legacy rows
+(including the named 2026-08-02 `canaryrun_f607c73a2589` artifact) latch
+conservatively until they age out of the window — no code deletes or
+dismisses that row. Per its own hard gate, this ticket must merge before
+`SHADOW_LABELLING_ENABLED` is ever set true; it has not merged yet, and that
+flag is still false. **Audit-fixup addition (round 2):** the arm selection
+widened beyond TIER_1 to also latch a TIER_2/label-drift trigger when THIS
+spec's own cross-class confirmation lands a TIER_1-severity re-run verdict
+on it (`confirmed-cross-class`) — the exact scenario CANARY-2's own MUST
+FIX 1 exists to catch — so a confirmed identity/failsafe drift suspends
+shadow labelling regardless of which row's own `drift_tier` carried the
+original trigger; see SUSP-1's own STATUS CORRECTION for the full detail.
