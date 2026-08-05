@@ -11,8 +11,13 @@ read by any code" -- ``alphaos/scheduler/shadow_label.py``'s
 ``check_auto_suspend`` (EXP-1, itself a shadow/measurement-layer mechanism,
 not a live decision path) DOES read ``canary_runs.drift_tier`` to decide
 whether to suspend shadow labelling. That is the one deliberate, named
-exception; see that function's own docstring for the (currently pre-existing,
-out-of-scope-for-CANARY-2) semantics gap it carries forward.
+exception; see that function's own docstring for the semantics.
+**SUSP-1 (docs/roadmap/alphaos-susp1-canary-aware-suspend-spec.md, merged
+2026-08) resolved the semantics gap this note used to carry forward**: the
+consumer now reads ``confirmation_of`` (trigger rows only) and this module's
+own ``drift_detail_json -> confirmation.status`` annotation (written by
+``run_canary_confirmed`` below) within a recency window, instead of latching
+on any historical TIER_1 row forever.
 
 CANARY-2 (docs/roadmap/alphaos-canary2-drift-confirmation-spec.md) adds a
 caller-layer confirmation policy on top of the above, in ``run_canary_confirmed``:

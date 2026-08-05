@@ -246,3 +246,14 @@ semantic decisions (does an `unconfirmed_page` trigger count toward suspend?
 must legacy rows NOT be silently un-armed by a query change? does it need a
 time window?) — filed as a follow-up ticket, and it must land before EXP-1
 arms (`SHADOW_LABELLING_ENABLED=true`), not before this ticket merges.
+
+**Resolved by SUSP-1** (`docs/roadmap/alphaos-susp1-canary-aware-suspend-
+spec.md`, operator D1–D3 ruling 2026-08-05, build merged 2026-08):
+`check_auto_suspend`'s canary arm now reads only trigger rows
+(`confirmation_of IS NULL`) within a `SHADOW_SUSPEND_CANARY_WINDOW_DAYS`
+(default 14) recency window, latching on every confirmation status except an
+explicit `not_confirmed`; legacy rows (including the named 2026-08-02
+`canaryrun_f607c73a2589` artifact) latch conservatively until they age out of
+the window — no code deletes or dismisses that row. This is the named
+follow-up ticket; it landed before `SHADOW_LABELLING_ENABLED` was ever set
+true, per its own hard gate.

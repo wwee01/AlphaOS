@@ -15,11 +15,13 @@ imports nothing from the approval/execution/risk stack.
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import statistics
 from datetime import timedelta
 from typing import Optional
 
+from alphaos.canary.run import DRIFT_TIER_1
 from alphaos.constants import (
     Severity,
     SHADOW_SELECTION_ARM_EXPLORE,
@@ -151,12 +153,101 @@ def check_feed_coverage_gate(journal, settings) -> tuple[bool, str]:
 
 
 # -------------------------------------------------------------- auto-suspend
+# SUSP-1 (docs/roadmap/alphaos-susp1-canary-aware-suspend-spec.md): the arm
+# names returned by ``_canary_confirmation_latch`` below, used verbatim in
+# both the suspend reason string and any future report-layer surfacing.
+CANARY_LATCH_ARM_IDENTITY = "identity"
+CANARY_LATCH_ARM_CONFIRMED = "confirmed"
+CANARY_LATCH_ARM_UNCONFIRMED = "unconfirmed"
+CANARY_LATCH_ARM_LEGACY = "legacy-conservative"
+
+# The one explicit all-clear literal CANARY-2's ``run_canary_confirmed``
+# writes onto a trigger row's ``drift_detail_json -> confirmation.status``
+# (alphaos/canary/run.py) when the same-day re-run came back genuinely clean
+# (TIER_3/none) -- no symbol exists for this in canary/run.py (it is written
+# as a bare literal there too), so this constant is the one place SUSP-1
+# spells it, reused by both the latch check and its own tests.
+CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
+
+
+def _canary_confirmation_latch(drift_detail_json: Optional[str]) -> tuple[bool, str]:
+    """SUSP-1 latch semantics, clause 2: does a TRIGGER row's own confirmation
+    verdict latch the suspend? Returns ``(latches, arm)``.
+
+    Fail direction (honest suspension): only the single explicit
+    ``not_confirmed`` status releases. Every other case -- ``identity_
+    immediate``, ``confirmed``, ``unconfirmed_page`` (confirmation itself
+    could not execute), a missing ``confirmation`` key, a non-dict value
+    there, or JSON that does not even parse -- LATCHES. A malformed/
+    unparseable ``drift_detail_json`` must never be skipped-because-broken;
+    it is treated identically to a legacy pre-CANARY-2 row (no confirmation
+    key at all), since both are cases where the system has no proof the trip
+    was transient."""
+    if drift_detail_json:
+        try:
+            detail = json.loads(drift_detail_json)
+        except (TypeError, ValueError):
+            detail = None
+        confirmation = detail.get("confirmation") if isinstance(detail, dict) else None
+        status = confirmation.get("status") if isinstance(confirmation, dict) else None
+        if status == CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED:
+            return False, ""
+        if status == "identity_immediate":
+            return True, CANARY_LATCH_ARM_IDENTITY
+        if status == "confirmed":
+            return True, CANARY_LATCH_ARM_CONFIRMED
+        if status == "unconfirmed_page":
+            return True, CANARY_LATCH_ARM_UNCONFIRMED
+    # Key absent / non-dict confirmation / unparseable JSON / no
+    # drift_detail_json at all / any unrecognized status string: conservative
+    # default -- legacy rows are never silently un-armed by code (operator
+    # decision, D2, master reference §9 2026-08-05).
+    return True, CANARY_LATCH_ARM_LEGACY
+
+
+def _canary_suspend_arm(journal, settings) -> tuple[bool, str]:
+    """SUSP-1: the canary-aware replacement for the old unfiltered "ANY
+    historical TIER_1 row latches forever" query. Selects recent TRIGGER
+    rows only (``confirmation_of IS NULL`` -- clause 1: a confirmation RUN
+    row tripping TIER_1 never latches independently, its verdict lives on
+    its trigger row's own annotation instead) within the recency window
+    (clause 3), newest first, and returns on the first row whose own
+    confirmation status latches (clause 2). A ``not_confirmed`` row does not
+    stop the scan -- an OLDER row within the same window can still latch
+    independently, since each row is its own event."""
+    window_days = settings.shadow_suspend_canary_window_days
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(days=window_days))
+    rows = journal.query(
+        "SELECT run_id, drift_detail_json, started_at_utc FROM canary_runs "
+        "WHERE drift_tier = ? AND confirmation_of IS NULL AND started_at_utc >= ? "
+        "ORDER BY started_at_utc DESC, id DESC",
+        (DRIFT_TIER_1, since),
+    )
+    for row in rows:
+        latches, arm = _canary_confirmation_latch(row["drift_detail_json"])
+        if latches:
+            return True, (
+                f"CANARY Tier-1 drift latch [{arm}]: run_id={row['run_id']!r}, "
+                f"started_at_utc={row['started_at_utc']!r}, within the "
+                f"{window_days}-day recency window (SHADOW_SUSPEND_CANARY_WINDOW_DAYS) -- "
+                "shadow labels flow through the exact same PlaybookClassifier CANARY watches"
+            )
+    return False, "no auto-suspend condition met"
+
+
 def check_auto_suspend(journal, settings) -> tuple[bool, str]:
     """EXP-1 mechanism 13 (Autonomy-Ladder pattern: every entry criterion
     pairs with a rollback trigger). Returns (should_suspend, reason).
     Neither trigger self-heals -- the caller engages ``ShadowLabelSuspend
     Switch`` on a True return, which stays engaged until an operator clears
-    it explicitly."""
+    it explicitly.
+
+    The feed-coverage arm below is untouched by SUSP-1 (spec's own Non-
+    goals). The canary arm (``_canary_suspend_arm``) is SUSP-1's own
+    replacement for the old unfiltered "ANY historical TIER_1 row latches
+    forever" query -- see that function and ``_canary_confirmation_latch``
+    for the full latch semantics (docs/roadmap/alphaos-susp1-canary-aware-
+    suspend-spec.md)."""
     daily_map = _daily_feed_coverage_map(
         journal, AUTO_SUSPEND_COVERAGE_CONSECUTIVE_DAYS + AUTO_SUSPEND_LOOKBACK_CALENDAR_PADDING_DAYS
     )
@@ -168,14 +259,7 @@ def check_auto_suspend(journal, settings) -> tuple[bool, str]:
             f"trading days: {last_n}"
         )
 
-    tier1 = journal.one("SELECT run_id FROM canary_runs WHERE drift_tier = 'TIER_1' ORDER BY id DESC LIMIT 1")
-    if tier1:
-        return True, (
-            f"CANARY Tier-1 drift event detected (run_id={tier1['run_id']!r}) -- shadow labels "
-            "flow through the exact same PlaybookClassifier CANARY watches"
-        )
-
-    return False, "no auto-suspend condition met"
+    return _canary_suspend_arm(journal, settings)
 
 
 # -------------------------------------------------------------------- selection
