@@ -947,6 +947,49 @@ SHADOW_SATURATION_AUDIT_MIN_TRADING_DAYS = 10
 SHADOW_SATURATION_AUDIT_TARGET_TRADING_DAYS = 20
 
 
+# --- CANARY / CANARY-2 / SUSP-1: shared drift-tier + confirmation-status
+# vocabulary ---------------------------------------------------------------
+# Promoted here from alphaos/canary/run.py (SUSP-1 audit-fixup, 2026-08:
+# MUST FIX 1). Previously ``alphaos/scheduler/shadow_label.py`` imported
+# ``DRIFT_TIER_1`` directly from ``alphaos.canary.run``, which cold-imports
+# ``alphaos.scheduler`` (via ``cost_guard``) -> ``alphaos.scheduler.digest``
+# -> ``alphaos.scheduler.shadow_label`` -> back into the still-initializing
+# ``alphaos.canary.run`` -- a real circular import (reproduced: fails on
+# this branch, works on `main`; masked in production only because
+# `__main__.py` happens to import `alphaos.scheduler` first, an untested
+# ordering accident). Living in ``constants.py`` -- a leaf module with zero
+# ``alphaos.*`` imports of its own -- breaks the cycle structurally, the
+# same role this module already plays for ``SHADOW_SELECTION_ARM_*`` above.
+#
+# The four confirmation-status literals are ALSO centralized here for the
+# same reason CANARY-2's own status vocabulary must never fork: it was
+# previously spelled as bare string literals in THREE places independently
+# (the producer in ``canary/run.py``, this consumer in ``shadow_label.py``,
+# and ``reports/canary_report.py``'s own rendering) -- a mutation-tested
+# audit finding proved a one-word rename in any single spelling left every
+# existing test green while the actual safety behavior silently inverted.
+# All three modules now import these names rather than re-typing them;
+# ``canary/run.py`` re-exports ``DRIFT_TIER_1``/``DRIFT_TIER_2``/
+# ``DRIFT_TIER_3``/``DRIFT_NONE`` unchanged (by importing them into its own
+# namespace) since other code (``tests/test_canary.py``) already imports
+# those names from there.
+DRIFT_TIER_1 = "TIER_1"
+DRIFT_TIER_2 = "TIER_2"
+DRIFT_TIER_3 = "TIER_3"
+DRIFT_NONE = "none"
+
+# CANARY-2's own confirmation verdict, annotated onto a TRIGGER row's
+# ``drift_detail_json -> confirmation.status`` by ``run_canary_confirmed``.
+# ``not_confirmed`` is the one explicit all-clear SUSP-1's latch semantics
+# release on; every other value (including any future/unrecognized one)
+# latches by conservative default -- see ``shadow_label._canary_confirmation
+# _latch``'s own docstring for the full fail-direction rationale.
+CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE = "identity_immediate"
+CANARY_CONFIRMATION_STATUS_CONFIRMED = "confirmed"
+CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE = "unconfirmed_page"
+CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
+
+
 # The ONE prompt-version allowlist (TRIP-1 audit L3, 2026-07-28): the valid
 # set was previously duplicated as a literal ("v1","v2","v3") in BOTH
 # settings.py's OPENAI_PROMPT_VERSION validation and __main__.py's

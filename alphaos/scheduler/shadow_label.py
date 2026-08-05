@@ -21,8 +21,19 @@ import statistics
 from datetime import timedelta
 from typing import Optional
 
-from alphaos.canary.run import DRIFT_TIER_1
+# SUSP-1 audit-fixup (2026-08, MUST FIX 1a): these come from alphaos.constants,
+# NOT alphaos.canary.run -- importing from canary.run here used to be a real
+# circular import (alphaos.canary -> canary.run -> alphaos.scheduler (via
+# cost_guard) -> scheduler.digest -> scheduler.shadow_label -> back into the
+# still-initializing canary.run). constants.py is a leaf module with zero
+# alphaos.* imports of its own, so it can never re-enter this cycle.
 from alphaos.constants import (
+    CANARY_CONFIRMATION_STATUS_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE,
+    CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED,
+    CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE,
+    DRIFT_TIER_1,
+    DRIFT_TIER_2,
     Severity,
     SHADOW_SELECTION_ARM_EXPLORE,
     SHADOW_SELECTION_ARM_TOP_K,
@@ -156,78 +167,148 @@ def check_feed_coverage_gate(journal, settings) -> tuple[bool, str]:
 # SUSP-1 (docs/roadmap/alphaos-susp1-canary-aware-suspend-spec.md): the arm
 # names returned by ``_canary_confirmation_latch`` below, used verbatim in
 # both the suspend reason string and any future report-layer surfacing.
+# ``CANARY_CONFIRMATION_STATUS_*`` themselves (the vocabulary CANARY-2's
+# ``run_canary_confirmed`` writes) live in ``alphaos.constants`` -- see the
+# import block above and that module's own comment (audit-fixup 2026-08,
+# MUST FIX 1: previously spelled independently here, in canary/run.py, and
+# in reports/canary_report.py; a mutation-tested audit finding proved a
+# one-word rename in any single spelling left every existing test green
+# while the safety behavior silently inverted).
 CANARY_LATCH_ARM_IDENTITY = "identity"
 CANARY_LATCH_ARM_CONFIRMED = "confirmed"
 CANARY_LATCH_ARM_UNCONFIRMED = "unconfirmed"
 CANARY_LATCH_ARM_LEGACY = "legacy-conservative"
-
-# The one explicit all-clear literal CANARY-2's ``run_canary_confirmed``
-# writes onto a trigger row's ``drift_detail_json -> confirmation.status``
-# (alphaos/canary/run.py) when the same-day re-run came back genuinely clean
-# (TIER_3/none) -- no symbol exists for this in canary/run.py (it is written
-# as a bare literal there too), so this constant is the one place SUSP-1
-# spells it, reused by both the latch check and its own tests.
-CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
+# MUST FIX 2 (audit-fixup 2026-08, A HIGH-1 / B HIGH-2, convergent): a
+# CROSS-CLASS confirmation -- a TIER_2/label-drift TRIGGER confirmed by a
+# TIER_1-severity (identity or failsafe) same-day re-run -- names its own
+# arm, distinct from same-tier ``confirmed``, so the reason string is
+# legible about which case fired.
+CANARY_LATCH_ARM_CONFIRMED_CROSS_CLASS = "confirmed-cross-class"
 
 
-def _canary_confirmation_latch(drift_detail_json: Optional[str]) -> tuple[bool, str]:
-    """SUSP-1 latch semantics, clause 2: does a TRIGGER row's own confirmation
-    verdict latch the suspend? Returns ``(latches, arm)``.
+def _parse_confirmation_annotation(drift_detail_json: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Best-effort parse of a TRIGGER row's own ``drift_detail_json ->
+    confirmation`` sub-dict (written by CANARY-2's ``run_canary_confirmed``).
+    Returns ``(status, confirming_drift_tier)`` -- both ``None`` on ANY
+    malformed/absent shape (missing key, non-dict value, unparseable JSON,
+    empty column). Callers treat a ``None`` status as the conservative-
+    default (legacy) case, never as an error -- this function never raises."""
+    if not drift_detail_json:
+        return None, None
+    try:
+        detail = json.loads(drift_detail_json)
+    except (TypeError, ValueError):
+        return None, None
+    confirmation = detail.get("confirmation") if isinstance(detail, dict) else None
+    if not isinstance(confirmation, dict):
+        return None, None
+    return confirmation.get("status"), confirmation.get("confirming_drift_tier")
+
+
+def _canary_confirmation_latch(trigger_tier: str, drift_detail_json: Optional[str]) -> tuple[bool, str]:
+    """SUSP-1 latch semantics, clause 2 (+ MUST FIX 2's cross-class
+    extension): does a TRIGGER row's own confirmation verdict latch the
+    suspend? Returns ``(latches, arm)``.
 
     Fail direction (honest suspension): only the single explicit
-    ``not_confirmed`` status releases. Every other case -- ``identity_
-    immediate``, ``confirmed``, ``unconfirmed_page`` (confirmation itself
-    could not execute), a missing ``confirmation`` key, a non-dict value
-    there, or JSON that does not even parse -- LATCHES. A malformed/
+    ``not_confirmed`` status releases a TIER_1 trigger. Every other case --
+    ``identity_immediate``, ``confirmed``, ``unconfirmed_page`` (confirmation
+    itself could not execute), a missing ``confirmation`` key, a non-dict
+    value there, or JSON that does not even parse -- LATCHES. A malformed/
     unparseable ``drift_detail_json`` must never be skipped-because-broken;
     it is treated identically to a legacy pre-CANARY-2 row (no confirmation
     key at all), since both are cases where the system has no proof the trip
-    was transient."""
-    if drift_detail_json:
-        try:
-            detail = json.loads(drift_detail_json)
-        except (TypeError, ValueError):
-            detail = None
-        confirmation = detail.get("confirmation") if isinstance(detail, dict) else None
-        status = confirmation.get("status") if isinstance(confirmation, dict) else None
+    was transient.
+
+    A TIER_2 trigger is narrower by design: it latches ONLY the cross-class
+    case (MUST FIX 2) -- ``status == confirmed`` AND
+    ``confirming_drift_tier == TIER_1`` -- the exact scenario CANARY-2's own
+    MUST FIX 1 exists to catch (a label-drift trip confirmed by a same-day
+    re-run that turns out to be a genuine identity/failsafe change). Every
+    OTHER TIER_2 outcome (not_confirmed, unconfirmed_page, a same-tier
+    TIER_2-confirmed, legacy/malformed) is deliberately UNCHANGED from
+    pre-SUSP-1 `main` behavior -- the old query never read TIER_2 rows at
+    all, and whether a same-tier confirmed TIER_2 should EVER suspend is an
+    open operator policy question, recorded but not decided here (see the
+    spec's own decision log -- NOT this round)."""
+    status, confirming_tier = _parse_confirmation_annotation(drift_detail_json)
+
+    if trigger_tier == DRIFT_TIER_1:
         if status == CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED:
             return False, ""
-        if status == "identity_immediate":
+        if status == CANARY_CONFIRMATION_STATUS_IDENTITY_IMMEDIATE:
             return True, CANARY_LATCH_ARM_IDENTITY
-        if status == "confirmed":
+        if status == CANARY_CONFIRMATION_STATUS_CONFIRMED:
             return True, CANARY_LATCH_ARM_CONFIRMED
-        if status == "unconfirmed_page":
+        if status == CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE:
             return True, CANARY_LATCH_ARM_UNCONFIRMED
-    # Key absent / non-dict confirmation / unparseable JSON / no
-    # drift_detail_json at all / any unrecognized status string: conservative
-    # default -- legacy rows are never silently un-armed by code (operator
-    # decision, D2, master reference §9 2026-08-05).
-    return True, CANARY_LATCH_ARM_LEGACY
+        # Key absent / non-dict confirmation / unparseable JSON / no
+        # drift_detail_json at all / any unrecognized status string:
+        # conservative default -- legacy rows are never silently un-armed by
+        # code (operator decision, D2, master reference §9 2026-08-05).
+        return True, CANARY_LATCH_ARM_LEGACY
+
+    # trigger_tier == DRIFT_TIER_2 (the only other tier the caller's query
+    # selects): see docstring above -- cross-class-confirmed only.
+    if status == CANARY_CONFIRMATION_STATUS_CONFIRMED and confirming_tier == DRIFT_TIER_1:
+        return True, CANARY_LATCH_ARM_CONFIRMED_CROSS_CLASS
+    return False, ""
+
+
+def _row_within_window_or_unparseable(started_at_utc: Optional[str], since_dt) -> bool:
+    """ALSO FIX (audit-fixup 2026-08, A L1): timestamp-hardening. A NULL/
+    empty/unparseable ``started_at_utc`` must be treated as WITHIN the
+    window (fail toward suspend), never silently dropped -- an approach that
+    filtered rows via a SQL lexical ``started_at_utc >= ?`` compare would let
+    a malformed value (``''``, a bare epoch-seconds string, a value with
+    leading whitespace) sort as "older than the cutoff" by lexical accident
+    and vanish from the result set entirely, violating the spec's own fail
+    direction ("never skipped because broken"). Unreachable today
+    (``started_at_utc`` is NOT NULL, single writer ``timeutils.stamp().utc``)
+    -- hardened by construction, not by luck."""
+    if not started_at_utc:
+        return True
+    parsed = timeutils.parse_iso(started_at_utc)
+    if parsed is None:
+        return True
+    return parsed >= since_dt
 
 
 def _canary_suspend_arm(journal, settings) -> tuple[bool, str]:
-    """SUSP-1: the canary-aware replacement for the old unfiltered "ANY
-    historical TIER_1 row latches forever" query. Selects recent TRIGGER
-    rows only (``confirmation_of IS NULL`` -- clause 1: a confirmation RUN
-    row tripping TIER_1 never latches independently, its verdict lives on
-    its trigger row's own annotation instead) within the recency window
-    (clause 3), newest first, and returns on the first row whose own
-    confirmation status latches (clause 2). A ``not_confirmed`` row does not
-    stop the scan -- an OLDER row within the same window can still latch
+    """SUSP-1 (+ MUST FIX 2): the canary-aware replacement for the old
+    unfiltered "ANY historical TIER_1 row latches forever" query. Selects
+    recent TRIGGER rows (``confirmation_of IS NULL`` -- clause 1: a
+    confirmation RUN row tripping any tier never latches independently, its
+    verdict lives on its trigger row's own annotation instead) of EITHER
+    TIER_1 or TIER_2 (the cross-class extension needs TIER_2 triggers
+    visible too), window-filtered in Python (not SQL -- see
+    ``_row_within_window_or_unparseable``), newest first, and returns on the
+    first row whose own confirmation status latches (clause 2 /
+    ``_canary_confirmation_latch``). A non-latching row does not stop the
+    scan -- an OLDER row within the same window can still latch
     independently, since each row is its own event."""
     window_days = settings.shadow_suspend_canary_window_days
-    since = timeutils.to_iso(timeutils.now_utc() - timedelta(days=window_days))
+    since_dt = timeutils.now_utc() - timedelta(days=window_days)
     rows = journal.query(
-        "SELECT run_id, drift_detail_json, started_at_utc FROM canary_runs "
-        "WHERE drift_tier = ? AND confirmation_of IS NULL AND started_at_utc >= ? "
+        "SELECT run_id, drift_tier, drift_detail_json, started_at_utc FROM canary_runs "
+        "WHERE drift_tier IN (?, ?) AND confirmation_of IS NULL "
         "ORDER BY started_at_utc DESC, id DESC",
-        (DRIFT_TIER_1, since),
+        (DRIFT_TIER_1, DRIFT_TIER_2),
     )
     for row in rows:
-        latches, arm = _canary_confirmation_latch(row["drift_detail_json"])
+        if not _row_within_window_or_unparseable(row["started_at_utc"], since_dt):
+            continue
+        latches, arm = _canary_confirmation_latch(row["drift_tier"], row["drift_detail_json"])
         if latches:
+            if arm == CANARY_LATCH_ARM_CONFIRMED_CROSS_CLASS:
+                tier_note = (
+                    f"trigger tier {row['drift_tier']} confirmed by a TIER_1-severity "
+                    "same-day re-run"
+                )
+            else:
+                tier_note = f"trigger tier {row['drift_tier']}"
             return True, (
-                f"CANARY Tier-1 drift latch [{arm}]: run_id={row['run_id']!r}, "
+                f"CANARY drift latch [{arm}]: run_id={row['run_id']!r} ({tier_note}), "
                 f"started_at_utc={row['started_at_utc']!r}, within the "
                 f"{window_days}-day recency window (SHADOW_SUSPEND_CANARY_WINDOW_DAYS) -- "
                 "shadow labels flow through the exact same PlaybookClassifier CANARY watches"

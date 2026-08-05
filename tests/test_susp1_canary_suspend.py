@@ -24,11 +24,30 @@ suspend). Covers, per the spec's own numbered test list:
 11. end-to-end through run_shadow_label (production entry point), not just
     the helper
 
+Audit-fixup round (2026-08, two independent Opus audits, both REQUEST
+CHANGES, convergent findings) adds:
+
+12. MUST FIX 1 -- confirmation-status vocabulary lockstep (AST-harvested,
+    producer vs consumer) + a cold-import regression (the circular-import
+    class that shipped in round 1, invisible to every OTHER test in this
+    repo because conftest.py always warms alphaos.scheduler first).
+13. MUST FIX 2 -- a cross-class confirmation (TIER_2 trigger confirmed by a
+    TIER_1-severity same-day re-run) must latch at TIER_1 severity, driven
+    through the REAL CANARY-2 producer (run_canary_confirmed), not a
+    hand-built row -- proves the wiring, not just the helper.
+14. The "NOT this round" policy boundary: a same-tier TIER_2-confirmed-by-
+    TIER_2 trigger does NOT latch (pre-existing on `main`, deliberately left
+    alone -- an operator policy question, not a builder fix).
+
 All offline, in-memory, mock mode. No real money, no network.
 """
 
 from __future__ import annotations
 
+import ast
+import inspect
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -38,6 +57,7 @@ from alphaos.safety import ShadowLabelSuspendSwitch
 from alphaos.scheduler import shadow_label
 from alphaos.util import alerts, timeutils
 from conftest import make_settings
+from test_canary import _identity_detail, _label_drift_detail, _seed_pinned_baseline
 from test_exp1_shadow_labelling import _orch_with_shadow_universe, _seed_symbols, _seed_universe_days
 
 
@@ -47,6 +67,7 @@ def _insert_tier1_row(
     run_id: str,
     *,
     days_ago: float = 1,
+    drift_tier: str = "TIER_1",
     confirmation_of=None,
     drift_detail: dict | None = None,
     drift_detail_json_raw: str | None = None,
@@ -56,7 +77,11 @@ def _insert_tier1_row(
     ``test_auto_suspend_triggers_on_canary_tier1``). Exactly one of
     ``drift_detail``/``drift_detail_json_raw`` may be given; neither given
     means a legacy pre-CANARY-2 row (no ``drift_detail_json`` at all).
-    ``days_ago`` accepts fractional days for boundary-precision tests."""
+    ``days_ago`` accepts fractional days for boundary-precision tests.
+    ``drift_tier`` defaults to TIER_1 but accepts TIER_2 for MUST FIX 2's
+    cross-class coverage (the name ``_insert_tier1_row`` predates that
+    generalization; kept to avoid an unnecessary rename of every existing
+    call site)."""
     import json as _json
 
     assert drift_detail is None or drift_detail_json_raw is None
@@ -68,7 +93,7 @@ def _insert_tier1_row(
     started = timeutils.stamp(timeutils.now_utc() - timedelta(days=days_ago))
     journal.insert("canary_runs", {
         "run_id": run_id, "corpus_dir": "data/canary", "n_prompts": 5,
-        "drift_tier": "TIER_1", "drift_detail_json": detail_json,
+        "drift_tier": drift_tier, "drift_detail_json": detail_json,
         "confirmation_of": confirmation_of,
         "started_at_utc": started.utc, "started_at_sgt": started.local_sgt,
     })
@@ -84,7 +109,7 @@ def test_susp1_identity_immediate_within_window_latches_names_identity(journal):
     )
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "identity" in reason
+    assert "[identity]" in reason
     assert "canaryrun_identity" in reason
 
 
@@ -97,7 +122,11 @@ def test_susp1_confirmed_within_window_latches(journal):
     )
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "confirmed" in reason
+    # Bracketed exact token, not a loose substring (audit NIT, both
+    # reviewers): "confirmed" is a substring of BOTH "unconfirmed" and
+    # "confirmed-cross-class" -- a substring assert would still pass even
+    # if an arm mixup bug returned the wrong arm entirely.
+    assert "[confirmed]" in reason
     assert "canaryrun_confirmed" in reason
 
 
@@ -111,7 +140,7 @@ def test_susp1_unconfirmed_page_within_window_latches_fail_direction(journal):
     )
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "unconfirmed" in reason
+    assert "[unconfirmed]" in reason
     assert "canaryrun_unconfirmed" in reason
 
 
@@ -152,7 +181,7 @@ def test_susp1_legacy_row_within_window_latches_conservative(journal):
     _insert_tier1_row(journal, "canaryrun_legacy_recent", days_ago=5, drift_detail=None)
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "legacy-conservative" in reason
+    assert "[legacy-conservative]" in reason
     assert "canaryrun_legacy_recent" in reason
 
 
@@ -177,7 +206,7 @@ def test_susp1_malformed_drift_detail_json_latches(journal):
     )
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "legacy-conservative" in reason
+    assert "[legacy-conservative]" in reason
     assert "canaryrun_malformed" in reason
 
 
@@ -192,7 +221,7 @@ def test_susp1_malformed_confirmation_value_not_a_dict_latches(journal):
     )
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
-    assert "legacy-conservative" in reason
+    assert "[legacy-conservative]" in reason
 
 
 def test_susp1_window_boundary_exact_edge_is_inclusive(journal, monkeypatch):
@@ -238,6 +267,42 @@ def test_susp1_window_boundary_just_past_edge_is_excluded(journal, monkeypatch):
     assert should_suspend is False
 
 
+def test_susp1_malformed_timestamp_latches_never_silently_dropped(journal, monkeypatch):
+    """ALSO FIX (audit-fixup 2026-08, A L1): fail-direction timestamp
+    hardening. A garbage ``started_at_utc`` (here: bare epoch-seconds text,
+    the exact shape flagged) must NOT be silently excluded by a lexical
+    window compare -- it must be treated as within the window (fail toward
+    suspend) and evaluated normally. Unreachable via any real write path
+    today (single writer, NOT NULL column) but must hold by construction."""
+    fixed_now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(shadow_label.timeutils, "now_utc", lambda: fixed_now)
+    settings = make_settings()
+    journal.insert("canary_runs", {
+        "run_id": "canaryrun_garbage_timestamp", "corpus_dir": "data/canary", "n_prompts": 5,
+        "drift_tier": "TIER_1", "drift_detail_json": None, "confirmation_of": None,
+        "started_at_utc": "1785936000", "started_at_sgt": "1785936000",
+    })
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "canaryrun_garbage_timestamp" in reason
+    assert "[legacy-conservative]" in reason
+
+
+def test_susp1_empty_string_timestamp_latches_never_silently_dropped(journal, monkeypatch):
+    """Same fail-direction guard, empty-string shape."""
+    fixed_now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(shadow_label.timeutils, "now_utc", lambda: fixed_now)
+    settings = make_settings()
+    journal.insert("canary_runs", {
+        "run_id": "canaryrun_empty_timestamp", "corpus_dir": "data/canary", "n_prompts": 5,
+        "drift_tier": "TIER_1", "drift_detail_json": None, "confirmation_of": None,
+        "started_at_utc": "", "started_at_sgt": "",
+    })
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "canaryrun_empty_timestamp" in reason
+
+
 def test_susp1_older_row_still_latches_after_newer_not_confirmed_row(journal):
     """Neither the spec's numbered list nor the design section stops the
     scan at the first non-latching row -- a NEWER not_confirmed row (system-
@@ -268,7 +333,7 @@ def test_susp1_canaryrun_f607c73a2589_shape_latches_at_3_days(journal):
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
     assert "canaryrun_f607c73a2589" in reason
-    assert "legacy-conservative" in reason
+    assert "[legacy-conservative]" in reason
 
 
 def test_susp1_canaryrun_f607c73a2589_shape_releases_at_20_days(journal):
@@ -319,11 +384,17 @@ def test_susp1_window_setting_accepts_bounds():
 
 
 # --------------------------------------------------------- end-to-end (mech 13)
-def test_susp1_e2e_not_confirmed_proceeds_to_labelling_via_run_shadow_label(tmp_path):
+def test_susp1_e2e_not_confirmed_proceeds_to_labelling_via_run_shadow_label(tmp_path, monkeypatch):
     """Spec test 11 (not-confirmed half): driving the PRODUCTION entry
     point ``run_shadow_label``, not just the ``check_auto_suspend`` helper
     -- a prior ticket's audit caught exactly this gap (HOLD-1 lesson). A
-    not_confirmed trigger row must not stop shadow labelling."""
+    not_confirmed trigger row must not stop shadow labelling.
+
+    ALSO FIX (audit-fixup 2026-08, B LOW): the suspend switch is pinned to
+    a tmp_path-scoped file, same as its sibling e2e test below -- otherwise
+    this reads/writes the REAL ``data/SHADOW_LABEL_SUSPENDED`` relative to
+    cwd, and a stray marker file from an unrelated drill would fail this
+    test for a reason that has nothing to do with SUSP-1."""
     orch, _ = _orch_with_shadow_universe(tmp_path, _seed_symbols(6))
     orch.run_scan_once()
     _seed_universe_days(orch.journal, timeutils.market_date().isoformat())
@@ -332,11 +403,17 @@ def test_susp1_e2e_not_confirmed_proceeds_to_labelling_via_run_shadow_label(tmp_
         drift_detail={"confirmation": {"status": "not_confirmed", "confirming_run_id": "canaryrun_e2e_x"}},
     )
 
-    result = shadow_label.run_shadow_label(orch)
+    switch = ShadowLabelSuspendSwitch(path=str(tmp_path / "SHADOW_LABEL_SUSPENDED"))
+    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda: switch)
 
-    assert result["status"] == "completed"
-    assert result["labelled"] > 0
-    assert orch.journal.count_rows("candidate_labels", "shadow_tier = 1") > 0
+    try:
+        result = shadow_label.run_shadow_label(orch)
+
+        assert result["status"] == "completed"
+        assert result["labelled"] > 0
+        assert orch.journal.count_rows("candidate_labels", "shadow_tier = 1") > 0
+    finally:
+        switch.release()
     orch.journal.close()
 
 
@@ -353,9 +430,10 @@ def test_susp1_e2e_confirmed_suspends_engages_switch_and_pages_via_run_shadow_la
     )
 
     switch = ShadowLabelSuspendSwitch(path=str(tmp_path / "SHADOW_LABEL_SUSPENDED"))
-    import alphaos.scheduler.shadow_label as sl_module
-    orig_switch_cls = sl_module.ShadowLabelSuspendSwitch
-    sl_module.ShadowLabelSuspendSwitch = lambda: switch
+    # ALSO FIX (audit-fixup 2026-08, B NIT): monkeypatch.setattr, not a raw
+    # module-attribute reassignment + manual try/finally restore -- pytest
+    # reverts this automatically even if an assertion below raises.
+    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda: switch)
 
     paged = {}
 
@@ -372,7 +450,7 @@ def test_susp1_e2e_confirmed_suspends_engages_switch_and_pages_via_run_shadow_la
         assert result["status"] == "skipped"
         assert "auto-suspend" in result["reason"]
         assert switch.is_engaged()
-        assert "confirmed" in switch.reason()
+        assert "[confirmed]" in switch.reason()
         assert "canaryrun_e2e_confirmed" in switch.reason()
         assert paged.get("title") == "AlphaOS: shadow labelling auto-suspended"
         assert "canaryrun_e2e_confirmed" in paged.get("message", "")
@@ -382,6 +460,274 @@ def test_susp1_e2e_confirmed_suspends_engages_switch_and_pages_via_run_shadow_la
         )
         assert len(events) == 1
     finally:
-        sl_module.ShadowLabelSuspendSwitch = orig_switch_cls
         switch.release()
     orch.journal.close()
+
+
+# ================================================== audit-fixup round (2026-08)
+# ---------------------------------------------- MUST FIX 2: cross-class latch
+def test_susp1_cross_class_tier2_confirmed_by_tier1_latches_via_real_producer(tmp_path, journal, monkeypatch):
+    """MUST FIX 2 (A HIGH-1 / B HIGH-2, CONVERGENT): drives the REAL
+    CANARY-2 producer (``run_canary_confirmed``), not a hand-built row -- a
+    TIER_2/label-drift trigger confirmed by a TIER_1/identity same-day
+    re-run (a genuine model swap, e.g. gpt-5.1->gpt-5.2) must LATCH the
+    auto-suspend at TIER_1 severity even though the TRIGGER row itself
+    never carried TIER_1. Round-1 SUSP-1 code excluded ALL TIER_2 trigger
+    rows from the query, so CANARY-2 itself paged "model drift CONFIRMED
+    (TIER_1)" while ``check_auto_suspend`` returned False -- a regression
+    vs `main`'s original (unfiltered, TIER_1-only-literal-but-catch-all)
+    query. Mirrors ``tests/test_canary.py::
+    test_canary2_auditfix_cross_class_tier2_confirmed_by_identity_keeps_diff``'s
+    own real-producer probe exactly."""
+    settings = make_settings(NTFY_TOPIC="test-topic")
+    corpus_dir = str(tmp_path / "corpus")
+    _seed_pinned_baseline(journal, settings, corpus_dir)
+
+    import alphaos.canary.run as run_module
+    from alphaos.canary.run import run_canary_confirmed
+    from alphaos.constants import DRIFT_TIER_1, DRIFT_TIER_2
+
+    responses = iter([
+        (DRIFT_TIER_2, _label_drift_detail(4, 1, 3)),
+        (DRIFT_TIER_1, _identity_detail(["gpt-5.1"], ["gpt-5.2"])),
+    ])
+    monkeypatch.setattr(run_module, "_compute_drift", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(run_module.alerts, "send_alert", lambda *a, **kw: True)
+
+    result = run_canary_confirmed(journal, settings, corpus_dir=corpus_dir)
+    assert result["confirmed"] is True  # sanity: CANARY-2 itself paged this (pre-existing law)
+    assert result["paged"] is True
+
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "[confirmed-cross-class]" in reason
+    assert result["run_id"] in reason
+
+
+def test_susp1_same_tier_tier2_confirmed_does_not_latch_policy_boundary(journal):
+    """The "NOT this round" boundary, encoded as a test: a same-tier
+    TIER_2-trigger confirmed by a TIER_2-severity re-run must NOT latch.
+    This is deliberately pre-existing `main` behavior (the old query never
+    read TIER_2 rows at all) -- whether a same-tier confirmed TIER_2 should
+    EVER suspend is an open operator policy question the spec's own
+    decision log records but does not decide; MUST FIX 2 only ever expands
+    coverage for the cross-class-to-TIER_1 case, never plain TIER_2."""
+    settings = make_settings()
+    _insert_tier1_row(
+        journal, "canaryrun_same_tier2_confirmed", days_ago=1, drift_tier="TIER_2",
+        drift_detail={
+            "confirmation": {
+                "status": "confirmed", "confirming_run_id": "canaryrun_x", "confirming_drift_tier": "TIER_2",
+            },
+        },
+    )
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is False
+    assert reason == "no auto-suspend condition met"
+
+
+def test_susp1_tier2_trigger_not_confirmed_does_not_latch(journal):
+    """Adjacent boundary case: a TIER_2 trigger's OWN not_confirmed/
+    unconfirmed_page/legacy outcomes stay exactly pre-SUSP-1 (unlatched) --
+    only the cross-class-confirmed-to-TIER_1 path is new."""
+    settings = make_settings()
+    _insert_tier1_row(
+        journal, "canaryrun_tier2_notconfirmed", days_ago=1, drift_tier="TIER_2",
+        drift_detail={"confirmation": {"status": "not_confirmed", "confirming_drift_tier": "TIER_2"}},
+    )
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is False
+
+
+def test_susp1_tier2_trigger_legacy_shape_does_not_latch(journal):
+    """A TIER_2 trigger with NO confirmation annotation at all (legacy
+    shape) does not latch -- TIER_2's conservative default is "don't latch,"
+    unlike TIER_1's "latch," precisely because pre-SUSP-1 `main` never read
+    TIER_2 rows in the first place; there is no regression to guard against
+    here in the other direction."""
+    settings = make_settings()
+    _insert_tier1_row(journal, "canaryrun_tier2_legacy", days_ago=1, drift_tier="TIER_2", drift_detail=None)
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is False
+
+
+# ------------------------------------------- MUST FIX 1: vocabulary lockstep
+def _resolve_ast_literal(node: ast.AST, module) -> object:
+    """Resolve an AST node to its underlying Python value: a raw string
+    literal resolves directly; a bare ``Name`` resolves via ``getattr`` on
+    the module that contains it (this is how both ``canary/run.py`` and
+    ``shadow_label.py`` now reference the shared ``CANARY_CONFIRMATION_
+    STATUS_*`` constants imported from ``alphaos.constants`` -- as plain
+    names in their own namespace, via ``from alphaos.constants import
+    X``). Raises loudly on anything else -- an unresolvable node means the
+    harvester itself needs updating, not a silent skip."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        return getattr(module, node.id)
+    raise AssertionError(
+        f"lockstep harvester: unresolvable AST node {ast.dump(node)} in {module.__name__}"
+    )
+
+
+def _harvest_confirmation_status_producer_values(module) -> set:
+    """AST-harvest every value written to a ``"status"`` key inside a dict
+    literal in ``module``'s own source -- the PRODUCER side of the
+    confirmation-status vocabulary (CANARY-2's ``run_canary_confirmed``,
+    ``alphaos/canary/run.py``). Source, not bytecode -- ``ast.walk``
+    recurses into nested/starred dict literals (``{**detail,
+    "confirmation": {"status": X}}``) automatically."""
+    tree = ast.parse(inspect.getsource(module))
+    values = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key_node, value_node in zip(node.keys, node.values):
+                if isinstance(key_node, ast.Constant) and key_node.value == "status":
+                    values.add(_resolve_ast_literal(value_node, module))
+    return values
+
+
+def _harvest_confirmation_status_consumer_values(module, compared_name: str = "status") -> set:
+    """AST-harvest every value compared against a local named
+    ``compared_name`` via ``==`` in ``module``'s own source -- the CONSUMER
+    side (``shadow_label._canary_confirmation_latch``)."""
+    tree = ast.parse(inspect.getsource(module))
+    values = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], ast.Eq):
+            left, right = node.left, node.comparators[0]
+            if isinstance(left, ast.Name) and left.id == compared_name:
+                values.add(_resolve_ast_literal(right, module))
+            elif isinstance(right, ast.Name) and right.id == compared_name:
+                values.add(_resolve_ast_literal(left, module))
+    return values
+
+
+_EXPECTED_CONFIRMATION_STATUS_VOCABULARY = {
+    "identity_immediate", "confirmed", "unconfirmed_page", "not_confirmed",
+}
+
+
+def test_susp1_confirmation_status_vocabulary_lockstep_producer_consumer():
+    """MUST FIX 1(b) (B HIGH-1 / A HIGH-2, CONVERGENT): the four
+    confirmation-status literals are centralized in ``alphaos.constants``,
+    but THIS test independently proves both the PRODUCER (``canary/run.py``'s
+    ``run_canary_confirmed``, which WRITES ``{"status": ...}``) and the
+    CONSUMER (``shadow_label.py``'s ``_canary_confirmation_latch``, which
+    COMPARES ``status == ...``) still spell the exact same four-value
+    vocabulary -- harvested from source via AST, never hand-copied into this
+    test. House precedent: ``test_ab_eval.py::
+    test_candidate_whitelist_matches_scanner_creation_insert``'s own
+    AST-introspected lockstep pattern (INSTR-3 spec).
+
+    Mutation-tested by hand before landing (see the audit-fixup commit
+    message / build report for the exact before/after): temporarily
+    hardcoding a raw ``"unconfirmed-page-typo"`` string in place of the
+    imported ``CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE`` constant in one
+    of ``_canary_confirmation_latch``'s comparisons turns this test RED
+    (consumer-only value ``{"unconfirmed-page-typo"}``, producer-only value
+    ``{"unconfirmed_page"}``) while every other test in this file (including
+    the ``unconfirmed_page`` behavioral test above) still independently
+    exercises the ACTUAL runtime behavior -- proving this test catches a
+    vocabulary drift that a purely behavioral suite would not."""
+    from alphaos.canary import run as canary_run_module
+    from alphaos.scheduler import shadow_label as shadow_label_module
+
+    producer_values = _harvest_confirmation_status_producer_values(canary_run_module)
+    consumer_values = _harvest_confirmation_status_consumer_values(shadow_label_module)
+
+    producer_only = producer_values - consumer_values
+    consumer_only = consumer_values - producer_values
+    assert not producer_only, (
+        f"canary/run.py writes a confirmation status no consumer in shadow_label.py checks: {producer_only}"
+    )
+    assert not consumer_only, (
+        f"shadow_label.py checks a confirmation status canary/run.py never writes: {consumer_only}"
+    )
+    assert producer_values == _EXPECTED_CONFIRMATION_STATUS_VOCABULARY
+    assert consumer_values == _EXPECTED_CONFIRMATION_STATUS_VOCABULARY
+
+
+def test_susp1_lockstep_harvester_reports_a_deliberately_broken_vocabulary():
+    """Proves the harvester itself has teeth (in-suite, no source
+    mutation required): fed a deliberately mismatched pair of fake modules
+    -- one "producer" that writes a status the other "consumer" never
+    checks, and vice versa -- the harvester must surface BOTH one-sided
+    sets, not silently intersect them away. This is what the hand
+    source-mutation test described in the sibling test's own docstring
+    would trip in the real modules; this version proves it deterministically
+    without touching real source files."""
+    import types
+
+    producer_src = (
+        "def build():\n"
+        "    return {'confirmation': {'status': 'identity_immediate'}}\n"
+        "def build2():\n"
+        "    return {'confirmation': {'status': 'producer_only_value'}}\n"
+    )
+    consumer_src = (
+        "def check(status):\n"
+        "    if status == 'identity_immediate':\n"
+        "        return True\n"
+        "    if status == 'consumer_only_value':\n"
+        "        return True\n"
+        "    return False\n"
+    )
+    fake_producer = types.ModuleType("fake_producer")
+    fake_producer.__source_override__ = producer_src
+    fake_consumer = types.ModuleType("fake_consumer")
+    fake_consumer.__source_override__ = consumer_src
+
+    import inspect as _inspect
+    orig_getsource = _inspect.getsource
+
+    def _fake_getsource(obj):
+        override = getattr(obj, "__source_override__", None)
+        return override if override is not None else orig_getsource(obj)
+
+    import unittest.mock as mock
+    with mock.patch.object(inspect, "getsource", side_effect=_fake_getsource):
+        producer_values = _harvest_confirmation_status_producer_values(fake_producer)
+        consumer_values = _harvest_confirmation_status_consumer_values(fake_consumer, compared_name="status")
+
+    assert producer_values == {"identity_immediate", "producer_only_value"}
+    assert consumer_values == {"identity_immediate", "consumer_only_value"}
+    assert producer_values - consumer_values == {"producer_only_value"}
+    assert consumer_values - producer_values == {"consumer_only_value"}
+
+
+# ------------------------------------------------- MUST FIX 1: cold import
+def test_susp1_cold_import_canary_modules_no_circular_import():
+    """MUST FIX 1(a) (B BLOCKER / B HIGH-1 / A HIGH-2, CONVERGENT): every
+    module in the canary/shadow-label dependency chain must cold-import
+    cleanly in a GENUINELY FRESH interpreter. Round-1 SUSP-1 code created a
+    real circular import: ``alphaos.canary`` -> ``canary.run`` ->
+    ``alphaos.scheduler`` (via ``cost_guard``) -> ``scheduler.digest`` ->
+    ``scheduler.shadow_label`` -> back into the still-initializing
+    ``canary.run`` (which ``shadow_label.py`` imported ``DRIFT_TIER_1``
+    from directly). Invisible to every OTHER test in this repo because
+    ``conftest.py`` always warms ``alphaos.scheduler`` first; invisible in
+    production only because ``__main__.py`` happens to import
+    ``alphaos.scheduler`` before ``alphaos.canary`` (an untested ordering
+    accident, per the audit). A subprocess with a genuinely fresh
+    ``sys.modules`` is the only way this repo can catch this bug class --
+    there is currently no other import-hygiene test anywhere in ``tests/``.
+
+    Fixed by promoting the shared ``DRIFT_TIER_*``/confirmation-status
+    vocabulary to ``alphaos.constants`` (a leaf module, zero ``alphaos.*``
+    imports of its own) so ``shadow_label.py`` no longer needs to import
+    anything from ``alphaos.canary.run`` at all."""
+    for module_name in (
+        "alphaos.canary",
+        "alphaos.canary.run",
+        "alphaos.canary.corpus",
+        "alphaos.reports.canary_report",
+        "alphaos.scheduler.shadow_label",
+    ):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module_name}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, (
+            f"cold import of {module_name!r} failed in a fresh interpreter:\n{result.stderr}"
+        )
