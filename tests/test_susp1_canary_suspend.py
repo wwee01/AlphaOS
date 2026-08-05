@@ -39,6 +39,18 @@ CHANGES, convergent findings) adds:
     TIER_2 trigger does NOT latch (pre-existing on `main`, deliberately left
     alone -- an operator policy question, not a builder fix).
 
+Audit-fixup round 3 (2026-08, both audits upgraded to APPROVE WITH NOTES;
+this round's items are the residue) adds:
+
+15. ALSO FIX 3 -- the vocabulary lockstep guard (item 12) now also covers
+    reports/canary_report.py, the third real consumer (rendering, not a
+    suspend decision) -- previously only shadow_label.py was checked.
+16. ALSO FIX 4 -- a fifth arm, unrecognized-status: a real, non-None status
+    matching none of the four known literals still latches (right fail
+    direction) but is no longer reported byte-identical to a genuinely
+    legacy row (an unrecognized status means CURRENT code is writing it
+    every cycle -- it will never age out the way a stale legacy row does).
+
 All offline, in-memory, mock mode. No real money, no network.
 """
 
@@ -222,6 +234,41 @@ def test_susp1_malformed_confirmation_value_not_a_dict_latches(journal):
     should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
     assert should_suspend is True
     assert "[legacy-conservative]" in reason
+
+
+def test_susp1_unrecognized_status_latches_and_names_offending_value(journal):
+    """ALSO FIX 4 (audit-fixup round 3, B NEW LOW, judged worth fixing): a
+    real, non-None, well-formed status that matches none of the four known
+    literals (e.g. a value a NEWER deployment or a hand-edit wrote) latches
+    -- correct fail direction -- but must NOT render byte-identical to a
+    genuinely legacy row. Distinguished arm, and the offending value is
+    named in the reason string so the operator can tell "this ages out on
+    its own" (legacy-conservative) apart from "this will not, because
+    current code is writing it every cycle" (unrecognized-status)."""
+    settings = make_settings()
+    _insert_tier1_row(
+        journal, "canaryrun_future_status", days_ago=1,
+        drift_detail={"confirmation": {"status": "some_future_status_v2"}},
+    )
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "[unrecognized-status]" in reason
+    assert "[legacy-conservative]" not in reason
+    assert "canaryrun_future_status" in reason
+    assert "some_future_status_v2" in reason  # the offending value itself, not just the arm name
+
+
+def test_susp1_unrecognized_status_distinct_from_genuinely_legacy_row(journal):
+    """Same shape (in-window TIER_1 trigger, both latch True) but the
+    reason strings must differ in their ARM, proving the two cases are not
+    conflated -- a genuinely legacy row (no confirmation key at all) still
+    reports legacy-conservative, never unrecognized-status."""
+    settings = make_settings()
+    _insert_tier1_row(journal, "canaryrun_truly_legacy", days_ago=1, drift_detail=None)
+    should_suspend, reason = shadow_label.check_auto_suspend(journal, settings)
+    assert should_suspend is True
+    assert "[legacy-conservative]" in reason
+    assert "[unrecognized-status]" not in reason
 
 
 def test_susp1_window_boundary_exact_edge_is_inclusive(journal, monkeypatch):
@@ -609,16 +656,27 @@ _EXPECTED_CONFIRMATION_STATUS_VOCABULARY = {
 
 
 def test_susp1_confirmation_status_vocabulary_lockstep_producer_consumer():
-    """MUST FIX 1(b) (B HIGH-1 / A HIGH-2, CONVERGENT): the four
-    confirmation-status literals are centralized in ``alphaos.constants``,
-    but THIS test independently proves both the PRODUCER (``canary/run.py``'s
-    ``run_canary_confirmed``, which WRITES ``{"status": ...}``) and the
-    CONSUMER (``shadow_label.py``'s ``_canary_confirmation_latch``, which
-    COMPARES ``status == ...``) still spell the exact same four-value
-    vocabulary -- harvested from source via AST, never hand-copied into this
-    test. House precedent: ``test_ab_eval.py::
-    test_candidate_whitelist_matches_scanner_creation_insert``'s own
-    AST-introspected lockstep pattern (INSTR-3 spec).
+    """MUST FIX 1(b) (B HIGH-1 / A HIGH-2, CONVERGENT), extended (audit-fixup
+    round 3, ALSO FIX 3, B NEW LOW): the four confirmation-status literals
+    are centralized in ``alphaos.constants``, but THIS test independently
+    proves the PRODUCER (``canary/run.py``'s ``run_canary_confirmed``, which
+    WRITES ``{"status": ...}``) and BOTH real consumers -- ``shadow_label.py``'s
+    ``_canary_confirmation_latch`` (COMPARES ``status == ...`` to decide
+    whether to suspend) and ``reports/canary_report.py``'s ``render_markdown``
+    (COMPARES ``status == ...`` to render the operator-facing drift line) --
+    still spell the exact same four-value vocabulary. Harvested from source
+    via AST, never hand-copied into this test. House precedent:
+    ``test_ab_eval.py::test_candidate_whitelist_matches_scanner_creation_
+    insert``'s own AST-introspected lockstep pattern (INSTR-3 spec).
+
+    round 3's own finding (B's mutation F): drifting ``canary_report.py``
+    alone to a bare literal previously left the whole repo green -- the
+    harvester already handled that module correctly once pointed at it, it
+    just wasn't being asked. Every consumer this repo has for this
+    vocabulary is now covered; a fourth consumer, if one is ever added,
+    would need a fourth line here (there is no way to enumerate "every
+    consumer" fully automatically without a repo-wide AST sweep, which is
+    out of scope for this ticket's own blast radius).
 
     Mutation-tested by hand before landing (see the audit-fixup commit
     message / build report for the exact before/after): temporarily
@@ -629,23 +687,32 @@ def test_susp1_confirmation_status_vocabulary_lockstep_producer_consumer():
     ``{"unconfirmed_page"}``) while every other test in this file (including
     the ``unconfirmed_page`` behavioral test above) still independently
     exercises the ACTUAL runtime behavior -- proving this test catches a
-    vocabulary drift that a purely behavioral suite would not."""
+    vocabulary drift that a purely behavioral suite would not. Separately
+    re-verified for this round's extension: hardcoding a raw literal in
+    ``canary_report.py``'s own comparison turns this test RED too (see the
+    build report for the exact before/after)."""
     from alphaos.canary import run as canary_run_module
+    from alphaos.reports import canary_report as canary_report_module
     from alphaos.scheduler import shadow_label as shadow_label_module
 
     producer_values = _harvest_confirmation_status_producer_values(canary_run_module)
     consumer_values = _harvest_confirmation_status_consumer_values(shadow_label_module)
+    report_values = _harvest_confirmation_status_consumer_values(canary_report_module)
 
-    producer_only = producer_values - consumer_values
-    consumer_only = consumer_values - producer_values
-    assert not producer_only, (
-        f"canary/run.py writes a confirmation status no consumer in shadow_label.py checks: {producer_only}"
-    )
-    assert not consumer_only, (
-        f"shadow_label.py checks a confirmation status canary/run.py never writes: {consumer_only}"
-    )
+    for consumer_name, consumer_values_set in (
+        ("shadow_label.py", consumer_values), ("reports/canary_report.py", report_values),
+    ):
+        producer_only = producer_values - consumer_values_set
+        consumer_only = consumer_values_set - producer_values
+        assert not producer_only, (
+            f"canary/run.py writes a confirmation status {consumer_name} never checks: {producer_only}"
+        )
+        assert not consumer_only, (
+            f"{consumer_name} checks a confirmation status canary/run.py never writes: {consumer_only}"
+        )
+        assert consumer_values_set == _EXPECTED_CONFIRMATION_STATUS_VOCABULARY
+
     assert producer_values == _EXPECTED_CONFIRMATION_STATUS_VOCABULARY
-    assert consumer_values == _EXPECTED_CONFIRMATION_STATUS_VOCABULARY
 
 
 def test_susp1_lockstep_harvester_reports_a_deliberately_broken_vocabulary():

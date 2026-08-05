@@ -184,6 +184,21 @@ CANARY_LATCH_ARM_LEGACY = "legacy-conservative"
 # arm, distinct from same-tier ``confirmed``, so the reason string is
 # legible about which case fired.
 CANARY_LATCH_ARM_CONFIRMED_CROSS_CLASS = "confirmed-cross-class"
+# ALSO FIX 4 (audit-fixup round 3, 2026-08, B NEW LOW, judged worth fixing):
+# an unrecognized/future status value (parses fine, ``confirmation`` is a
+# real dict, ``status`` is a real non-None string, but it matches none of
+# the four known literals) latched correctly under ``CANARY_LATCH_ARM_LEGACY``
+# before this fix -- the right fail direction, but a byte-identical reason
+# to a GENUINELY legacy pre-CANARY-2 row. That equivalence is operationally
+# dangerous: "legacy-conservative" tells the operator "old row, it ages out
+# in ~SHADOW_SUSPEND_CANARY_WINDOW_DAYS days, sit tight" -- but an
+# unrecognized status means CURRENT code is writing it every cycle, so the
+# row will NEVER age out on its own. This arm exists so the reason string
+# can say so explicitly, and name the offending value (the lockstep guard
+# in tests/test_susp1_canary_suspend.py closes the SOURCE-level version of
+# this gap; it cannot close the DATA-level version -- a row written by an
+# older/newer deployment or a hand-edit -- which is what this arm defends).
+CANARY_LATCH_ARM_UNRECOGNIZED_STATUS = "unrecognized-status"
 
 
 def _parse_confirmation_annotation(drift_detail_json: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -214,11 +229,16 @@ def _canary_confirmation_latch(trigger_tier: str, drift_detail_json: Optional[st
     ``not_confirmed`` status releases a TIER_1 trigger. Every other case --
     ``identity_immediate``, ``confirmed``, ``unconfirmed_page`` (confirmation
     itself could not execute), a missing ``confirmation`` key, a non-dict
-    value there, or JSON that does not even parse -- LATCHES. A malformed/
+    value there, JSON that does not even parse, or a non-None status that
+    matches none of the four known literals -- LATCHES. A malformed/
     unparseable ``drift_detail_json`` must never be skipped-because-broken;
     it is treated identically to a legacy pre-CANARY-2 row (no confirmation
     key at all), since both are cases where the system has no proof the trip
-    was transient.
+    was transient -- BUT a real, non-None, unrecognized status is deliberately
+    NOT reported as legacy (``CANARY_LATCH_ARM_UNRECOGNIZED_STATUS``,
+    ALSO FIX 4): a legacy row ages out of the recency window on its own; an
+    unrecognized status means CURRENT code is writing it every cycle and
+    will not.
 
     A TIER_2 trigger is narrower by design: it latches ONLY the cross-class
     case (MUST FIX 2) -- ``status == confirmed`` AND
@@ -226,11 +246,11 @@ def _canary_confirmation_latch(trigger_tier: str, drift_detail_json: Optional[st
     MUST FIX 1 exists to catch (a label-drift trip confirmed by a same-day
     re-run that turns out to be a genuine identity/failsafe change). Every
     OTHER TIER_2 outcome (not_confirmed, unconfirmed_page, a same-tier
-    TIER_2-confirmed, legacy/malformed) is deliberately UNCHANGED from
-    pre-SUSP-1 `main` behavior -- the old query never read TIER_2 rows at
-    all, and whether a same-tier confirmed TIER_2 should EVER suspend is an
-    open operator policy question, recorded but not decided here (see the
-    spec's own decision log -- NOT this round)."""
+    TIER_2-confirmed, legacy/malformed/unrecognized) is deliberately
+    UNCHANGED from pre-SUSP-1 `main` behavior -- the old query never read
+    TIER_2 rows at all, and whether a same-tier confirmed TIER_2 should EVER
+    suspend is an open operator policy question, recorded but not decided
+    here (see the spec's own decision log -- NOT this round)."""
     status, confirming_tier = _parse_confirmation_annotation(drift_detail_json)
 
     if trigger_tier == DRIFT_TIER_1:
@@ -242,11 +262,18 @@ def _canary_confirmation_latch(trigger_tier: str, drift_detail_json: Optional[st
             return True, CANARY_LATCH_ARM_CONFIRMED
         if status == CANARY_CONFIRMATION_STATUS_UNCONFIRMED_PAGE:
             return True, CANARY_LATCH_ARM_UNCONFIRMED
-        # Key absent / non-dict confirmation / unparseable JSON / no
-        # drift_detail_json at all / any unrecognized status string:
-        # conservative default -- legacy rows are never silently un-armed by
-        # code (operator decision, D2, master reference §9 2026-08-05).
-        return True, CANARY_LATCH_ARM_LEGACY
+        if status is None:
+            # Key absent / non-dict confirmation / unparseable JSON / no
+            # drift_detail_json at all: genuinely legacy pre-CANARY-2 shape
+            # -- conservative default, never silently un-armed by code
+            # (operator decision, D2, master reference §9 2026-08-05).
+            return True, CANARY_LATCH_ARM_LEGACY
+        # A real, non-None status that matches none of the four known
+        # literals (ALSO FIX 4): still latches -- same fail direction -- but
+        # NOT legacy. Distinguished from the branch above because the
+        # operator-facing implication is opposite: legacy ages out, this
+        # does not (see the constant's own comment above).
+        return True, CANARY_LATCH_ARM_UNRECOGNIZED_STATUS
 
     # trigger_tier == DRIFT_TIER_2 (the only other tier the caller's query
     # selects): see docstring above -- cross-class-confirmed only.
@@ -304,6 +331,14 @@ def _canary_suspend_arm(journal, settings) -> tuple[bool, str]:
                 tier_note = (
                     f"trigger tier {row['drift_tier']} confirmed by a TIER_1-severity "
                     "same-day re-run"
+                )
+            elif arm == CANARY_LATCH_ARM_UNRECOGNIZED_STATUS:
+                status, _confirming_tier = _parse_confirmation_annotation(row["drift_detail_json"])
+                tier_note = (
+                    f"trigger tier {row['drift_tier']}, unrecognized confirmation.status={status!r} "
+                    "-- NOT a legacy/malformed row (current code is writing this status every "
+                    "cycle; unlike a genuinely legacy row, it will never age out of this window "
+                    "on its own)"
                 )
             else:
                 tier_note = f"trigger tier {row['drift_tier']}"

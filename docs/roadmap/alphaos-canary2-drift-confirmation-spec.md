@@ -259,4 +259,10 @@ every confirmation status except an explicit `not_confirmed`; legacy rows
 conservatively until they age out of the window — no code deletes or
 dismisses that row. Per its own hard gate, this ticket must merge before
 `SHADOW_LABELLING_ENABLED` is ever set true; it has not merged yet, and that
-flag is still false.
+flag is still false. **Audit-fixup addition (round 2):** the arm selection
+widened beyond TIER_1 to also latch a TIER_2/label-drift trigger when THIS
+spec's own cross-class confirmation lands a TIER_1-severity re-run verdict
+on it (`confirmed-cross-class`) — the exact scenario CANARY-2's own MUST
+FIX 1 exists to catch — so a confirmed identity/failsafe drift suspends
+shadow labelling regardless of which row's own `drift_tier` carried the
+original trigger; see SUSP-1's own STATUS CORRECTION for the full detail.
