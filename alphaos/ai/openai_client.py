@@ -21,7 +21,11 @@ if TYPE_CHECKING:
     from alphaos.scanner.scan_context import ScanContext
 
 from alphaos.ai import prompt_templates as pt
-from alphaos.ai.validation import enforce_no_news_sentinels, validate_no_news_eval
+from alphaos.ai.validation import (
+    enforce_no_news_sentinels,
+    validate_max_holding_days_range,
+    validate_no_news_eval,
+)
 from alphaos import lineage
 from alphaos.constants import (
     CATALYST_NOT_AVAILABLE_V1,
@@ -236,9 +240,9 @@ class OpenAIClient:
 
     def _augment_snapshot_for_prompt(self, snapshot: dict,
                                      candidate: "Union[dict, ScanContext]") -> dict:
-        """INSTR-2/INSTR-3: no-op (returns ``snapshot`` UNCHANGED, same
-        object) unless BOTH live (``not self.use_mock``) AND
-        ``settings.openai_prompt_version in ("v2", "v3")`` -- the mock
+        """INSTR-2/INSTR-3/HOLD-2: no-op (returns ``snapshot`` UNCHANGED,
+        same object) unless BOTH live (``not self.use_mock``) AND
+        ``settings.openai_prompt_version in ("v2", "v3", "v4")`` -- the mock
         baseline's prompt never changes (non-goal), and v1 stays
         byte-identical to before (merge-dark guarantee). INSTR-3 widened
         this from a literal ``== "v2"`` check to a membership check
@@ -247,7 +251,10 @@ class OpenAIClient:
         gate back to a literal ``== "v2"`` silently strips v3 of the
         ATR_STOP_POLICY block it still needs (incoherent by construction --
         see ``tests/test_instr3_trend_context.py``'s version-gate
-        regression tests).
+        regression tests). HOLD-2 widened it again to include "v4" -- v4 is
+        v3 content plus a card-interpolated horizon, so it needs
+        ATR_STOP_POLICY exactly like v3 (never regress this back to
+        ``in ("v2", "v3")`` -- that would silently strip v4 of the block).
 
         When active, returns a COPY of ``snapshot`` with key ``"atr_policy"``
         set to a freshly-computed block -- ALWAYS recomputed here, ALWAYS
@@ -276,7 +283,7 @@ class OpenAIClient:
         of the ATR read above: ATR already computed successfully means the
         returned snapshot still carries ``atr_policy``, i.e. a v2-shaped
         prompt, even though this evaluation is nominally v3)."""
-        if self.use_mock or self.settings.openai_prompt_version not in ("v2", "v3"):
+        if self.use_mock or self.settings.openai_prompt_version not in ("v2", "v3", "v4"):
             return snapshot
 
         symbol = candidate.get("symbol")
@@ -307,7 +314,7 @@ class OpenAIClient:
             "rules_version": ATR_RULES_V1,
         }
 
-        if self.settings.openai_prompt_version == "v3":
+        if self.settings.openai_prompt_version in ("v3", "v4"):  # HOLD-2: v4 retains MULTI_DAY_CONTEXT
             multi_day_context = self._build_multi_day_context(symbol, candidate, snapshot, atr)
             if multi_day_context is not None:
                 augmented["multi_day_context"] = multi_day_context
@@ -527,6 +534,19 @@ class OpenAIClient:
         return evaluation
 
     # ------------------------------------------------------------------- mock
+    def _mock_max_holding_days(self) -> int:
+        """HOLD-2: the mock baseline's ``max_holding_days`` now follows the
+        ACTIVE card (was a hardcoded literal ``3``) -- deliberately NOT
+        gated on prompt version (the mock path is version-agnostic; this
+        setting's own default, ``catalyst_momentum_v2`` -> 3, reproduces the
+        old literal exactly, so an unchanged .env stays merge-dark).
+        Deferred import: avoids a module-level import cycle with
+        ``alphaos.config.settings`` (same reasoning as
+        ``load_settings()``'s own deferred import of this registry)."""
+        from alphaos.cards.registry import get_default_card
+        card = get_default_card(settings=self.settings)
+        return card["max_holding_days_default"]
+
     def _mock_eval(self, candidate, snapshot, freshness_status) -> OpenAIEvaluation:
         symbol = candidate.get("symbol")
         direction = candidate.get("direction") or TradeDirection.LONG.value
@@ -575,7 +595,7 @@ class OpenAIClient:
             entry=entry,
             stop=stop,
             target=target,
-            max_holding_days=3,
+            max_holding_days=self._mock_max_holding_days(),
             expected_r=expected_r,
             confidence=confidence,
             decision=decision,
@@ -618,49 +638,75 @@ class OpenAIClient:
         from openai import OpenAI  # lazy import; optional dependency
 
         client = OpenAI(api_key=self.settings.openai_api_key)
-        # INSTR-2 (audit fixup, MEDIUM), widened by INSTR-3: gated on the
-        # ACTIVE settings version, never on whatever "atr_policy"/
-        # "multi_day_context" keys happen to already sit in ``snapshot``.
-        # Naively passing snapshot.get(...) unconditionally was proven
-        # exploitable: a replayed v2/v3-era fixture (e.g. a future
-        # AB-EVAL-1 corpus built from post-cutover snapshot_json, which DOES
-        # carry an archived block) would leak a section into what's
-        # supposed to be a byte-identical v1 (or v2) control-arm prompt,
-        # corrupting the exact comparison the harness exists to produce.
-        # _augment_snapshot_for_prompt()'s own v1/mock no-op deliberately
-        # returns ``snapshot`` UNCHANGED (never strips a pre-existing key --
-        # see its own docstring), so this gate is the one place that must
-        # not trust the snapshot dict's own contents. The two membership
-        # checks below are the same audit-MEDIUM fix as before, widened
-        # from a literal ``== "v2"`` to ``in ("v2", "v3")`` for atr_policy
-        # (regressing this re-opens the original finding) plus a NEW,
-        # v3-only gate for multi_day_context.
+        # INSTR-2 (audit fixup, MEDIUM), widened by INSTR-3, widened again by
+        # HOLD-2: gated on the ACTIVE settings version, never on whatever
+        # "atr_policy"/"multi_day_context" keys happen to already sit in
+        # ``snapshot``. Naively passing snapshot.get(...) unconditionally
+        # was proven exploitable: a replayed v2/v3-era fixture (e.g. a
+        # future AB-EVAL-1 corpus built from post-cutover snapshot_json,
+        # which DOES carry an archived block) would leak a section into
+        # what's supposed to be a byte-identical v1 (or v2) control-arm
+        # prompt, corrupting the exact comparison the harness exists to
+        # produce. _augment_snapshot_for_prompt()'s own v1/mock no-op
+        # deliberately returns ``snapshot`` UNCHANGED (never strips a
+        # pre-existing key -- see its own docstring), so this gate is the
+        # one place that must not trust the snapshot dict's own contents.
+        # The membership checks below are the same audit-MEDIUM fix as
+        # before, widened from a literal ``== "v2"`` to ``in ("v2", "v3")``
+        # for atr_policy (regressing this re-opens the original finding),
+        # then to ``in ("v2", "v3", "v4")`` by HOLD-2 (v4 is v3 content plus
+        # an interpolated horizon -- it needs the same blocks v3 does).
         version = self.settings.openai_prompt_version
         prompt_candidate = candidate
-        if version == "v3":
-            # INSTR-3: under v3 ONLY, the model never sees the dishonest
-            # legacy `trend_quality` field (candidate_scanner.py's own
-            # abs(change_pct)*10 formula) -- a plain dict copy so the
-            # original candidate/ScanContext (persisted, reused elsewhere)
-            # is never mutated. v1/v2 prompts are unaffected (byte-identity
-            # preserved for both golden tests).
+        if version in ("v3", "v4"):
+            # INSTR-3 (widened to v4 by HOLD-2): under v3/v4 ONLY, the model
+            # never sees the dishonest legacy `trend_quality` field
+            # (candidate_scanner.py's own abs(change_pct)*10 formula) -- a
+            # plain dict copy so the original candidate/ScanContext
+            # (persisted, reused elsewhere) is never mutated. v1/v2 prompts
+            # are unaffected (byte-identity preserved for both golden
+            # tests).
             prompt_candidate = {k: v for k, v in candidate.items() if k != "trend_quality"}
-        user_prompt = pt.build_no_news_user_prompt(
-            prompt_candidate, snapshot, freshness_status,
-            atr_policy=snapshot.get("atr_policy") if version in ("v2", "v3") else None,
-            multi_day_context=snapshot.get("multi_day_context") if version == "v3" else None,
-        )
+
+        # HOLD-2: v4's horizon is interpolated from the ACTIVE card's own
+        # max_holding_days_default -- resolved ONCE here and reused for the
+        # system prompt, the user-prompt schema, AND the response range
+        # check below (one number, three uses, never re-derived). v1/v2/v3
+        # never compute this -- their system_prompt/user_prompt calls stay
+        # byte-identical to pre-HOLD-2 (the frozen LEGACY_MAX_HOLDING_DAYS_
+        # BOUND default on both builders).
+        max_holding_days_bound = None
+        if version == "v4":
+            from alphaos.cards.registry import get_default_card
+            active_card = get_default_card(settings=self.settings)
+            max_holding_days_bound = active_card["max_holding_days_default"]
+
+        if version == "v4":
+            user_prompt = pt.build_no_news_user_prompt(
+                prompt_candidate, snapshot, freshness_status,
+                atr_policy=snapshot.get("atr_policy"),
+                multi_day_context=snapshot.get("multi_day_context"),
+                max_holding_days_bound=max_holding_days_bound,
+            )
+            system_prompt = pt.build_no_news_system_prompt(max_holding_days_bound)
+        else:
+            user_prompt = pt.build_no_news_user_prompt(
+                prompt_candidate, snapshot, freshness_status,
+                atr_policy=snapshot.get("atr_policy") if version in ("v2", "v3") else None,
+                multi_day_context=snapshot.get("multi_day_context") if version == "v3" else None,
+            )
+            system_prompt = pt.NO_NEWS_SYSTEM_PROMPT
         # PR4: measurement-only AI-call lineage (model provider + content hashes of
         # the actual prompt sent, never the raw prompt body) -- stamped onto
         # whichever OpenAIEvaluation this call ends up returning below.
         ai_lineage = lineage.ai_call_lineage(
-            provider="openai", prompt=user_prompt, system_prompt=pt.NO_NEWS_SYSTEM_PROMPT,
+            provider="openai", prompt=user_prompt, system_prompt=system_prompt,
         )
         resp = client.chat.completions.create(
             model=self.model,
             response_format={"type": "json_object"},
             messages=[
-                {"role": "system", "content": pt.NO_NEWS_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             timeout=HTTP_TIMEOUT,
@@ -683,6 +729,28 @@ class OpenAIClient:
                 validation_status=failure,
             )
             return self._with_ai_lineage(rej, ai_lineage, usage)
+
+        # HOLD-2: v4 ONLY -- the response's own max_holding_days must fall
+        # inside 1..N (N = the same active-card bound the prompt itself
+        # advertised). Gated to PROPOSE only: a reject/watch carries no real
+        # holding-window commitment, so there is nothing to validate. This
+        # is a NEW enforcement (v1/v2/v3 never checked this at all -- the
+        # prompt's "1-5" text was advisory only); v4 is the only version
+        # that makes it a real, code-enforced promise.
+        if version == "v4" and str(obj.get("decision", "")).lower() == Decision.PROPOSE.value:
+            range_failure = validate_max_holding_days_range(obj, max_holding_days_bound)
+            if range_failure:
+                if self.journal is not None:
+                    self.journal.log_system_event(
+                        Severity.WARNING, "openai",
+                        f"Rejected {candidate.get('symbol')}: {range_failure}.",
+                    )
+                rej = self._rejection(
+                    candidate, f"failed_validation: {range_failure}",
+                    [ReasonCode.MAX_HOLDING_DAYS_OUT_OF_RANGE.value], freshness_status=freshness_status,
+                    validation_status=range_failure,
+                )
+                return self._with_ai_lineage(rej, ai_lineage, usage)
 
         obj = enforce_no_news_sentinels(obj)
         evaluation = self._from_json(candidate, obj, freshness_status)

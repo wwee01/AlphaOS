@@ -72,19 +72,42 @@ def load_card_files(cards_dir: Optional[Path] = None) -> list[dict]:
     return cards
 
 
-def get_default_card(cards_dir: Optional[Path] = None) -> dict:
-    """The single ACTIVE card (``DEFAULT_CARD_ID``). Every stamping call site
-    uses this -- there is still no per-candidate card SELECTION (PR13), only
-    ever one default at a time, so "the card that produced this candidate/
-    proposal" and "the default card" are the same thing. Superseded cards
-    (e.g. ``catalyst_momentum_v1`` after INSTR-1) stay registered/loadable
-    for historical-row provenance but are never returned here again."""
+def get_card_by_id(card_id: str, cards_dir: Optional[Path] = None) -> dict:
+    """Load ONE card BY EXPLICIT ID, bypassing ``DEFAULT_CARD_ID``/
+    ``settings.active_card_id`` entirely (HOLD-2). Used wherever a card's
+    identity must stay PINNED regardless of the active default -- e.g.
+    BASELINE's frozen v1 arms, which must never silently move when an
+    operator swaps ``ACTIVE_CARD_ID`` (see ``alphaos/baseline/tracker.py``).
+    Raises ``SettingsError`` if the id isn't found (never a silent
+    fallback)."""
     for card in load_card_files(cards_dir):
-        if card["card_id"] == DEFAULT_CARD_ID:
+        if card["card_id"] == card_id:
             return card
-    raise SettingsError(
-        f"Default setup card {DEFAULT_CARD_ID!r} not found in {cards_dir or CARDS_DIR}"
-    )
+    raise SettingsError(f"Setup card {card_id!r} not found in {cards_dir or CARDS_DIR}")
+
+
+def get_default_card(cards_dir: Optional[Path] = None, settings: Optional[object] = None) -> dict:
+    """The single ACTIVE card. Every stamping call site uses this -- there is
+    still no per-candidate card SELECTION (PR13), only ever one default at a
+    time, so "the card that produced this candidate/proposal" and "the
+    default card" are the same thing. Superseded cards (e.g.
+    ``catalyst_momentum_v1`` after INSTR-1) stay registered/loadable for
+    historical-row provenance but are never returned here again.
+
+    HOLD-2: which card is "the default" is now an operator config axis
+    (``settings.active_card_id``, validated at settings-load time against
+    this same on-disk registry -- see ``alphaos/config/settings.py``).
+    ``settings`` is OPTIONAL and keyword-only in spirit (positional callers
+    predate this change and must keep working): when omitted, this resolves
+    ``DEFAULT_CARD_ID`` exactly as before HOLD-2 -- the merge-dark guarantee
+    for any call site not yet threaded through to settings (deliberately out
+    of HOLD-2's scope -- this module stays silent about which those are; see
+    the HOLD-2 build report for the enumerated list). The module constant
+    ``DEFAULT_CARD_ID`` remains the single-sourced default VALUE of the
+    ``ACTIVE_CARD_ID`` setting itself (see settings.py) -- never duplicated
+    as a second literal."""
+    card_id = settings.active_card_id if settings is not None else DEFAULT_CARD_ID
+    return get_card_by_id(card_id, cards_dir)
 
 
 def sync_registry(journal, settings, cards_dir: Optional[Path] = None) -> list[str]:

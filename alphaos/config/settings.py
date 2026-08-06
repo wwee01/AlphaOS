@@ -204,6 +204,15 @@ class Settings:
     # one; this field is what OpenAIEvaluation.prompt_template_version is
     # actually stamped from now.
     openai_prompt_version: str
+    # HOLD-2 (2026-08-05): which setup card ``get_default_card()`` resolves
+    # to -- previously a hardcoded module constant
+    # (``alphaos.cards.registry.DEFAULT_CARD_ID``). Default
+    # ``catalyst_momentum_v2`` (that constant's own value, single-sourced --
+    # see ``load_settings()`` below) means an unchanged .env behaves
+    # byte-for-byte like pre-HOLD-2 (the merge-dark guarantee). Validated at
+    # load against the on-disk card registry: an unknown id is a hard
+    # SettingsError, never a silent fallback to the default card.
+    active_card_id: str
 
     # --- market data (v1: Alpaca only, IEX feed) ---
     data_provider: str
@@ -1490,6 +1499,28 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of {_valid}."
         )
 
+    # --- HOLD-2: ACTIVE_CARD_ID -- which setup card get_default_card()
+    # resolves to. Deferred import (not at module top): alphaos.cards.registry
+    # imports SettingsError FROM this module, so a top-level import here
+    # would be a genuine import cycle -- this function-body import only runs
+    # when load_settings() is actually CALLED, by which point both modules
+    # are already fully loaded regardless of which one a process imports
+    # first (same pattern as the cadence.parse_windows deferred import
+    # above). Validated against the real on-disk card registry: an unknown
+    # id must never silently fall back to the default card (that would be
+    # exactly the silent-mutation failure mode the card registry's own
+    # append-only law exists to prevent).
+    from alphaos.cards.registry import DEFAULT_CARD_ID, load_card_files
+    active_card_id = _get(src, "ACTIVE_CARD_ID", DEFAULT_CARD_ID)
+    _known_card_ids = {c["card_id"] for c in load_card_files()}
+    if active_card_id not in _known_card_ids:
+        _valid_cards = ", ".join(repr(c) for c in sorted(_known_card_ids))
+        raise SettingsError(
+            f"ACTIVE_CARD_ID={active_card_id!r} not found among on-disk setup cards "
+            f"({_valid_cards}). This must never silently fall back to the default "
+            "card -- fix the id, or add the card file first."
+        )
+
     # --- earnings proximity (PR5): warning window + conservative hold-days
     # fallback. Not a safety gate (advisory only), but a nonsensical value
     # (0 hold days, a multi-year warning window) would silently make the flag
@@ -1544,6 +1575,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         anthropic_api_key=_get(src, "ANTHROPIC_API_KEY"),
         claude_review_model=_get(src, "CLAUDE_REVIEW_MODEL", "claude-sonnet-4-6"),
         openai_prompt_version=openai_prompt_version,
+        active_card_id=active_card_id,
         data_provider=data_provider,
         market_data_feed=_get(src, "MARKET_DATA_FEED", "iex").lower(),
         news_enabled=news_enabled,

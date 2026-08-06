@@ -663,7 +663,7 @@ class Orchestrator:
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
         snapshot = cand.snapshot or {}
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
 
         risk = self.risk.assess(
             direction=direction,
@@ -1179,7 +1179,7 @@ class Orchestrator:
         self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "user_override"
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
         proposal.card_id = card["card_id"]
         proposal.card_version = card["version"]
         proposal.invalidation_reason = card["invalidation_rule"]
@@ -1895,7 +1895,7 @@ class Orchestrator:
             },
         )
         risk = self.risk.assess(direction="long", entry=entry, stop=stop, snapshot=snap)
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
         proposal = TradeProposal(
             symbol=symbol, direction="long", strategy=Strategy.SWING.value,
             entry=entry, stop=stop, target=target, max_holding_days=3,

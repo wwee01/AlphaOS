@@ -99,6 +99,11 @@ def run_ab_eval(journal: Any, settings: Any, models: Optional[list] = None,
         "arms_json": json.dumps(result["arms"]),
         "is_mock": 1 if is_mock else 0,
         "n_packets": len(fixtures), "lineage_id": lineage_id,
+        # HOLD-2 spec 3.5: record which ACTIVE_CARD_ID this run's process
+        # actually had loaded -- provenance for the pre-registered
+        # luna:v3-vs-luna:v4 proof gate (a process-level env override on the
+        # replay command only, never the live .env).
+        "active_card_id": settings.active_card_id,
         "started_at_utc": started.utc, "started_at_sgt": started.local_sgt,
     })
 

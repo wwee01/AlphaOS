@@ -75,31 +75,69 @@ OPENAI_EVAL_KEYS = [
     "risk_flags",
 ]
 
-OPENAI_SYSTEM_PROMPT = (
-    "You are AlphaOS's primary trade-evaluation engine for a paper-trading "
-    "system. The active playbook is NEWS-CONFIRMED MOMENTUM CONTINUATION on "
-    "liquid US stocks/ETFs, swing horizon 1-5 trading days. You are risk-first: "
-    "survive, then learn, then profit. If there is no verifiable news catalyst, "
-    "you must NOT 'propose'; downgrade to 'watch' or 'reject'. If data is stale "
-    "or unverifiable, reject. Respond with a SINGLE JSON object ONLY. No prose, "
-    "no markdown, no code fences."
-)
+# HOLD-2 (2026-08-05): the frozen v1/v2/v3 horizon bound. v1/v2/v3 hardcode
+# "swing horizon 1-5 trading days" (and the schema's "integer 1-5") FOREVER
+# -- these are frozen replay control arms guarded by byte-identity golden
+# tests, never edited in place (Prime Directive 7). Only prompt v4 reads a
+# DIFFERENT bound, interpolated from the ACTIVE card's own
+# max_holding_days_default (see build_no_news_system_prompt() /
+# build_openai_system_prompt() / the max_holding_days_bound kwarg on both
+# user-prompt builders below) -- "no hardcoded policy number survives" is a
+# v4-only promise, not retroactive.
+LEGACY_MAX_HOLDING_DAYS_BOUND = 5
+
+
+def _render_openai_system_prompt(max_holding_days_bound: int = LEGACY_MAX_HOLDING_DAYS_BOUND) -> str:
+    return (
+        "You are AlphaOS's primary trade-evaluation engine for a paper-trading "
+        "system. The active playbook is NEWS-CONFIRMED MOMENTUM CONTINUATION on "
+        f"liquid US stocks/ETFs, swing horizon 1-{max_holding_days_bound} trading days. "
+        "You are risk-first: "
+        "survive, then learn, then profit. If there is no verifiable news catalyst, "
+        "you must NOT 'propose'; downgrade to 'watch' or 'reject'. If data is stale "
+        "or unverifiable, reject. Respond with a SINGLE JSON object ONLY. No prose, "
+        "no markdown, no code fences."
+    )
+
+
+def _render_no_news_system_prompt(max_holding_days_bound: int = LEGACY_MAX_HOLDING_DAYS_BOUND) -> str:
+    return (
+        "You are AlphaOS's primary trade-evaluation engine for a paper-trading "
+        "system. The active playbook for v1 is MOMENTUM CONTINUATION (NO-NEWS "
+        f"BASELINE) on liquid US stocks/ETFs, swing horizon 1-{max_holding_days_bound} "
+        "trading days. "
+        "The system is operating in NO-NEWS MODE: no verified news, catalyst feed, "
+        "analyst headline, company event, macro event, or web source has been "
+        "provided to you. You MUST base the thesis ONLY on price action, volume, "
+        "relative strength, trend structure, and risk/reward. You MUST NOT invent, "
+        "infer, assume, or imply any news or catalyst (no company news, analyst "
+        "up/downgrade, earnings, FDA, M&A, macro headline, social-media claim, or "
+        "'likely news-driven' language). Mark news/catalyst fields as unavailable. "
+        "If data is stale or unverifiable, reject. You are risk-first. Respond with "
+        "a SINGLE JSON object ONLY. No prose, no markdown, no code fences."
+    )
+
+
+# Computed ONCE at import time with the frozen bound -- byte-identical to
+# the pre-HOLD-2 literal strings; every v1/v2/v3 call site keeps reading
+# these two plain-string constants completely unchanged.
+OPENAI_SYSTEM_PROMPT = _render_openai_system_prompt()
 
 # v1 runs in NO-NEWS mode: momentum continuation (no-news baseline).
-NO_NEWS_SYSTEM_PROMPT = (
-    "You are AlphaOS's primary trade-evaluation engine for a paper-trading "
-    "system. The active playbook for v1 is MOMENTUM CONTINUATION (NO-NEWS "
-    "BASELINE) on liquid US stocks/ETFs, swing horizon 1-5 trading days. "
-    "The system is operating in NO-NEWS MODE: no verified news, catalyst feed, "
-    "analyst headline, company event, macro event, or web source has been "
-    "provided to you. You MUST base the thesis ONLY on price action, volume, "
-    "relative strength, trend structure, and risk/reward. You MUST NOT invent, "
-    "infer, assume, or imply any news or catalyst (no company news, analyst "
-    "up/downgrade, earnings, FDA, M&A, macro headline, social-media claim, or "
-    "'likely news-driven' language). Mark news/catalyst fields as unavailable. "
-    "If data is stale or unverifiable, reject. You are risk-first. Respond with "
-    "a SINGLE JSON object ONLY. No prose, no markdown, no code fences."
-)
+NO_NEWS_SYSTEM_PROMPT = _render_no_news_system_prompt()
+
+
+def build_openai_system_prompt(max_holding_days_bound: int) -> str:
+    """v4 ONLY: the card-interpolated OPENAI_SYSTEM_PROMPT (HOLD-2 spec
+    3.3). ``max_holding_days_bound`` is the ACTIVE card's own
+    ``max_holding_days_default`` -- never a second hardcoded literal."""
+    return _render_openai_system_prompt(max_holding_days_bound)
+
+
+def build_no_news_system_prompt(max_holding_days_bound: int) -> str:
+    """v4 ONLY: the card-interpolated NO_NEWS_SYSTEM_PROMPT (HOLD-2 spec
+    3.3) -- see ``build_openai_system_prompt``'s docstring."""
+    return _render_no_news_system_prompt(max_holding_days_bound)
 
 # Required keys for the no-news evaluation output.
 NO_NEWS_EVAL_KEYS = [
@@ -228,6 +266,7 @@ def _render_multi_day_context(multi_day_context: dict) -> str:
 def build_no_news_user_prompt(
     candidate: "Union[dict, ScanContext]", snapshot: dict, freshness_status: str,
     atr_policy: Optional[dict] = None, multi_day_context: Optional[dict] = None,
+    max_holding_days_bound: int = LEGACY_MAX_HOLDING_DAYS_BOUND,
 ) -> str:
     """User prompt for no-news mode. Forces the catalyst/news sentinels.
 
@@ -253,14 +292,21 @@ def build_no_news_user_prompt(
     (a v3-era fixture replayed under a v1/v2 arm must never leak this
     section). The caller decides both kwargs from the ACTIVE settings
     version, never from the snapshot dict's own contents (see
-    ``OpenAIClient._live_eval``'s own gate)."""
+    ``OpenAIClient._live_eval``'s own gate).
+
+    HOLD-2: ``max_holding_days_bound`` defaults to
+    ``LEGACY_MAX_HOLDING_DAYS_BOUND`` (5) -- v1/v2/v3 callers never pass this
+    kwarg, so their schema's ``"max_holding_days"`` text stays the frozen,
+    byte-identical ``"integer 1-5"``. Only the v4 call site
+    (``OpenAIClient._live_eval``) passes the ACTIVE card's own
+    ``max_holding_days_default`` here."""
     schema = {
         "symbol": "string",
         "direction": "long | short",
         "entry": "number",
         "stop": "number",
         "target": "number",
-        "max_holding_days": "integer 1-5",
+        "max_holding_days": f"integer 1-{max_holding_days_bound}",
         "expected_r": "number (reward/risk)",
         "confidence": "number 0..1",
         "decision": "reject | watch | propose",
@@ -297,16 +343,20 @@ def build_no_news_user_prompt(
 
 def build_openai_user_prompt(
     candidate: "Union[dict, ScanContext]", snapshot: dict, news_items: list[dict],
-    freshness_status: str
+    freshness_status: str, max_holding_days_bound: int = LEGACY_MAX_HOLDING_DAYS_BOUND,
 ) -> str:
-    """Construct the user prompt with the strict JSON schema instruction."""
+    """Construct the user prompt with the strict JSON schema instruction.
+
+    HOLD-2: ``max_holding_days_bound`` defaults to
+    ``LEGACY_MAX_HOLDING_DAYS_BOUND`` (5) -- see
+    ``build_no_news_user_prompt``'s docstring for the same convention."""
     schema = {
         "symbol": "string",
         "direction": "long | short",
         "entry": "number",
         "stop": "number",
         "target": "number",
-        "max_holding_days": "integer 1-5",
+        "max_holding_days": f"integer 1-{max_holding_days_bound}",
         "expected_r": "number (reward/risk)",
         "confidence": "number 0..1",
         "decision": "reject | watch | propose",

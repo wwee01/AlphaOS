@@ -363,14 +363,14 @@ class CandidateScanner:
            batch produces, core or shadow.
         """
         if card_activation is None:
-            card = get_default_card()
+            card = get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
             return {
                 "card_id": card["card_id"], "card_version": card["version"],
                 "card_assignment_status": None, "card_assignment_ref": None,
                 "card_selector_version": None,
             }
         if not card_activation.active:
-            card = get_default_card()
+            card = get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
             return {
                 "card_id": card["card_id"], "card_version": card["version"],
                 "card_assignment_status": PREFLIGHT_FAILED_STATUS, "card_assignment_ref": None,
@@ -385,7 +385,7 @@ class CandidateScanner:
             # row (e.g. an unparseable report_date) must degrade this ONE candidate to the default
             # card, never crash the whole scan -- select_card() itself makes no never-raises promise,
             # unlike build_scan_card_activation() (see that function's own docstring for the same fix).
-            card = get_default_card()
+            card = get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
             return {
                 "card_id": card["card_id"], "card_version": card["version"],
                 "card_assignment_status": ACTIVATION_ERROR_STATUS, "card_assignment_ref": None,

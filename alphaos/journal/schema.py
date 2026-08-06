@@ -2568,6 +2568,14 @@ SCHEMA: list[tuple[str, str]] = [
             n_results INTEGER NOT NULL DEFAULT 0,
             n_corpus_errors INTEGER NOT NULL DEFAULT 0,
             lineage_id TEXT,
+            -- HOLD-2 (2026-08-05, spec section 3.5): the ACTIVE_CARD_ID this
+            -- run's process actually had loaded -- provenance for the
+            -- pre-registered luna:v3 vs luna:v4 proof gate, which sets
+            -- ACTIVE_CARD_ID=catalyst_momentum_v3 as a process-level env
+            -- override on the replay command only (never touching the live
+            -- .env). Additive; SCHEMA_VERSION stays 3 (_reconcile_columns
+            -- handles this on an existing DB, same law as arms_json above).
+            active_card_id TEXT,
             started_at_utc TEXT NOT NULL,
             started_at_sgt TEXT NOT NULL,
             finished_at_utc TEXT,

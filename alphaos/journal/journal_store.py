@@ -316,6 +316,12 @@ class JournalStore:
             # the openai_primary_model fix above) -- a v1<->v2 cutover must
             # move the config fingerprint.
             "openai_prompt_version": settings.openai_prompt_version,
+            # HOLD-2: which setup card get_default_card() resolves to is a
+            # real behavior axis (default card_id, holding-window horizon
+            # under prompt v4, earnings-proximity window) -- same rationale
+            # as openai_prompt_version above; a v2<->v3 cutover must move
+            # the config fingerprint.
+            "active_card_id": settings.active_card_id,
             "hypothesis_gen_shadow_enabled": settings.hypothesis_gen_shadow_enabled,
             "hypothesis_gen_recurring_enabled": settings.hypothesis_gen_recurring_enabled,
             "hypothesis_gen_max_calls_per_day": settings.hypothesis_gen_max_calls_per_day,

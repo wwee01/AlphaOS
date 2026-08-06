@@ -303,15 +303,18 @@ def test_settings_validates_openai_prompt_version():
     """INSTR-3 (2026-07-24) widened the valid set from {"v1", "v2"} to
     {"v1", "v2", "v3"} -- this test's own original assertion
     (OPENAI_PROMPT_VERSION="v3" raises) is now the EXPECTED spec change,
-    not a regression; "v4" takes v3's old place as the still-refused value.
-    See tests/test_instr3_trend_context.py::test_settings_validates_v3_and_rejects_v4
-    for the dedicated INSTR-3 version of this test."""
+    not a regression. HOLD-2 (2026-08-05) widened it again to include "v4"
+    (card-interpolated horizon) -- "v5" now takes v4's old place as the
+    still-refused value. See
+    tests/test_instr3_trend_context.py::test_10_settings_validates_v3_and_v4
+    for the dedicated version-gate test."""
     with pytest.raises(SettingsError):
-        make_settings(OPENAI_PROMPT_VERSION="v4")
+        make_settings(OPENAI_PROMPT_VERSION="v5")
 
     assert make_settings().openai_prompt_version == "v1"
     assert make_settings(OPENAI_PROMPT_VERSION="v2").openai_prompt_version == "v2"
     assert make_settings(OPENAI_PROMPT_VERSION="v3").openai_prompt_version == "v3"
+    assert make_settings(OPENAI_PROMPT_VERSION="v4").openai_prompt_version == "v4"
 
 
 # --------------------------------------------------- test 10: structural AST

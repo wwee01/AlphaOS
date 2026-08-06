@@ -1,0 +1,44 @@
+card_id: catalyst_momentum_v3
+version: 1
+name: "Catalyst Momentum (long) v3 -- 10-trading-day holding window"
+state: live_eligible
+direction: long
+holding_class: swing
+regimes: [any]
+required_evidence:
+  - interest_score >= settings.interest_min_score
+  - freshness gates pass
+  - risk gates pass
+  - "ATR(14) available for the symbol (else rejected, never a silent fallback -- NO_ATR_DATA)"
+entry_rule: "as produced by evaluator within freshness/drift gates"
+stop_rule: "Stop = entry -/+ k*ATR(14), k=2.0 pre-registered (ATR_STOP_MULTIPLIER_V1); risk engine still validates"
+target_rule: "evaluator target; min RR enforced by risk engine against the ATR-scaled stop"
+invalidation_rule: "catalyst refuted, or thesis condition broken, before stop"
+max_holding_days_default: 10
+expected_tqs_profile:
+  interest_strength: ">= 0.5"
+notes: >
+  HOLD-2 (2026-08-05): ONE change vs catalyst_momentum_v2 -- the holding
+  window extends 3 -> 10 TRADING days. Nothing else moves: stop rule,
+  target rule, entry rule, invalidation, evidence requirements and TQS
+  profile are byte-identical to v2. Evidence (HOLD-1, pre-registered
+  2026-07-24, floor met 2026-08-05 at 57 scoped observations vs the
+  >=30-cluster floor): among setups that had NOT reached the 2.4xATR
+  minimum target distance by day 5, the fraction that reached it by day
+  10 was proposed 1/4 (25%), watch 16/49 (33%), rejected 8/20 (40%) --
+  i.e. roughly a third of day-5 "failures" complete in days 6-10, which
+  is the geometry argument made quantitative: a 2.4xATR minimum target at
+  ~0.3-0.5 ATR/day of net trend progress needs 5-8+ sessions, so a 3-day
+  ceiling structurally starved otherwise-valid targets of time. Operator
+  ruling (CK, 2026-08-05): extend to 10. Known, accepted consequences:
+  fewer closed observations per week per slot (longer holds on a 5-slot
+  book), and a wider earnings-proximity window (earnings_within_hold_window
+  now looks 10 trading days out, so more candidates carry earnings flags
+  -- conservative direction). Caveats carried honestly from HOLD-1: the
+  proposed cohort was n=4 (signal lives in the watch cohort, n=49), and
+  the rejected cohort completed most often (40%) -- a longer window also
+  helps trades the evaluator declined, so this is "the geometry becomes
+  reachable", not "expectancy improves"; that question resolves from
+  post-v3 outcomes segmented by card version. v2 stays registered,
+  unchanged, for every pre-existing row's provenance (append-only per
+  Prime Directive 7).

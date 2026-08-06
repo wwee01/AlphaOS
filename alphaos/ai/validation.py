@@ -43,6 +43,24 @@ def validate_no_news_eval(obj: dict) -> Optional[str]:
     return None
 
 
+def validate_max_holding_days_range(obj: dict, bound: int) -> Optional[str]:
+    """HOLD-2, v4 ONLY: the parser's accepted range for ``max_holding_days``
+    is 1..``bound``, where ``bound`` is the ACTIVE card's own
+    ``max_holding_days_default`` (never a second hardcoded literal -- see
+    docs/roadmap/alphaos-hold2-10day-window-spec.md section 3.3). Returns a
+    failure reason string when the value is missing/non-integer/out of
+    range, else None. Callers gate this to PROPOSE decisions only -- a
+    reject/watch carries no real holding-window commitment."""
+    value = obj.get("max_holding_days")
+    try:
+        value_int = int(value)
+    except (TypeError, ValueError):
+        return f"max_holding_days {value!r} is missing or not an integer"
+    if not (1 <= value_int <= bound):
+        return f"max_holding_days {value_int} outside the allowed range 1-{bound}"
+    return None
+
+
 def enforce_no_news_sentinels(obj: dict) -> dict:
     """Hard-set the no-news sentinels on a (validated) output object."""
     obj = dict(obj)

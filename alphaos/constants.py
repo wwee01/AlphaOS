@@ -366,6 +366,11 @@ class ReasonCode(StrEnum):
     OPENAI_REJECT = "OPENAI_REJECT"
     REWARD_RISK_TOO_LOW = "REWARD_RISK_TOO_LOW"
     NO_ATR_DATA = "NO_ATR_DATA"
+    # HOLD-2: v4's response validator enforces max_holding_days in 1..N,
+    # where N is the ACTIVE card's max_holding_days_default (never a second
+    # hardcoded bound) -- see alphaos/ai/validation.py's
+    # validate_max_holding_days_range().
+    MAX_HOLDING_DAYS_OUT_OF_RANGE = "MAX_HOLDING_DAYS_OUT_OF_RANGE"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
     MARGIN_APPROVAL_REQUIRED = "MARGIN_APPROVAL_REQUIRED"
     DAYTRADE_GATED = "DAYTRADE_GATED"
@@ -1000,4 +1005,12 @@ CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
 # would reject the remediation command the pager just handed them. Both
 # sites now import this tuple; a new version is added HERE, once.
 # Ordered oldest-first; the last entry is the newest version.
-PROMPT_VERSIONS = ("v1", "v2", "v3")
+# HOLD-2 (2026-08-05): "v4" added -- v3 content (ATR_STOP_POLICY +
+# MULTI_DAY_CONTEXT retained) plus a card-interpolated holding-window
+# horizon (system-prompt "swing horizon 1-N trading days" and the schema's
+# "max_holding_days" bound both read N from the ACTIVE card's
+# max_holding_days_default, never a second hardcoded literal -- see
+# alphaos/ai/prompt_templates.py and docs/roadmap/alphaos-hold2-10day-
+# window-spec.md section 3.3). v1/v2/v3 stay byte-identical -- only v4's
+# own code path reads the interpolated bound.
+PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
