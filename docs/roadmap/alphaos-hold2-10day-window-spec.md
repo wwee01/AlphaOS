@@ -178,3 +178,59 @@ where the card and the prompt disagree about the horizon.
    2026-10-05) + §9 row.
 5. Expect: more earnings-flagged candidates; slower observation turnover on
    the 5-slot book (accepted in D1).
+
+---
+
+## STATUS CORRECTION (2026-08-06, after audit round 1 — Fable strategist)
+
+Two independent blind Opus audits of build `1a627c8` (correctness lens; scope/safety
+lens) both returned REQUEST-CHANGES and **converged on the same BLOCKER**. Several
+findings trace to errors in THIS SPEC, corrected here. Where the text below
+contradicts the sections above, this correction governs.
+
+1. **§2/§4 "out of scope: selector/S1c/PER" — WRONG, and it caused the blocker.**
+   When S1c activation is live (the production state since 2026-07-25),
+   candidate card-stamping flows through `build_selector_context()` →
+   `select_card()` → `selector.py:283 get_default_card()` — NOT through the
+   scanner/orchestrator call sites §3.2 enumerated. Both audits proved
+   post-cutover split-brain: `candidates.card_id=v2` while
+   `trade_proposals.card_id=v3`, which silently poisons the per-card ΔR
+   attribution and makes the card-version segmentation this ticket promises
+   impossible. CORRECTED: threading `settings` through `build_selector_context`
+   (minimal — no selection-logic change) is IN scope. The rest of the
+   selector/S1c/PER exclusion stands.
+2. **§2 item 5 "earnings hold-window widens automatically" — HALF-WRONG.** Only
+   proposal-stage fields follow the hold days. The candidate-stage
+   `earnings_within_hold_window` reads `EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS`
+   (=3) — a second, un-linked copy of the policy number this ticket exists to
+   single-source. CORRECTED: the candidate-stage window follows the ACTIVE
+   card's `max_holding_days_default` (threaded at the call site); the env
+   setting stays only as the fallback when no card resolves. No third `.env`
+   edit in the §3.6 ceremony.
+3. **§3.4 hold10 replay convergence.** The shared 15-calendar-day give-up
+   (`UNAVAILABLE_AFTER_DAYS`) selectively censors 10-trading-day windows
+   (~9% of trading dates span >15 calendar days; ONLY the 0-R
+   'neither' outcomes are lost — a directional bias). HOLD-1 already solved
+   this by omitting the give-up for its 10-day family. CORRECTED: `_hold10`
+   rows use a 30-calendar-day give-up; v1 arms keep 15.0 byte-unchanged.
+4. **§3.4/§6 shared budgets + missing tooling.** The v1 baseline report's SQL
+   reads ALL rule_versions before filtering (shared `LIMIT 5000` + headline
+   counts + resolver budget), so hold10 rows dilute the pre-registered v1
+   analysis — the exact harm ruling D2 exists to prevent. CORRECTED: filter by
+   `rule_version` at the SQL layer (report queries + headline counts;
+   resolver stays shared but rule-aware ordering must not starve v1 rows).
+   ALSO: §6 step 4 assumed existing tooling could register/read the hold10
+   arm; it cannot. A hold10 registration path (CLI) and a segmented hold10
+   report section are IN BUILD SCOPE.
+5. **§3.2 `ACTIVE_CARD_ID` validation is too weak.** It accepts the
+   shadow-only PER card (`post_earnings_reaction`) — one hand-edit away
+   during the cutover ceremony from making a "no trading" card the live
+   default. CORRECTED: validation additionally requires
+   `state == live_eligible` AND an integer `max_holding_days_default` in
+   [1, 30] present on the card, both enforced at settings load.
+6. **§3.3 validator hardening.** `max_holding_days` must be integral
+   (10.0 accepted and coerced; 10.9 / "10" rejected or coerced-and-written-back —
+   the validated int MUST be what persists downstream), and a range rejection
+   must surface as `MAX_HOLDING_DAYS_OUT_OF_RANGE` in
+   `rejected_candidates.reason_code` (extend the existing `NO_ATR_DATA`
+   special-case branch), never as `INVENTED_CATALYST_IN_NO_NEWS_MODE`.
