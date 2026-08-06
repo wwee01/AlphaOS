@@ -327,6 +327,7 @@ class Orchestrator:
         # shares one instant, never a drifting one.
         card_activation = build_scan_card_activation(
             self.journal, st.utc, set(DEFAULT_UNIVERSE) | set(shadow_symbols),
+            settings=self.settings,  # HOLD-2 (STATUS CORRECTION item 1): the ACTUAL live card-stamping path
         )
         if not card_activation.active:
             self.journal.log_system_event(
@@ -568,6 +569,23 @@ class Orchestrator:
                     # able to tell "ATR data is missing for this symbol" apart from
                     # "the model itself rejected it."
                     self._reject_candidate(cand, "openai", evaluation, reason=ReasonCode.NO_ATR_DATA.value)
+                elif ReasonCode.MAX_HOLDING_DAYS_OUT_OF_RANGE.value in (evaluation.risk_flags or []):
+                    # Audit-fixup HOLD-2 (HIGH-5, audit A): same class of
+                    # misfiling as NO_ATR_DATA above -- _reject_candidate's
+                    # own default inference reads evaluation.validation_status
+                    # (any non-"passed" value) and ALWAYS assumes
+                    # INVENTED_CATALYST_IN_NO_NEWS_MODE, since that used to be
+                    # the only real "failed_validation:" producer. HOLD-2's v4
+                    # range validator (alphaos/ai/validation.py's
+                    # validate_max_holding_days_range()) also stamps a
+                    # non-"passed" validation_status, so without this
+                    # explicit branch every v4 range rejection would land in
+                    # rejected_candidates.reason_code as a fabricated
+                    # "invented a catalyst" -- a real, diagnosable failure
+                    # mode misfiled as an unrelated one.
+                    self._reject_candidate(
+                        cand, "openai", evaluation, reason=ReasonCode.MAX_HOLDING_DAYS_OUT_OF_RANGE.value,
+                    )
                 else:
                     self._reject_candidate(cand, "openai", evaluation)
                 summary.rejected += 1
@@ -2171,11 +2189,23 @@ class Orchestrator:
         # PR5: earnings-proximity context, AFTER last30days. Advisory ONLY — never
         # applied to the packet, so it can never reach the AI eval/labeller prompt,
         # never forces a decision, bypasses a gate, or executes.
+        # Audit-fixup HOLD-2 (MEDIUM-8, audit B M2 / STATUS CORRECTION item
+        # 2): the candidate-stage window now follows the ACTIVE card's own
+        # max_holding_days_default -- resolved fresh here (cheap disk read,
+        # not a hot path, same as every other get_default_card() call site)
+        # -- instead of the settings fallback earnings_enricher.enrich()
+        # used to always read unconditionally (a second, un-linked copy of
+        # the same policy number this ticket exists to single-source).
+        # settings.earnings_proximity_default_hold_days stays as the
+        # FALLBACK only, inside enrich() itself, for the case a card
+        # genuinely can't resolve.
         earnings = None
-        if earnings_mode == "enrich":
-            earnings = self.earnings_enricher.enrich(packet)
-        elif earnings_mode == "skipped_budget_cap":
-            earnings = self.earnings_enricher.skipped_budget_cap(packet)
+        if earnings_mode in ("enrich", "skipped_budget_cap"):
+            active_card_hold_days = cards.get_default_card(settings=self.settings).get("max_holding_days_default")
+            if earnings_mode == "enrich":
+                earnings = self.earnings_enricher.enrich(packet, hold_days=active_card_hold_days)
+            else:
+                earnings = self.earnings_enricher.skipped_budget_cap(packet, hold_days=active_card_hold_days)
         regime_row = getattr(self, "_today_regime", None)
         self.journal.insert("candidate_packets", packet.to_row(
             scan_batch_id,

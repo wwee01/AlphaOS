@@ -69,7 +69,7 @@ class ScanCardActivation:
 
 
 def build_scan_card_activation(
-    journal, assignment_as_of_utc: str, universe_symbols: Iterable[str],
+    journal, assignment_as_of_utc: str, universe_symbols: Iterable[str], settings: Optional[object] = None,
 ) -> ScanCardActivation:
     """Called ONCE per scan batch -- before either ``CandidateScanner.scan()``
     or ``.scan_shadow_tier()`` runs -- so every candidate in the batch, core
@@ -85,12 +85,19 @@ def build_scan_card_activation(
     preregistration row, for example, would previously have propagated a
     bare ``json.JSONDecodeError`` out of here and crashed the entire scan).
     This function's own contract is the one that matters to its caller, so
-    it is the one place that must actually hold that line."""
+    it is the one place that must actually hold that line.
+
+    HOLD-2 (STATUS CORRECTION item 1): ``settings`` is threaded straight
+    through to ``build_selector_context()`` so the frozen context's
+    ``default_card`` honors ``ACTIVE_CARD_ID`` -- see that function's own
+    docstring for the split-brain this fixes. ``settings=None`` (the
+    default) is the pre-HOLD-2 behavior, preserved for any caller not yet
+    updated."""
     try:
         preflight = s1c_activation_preflight(journal)
         if not preflight["ready"]:
             return ScanCardActivation(active=False, context=None, reason=preflight["reason"])
-        context = build_selector_context(journal, assignment_as_of_utc, universe_symbols)
+        context = build_selector_context(journal, assignment_as_of_utc, universe_symbols, settings=settings)
         return ScanCardActivation(active=True, context=context, reason=None)
     except Exception:  # noqa: BLE001 -- an activation decision must never crash a scan
         return ScanCardActivation(active=False, context=None, reason=ACTIVATION_ERROR_STATUS)

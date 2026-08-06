@@ -57,6 +57,52 @@ def _validate_card(card: dict, source: str) -> None:
         raise SettingsError(f"Setup card {source} has an invalid version: {card.get('version')!r}")
 
 
+# HOLD-2 audit-fixup (MEDIUM-6, audit B / STATUS CORRECTION item 5): the
+# extra checks a card must pass to be a valid ACTIVE_CARD_ID -- beyond mere
+# id-membership. Bare id-membership accepted the shadow-only PER card
+# (post_earnings_reaction, state=shadow, "no trading" by its own card
+# YAML) as a valid live default -- one hand-edit away, during the cutover
+# ceremony, from silently making a non-trading card the live default. It
+# also accepted a card missing max_holding_days_default entirely, which
+# then KeyError-crashes the mock evaluator path
+# (OpenAIClient._mock_max_holding_days) while the live v4 path silently
+# rejects every single PROPOSE (validate_max_holding_days_range() called
+# with bound=None). Factored out here (not inlined in settings.py) so it
+# is directly testable against a synthetic card dict, no filesystem
+# needed.
+ACTIVE_CARD_MAX_HOLDING_DAYS_CEILING = 30
+
+
+def validate_card_as_active_default(card: dict) -> None:
+    """Raises ``SettingsError`` unless ``card`` may legally be
+    ``ACTIVE_CARD_ID``: ``state == "live_eligible"`` AND an integer
+    ``max_holding_days_default`` in ``[1, ACTIVE_CARD_MAX_HOLDING_DAYS_
+    CEILING]``. ``catalyst_momentum_v1`` (state live_eligible,
+    max_holding_days_default 3) passes -- a deliberate rollback capability,
+    not something this check exists to block."""
+    card_id = card.get("card_id")
+    if card.get("state") != "live_eligible":
+        raise SettingsError(
+            f"card {card_id!r} has state={card.get('state')!r}, not 'live_eligible' -- "
+            "only a live-eligible card may be the live default (e.g. the shadow-only "
+            "post_earnings_reaction card must never be set here)."
+        )
+    hold_days = card.get("max_holding_days_default")
+    # bool is an int subclass in Python -- explicitly excluded so a stray
+    # `max_holding_days_default: true` in a hand-edited card can't sneak
+    # through as "1".
+    if (
+        not isinstance(hold_days, int) or isinstance(hold_days, bool)
+        or not (1 <= hold_days <= ACTIVE_CARD_MAX_HOLDING_DAYS_CEILING)
+    ):
+        raise SettingsError(
+            f"card {card_id!r}'s max_holding_days_default={hold_days!r} must be an integer "
+            f"in [1, {ACTIVE_CARD_MAX_HOLDING_DAYS_CEILING}] -- a missing or malformed value "
+            "would KeyError-crash the mock evaluator path and silently reject every v4 "
+            "PROPOSE on the live path."
+        )
+
+
 def load_card_files(cards_dir: Optional[Path] = None) -> list[dict]:
     """Parse every ``*.yaml`` file in ``cards_dir`` (default: this package's
     own directory) into a card dict, validated against ``_REQUIRED_FIELDS``.
@@ -90,22 +136,30 @@ def get_default_card(cards_dir: Optional[Path] = None, settings: Optional[object
     """The single ACTIVE card. Every stamping call site uses this -- there is
     still no per-candidate card SELECTION (PR13), only ever one default at a
     time, so "the card that produced this candidate/proposal" and "the
-    default card" are the same thing. Superseded cards (e.g.
-    ``catalyst_momentum_v1`` after INSTR-1) stay registered/loadable for
-    historical-row provenance but are never returned here again.
+    default card" are the same thing.
 
-    HOLD-2: which card is "the default" is now an operator config axis
+    HOLD-2 (audit-fixup, per the spec's own STATUS CORRECTION item 1):
+    which card is "the default" is now an operator config axis
     (``settings.active_card_id``, validated at settings-load time against
     this same on-disk registry -- see ``alphaos/config/settings.py``).
-    ``settings`` is OPTIONAL and keyword-only in spirit (positional callers
-    predate this change and must keep working): when omitted, this resolves
-    ``DEFAULT_CARD_ID`` exactly as before HOLD-2 -- the merge-dark guarantee
-    for any call site not yet threaded through to settings (deliberately out
-    of HOLD-2's scope -- this module stays silent about which those are; see
-    the HOLD-2 build report for the enumerated list). The module constant
-    ``DEFAULT_CARD_ID`` remains the single-sourced default VALUE of the
-    ``ACTIVE_CARD_ID`` setting itself (see settings.py) -- never duplicated
-    as a second literal."""
+    Every production call site that stamps a candidate/proposal now threads
+    ``settings`` through to this function -- ``orchestrator.py``,
+    ``scanner/candidate_scanner.py``, ``cards/selector.py`` (via
+    ``build_selector_context``, itself reached from
+    ``cards/activation.py``'s ``build_scan_card_activation``), and
+    ``ai/openai_client.py``'s mock path. ``settings`` stays OPTIONAL only
+    for callers OUTSIDE the live stamping path (tests, ad-hoc scripts): when
+    omitted, this resolves ``DEFAULT_CARD_ID`` exactly as before HOLD-2. The
+    module constant ``DEFAULT_CARD_ID`` remains the single-sourced default
+    VALUE of the ``ACTIVE_CARD_ID`` setting itself (see settings.py) --
+    never duplicated as a second literal.
+
+    Because ``ACTIVE_CARD_ID`` accepts any ``live_eligible`` card id
+    (including a deliberate operator rollback to an older one, e.g.
+    ``catalyst_momentum_v1`` -- see settings.py's own validation), a
+    "superseded" card is NO LONGER guaranteed to never be returned here
+    again; supersession only means it stopped being the DEFAULT, not that
+    it was removed or made unselectable."""
     card_id = settings.active_card_id if settings is not None else DEFAULT_CARD_ID
     return get_card_by_id(card_id, cards_dir)
 

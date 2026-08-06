@@ -225,6 +225,31 @@ def test_enrich_uses_default_hold_days_not_real_one(monkeypatch):
     assert ctx.earnings_within_hold_window == 0     # 5 days out > default 3-day hold
 
 
+def test_enrich_hold_days_param_overrides_the_settings_default(monkeypatch):
+    """Audit-fixup HOLD-2 (MEDIUM-8, audit B M2 / STATUS CORRECTION item 2):
+    a caller-supplied hold_days (the ACTIVE card's own
+    max_holding_days_default, threaded by the orchestrator) now overrides
+    settings.earnings_proximity_default_hold_days -- the whole point being
+    that a candidate-stage window doesn't stay stuck at a second, un-linked
+    policy copy once ACTIVE_CARD_ID points at a card with a materially
+    different hold length. 8 calendar days out is unambiguously outside a
+    3-trading-day hold (max 5 calendar days) and unambiguously inside a
+    10-trading-day hold (a 10-trading-day window always spans at least 10
+    calendar days) regardless of which weekday the suite runs on."""
+    monkeypatch.setattr(timeutils, "market_date", lambda dt=None: _SAFE_TODAY)
+    s = _settings(EARNINGS_PROXIMITY_DEFAULT_HOLD_DAYS="3")
+    res = _result(days_out=8, today=_SAFE_TODAY)
+    enricher = EarningsProximityEnricher(s, provider=_StubProvider(result=res))
+
+    default_ctx = enricher.enrich(_pkt())  # no hold_days -> falls back to the setting (3)
+    assert default_ctx.hold_days_used == 3
+    assert default_ctx.earnings_within_hold_window == 0
+
+    card_ctx = enricher.enrich(_pkt(), hold_days=10)  # ACTIVE_CARD_ID=catalyst_momentum_v3 shape
+    assert card_ctx.hold_days_used == 10
+    assert card_ctx.earnings_within_hold_window == 1
+
+
 def test_fail_open_on_provider_error():
     e = EarningsProximityEnricher(_settings(), provider=_StubProvider(exc=RuntimeError("boom")))
     ctx = e.enrich(_pkt())                            # must NOT raise

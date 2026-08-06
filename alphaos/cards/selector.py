@@ -260,7 +260,9 @@ def _resolve_current_belief(rows: list[dict]) -> list[dict]:
     return list(groups.values())
 
 
-def build_selector_context(journal, assignment_as_of_utc: str, universe_symbols) -> SelectorContext:
+def build_selector_context(
+    journal, assignment_as_of_utc: str, universe_symbols, settings: Optional[object] = None,
+) -> SelectorContext:
     """THE ONLY function in this module that touches the journal (or, via
     ``get_default_card``, the card YAML on disk). Called ONCE per scan,
     before any candidate is created.
@@ -278,9 +280,23 @@ def build_selector_context(journal, assignment_as_of_utc: str, universe_symbols)
     exact same instant the scan batch was minted is excluded, removing any
     same-timestamp ambiguity; candidate inserts always postdate batch
     minting in the real pipeline, so this can never exclude information
-    that genuinely existed first)."""
+    that genuinely existed first).
+
+    HOLD-2 (STATUS CORRECTION item 1, 2026-08-06): ``settings`` is threaded
+    through to ``get_default_card()`` so ``context.default_card`` honors
+    ``ACTIVE_CARD_ID`` -- this is the ACTUAL production card-stamping path
+    when S1c activation is live (``select_card()``'s own fallback-to-
+    default branches, plus every candidate this context's ``default_card``
+    seeds when PER doesn't fire). Two independent audits proved that
+    leaving this call un-threaded produces a split-brain
+    (``candidates.card_id`` stuck on the old default while
+    ``trade_proposals.card_id`` follows the new one) the moment an operator
+    cuts over ``ACTIVE_CARD_ID`` in production. Minimal threading ONLY --
+    no selection-logic change; ``settings=None`` (the default) preserves
+    the pre-HOLD-2 ``DEFAULT_CARD_ID`` resolution for any caller that
+    hasn't been updated."""
     cache_health = compute_cache_health(journal, assignment_as_of_utc)
-    default_card = get_default_card()
+    default_card = get_default_card(settings=settings)
 
     symbols = list(universe_symbols or [])
     if not symbols:

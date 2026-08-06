@@ -21,7 +21,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from alphaos.baseline.rules import BASELINE_HOLD10_SUFFIX, RULE_FUNCTIONS
+from alphaos.baseline.rules import (
+    BASELINE_HOLD10_SUFFIX,
+    BASELINE_RULE_VERSIONS,
+    BASELINE_RULE_VERSIONS_HOLD10,
+    RULE_FUNCTIONS,
+)
 from alphaos.cards.registry import get_card_by_id
 from alphaos.constants import Severity
 from alphaos.data.atr import ATR_RULES_V1
@@ -49,6 +54,21 @@ BASELINE_V1_PINNED_CARD_ID = "catalyst_momentum_v2"
 # an operator action taken after merge; this pin is what makes its rows
 # comparable to a fixed horizon from the first row onward.
 BASELINE_HOLD10_PINNED_CARD_ID = "catalyst_momentum_v3"
+
+# Audit-fixup HOLD-2 (STATUS CORRECTION item 3, 2026-08-06, both audits
+# convergent HIGH): UNAVAILABLE_AFTER_DAYS (15.0 calendar days) is a
+# CALENDAR give-up on a window sized for the OLD 3-trading-day hold. A
+# 10-trading-day window spans more than 15 calendar days on ~9% of trading
+# dates (weekends/holidays inside the window) -- and give-up marks a row
+# 'unavailable' ONLY on the 'neither' (0-R) branch, since a stop/target hit
+# resolves immediately regardless of age. That is DIRECTIONAL censoring:
+# hold10's own 0-R outcomes are selectively dropped from the sample while
+# every winning/losing outcome survives, biasing mean_ai_delta_r away from
+# zero. HOLD-1 already solved this exact problem for its own 10-day family
+# by using a longer give-up; this reuses that number. v1 arms keep
+# UNAVAILABLE_AFTER_DAYS (15.0) byte-unchanged -- only rows whose
+# rule_version carries BASELINE_HOLD10_SUFFIX use this wider one.
+HOLD10_UNAVAILABLE_AFTER_DAYS = 30.0
 
 
 def _lookup_atr(journal, symbol: str) -> Optional[float]:
@@ -152,7 +172,6 @@ def record_shadow_baseline_decisions(
             # (fail-safe: logged, scan continues) rather than silently
             # defaulting to a fabricated hold-days value.
             raise ValueError(f"card {card.get('card_id')!r} has no max_holding_days_default")
-        setup_card_id = cand.get("card_id")
         stamp = timeutils.stamp()
         decided_at = decision_at_utc or stamp.utc
 
@@ -177,7 +196,16 @@ def record_shadow_baseline_decisions(
 
             _write_baseline_row(
                 journal, cand=cand, symbol=symbol, scan_batch_id=scan_batch_id,
-                rule_version=rule_version, out=out, setup_card_id=setup_card_id,
+                # Audit-fixup HOLD-2 (S-a): setup_card_id stamps the card
+                # that ACTUALLY supplied this row's max_holding_days_default
+                # (BASELINE_V1_PINNED_CARD_ID) -- not cand.get("card_id"),
+                # the candidate's OWN live card assignment (which can be a
+                # totally unrelated card, e.g. post_earnings_reaction, and
+                # never governs a baseline row's bracket window). This is
+                # provenance for "which card's policy drove this shadow
+                # decision," a different question from "which card did the
+                # live pipeline assign this candidate."
+                rule_version=rule_version, out=out, setup_card_id=BASELINE_V1_PINNED_CARD_ID,
                 decided_at=decided_at, lineage_id=lineage_id,
             )
 
@@ -212,11 +240,19 @@ def record_shadow_baseline_decisions(
                         f"{symbol}/{rule_version}{BASELINE_HOLD10_SUFFIX}: apply_rule failed: {exc}",
                     )
                     continue
-                hold10_out = {**out, "rule_version": rule_version + BASELINE_HOLD10_SUFFIX}
+                # Audit-fixup HOLD-2 (S-b): no "rule_version" key needed in
+                # the dict passed as `out` -- _write_baseline_row() takes
+                # rule_version as its own explicit keyword, never reads it
+                # off `out` (the pre-fixup `{**out, "rule_version": ...}`
+                # spread wrote a dead key that was never consumed).
                 _write_baseline_row(
                     journal, cand=cand, symbol=symbol, scan_batch_id=scan_batch_id,
-                    rule_version=rule_version + BASELINE_HOLD10_SUFFIX, out=hold10_out,
-                    setup_card_id=setup_card_id, decided_at=decided_at, lineage_id=lineage_id,
+                    rule_version=rule_version + BASELINE_HOLD10_SUFFIX, out=out,
+                    # S-a: hold10 rows stamp the card that supplied THIS
+                    # arm's window (catalyst_momentum_v3), same law as the
+                    # v1 arms above.
+                    setup_card_id=BASELINE_HOLD10_PINNED_CARD_ID,
+                    decided_at=decided_at, lineage_id=lineage_id,
                 )
         except Exception as exc:  # noqa: BLE001 - the 10-day arm must never affect the v1 arms above
             journal.log_system_event(
@@ -240,14 +276,43 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
     counterfactual ledger uses -- one replay engine, one truth. Idempotent:
     only 'pending' rows are touched; 'complete'/'unavailable' rows (already
     resolved at write time, see record_shadow_baseline_decisions) are never
-    revisited."""
+    revisited.
+
+    Audit-fixup HOLD-2 (HIGH-4, both audits convergent / STATUS CORRECTION
+    item 4): rule-AWARE resolution -- v1-arm and hold10-arm pending rows are
+    queried and budgeted SEPARATELY, each getting the FULL `limit`, rather
+    than one shared ``ORDER BY id ASC LIMIT`` across both arm-sets. hold10
+    rows resolve markedly slower (a real 10-trading-day hold plus this
+    build's own 30-day give-up, vs v1's 3-day hold / 15-day give-up), so a
+    shared query would let an aging hold10 backlog permanently occupy the
+    front of the id-ordered window once the COMBINED backlog exceeds
+    `limit` -- structurally starving v1 resolution of any progress at all,
+    exactly the harm ruling D2 exists to prevent (the pre-registered v1 arm
+    must never be affected by the new arm's own existence). Accepted
+    residual: this roughly doubles worst-case bars-API calls per invocation
+    (no caching exists between the two sub-calls -- noted in the build
+    report, not fixed here)."""
     counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     if bars_provider is None:
         return counts
 
+    for rule_versions in (BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10):
+        sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions)
+        for key in counts:
+            counts[key] += sub_counts[key]
+    return counts
+
+
+def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_versions: tuple) -> dict:
+    """One arm-set's worth of ``resolve_pending_baseline_decisions`` --
+    factored out (HOLD-2 audit-fixup HIGH-4) so v1 and hold10 each get their
+    own independent query + budget. See the caller's own docstring for why."""
+    counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
-        "SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
-        "ORDER BY id ASC LIMIT ?", (limit,),
+        f"SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
+        f"AND rule_version IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+        (*rule_versions, limit),
     )
     counts["total"] = len(rows)
     now = timeutils.now_utc()
@@ -262,9 +327,18 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
         window_days = row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS
+        # HOLD-2 (STATUS CORRECTION item 3): hold10 rows get a wider
+        # calendar give-up -- see HOLD10_UNAVAILABLE_AFTER_DAYS's own
+        # module-level docstring for why the shared 15.0 would selectively
+        # censor hold10's own 0-R outcomes.
+        unavailable_after_days = (
+            HOLD10_UNAVAILABLE_AFTER_DAYS
+            if (row.get("rule_version") or "").endswith(BASELINE_HOLD10_SUFFIX)
+            else UNAVAILABLE_AFTER_DAYS
+        )
 
         if not forward_bars:
-            if age_days > UNAVAILABLE_AFTER_DAYS:
+            if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    "no_bars_after_window", None, "no_bars_after_window")
                 counts["unavailable"] += 1
@@ -290,7 +364,7 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
             # arrive next call; a "neither" here would be a premature,
             # not-yet-final mark-to-market read (mirrors
             # update_pending_outcomes' own bars_used>=N completeness gate).
-            if age_days > UNAVAILABLE_AFTER_DAYS:
+            if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    None, None, "window_never_completed")
                 counts["unavailable"] += 1

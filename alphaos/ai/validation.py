@@ -48,16 +48,40 @@ def validate_max_holding_days_range(obj: dict, bound: int) -> Optional[str]:
     is 1..``bound``, where ``bound`` is the ACTIVE card's own
     ``max_holding_days_default`` (never a second hardcoded literal -- see
     docs/roadmap/alphaos-hold2-10day-window-spec.md section 3.3). Returns a
-    failure reason string when the value is missing/non-integer/out of
+    failure reason string when the value is missing/non-integral/out of
     range, else None. Callers gate this to PROPOSE decisions only -- a
-    reject/watch carries no real holding-window commitment."""
+    reject/watch carries no real holding-window commitment.
+
+    Audit-fixup HOLD-2 (MEDIUM-7, both audits convergent / STATUS
+    CORRECTION item 6): only INTEGRAL values are accepted now -- plain
+    ``int(value)`` silently TRUNCATED a fractional float (``int(10.9) ==
+    10``), so a model response of ``10.9`` passed this check as if it had
+    said ``10``, while the ORIGINAL ``10.9`` was left sitting in ``obj``
+    for every downstream reader (audit B reproduced this concretely: a
+    position held for 11 trading days off a ``10.9`` value that this
+    validator's own success implied was "10"). Booleans are rejected too
+    (``bool`` is an ``int`` subclass in Python -- ``True``/``False`` must
+    never silently read as ``1``/``0``). On success, the validated
+    ``int`` is written BACK into ``obj["max_holding_days"]`` -- what
+    persists downstream is exactly what was validated, never a leftover
+    float/string/bool the check merely tolerated."""
     value = obj.get("max_holding_days")
-    try:
+    if isinstance(value, bool):
+        return f"max_holding_days {value!r} must be an integer, not a bool"
+    if isinstance(value, int):
+        value_int = value
+    elif isinstance(value, float):
+        if not value.is_integer():
+            return f"max_holding_days {value!r} must be an integral value (no fractional part)"
         value_int = int(value)
-    except (TypeError, ValueError):
-        return f"max_holding_days {value!r} is missing or not an integer"
+    else:
+        try:
+            value_int = int(value)
+        except (TypeError, ValueError):
+            return f"max_holding_days {value!r} is missing or not an integer"
     if not (1 <= value_int <= bound):
         return f"max_holding_days {value_int} outside the allowed range 1-{bound}"
+    obj["max_holding_days"] = value_int
     return None
 
 
