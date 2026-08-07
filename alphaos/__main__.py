@@ -132,13 +132,20 @@ def cmd_regime_arming_report(orch: Orchestrator) -> int:
 
 def cmd_baseline_report(orch: Orchestrator) -> int:
     """BASELINE: does the AI add R report. PURE READ -- pure ledger math
-    over existing shadow rows; nothing gated for real."""
-    from alphaos.reports.baseline_report import render_markdown
+    over existing shadow rows; nothing gated for real.
 
-    rep = orch.baseline_report()
-    print(render_markdown(rep))
+    Audit-fixup HOLD-2 (MEDIUM-9 / STATUS CORRECTION item 4): prints the v1
+    report AND the SEGMENTED hold10 report (via
+    ``render_full_baseline_markdown``) -- two clearly separated sections,
+    never merged numbers. ``_print``'s own JSON payload carries BOTH reports
+    under distinct keys for the same reason."""
+    from alphaos.reports.baseline_report import build_baseline_hold10_report, render_full_baseline_markdown
+
+    print(render_full_baseline_markdown(orch.journal, orch.settings))
     print()
-    _print({"baseline_report": rep})
+    rep = orch.baseline_report()
+    hold10_rep = build_baseline_hold10_report(orch.journal, orch.settings)
+    _print({"baseline_report": rep, "baseline_report_hold10": hold10_rep})
     return 0
 
 
@@ -177,6 +184,51 @@ def cmd_baseline_register(orch: Orchestrator) -> int:
     )
     print(f"Registered: {prereg_id}")
     _print({"baseline_register": {"status": "registered", "prereg_id": prereg_id}})
+    return 0
+
+
+def cmd_baseline_register_hold10(orch: Orchestrator) -> int:
+    """Audit-fixup HOLD-2 (MEDIUM-9 / STATUS CORRECTION item 4): register
+    the hold10 arm's OWN fresh pre-registration -- "v2+ arms are new
+    pre-registrations" (decision-log law from 2026-07). Mirrors
+    cmd_baseline_register()'s own shape exactly (same idempotency
+    discipline), just against the hold10 arm's own hypothesis/metric/
+    analysis date. Zero production tooling previously existed to do this
+    (spec §6 step 4 assumed it did -- STATUS CORRECTION item 4 corrects
+    that)."""
+    from alphaos.reports.baseline_report import (
+        FLOOR_DAY_BLOCKS,
+        FLOOR_SPAN_DAYS,
+        HOLD10_ANALYSIS_NOT_BEFORE_DATE,
+    )
+    from alphaos.stats.preregistration import register_hypothesis
+
+    hypothesis = (
+        "AI adds >= +0.05R mean paired ai_delta_r over threshold_v1_hold10 "
+        "(catalyst_momentum_v3's 10-trading-day hold) on proposed candidates, "
+        "conditional on labeller reach"
+    )
+    metric = (
+        "mean_ai_delta_r = mean(candidate_outcomes.replay_r - "
+        "shadow_baseline_decisions.replay_r), threshold_v1_hold10"
+    )
+    existing = orch.journal.one(
+        "SELECT prereg_id, registered_at_utc FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (hypothesis, metric),
+    )
+    if existing:
+        print(f"Already registered: {existing['prereg_id']} (at {existing['registered_at_utc']}) -- no-op.")
+        _print({"baseline_register_hold10": {"status": "already_registered", **existing}})
+        return 0
+
+    prereg_id = register_hypothesis(
+        orch.journal, hypothesis, metric,
+        floor_effective_n=FLOOR_DAY_BLOCKS, floor_span_days=FLOOR_SPAN_DAYS,
+        analysis_not_before=HOLD10_ANALYSIS_NOT_BEFORE_DATE,
+        params={"rule_version": "threshold_v1_hold10", "target_delta_r": 0.05},
+    )
+    print(f"Registered: {prereg_id}")
+    _print({"baseline_register_hold10": {"status": "registered", "prereg_id": prereg_id}})
     return 0
 
 
@@ -1348,6 +1400,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("baseline_register",
                    help="BASELINE: one-off, idempotent -- register the pre-registration block "
                         "(preregistrations row #1)")
+    sub.add_parser("baseline_register_hold10",
+                   help="HOLD-2: one-off, idempotent -- register the hold10 arm's OWN fresh "
+                        "pre-registration (analysis_not_before 2026-10-05)")
     sub.add_parser("debate_register",
                    help="PR14: one-off, idempotent -- register the bear-debate pre-registration "
                         "block (oppose_high_conviction_v1)")
@@ -1625,6 +1680,8 @@ def main(argv=None) -> int:
             return cmd_baseline_report(orch)
         if args.command == "baseline_register":
             return cmd_baseline_register(orch)
+        if args.command == "baseline_register_hold10":
+            return cmd_baseline_register_hold10(orch)
         if args.command == "debate_register":
             return cmd_debate_register(orch)
         if args.command == "hypothesis_seed":

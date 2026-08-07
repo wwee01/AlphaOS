@@ -28,6 +28,23 @@ THRESHOLD_V1 = "threshold_v1"
 PROPOSE_ALL_V1 = "propose_all_v1"
 BASELINE_RULE_VERSIONS = (THRESHOLD_V1, PROPOSE_ALL_V1)
 
+# HOLD-2 (2026-08-05, spec section 3.4 / operator ruling D2): the SAME
+# frozen rule LOGIC (apply_threshold_v1/apply_propose_all_v1, byte-for-byte
+# unchanged), replayed a SECOND time by baseline/tracker.py under a
+# 10-trading-day hold (card catalyst_momentum_v3, by explicit id) instead of
+# the pinned v1 default -- a NEW, additively-labelled arm, never an in-place
+# edit to what threshold_v1/propose_all_v1 already mean. This is not a
+# rule-FORMULA change (so it is not threshold_v2); it is the same formula
+# replayed at a different, explicitly-chosen horizon, hence the "_hold10"
+# suffix rather than a "_v2" version bump. tracker.py relabels the
+# rule_version the frozen apply functions themselves return with this
+# suffix ONLY when writing the 10-day arm's own rows -- see
+# ``record_shadow_baseline_decisions``.
+BASELINE_HOLD10_SUFFIX = "_hold10"
+THRESHOLD_V1_HOLD10 = THRESHOLD_V1 + BASELINE_HOLD10_SUFFIX
+PROPOSE_ALL_V1_HOLD10 = PROPOSE_ALL_V1 + BASELINE_HOLD10_SUFFIX
+BASELINE_RULE_VERSIONS_HOLD10 = (THRESHOLD_V1_HOLD10, PROPOSE_ALL_V1_HOLD10)
+
 # BASELINE spec item 1: "X = the historical median interest score of
 # AI-proposed candidates, computed at build time, frozen as a literal."
 # Computed 2026-07-09 against the real production DB (data/alphaos.db,

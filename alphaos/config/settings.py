@@ -204,6 +204,15 @@ class Settings:
     # one; this field is what OpenAIEvaluation.prompt_template_version is
     # actually stamped from now.
     openai_prompt_version: str
+    # HOLD-2 (2026-08-05): which setup card ``get_default_card()`` resolves
+    # to -- previously a hardcoded module constant
+    # (``alphaos.cards.registry.DEFAULT_CARD_ID``). Default
+    # ``catalyst_momentum_v2`` (that constant's own value, single-sourced --
+    # see ``load_settings()`` below) means an unchanged .env behaves
+    # byte-for-byte like pre-HOLD-2 (the merge-dark guarantee). Validated at
+    # load against the on-disk card registry: an unknown id is a hard
+    # SettingsError, never a silent fallback to the default card.
+    active_card_id: str
 
     # --- market data (v1: Alpaca only, IEX feed) ---
     data_provider: str
@@ -1479,16 +1488,48 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     if min_reward_risk < 0:
         raise SettingsError(f"MIN_REWARD_RISK={min_reward_risk!r} must be >= 0.")
 
-    # --- INSTR-2/INSTR-3: settings-gated primary-evaluator prompt version ----
-    # v3 (INSTR-3) adds MULTI_DAY_CONTEXT on top of v2's ATR_STOP_POLICY --
-    # see openai_client.py's two membership-check gates (`in ("v2", "v3")`)
-    # for why v3 must never regress to a literal `== "v2"` check.
+    # --- INSTR-2/INSTR-3/HOLD-2: settings-gated primary-evaluator prompt
+    # version. v3 (INSTR-3) adds MULTI_DAY_CONTEXT on top of v2's
+    # ATR_STOP_POLICY; v4 (HOLD-2) adds a card-interpolated horizon -- see
+    # openai_client.py's membership-check gates (`in ("v2", "v3", "v4")`)
+    # for why v3/v4 must never regress to a literal `== "v2"` check.
     openai_prompt_version = _get(src, "OPENAI_PROMPT_VERSION", "v1")
     if openai_prompt_version not in PROMPT_VERSIONS:
         _valid = ", ".join(repr(v) for v in PROMPT_VERSIONS)
         raise SettingsError(
             f"OPENAI_PROMPT_VERSION={openai_prompt_version!r} must be one of {_valid}."
         )
+
+    # --- HOLD-2: ACTIVE_CARD_ID -- which setup card get_default_card()
+    # resolves to. Deferred import (not at module top): alphaos.cards.registry
+    # imports SettingsError FROM this module, so a top-level import here
+    # would be a genuine import cycle -- this function-body import only runs
+    # when load_settings() is actually CALLED, by which point both modules
+    # are already fully loaded regardless of which one a process imports
+    # first (same pattern as the cadence.parse_windows deferred import
+    # above). Validated against the real on-disk card registry: an unknown
+    # id must never silently fall back to the default card (that would be
+    # exactly the silent-mutation failure mode the card registry's own
+    # append-only law exists to prevent).
+    #
+    # Audit-fixup HOLD-2 (MEDIUM-6, audit B / STATUS CORRECTION item 5):
+    # id-membership alone was too weak -- see
+    # alphaos.cards.registry.validate_card_as_active_default()'s own
+    # docstring for the full rationale (shadow-only PER card as a live
+    # default; a card missing max_holding_days_default entirely). Delegated
+    # there (not inlined here) so the check is directly testable against a
+    # synthetic card dict.
+    from alphaos.cards.registry import DEFAULT_CARD_ID, load_card_files, validate_card_as_active_default
+    active_card_id = _get(src, "ACTIVE_CARD_ID", DEFAULT_CARD_ID)
+    _known_cards = {c["card_id"]: c for c in load_card_files()}
+    if active_card_id not in _known_cards:
+        _valid_cards = ", ".join(repr(c) for c in sorted(_known_cards))
+        raise SettingsError(
+            f"ACTIVE_CARD_ID={active_card_id!r} not found among on-disk setup cards "
+            f"({_valid_cards}). This must never silently fall back to the default "
+            "card -- fix the id, or add the card file first."
+        )
+    validate_card_as_active_default(_known_cards[active_card_id])
 
     # --- earnings proximity (PR5): warning window + conservative hold-days
     # fallback. Not a safety gate (advisory only), but a nonsensical value
@@ -1544,6 +1585,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         anthropic_api_key=_get(src, "ANTHROPIC_API_KEY"),
         claude_review_model=_get(src, "CLAUDE_REVIEW_MODEL", "claude-sonnet-4-6"),
         openai_prompt_version=openai_prompt_version,
+        active_card_id=active_card_id,
         data_provider=data_provider,
         market_data_feed=_get(src, "MARKET_DATA_FEED", "iex").lower(),
         news_enabled=news_enabled,

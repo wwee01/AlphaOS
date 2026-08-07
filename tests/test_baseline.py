@@ -23,14 +23,20 @@ import pathlib
 import pytest
 
 from alphaos.baseline.rules import (
+    BASELINE_HOLD10_SUFFIX,
     BASELINE_RULE_VERSIONS,
+    BASELINE_RULE_VERSIONS_HOLD10,
     PROPOSE_ALL_V1,
+    PROPOSE_ALL_V1_HOLD10,
     THRESHOLD_V1,
+    THRESHOLD_V1_HOLD10,
     THRESHOLD_V1_INTEREST_SCORE,
     apply_propose_all_v1,
     apply_threshold_v1,
 )
 from alphaos.baseline.tracker import (
+    BASELINE_HOLD10_PINNED_CARD_ID,
+    BASELINE_V1_PINNED_CARD_ID,
     record_shadow_baseline_decisions,
     resolve_pending_baseline_decisions,
 )
@@ -39,7 +45,12 @@ from alphaos.orchestrator import Orchestrator
 from alphaos.reports.baseline_report import (
     FLOOR_DAY_BLOCKS,
     FLOOR_SPAN_DAYS,
+    HOLD10_ANALYSIS_NOT_BEFORE_DATE,
+    HOLD10_REPORT_TITLE,
+    build_baseline_hold10_report,
+    build_baseline_report,
     compute_baseline_report,
+    render_full_baseline_markdown,
     render_markdown,
 )
 from alphaos.stats.bootstrap import day_block_bootstrap
@@ -376,6 +387,166 @@ def test_compute_baseline_report_rules_are_independent():
     assert rep["rules"][PROPOSE_ALL_V1]["n_paired"] == 0
 
 
+def test_compute_baseline_report_hold10_rule_versions_param_never_mixes_with_v1():
+    """Audit-fixup HOLD-2 (HIGH-4 / STATUS CORRECTION item 4):
+    compute_baseline_report() now takes rule_versions so the SAME
+    aggregation serves the hold10 report -- v1 rows passed in must be
+    silently ignored when computing the hold10 arm-set, exactly like
+    hold10 rows were always silently ignored computing the v1 arm-set
+    (test_compute_baseline_report_rules_are_independent above)."""
+    rows = [
+        {"rule_version": THRESHOLD_V1, "ai_replay_r": 5.0, "baseline_replay_r": 0.0,
+         "decision_at_utc": "2026-01-01T00:00:00+00:00"},
+        {"rule_version": THRESHOLD_V1_HOLD10, "ai_replay_r": 3.0, "baseline_replay_r": 1.0,
+         "decision_at_utc": "2026-01-01T00:00:00+00:00"},
+    ]
+    v1_rep = compute_baseline_report(rows)  # default rule_versions -- unchanged behavior
+    hold10_rep = compute_baseline_report(rows, rule_versions=BASELINE_RULE_VERSIONS_HOLD10)
+
+    assert v1_rep["rules"][THRESHOLD_V1]["n_paired"] == 1
+    assert THRESHOLD_V1_HOLD10 not in v1_rep["rules"]  # never mixed in
+    assert hold10_rep["rules"][THRESHOLD_V1_HOLD10]["n_paired"] == 1
+    assert THRESHOLD_V1 not in hold10_rep["rules"]  # never mixed in
+
+
+def test_compute_baseline_report_analysis_not_before_param():
+    """Default reproduces the pre-fixup v1 date exactly; hold10 gets its
+    OWN fresh pre-registration date ('v2+ arms are new pre-registrations')."""
+    assert compute_baseline_report([])["analysis_not_before"] == "2026-09-07"
+    assert (
+        compute_baseline_report([], analysis_not_before=HOLD10_ANALYSIS_NOT_BEFORE_DATE)["analysis_not_before"]
+        == HOLD10_ANALYSIS_NOT_BEFORE_DATE
+        == "2026-10-05"
+    )
+
+
+def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, baseline_r=0.0,
+                              decision_at_utc="2026-01-01T00:00:00+00:00"):
+    """A shadow_baseline_decisions row already resolved ('complete',
+    replay_r set) PLUS the matching candidate's own resolved
+    candidate_outcomes row -- the minimum shape build_baseline_report()'s
+    own JOIN needs to count this as 'paired'."""
+    from alphaos.util.ids import new_id
+
+    journal.insert("shadow_baseline_decisions", {
+        "baseline_decision_id": new_id("basedec"), "candidate_id": candidate_id, "symbol": "AAPL",
+        "rule_version": rule_version, "decision": "propose", "decision_reason": "above_threshold",
+        "direction": "long", "entry": 100.0, "stop": 96.0, "target": 104.8,
+        "max_holding_days": 3, "input_sha": "deadbeef", "decision_at_utc": decision_at_utc,
+        "replay_status": "complete", "replay_result": "target_hit", "replay_r": baseline_r,
+    })
+    journal.insert("candidate_outcomes", {
+        "outcome_id": new_id("outc"), "candidate_id": candidate_id, "symbol": "AAPL",
+        "candidate_type": "candidate", "outcome_status": "resolved", "replay_r": ai_r,
+    })
+
+
+def test_build_baseline_report_v1_not_diluted_by_newer_hold10_rows(journal, settings):
+    """Audit-fixup HOLD-2 (HIGH-4, both audits convergent): before this fix,
+    the SQL read ALL rule versions before the Python-side filter dropped
+    the ones compute_baseline_report() didn't recognize -- so a shared
+    LIMIT (ORDER BY id DESC, favoring recency) would drop the OLDEST v1
+    rows once enough NEWER hold10 rows existed (audit A measured n_paired
+    1600->1250 on a representative corpus). Proof: 2 OLD v1 rows inserted
+    FIRST, then 5 NEWER hold10 rows, with limit=3 -- pre-fixup this returns
+    3 hold10 rows and ZERO v1 rows (the 2 old v1 rows never even enter the
+    LIMIT window); post-fixup the v1-only query never sees hold10 rows at
+    all, so both v1 rows survive regardless of how small the limit is."""
+    for i in range(2):
+        _seed_complete_paired_row(journal, candidate_id=f"cand_v1_{i}", rule_version=THRESHOLD_V1)
+    for i in range(5):
+        _seed_complete_paired_row(journal, candidate_id=f"cand_h10_{i}", rule_version=THRESHOLD_V1_HOLD10)
+
+    rep = build_baseline_report(journal, settings, limit=3)
+    assert rep["n_shadow_resolved"] == 2
+    assert rep["n_paired_total"] == 2
+    assert THRESHOLD_V1_HOLD10 not in rep["rules"]
+
+
+def test_build_baseline_hold10_report_only_sees_hold10_rows(journal, settings):
+    _seed_complete_paired_row(journal, candidate_id="cand_v1_x", rule_version=THRESHOLD_V1)
+    _seed_complete_paired_row(journal, candidate_id="cand_h10_x", rule_version=THRESHOLD_V1_HOLD10)
+
+    rep = build_baseline_hold10_report(journal, settings)
+    assert rep["n_shadow_resolved"] == 1
+    assert rep["n_paired_total"] == 1
+    assert rep["analysis_not_before"] == HOLD10_ANALYSIS_NOT_BEFORE_DATE
+    assert THRESHOLD_V1 not in rep["rules"]
+    assert THRESHOLD_V1_HOLD10 in rep["rules"]
+
+
+def test_render_full_baseline_markdown_segments_hold10_clearly(journal, settings):
+    """MEDIUM-9: the hold10 section is a CLEARLY SEGMENTED, distinctly-
+    titled block -- never a mixed/merged section."""
+    _seed_complete_paired_row(journal, candidate_id="cand_v1_y", rule_version=THRESHOLD_V1)
+    _seed_complete_paired_row(journal, candidate_id="cand_h10_y", rule_version=THRESHOLD_V1_HOLD10)
+
+    md = render_full_baseline_markdown(journal, settings)
+    assert "## BASELINE -- does the AI add R? (shadow, nothing gated for real)" in md
+    assert HOLD10_REPORT_TITLE in md
+    # The v1 section's own header appears strictly before the hold10 one.
+    assert md.index("## BASELINE --") < md.index(HOLD10_REPORT_TITLE)
+
+
+def test_resolve_pending_baseline_decisions_rule_aware_v1_not_starved_by_hold10_backlog():
+    """Audit-fixup HOLD-2 (HIGH-4, both audits convergent): before this
+    fix, a single 'ORDER BY id ASC LIMIT n' query spanned both arm-sets --
+    an aging hold10 backlog (resolves markedly slower: 10-trading-day hold
+    + 30-day give-up, vs v1's 3-day hold + 15-day give-up) could
+    permanently occupy the front of that window and starve v1 resolution
+    once the combined backlog exceeded the limit. Proof: 5 OLD hold10
+    pending rows inserted FIRST (lower ids, all still genuinely pending --
+    no bars provided for them), then 1 NEWER v1 pending row, with limit=2.
+    Pre-fixup: the shared query returns only the 2 oldest rows by id (both
+    hold10), and the v1 row is never even read this call. Post-fixup: the
+    v1 row is resolved regardless, because v1 rows are queried
+    independently of the hold10 backlog's size."""
+    j = JournalStore(":memory:")
+    for i in range(5):
+        _pending_row(j, candidate_id=f"cand_h10_{i}", days_ago=1, max_holding_days=10,
+                     rule_version=THRESHOLD_V1_HOLD10)
+    decision_at_utc = _pending_row(j, candidate_id="cand_v1_new", days_ago=1, rule_version=THRESHOLD_V1)
+    bar_date = _bar_dates_after(decision_at_utc, 1)[0]
+    provider = _FakeBarsProvider({"AAPL": [
+        {"date": bar_date, "high": 106.0, "low": 101.0, "close": 105.0},
+    ]})
+
+    counts = resolve_pending_baseline_decisions(j, bars_provider=provider, limit=2)
+
+    v1_row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_v1_new'")
+    assert v1_row["replay_status"] == "complete"  # resolved -- NOT starved by the hold10 backlog
+    assert counts["completed"] >= 1
+    j.close()
+
+
+def test_baseline_register_hold10_cli_is_idempotent():
+    """MEDIUM-9: mirrors test_baseline_register_cli_is_idempotent()'s own
+    shape for the NEW hold10 registration command."""
+    from alphaos.__main__ import cmd_baseline_register_hold10
+
+    o = _orch()
+    assert cmd_baseline_register_hold10(o) == 0
+    assert o.journal.count_rows("preregistrations") == 1
+    row = o.journal.one("SELECT * FROM preregistrations")
+    assert row["analysis_not_before"] == HOLD10_ANALYSIS_NOT_BEFORE_DATE
+    assert cmd_baseline_register_hold10(o) == 0  # no-op, not a duplicate row
+    assert o.journal.count_rows("preregistrations") == 1
+    o.close()
+
+
+def test_baseline_register_and_baseline_register_hold10_are_independent():
+    """Registering the v1 pre-registration must never satisfy/duplicate
+    the hold10 one, and vice versa -- distinct hypothesis/metric text means
+    both land as separate rows."""
+    from alphaos.__main__ import cmd_baseline_register, cmd_baseline_register_hold10
+
+    o = _orch()
+    assert cmd_baseline_register(o) == 0
+    assert cmd_baseline_register_hold10(o) == 0
+    assert o.journal.count_rows("preregistrations") == 2
+    o.close()
+
+
 def test_render_markdown_below_floor_and_ok_paths_both_render():
     rep = compute_baseline_report([])
     rep["as_of"] = "2026-07-09"
@@ -390,8 +561,13 @@ def test_render_markdown_below_floor_and_ok_paths_both_render():
 
 # --------------------------------------------------------- journal-aware
 def _card_default_holding_days():
-    from alphaos.cards.registry import get_default_card
-    return get_default_card()["max_holding_days_default"]
+    from alphaos.cards.registry import get_card_by_id
+    return get_card_by_id(BASELINE_V1_PINNED_CARD_ID)["max_holding_days_default"]
+
+
+def _hold10_card_holding_days():
+    from alphaos.cards.registry import get_card_by_id
+    return get_card_by_id(BASELINE_HOLD10_PINNED_CARD_ID)["max_holding_days_default"]
 
 
 def _make_cand(journal, candidate_id="cand1", symbol="AAPL", direction="long",
@@ -409,12 +585,16 @@ def _make_cand(journal, candidate_id="cand1", symbol="AAPL", direction="long",
 
 
 def test_record_shadow_baseline_decisions_writes_two_rows_per_candidate():
+    """HOLD-2: now 4 rows/candidate -- the pinned v1 arms (2, unchanged)
+    PLUS the new 10-day arm (2 more, additive)."""
     j = JournalStore(":memory:")
     cand = _make_cand(j)
     record_shadow_baseline_decisions(j, make_settings(), cand, scan_batch_id="sb1")
     rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
-    assert len(rows) == 2
-    assert {r["rule_version"] for r in rows} == {THRESHOLD_V1, PROPOSE_ALL_V1}
+    assert len(rows) == 4
+    assert {r["rule_version"] for r in rows} == {
+        THRESHOLD_V1, PROPOSE_ALL_V1, THRESHOLD_V1_HOLD10, PROPOSE_ALL_V1_HOLD10,
+    }
     for r in rows:
         assert r["scan_batch_id"] == "sb1"
         assert r["input_sha"]
@@ -460,6 +640,11 @@ def test_record_shadow_baseline_decisions_below_threshold_resolves_zero_immediat
 
 
 def test_record_shadow_baseline_decisions_uses_default_card_holding_days():
+    """HOLD-2: the v1 arms are PINNED to catalyst_momentum_v2's hold days
+    (3) regardless of ACTIVE_CARD_ID; the new hold10 arm always uses
+    catalyst_momentum_v3's hold days (10) -- see
+    test_record_shadow_baseline_decisions_pin_unaffected_by_active_card_id_swap
+    below for the swap-doesn't-move-v1 proof (spec test obligation 6)."""
     j = JournalStore(":memory:")
     cand = _make_cand(j)
     j.insert("atr_history", {
@@ -469,17 +654,58 @@ def test_record_shadow_baseline_decisions_uses_default_card_holding_days():
     record_shadow_baseline_decisions(j, make_settings(), cand)
     rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
     for r in rows:
-        assert r["max_holding_days"] == _card_default_holding_days()
+        if r["rule_version"] in BASELINE_RULE_VERSIONS:
+            assert r["max_holding_days"] == _card_default_holding_days()
+        else:
+            assert r["rule_version"] in BASELINE_RULE_VERSIONS_HOLD10
+            assert r["max_holding_days"] == _hold10_card_holding_days()
+    j.close()
+
+
+def test_record_shadow_baseline_decisions_pin_unaffected_by_active_card_id_swap():
+    """HOLD-2 spec test obligation 6: swapping ACTIVE_CARD_ID must NOT move
+    the v1 arms' hold days (they are pinned to catalyst_momentum_v2 by
+    explicit id, never get_default_card()/settings.active_card_id)."""
+    j = JournalStore(":memory:")
+    cand = _make_cand(j)
+    j.insert("atr_history", {
+        "atr_id": "atr1", "symbol": "AAPL", "market_date": "2026-01-01",
+        "atr_14": 2.0, "rules_version": "atr_rules_v1", "n_bars_fetched": 15,
+    })
+    swapped_settings = make_settings(ACTIVE_CARD_ID="catalyst_momentum_v3")
+    assert swapped_settings.active_card_id == "catalyst_momentum_v3"
+    record_shadow_baseline_decisions(j, swapped_settings, cand)
+    rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
+    v1_rows = [r for r in rows if r["rule_version"] in BASELINE_RULE_VERSIONS]
+    hold10_rows = [r for r in rows if r["rule_version"] in BASELINE_RULE_VERSIONS_HOLD10]
+    assert len(v1_rows) == 2
+    assert len(hold10_rows) == 2
+    for r in v1_rows:
+        assert r["max_holding_days"] == 3  # catalyst_momentum_v2, unmoved by the swap
+    for r in hold10_rows:
+        assert r["max_holding_days"] == 10  # catalyst_momentum_v3, unaffected either way
     j.close()
 
 
 def test_record_shadow_baseline_decisions_stamps_setup_card_id_from_candidate():
+    """Audit-fixup HOLD-2 (S-a): setup_card_id stamps the card that
+    ACTUALLY supplied each ARM's max_holding_days_default (the pin), not
+    the candidate's own live card assignment. Proven with a candidate
+    card_id that matches NEITHER pin -- if setup_card_id were still reading
+    cand.get('card_id') this would fail on every row."""
     j = JournalStore(":memory:")
-    cand = _make_cand(j, card_id="catalyst_momentum_v2")
+    cand = _make_cand(j, card_id="post_earnings_reaction")
     record_shadow_baseline_decisions(j, make_settings(), cand)
     rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
-    for r in rows:
-        assert r["setup_card_id"] == "catalyst_momentum_v2"
+    assert rows
+    v1_rows = [r for r in rows if r["rule_version"] in BASELINE_RULE_VERSIONS]
+    hold10_rows = [r for r in rows if r["rule_version"] in BASELINE_RULE_VERSIONS_HOLD10]
+    assert len(v1_rows) == 2
+    assert len(hold10_rows) == 2
+    for r in v1_rows:
+        assert r["setup_card_id"] == BASELINE_V1_PINNED_CARD_ID == "catalyst_momentum_v2"
+    for r in hold10_rows:
+        assert r["setup_card_id"] == BASELINE_HOLD10_PINNED_CARD_ID == "catalyst_momentum_v3"
     j.close()
 
 
@@ -525,7 +751,10 @@ def test_record_shadow_baseline_decisions_one_rule_failure_does_not_block_the_ot
     """2026-07-09 correctness-audit NIT-2: a poisoned field only ONE rule
     reads must not suppress the OTHER rule's row. Simulated by monkeypatching
     ONE entry of RULE_FUNCTIONS to raise; the other rule's row must still be
-    written."""
+    written. HOLD-2: the v1-pin loop and the hold10 loop both read the SAME
+    RULE_FUNCTIONS dict, so threshold_v1's poisoning is isolated per-ARM too
+    -- propose_all_v1's row AND propose_all_v1_hold10's row must both still
+    be written (2 rows, not 1)."""
     import alphaos.baseline.tracker as tracker_mod
 
     def _exploding_rule(row, **kwargs):
@@ -542,8 +771,8 @@ def test_record_shadow_baseline_decisions_one_rule_failure_does_not_block_the_ot
     record_shadow_baseline_decisions(j, make_settings(), cand)  # must not raise
 
     rows = j.query("SELECT * FROM shadow_baseline_decisions WHERE candidate_id = 'cand1'")
-    assert len(rows) == 1  # only propose_all_v1's row -- threshold_v1's own failure was isolated
-    assert rows[0]["rule_version"] == PROPOSE_ALL_V1
+    assert len(rows) == 2  # propose_all_v1 + propose_all_v1_hold10 -- threshold_v1's failure isolated in BOTH arms
+    assert {r["rule_version"] for r in rows} == {PROPOSE_ALL_V1, PROPOSE_ALL_V1_HOLD10}
     j.close()
 
 
@@ -558,12 +787,14 @@ def test_record_shadow_baseline_decisions_never_raises_on_missing_candidate_id()
 
 def test_record_shadow_baseline_decisions_idempotent_index_guards_duplicate_insert():
     """The (candidate_id, rule_version) unique index is the real backstop --
-    a duplicate insert attempt is caught and logged, never raised."""
+    a duplicate insert attempt is caught and logged, never raised. HOLD-2:
+    4 distinct rule_version labels now exist per candidate (2 v1-pinned + 2
+    hold10), so a re-run must still land on exactly 4, not 8."""
     j = JournalStore(":memory:")
     cand = _make_cand(j)
     record_shadow_baseline_decisions(j, make_settings(), cand)
     record_shadow_baseline_decisions(j, make_settings(), cand)  # must not raise
-    assert j.count_rows("shadow_baseline_decisions") == 2  # still exactly 2, not 4
+    assert j.count_rows("shadow_baseline_decisions") == 4  # still exactly 4, not 8
     j.close()
 
 
@@ -586,12 +817,13 @@ def _days_ago_iso(n: int) -> str:
 
 
 def _pending_row(j, *, entry=100.0, stop=96.0, target=104.8, direction="long",
-                 days_ago: int = 1, max_holding_days=3):
+                 days_ago: int = 1, max_holding_days=3, candidate_id="cand1",
+                 rule_version=THRESHOLD_V1):
     from alphaos.util.ids import new_id
     decision_at_utc = _days_ago_iso(days_ago)
     j.insert("shadow_baseline_decisions", {
-        "baseline_decision_id": new_id("basedec"), "candidate_id": "cand1", "symbol": "AAPL",
-        "rule_version": THRESHOLD_V1, "decision": "propose", "decision_reason": "above_threshold",
+        "baseline_decision_id": new_id("basedec"), "candidate_id": candidate_id, "symbol": "AAPL",
+        "rule_version": rule_version, "decision": "propose", "decision_reason": "above_threshold",
         "direction": direction, "entry": entry, "stop": stop, "target": target,
         "max_holding_days": max_holding_days, "input_sha": "deadbeef",
         "decision_at_utc": decision_at_utc, "replay_status": "pending",
@@ -711,6 +943,102 @@ def test_resolve_pending_baseline_decisions_stale_no_bars_marks_unavailable():
     j.close()
 
 
+def test_resolve_pending_baseline_decisions_warns_on_orphaned_rule_version():
+    """Round-2 audit-fixup (FIX-B, audit A NEW-2, LOW): HIGH-4's rule-aware
+    split turned "resolve every pending row" into "resolve rows in these
+    two hardcoded arm-sets" -- a foreign rule_version (e.g. a future
+    threshold_v2) would otherwise stay pending FOREVER with zero signal.
+    Proof: seed a pending row under a made-up rule_version, run the
+    resolver, assert (a) it stays pending -- no resolution attempted --
+    and (b) a WARNING system_events row fires naming the count and the
+    label, this codebase's own established convention for "the warning
+    fired" (log_system_event writes to system_events, not Python
+    logging -- see e.g. test_preflight_failure_emits_warning_and_assigns_
+    zero_per_candidates in test_s1c_activation.py for the same pattern)."""
+    j = JournalStore(":memory:")
+    _pending_row(j, candidate_id="cand_orphan", rule_version="threshold_v2_made_up")
+    provider = _FakeBarsProvider({})
+
+    resolve_pending_baseline_decisions(j, bars_provider=provider)
+
+    row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_orphan'")
+    assert row["replay_status"] == "pending"  # never touched
+
+    events = j.query(
+        "SELECT * FROM system_events WHERE category = 'baseline' AND severity = 'warning'"
+    )
+    assert events, "expected a WARNING system_events row naming the orphaned rule_version"
+    assert any("threshold_v2_made_up" in (e["message"] or "") for e in events)
+    assert any("1 shadow_baseline_decisions row" in (e["message"] or "") for e in events)
+    j.close()
+
+
+def test_resolve_pending_baseline_decisions_no_warning_when_nothing_orphaned():
+    """The guard must not false-positive on ordinary v1/hold10 rows."""
+    j = JournalStore(":memory:")
+    _pending_row(j, candidate_id="cand_v1_ok", rule_version=THRESHOLD_V1)
+    _pending_row(j, candidate_id="cand_h10_ok", rule_version=THRESHOLD_V1_HOLD10)
+    provider = _FakeBarsProvider({})
+
+    resolve_pending_baseline_decisions(j, bars_provider=provider)
+
+    events = j.query(
+        "SELECT * FROM system_events WHERE category = 'baseline' AND severity = 'warning' "
+        "AND message LIKE '%rule_version(s) this resolver does not know about%'"
+    )
+    assert not events
+    j.close()
+
+
+def test_hold10_arm_uses_wider_give_up_v1_arm_unaffected():
+    """Audit-fixup HOLD-2 (HIGH-3, STATUS CORRECTION item 3, both audits
+    convergent): UNAVAILABLE_AFTER_DAYS (15.0 calendar days) is sized for
+    the OLD 3-trading-day hold -- a 10-trading-day window spans more than
+    15 calendar days on ~9% of trading dates, and ONLY the 0-R 'neither'
+    outcomes get marked unavailable/window_never_completed (a stop/target
+    hit resolves immediately regardless of age), so the shared give-up
+    SELECTIVELY censors hold10's own losing/flat outcomes -- a directional
+    bias. Proof: two rows with the IDENTICAL shape (16 calendar days
+    elapsed, 9 forward bars, neither level hit, max_holding_days=10) must
+    resolve DIFFERENTLY purely based on rule_version: the v1-labelled row
+    (15.0 give-up) gives up (unavailable); the _hold10-labelled row (30.0
+    give-up) stays pending -- more bars may still complete its real
+    10-trading-day window."""
+    j = JournalStore(":memory:")
+    decision_at_utc = _pending_row(
+        j, candidate_id="cand_v1", days_ago=16, max_holding_days=10, rule_version=THRESHOLD_V1,
+    )
+    _pending_row(
+        j, candidate_id="cand_h10", days_ago=16, max_holding_days=10, rule_version=THRESHOLD_V1_HOLD10,
+    )
+    dates = _bar_dates_after(decision_at_utc, 9)  # neither level hit, window not yet complete (needs 10)
+    bars = [{"date": d, "high": 101.0, "low": 99.0, "close": 100.5} for d in dates]
+    provider = _FakeBarsProvider({"AAPL": bars})
+
+    resolve_pending_baseline_decisions(j, bars_provider=provider)
+
+    v1_row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_v1'")
+    h10_row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_h10'")
+    assert v1_row["replay_status"] == "unavailable"
+    assert h10_row["replay_status"] == "pending"
+
+
+def test_hold10_arm_eventually_converges_past_its_own_wider_give_up():
+    """The wider hold10 give-up is not "never gives up" -- past 30 calendar
+    days with no bars at all, a hold10 row still converges to unavailable,
+    same terminal-state guarantee the v1 arms have always had."""
+    j = JournalStore(":memory:")
+    _pending_row(
+        j, candidate_id="cand_h10_old", days_ago=31, max_holding_days=10, rule_version=THRESHOLD_V1_HOLD10,
+    )
+    provider = _FakeBarsProvider({})  # no bars ever
+    counts = resolve_pending_baseline_decisions(j, bars_provider=provider)
+    row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_h10_old'")
+    assert row["replay_status"] == "unavailable"
+    assert counts["unavailable"] == 1
+    j.close()
+
+
 def test_resolve_pending_baseline_decisions_idempotent_only_touches_pending():
     j = JournalStore(":memory:")
     decision_at_utc = _pending_row(j)
@@ -727,13 +1055,14 @@ def test_resolve_pending_baseline_decisions_idempotent_only_touches_pending():
 # ------------------------------------------------------------ orchestrator
 def test_baseline_records_2_to_1_with_ai_evaluations_acceptance_criterion():
     """Spec's own acceptance criterion: shadow_baseline_decisions rows 2:1
-    with AI evaluations (two rules)."""
+    with AI evaluations (two rules). HOLD-2: now 4:1 -- the pinned v1 arms
+    (2, unchanged ratio) PLUS the new additive 10-day arm (2 more)."""
     o = _orch(INTEREST_SCAN_TOP_N="12", MAX_CANDIDATES_TO_AI="12", LABELLING_ENABLED="true")
     o.run_scan_once()
     n_evals = o.journal.count_rows("openai_evaluations")
     n_baseline = o.journal.count_rows("shadow_baseline_decisions")
     assert n_evals > 0, "scan produced zero evaluations -- test fixture is vacuous"
-    assert n_baseline == 2 * n_evals
+    assert n_baseline == 4 * n_evals
     o.close()
 
 

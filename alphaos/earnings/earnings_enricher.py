@@ -187,13 +187,13 @@ class EarningsProximityEnricher:
         self._provider = provider if provider is not None else make_earnings_provider(settings, journal)
 
     def _empty(self, symbol: str, status: str, enrichment_status: str, source: str,
-               error: Optional[str] = None) -> EarningsProximityContext:
-        flags = compute_proximity_flags(None, status, self.settings.earnings_proximity_default_hold_days,
-                                        self.settings.earnings_proximity_warning_days)
+               error: Optional[str] = None, hold_days: Optional[int] = None) -> EarningsProximityContext:
+        hold_days = hold_days if hold_days is not None else self.settings.earnings_proximity_default_hold_days
+        flags = compute_proximity_flags(None, status, hold_days, self.settings.earnings_proximity_warning_days)
         return EarningsProximityContext(
             symbol=symbol, earnings_date=None, earnings_timing="unknown",
             days_until_earnings=flags["days_until_earnings"],
-            hold_days_used=self.settings.earnings_proximity_default_hold_days,
+            hold_days_used=hold_days,
             earnings_within_hold_window=flags["earnings_within_hold_window"],
             earnings_within_warning_window=flags["earnings_within_warning_window"],
             earnings_data_status=status, confidence=0.0, source=source,
@@ -202,13 +202,23 @@ class EarningsProximityEnricher:
             risk_tags=flags["risk_tags"], fetched_at_utc=timeutils.to_iso(timeutils.now_utc()),
         )
 
-    def enrich(self, packet) -> EarningsProximityContext:
+    def enrich(self, packet, hold_days: Optional[int] = None) -> EarningsProximityContext:
         """Enrich a candidate packet with earnings-proximity context. Never
-        raises. Uses the DEFAULT hold-days (the real hold length isn't known
-        yet at this point in the pipeline) -- see module docstring."""
+        raises. Uses ``hold_days`` when the caller supplies it (HOLD-2
+        audit-fixup MEDIUM-8, STATUS CORRECTION item 2: the caller resolves
+        the ACTIVE card's own ``max_holding_days_default`` and passes it in
+        here); ``settings.earnings_proximity_default_hold_days`` is now only
+        the FALLBACK for when ``hold_days`` is ``None`` (e.g. no card
+        resolves, or a caller that predates card-threading). Before this
+        fix, this method ALWAYS read the settings value -- a second,
+        un-linked copy of the same policy number this ticket exists to
+        single-source (candidate-stage `earnings_within_hold_window` stayed
+        stuck at the settings default's own window even when ACTIVE_CARD_ID
+        pointed at a card with a materially different hold length)."""
         symbol = getattr(packet, "symbol", None)
         if not self.settings.earnings_proximity_enabled or self._provider is None:
-            return self._empty(symbol, EarningsDataStatus.PROVIDER_DISABLED.value, "disabled", "disabled")
+            return self._empty(symbol, EarningsDataStatus.PROVIDER_DISABLED.value, "disabled", "disabled",
+                               hold_days=hold_days)
         try:
             result = self._provider.get_earnings_for_symbol(symbol)
         except Exception as exc:  # fail-safe: never crash the scan
@@ -220,9 +230,10 @@ class EarningsProximityEnricher:
             status = (EarningsDataStatus.UNAVAILABLE.value
                      if self.settings.earnings_proximity_fail_open_as_unavailable
                      else EarningsDataStatus.UNKNOWN.value)
-            return self._empty(symbol, status, "error", getattr(self._provider, "name", "unknown"), error=str(exc))
+            return self._empty(symbol, status, "error", getattr(self._provider, "name", "unknown"), error=str(exc),
+                               hold_days=hold_days)
 
-        hold_days = self.settings.earnings_proximity_default_hold_days
+        hold_days = hold_days if hold_days is not None else self.settings.earnings_proximity_default_hold_days
         warning_days = self.settings.earnings_proximity_warning_days
         flags = compute_proximity_flags(result.earnings_date, result.status, hold_days, warning_days)
         return EarningsProximityContext(
@@ -235,12 +246,12 @@ class EarningsProximityEnricher:
             risk_tags=flags["risk_tags"], fetched_at_utc=result.fetched_at_utc,
         )
 
-    def skipped_budget_cap(self, packet) -> EarningsProximityContext:
+    def skipped_budget_cap(self, packet, hold_days: Optional[int] = None) -> EarningsProximityContext:
         """For an eligible candidate outside the per-scan enrichment cap --
         distinct from 'checked, no data' (unavailable) or 'disabled'."""
         symbol = getattr(packet, "symbol", None)
         return self._empty(symbol, EarningsDataStatus.UNKNOWN.value, "skipped",
-                           getattr(self._provider, "name", "disabled"))
+                           getattr(self._provider, "name", "disabled"), hold_days=hold_days)
 
 
 def recompute_with_hold_days(context: EarningsProximityContext, hold_days: int,

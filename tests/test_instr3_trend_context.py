@@ -409,13 +409,25 @@ def test_9_multi_day_context_computed_only_inside_augment_ast():
 
 
 # ============================================================= test 10: version gates
-def test_10_settings_validates_v3_and_rejects_v4():
-    with pytest.raises(SettingsError):
-        make_settings(OPENAI_PROMPT_VERSION="v4")
+def test_10_settings_validates_v3_and_v4():
+    """HOLD-2 (2026-08-05): "v4" is now a valid prompt version
+    (card-interpolated horizon) -- this test previously pinned "v4 rejected"
+    as the INSTR-3-era boundary; that boundary moved. "v5" now takes v4's
+    old place as the still-refused value (see
+    tests/test_instr2_atr_coherent_prompt.py::test_settings_validates_openai_prompt_version
+    for the general version of this same guard)."""
     assert make_settings(OPENAI_PROMPT_VERSION="v3").openai_prompt_version == "v3"
+    assert make_settings(OPENAI_PROMPT_VERSION="v4").openai_prompt_version == "v4"
+    with pytest.raises(SettingsError):
+        make_settings(OPENAI_PROMPT_VERSION="v5")
 
 
-def test_10_cli_arms_v3_parses_v4_refused(tmp_path, journal):
+def test_10_cli_arms_v3_and_v4_parse_v5_refused(tmp_path, journal):
+    """HOLD-2: v4 arms must now be accepted end-to-end by the CLI (both the
+    per-token PROMPT_VERSIONS membership check AND the actual run); v5
+    stays refused at the per-token parse gate (this is the updated
+    replacement for the pre-HOLD-2 'v4 refused' assertion this test used to
+    make -- see test_10_settings_validates_v3_and_v4 above)."""
     from alphaos.__main__ import build_parser, cmd_ab_eval_run
     from alphaos.ab_eval.corpus import write_corpus as _write
     from alphaos.orchestrator import Orchestrator
@@ -437,7 +449,10 @@ def test_10_cli_arms_v3_parses_v4_refused(tmp_path, journal):
     rc = cmd_ab_eval_run(orch, None, ["gpt-5.4-mini:v3", "gpt-5.6-luna:v3"], corpus_dir)
     assert rc == 0
 
-    rc = cmd_ab_eval_run(orch, None, ["gpt-5.4-mini:v4"], corpus_dir)
+    rc = cmd_ab_eval_run(orch, None, ["gpt-5.4-mini:v4", "gpt-5.6-luna:v4"], corpus_dir)
+    assert rc == 0
+
+    rc = cmd_ab_eval_run(orch, None, ["gpt-5.4-mini:v5"], corpus_dir)
     assert rc == 1
 
 

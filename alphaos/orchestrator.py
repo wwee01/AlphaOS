@@ -327,6 +327,7 @@ class Orchestrator:
         # shares one instant, never a drifting one.
         card_activation = build_scan_card_activation(
             self.journal, st.utc, set(DEFAULT_UNIVERSE) | set(shadow_symbols),
+            settings=self.settings,  # HOLD-2 (STATUS CORRECTION item 1): the ACTUAL live card-stamping path
         )
         if not card_activation.active:
             self.journal.log_system_event(
@@ -462,6 +463,19 @@ class Orchestrator:
             c["candidate_id"] for c in scan.candidates
             if earnings_enabled and (c.get("interest_rank") or 10 ** 9) <= earnings_cap
         }
+        # HOLD-2 audit-fixup round 2 (FIX-A, audit A NEW-3, LOW): the ACTIVE
+        # card's max_holding_days_default is CONSTANT for the whole scan --
+        # resolved ONCE here and threaded down to every _label_candidate()
+        # call below, instead of being re-read per candidate inside that
+        # method (measured live: ~2352us/call -- filesystem read + YAML
+        # parse -- the ONLY per-candidate get_default_card() call site in
+        # the codebase; every other call site is per-scan or per-proposal.
+        # ~75ms of pure waste on a 32-candidate scan for a value that never
+        # changes mid-scan).
+        active_card_hold_days = (
+            cards.get_default_card(settings=self.settings).get("max_holding_days_default")
+            if earnings_enabled else None
+        )
 
         for cand in scan.candidates:
             # EXP-0 backstop: structurally this can never be true (the shadow-
@@ -505,7 +519,7 @@ class Orchestrator:
                                      else "skipped_budget_cap")
                 classification = self._label_candidate(
                     cand, snapshot, scan_batch_id, enrich=do_enrich, l30_mode=l30_mode,
-                    earnings_mode=earnings_mode)
+                    earnings_mode=earnings_mode, active_card_hold_days=active_card_hold_days)
                 summary.labelled += 1
                 if do_enrich:
                     enrich_budget -= 1
@@ -568,6 +582,23 @@ class Orchestrator:
                     # able to tell "ATR data is missing for this symbol" apart from
                     # "the model itself rejected it."
                     self._reject_candidate(cand, "openai", evaluation, reason=ReasonCode.NO_ATR_DATA.value)
+                elif ReasonCode.MAX_HOLDING_DAYS_OUT_OF_RANGE.value in (evaluation.risk_flags or []):
+                    # Audit-fixup HOLD-2 (HIGH-5, audit A): same class of
+                    # misfiling as NO_ATR_DATA above -- _reject_candidate's
+                    # own default inference reads evaluation.validation_status
+                    # (any non-"passed" value) and ALWAYS assumes
+                    # INVENTED_CATALYST_IN_NO_NEWS_MODE, since that used to be
+                    # the only real "failed_validation:" producer. HOLD-2's v4
+                    # range validator (alphaos/ai/validation.py's
+                    # validate_max_holding_days_range()) also stamps a
+                    # non-"passed" validation_status, so without this
+                    # explicit branch every v4 range rejection would land in
+                    # rejected_candidates.reason_code as a fabricated
+                    # "invented a catalyst" -- a real, diagnosable failure
+                    # mode misfiled as an unrelated one.
+                    self._reject_candidate(
+                        cand, "openai", evaluation, reason=ReasonCode.MAX_HOLDING_DAYS_OUT_OF_RANGE.value,
+                    )
                 else:
                     self._reject_candidate(cand, "openai", evaluation)
                 summary.rejected += 1
@@ -663,7 +694,7 @@ class Orchestrator:
         direction = evaluation.direction or TradeDirection.LONG.value
         requires_margin = direction == TradeDirection.SHORT.value
         snapshot = cand.snapshot or {}
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
 
         risk = self.risk.assess(
             direction=direction,
@@ -1179,7 +1210,7 @@ class Orchestrator:
         self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "user_override"
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
         proposal.card_id = card["card_id"]
         proposal.card_version = card["version"]
         proposal.invalidation_reason = card["invalidation_rule"]
@@ -1895,7 +1926,7 @@ class Orchestrator:
             },
         )
         risk = self.risk.assess(direction="long", entry=entry, stop=stop, snapshot=snap)
-        card = cards.get_default_card()
+        card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
         proposal = TradeProposal(
             symbol=symbol, direction="long", strategy=Strategy.SWING.value,
             entry=entry, stop=stop, target=target, max_holding_days=3,
@@ -2133,7 +2164,8 @@ class Orchestrator:
         return ctx.summary_fields()
 
     def _label_candidate(self, cand: "ScanContext", snapshot: dict, scan_batch_id, enrich: bool = True,
-                         l30_mode: Optional[str] = None, earnings_mode: Optional[str] = None):
+                         l30_mode: Optional[str] = None, earnings_mode: Optional[str] = None,
+                         active_card_hold_days: Optional[int] = None):
         """Build the compact packet, (optionally) enrich it with catalyst +
         last30days + earnings-proximity context, journal it, AI-classify it, and
         freeze the label + catalyst + last30days + earnings view onto the
@@ -2141,7 +2173,14 @@ class Orchestrator:
         ``earnings_mode`` are each one of: 'enrich' (within the per-scan cap),
         'skipped_budget_cap' (eligible but outside it), or None (disabled).
         Earnings context is NEVER applied to the packet -- it must not reach the
-        AI eval/labeller prompt."""
+        AI eval/labeller prompt.
+
+        ``active_card_hold_days`` (HOLD-2 audit-fixup round 2, FIX-A): the
+        ACTIVE card's own ``max_holding_days_default``, resolved ONCE by the
+        caller (constant for the whole scan) and threaded straight through
+        to the earnings enricher below -- see ``run_scan_once``'s own
+        hoisting comment for why this moved out of this method (it used to
+        be re-read here, per candidate)."""
         signals = cand.interest
         if signals is None:  # defensive: recompute if the scanner didn't attach it
             from alphaos.scanner.interest_scanner import InterestScanner
@@ -2171,11 +2210,30 @@ class Orchestrator:
         # PR5: earnings-proximity context, AFTER last30days. Advisory ONLY — never
         # applied to the packet, so it can never reach the AI eval/labeller prompt,
         # never forces a decision, bypasses a gate, or executes.
+        # Audit-fixup HOLD-2 (MEDIUM-8, audit B M2 / STATUS CORRECTION item
+        # 2): the candidate-stage window follows the ACTIVE card's own
+        # max_holding_days_default -- instead of the settings fallback
+        # earnings_enricher.enrich() used to always read unconditionally (a
+        # second, un-linked copy of the same policy number this ticket
+        # exists to single-source). settings.earnings_proximity_default_
+        # hold_days stays as the FALLBACK only, inside enrich() itself, for
+        # the case a card genuinely can't resolve.
+        #
+        # Round-2 fixup (FIX-A, audit A NEW-3, LOW): the lookup itself is
+        # NOT done here anymore -- ``active_card_hold_days`` is a per-scan
+        # CONSTANT, resolved ONCE by the caller (run_scan_once) and passed
+        # in as a parameter. Doing it here, per candidate, was the only
+        # per-candidate get_default_card() call site in the codebase
+        # (every other call site is per-scan or per-proposal) and measured
+        # ~2352us/call live (filesystem read + YAML parse) -- ~75ms of pure
+        # waste on a 32-candidate scan for a value that never changes
+        # mid-scan.
         earnings = None
-        if earnings_mode == "enrich":
-            earnings = self.earnings_enricher.enrich(packet)
-        elif earnings_mode == "skipped_budget_cap":
-            earnings = self.earnings_enricher.skipped_budget_cap(packet)
+        if earnings_mode in ("enrich", "skipped_budget_cap"):
+            if earnings_mode == "enrich":
+                earnings = self.earnings_enricher.enrich(packet, hold_days=active_card_hold_days)
+            else:
+                earnings = self.earnings_enricher.skipped_budget_cap(packet, hold_days=active_card_hold_days)
         regime_row = getattr(self, "_today_regime", None)
         self.journal.insert("candidate_packets", packet.to_row(
             scan_batch_id,
@@ -2739,6 +2797,22 @@ class Orchestrator:
                           reason: Optional[str] = None) -> None:
         if reason is None:
             # No-news mode: rejections come from data/validation/risk, not "no news".
+            # Audit-fixup HOLD-2 round 2 (FIX-D, audit A NEW-5, NIT --
+            # comment only, no behavior change): this ELSE-BRANCH-BY-
+            # DEFAULT inference is a TRAP for any future validator. It
+            # reads ONLY "is validation_status a non-passed value?" and
+            # ALWAYS concludes INVENTED_CATALYST_IN_NO_NEWS_MODE -- correct
+            # today only because both real producers of a non-"passed"
+            # validation_status (validate_no_news_eval's invented-catalyst
+            # check, and HOLD-2's own validate_max_holding_days_range) call
+            # sites now pass an EXPLICIT reason= to this method instead of
+            # relying on this default (see the NO_ATR_DATA and
+            # MAX_HOLDING_DAYS_OUT_OF_RANGE elif branches in run_scan_once's
+            # own reject-handling block). Any NEW validator that sets a
+            # non-"passed" validation_status WITHOUT its own explicit-
+            # reason call site will silently misfile here as an invented
+            # catalyst -- extend that elif chain when adding one, don't
+            # rely on this fallback ever inferring the right code.
             if evaluation.validation_status not in (None, "", "passed"):
                 reason = ReasonCode.INVENTED_CATALYST.value
             else:

@@ -21,14 +21,54 @@ from __future__ import annotations
 
 from typing import Optional
 
-from alphaos.baseline.rules import RULE_FUNCTIONS
-from alphaos.cards.registry import get_default_card
+from alphaos.baseline.rules import (
+    BASELINE_HOLD10_SUFFIX,
+    BASELINE_RULE_VERSIONS,
+    BASELINE_RULE_VERSIONS_HOLD10,
+    RULE_FUNCTIONS,
+)
+from alphaos.cards.registry import get_card_by_id
 from alphaos.constants import Severity
 from alphaos.data.atr import ATR_RULES_V1
 from alphaos.learning.outcomes_engine import DEFAULT_REPLAY_WINDOW_DAYS, replay_bracket
 from alphaos.learning.outcomes_tracker import UNAVAILABLE_AFTER_DAYS
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+
+# HOLD-2 (2026-08-05, spec section 3.4 / operator ruling D2, logged in the
+# spec's own S9 row): BASELINE's v1 arms are PINNED to catalyst_momentum_v2
+# BY EXPLICIT ID -- deliberately NOT get_default_card()/settings.
+# active_card_id. The whole point of this pin is that an operator swapping
+# the live ACTIVE_CARD_ID (or any future default-card supersession) must
+# NEVER move these already pre-registered v1 arms' hold window
+# mid-accumulation (their pre-registration has analysis_not_before
+# 2026-09-07). A literal card_id here, never a reference to any "default"
+# constant, is deliberate -- see get_card_by_id()'s own docstring for why
+# this is the one sanctioned way to bypass the active-default resolution.
+BASELINE_V1_PINNED_CARD_ID = "catalyst_momentum_v2"
+
+# HOLD-2: the NEW 10-day arm is likewise pinned by explicit id (never the
+# active default) -- catalyst_momentum_v3's 10-trading-day
+# max_holding_days_default, regardless of whatever ACTIVE_CARD_ID is set to
+# live. Its own fresh pre-registration (analysis_not_before 2026-10-05) is
+# an operator action taken after merge; this pin is what makes its rows
+# comparable to a fixed horizon from the first row onward.
+BASELINE_HOLD10_PINNED_CARD_ID = "catalyst_momentum_v3"
+
+# Audit-fixup HOLD-2 (STATUS CORRECTION item 3, 2026-08-06, both audits
+# convergent HIGH): UNAVAILABLE_AFTER_DAYS (15.0 calendar days) is a
+# CALENDAR give-up on a window sized for the OLD 3-trading-day hold. A
+# 10-trading-day window spans more than 15 calendar days on ~9% of trading
+# dates (weekends/holidays inside the window) -- and give-up marks a row
+# 'unavailable' ONLY on the 'neither' (0-R) branch, since a stop/target hit
+# resolves immediately regardless of age. That is DIRECTIONAL censoring:
+# hold10's own 0-R outcomes are selectively dropped from the sample while
+# every winning/losing outcome survives, biasing mean_ai_delta_r away from
+# zero. HOLD-1 already solved this exact problem for its own 10-day family
+# by using a longer give-up; this reuses that number. v1 arms keep
+# UNAVAILABLE_AFTER_DAYS (15.0) byte-unchanged -- only rows whose
+# rule_version carries BASELINE_HOLD10_SUFFIX use this wider one.
+HOLD10_UNAVAILABLE_AFTER_DAYS = 30.0
 
 
 def _lookup_atr(journal, symbol: str) -> Optional[float]:
@@ -41,14 +81,78 @@ def _lookup_atr(journal, symbol: str) -> Optional[float]:
     )
 
 
+def _write_baseline_row(
+    journal, *, cand, symbol, scan_batch_id, rule_version, out, setup_card_id,
+    decided_at, lineage_id,
+) -> None:
+    """Shared row-shaping + insert for ONE (candidate, rule) decision --
+    factored out of ``record_shadow_baseline_decisions`` (HOLD-2) so the
+    pinned v1 arms and the new 10-day arm write through the exact same
+    shaping logic; only ``rule_version`` and the ``out`` dict's own
+    ``max_holding_days_default``-derived values differ between callers."""
+    decision = out["decision"]
+    # A directly-observed fact (no position ever opened), matching
+    # Attribution v2's own 0-is-a-fact convention -- NOT a substitute
+    # for missing data (that's the 'unavailable' branch below).
+    # entry_fill_status (spec item 4, added 2026-07-09 scope/safety-
+    # audit finding LOW-1): 'assumed_filled' for every 'propose' row
+    # -- by construction, _build_bracket() only reaches 'propose'
+    # when a real last_price was available (a missing/unusable price
+    # already resolves to 'unavailable' below), so there is no live
+    # signal in v1 that would ever produce 'needs_review'. The
+    # column exists now so a future version (e.g. one that also
+    # considers snapshot staleness/quality) can populate it without
+    # a migration; None for no_action/unavailable rows, which never
+    # represent an entry attempt at all.
+    if decision == "no_action":
+        replay_status, replay_result, replay_r = "complete", "no_action", 0.0
+        entry_fill_status = None
+    elif decision == "unavailable":
+        replay_status, replay_result, replay_r = "unavailable", None, None
+        entry_fill_status = None
+    else:
+        replay_status, replay_result, replay_r = "pending", None, None
+        entry_fill_status = "assumed_filled"
+
+    try:
+        journal.insert("shadow_baseline_decisions", {
+            "baseline_decision_id": new_id("basedec"),
+            "candidate_id": cand["candidate_id"],
+            "symbol": symbol,
+            "scan_batch_id": scan_batch_id,
+            "rule_version": rule_version,
+            "decision": decision,
+            "decision_reason": out.get("decision_reason"),
+            "direction": out.get("direction"),
+            "entry": out.get("entry"),
+            "stop": out.get("stop"),
+            "target": out.get("target"),
+            "max_holding_days": out.get("max_holding_days"),
+            "setup_card_id": setup_card_id,
+            "entry_fill_status": entry_fill_status,
+            "input_sha": out["input_sha"],
+            "decision_at_utc": decided_at,
+            "replay_status": replay_status,
+            "replay_result": replay_result,
+            "replay_r": replay_r,
+            "lineage_id": lineage_id,
+        })
+    except Exception as exc:  # noqa: BLE001 - a partial-uniqueness race must never surface
+        journal.log_system_event(
+            Severity.WARNING, "baseline",
+            f"{symbol}/{rule_version}: shadow_baseline_decisions insert failed: {exc}",
+        )
+
+
 def record_shadow_baseline_decisions(
     journal, settings, cand, *, scan_batch_id: Optional[str] = None,
     decision_at_utc: Optional[str] = None, lineage_id: Optional[str] = None,
 ) -> None:
-    """Journal one row per rule_version (2 rows/candidate) for ``cand``.
-    Never raises -- a shadow-recording failure must never be visible to the
-    live scan loop it runs alongside (matches TQS's own "never raises
-    regardless" posture)."""
+    """Journal one row per rule_version PER ARM for ``cand`` -- 2 rows for
+    the pinned v1 arms (unchanged since PR10/BASELINE) PLUS (HOLD-2) 2 more
+    rows for the new 10-day arm, additive storage only. Never raises -- a
+    shadow-recording failure must never be visible to the live scan loop it
+    runs alongside (matches TQS's own "never raises regardless" posture)."""
     try:
         symbol = cand["symbol"]
         row = {
@@ -58,7 +162,9 @@ def record_shadow_baseline_decisions(
             "interest_score": cand.get("interest_score"),
         }
         atr_14 = _lookup_atr(journal, symbol)
-        card = get_default_card()
+        # HOLD-2: PINNED by explicit id -- see BASELINE_V1_PINNED_CARD_ID's
+        # own module docstring for why this is never get_default_card().
+        card = get_card_by_id(BASELINE_V1_PINNED_CARD_ID)
         max_holding_days_default = card.get("max_holding_days_default")
         if max_holding_days_default is None:
             # A malformed card registry entry -- genuinely unexpected (every
@@ -66,7 +172,6 @@ def record_shadow_baseline_decisions(
             # (fail-safe: logged, scan continues) rather than silently
             # defaulting to a fabricated hold-days value.
             raise ValueError(f"card {card.get('card_id')!r} has no max_holding_days_default")
-        setup_card_id = cand.get("card_id")
         stamp = timeutils.stamp()
         decided_at = decision_at_utc or stamp.utc
 
@@ -89,58 +194,71 @@ def record_shadow_baseline_decisions(
                 )
                 continue
 
-            decision = out["decision"]
-            # A directly-observed fact (no position ever opened), matching
-            # Attribution v2's own 0-is-a-fact convention -- NOT a substitute
-            # for missing data (that's the 'unavailable' branch below).
-            # entry_fill_status (spec item 4, added 2026-07-09 scope/safety-
-            # audit finding LOW-1): 'assumed_filled' for every 'propose' row
-            # -- by construction, _build_bracket() only reaches 'propose'
-            # when a real last_price was available (a missing/unusable price
-            # already resolves to 'unavailable' below), so there is no live
-            # signal in v1 that would ever produce 'needs_review'. The
-            # column exists now so a future version (e.g. one that also
-            # considers snapshot staleness/quality) can populate it without
-            # a migration; None for no_action/unavailable rows, which never
-            # represent an entry attempt at all.
-            if decision == "no_action":
-                replay_status, replay_result, replay_r = "complete", "no_action", 0.0
-                entry_fill_status = None
-            elif decision == "unavailable":
-                replay_status, replay_result, replay_r = "unavailable", None, None
-                entry_fill_status = None
-            else:
-                replay_status, replay_result, replay_r = "pending", None, None
-                entry_fill_status = "assumed_filled"
+            _write_baseline_row(
+                journal, cand=cand, symbol=symbol, scan_batch_id=scan_batch_id,
+                # Audit-fixup HOLD-2 (S-a): setup_card_id stamps the card
+                # that ACTUALLY supplied this row's max_holding_days_default
+                # (BASELINE_V1_PINNED_CARD_ID) -- not cand.get("card_id"),
+                # the candidate's OWN live card assignment (which can be a
+                # totally unrelated card, e.g. post_earnings_reaction, and
+                # never governs a baseline row's bracket window). This is
+                # provenance for "which card's policy drove this shadow
+                # decision," a different question from "which card did the
+                # live pipeline assign this candidate."
+                rule_version=rule_version, out=out, setup_card_id=BASELINE_V1_PINNED_CARD_ID,
+                decided_at=decided_at, lineage_id=lineage_id,
+            )
 
-            try:
-                journal.insert("shadow_baseline_decisions", {
-                    "baseline_decision_id": new_id("basedec"),
-                    "candidate_id": cand["candidate_id"],
-                    "symbol": symbol,
-                    "scan_batch_id": scan_batch_id,
-                    "rule_version": rule_version,
-                    "decision": decision,
-                    "decision_reason": out.get("decision_reason"),
-                    "direction": out.get("direction"),
-                    "entry": out.get("entry"),
-                    "stop": out.get("stop"),
-                    "target": out.get("target"),
-                    "max_holding_days": out.get("max_holding_days"),
-                    "setup_card_id": setup_card_id,
-                    "entry_fill_status": entry_fill_status,
-                    "input_sha": out["input_sha"],
-                    "decision_at_utc": decided_at,
-                    "replay_status": replay_status,
-                    "replay_result": replay_result,
-                    "replay_r": replay_r,
-                    "lineage_id": lineage_id,
-                })
-            except Exception as exc:  # noqa: BLE001 - a partial-uniqueness race must never surface
-                journal.log_system_event(
-                    Severity.WARNING, "baseline",
-                    f"{symbol}/{rule_version}: shadow_baseline_decisions insert failed: {exc}",
+        # HOLD-2 (spec section 3.4 / operator ruling D2): the NEW 10-day arm
+        # -- the SAME frozen rule logic, replayed a second time under
+        # catalyst_momentum_v3's 10-trading-day hold (pinned by explicit id,
+        # same law as the v1 arms above). Additive storage only: distinct
+        # rule_version labels (the "_hold10" suffix) mean these rows can
+        # never collide with the v1 arms' own UNIQUE (candidate_id,
+        # rule_version) index, and compute_baseline_report()'s existing
+        # BASELINE_RULE_VERSIONS filter silently ignores them -- the
+        # pre-registered v1 report is unaffected by construction, no code
+        # change needed there. Isolated in its OWN try/except: a failure
+        # here (e.g. the v3 card file missing) must never suppress the v1
+        # arms recorded above.
+        try:
+            hold10_card = get_card_by_id(BASELINE_HOLD10_PINNED_CARD_ID)
+            hold10_days_default = hold10_card.get("max_holding_days_default")
+            if hold10_days_default is None:
+                raise ValueError(
+                    f"card {hold10_card.get('card_id')!r} has no max_holding_days_default"
                 )
+            for rule_version, apply_rule in RULE_FUNCTIONS.items():
+                try:
+                    out = apply_rule(
+                        row, atr_14=atr_14, min_reward_risk=settings.min_reward_risk,
+                        max_holding_days_default=hold10_days_default,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one rule's failure must never block the other
+                    journal.log_system_event(
+                        Severity.WARNING, "baseline",
+                        f"{symbol}/{rule_version}{BASELINE_HOLD10_SUFFIX}: apply_rule failed: {exc}",
+                    )
+                    continue
+                # Audit-fixup HOLD-2 (S-b): no "rule_version" key needed in
+                # the dict passed as `out` -- _write_baseline_row() takes
+                # rule_version as its own explicit keyword, never reads it
+                # off `out` (the pre-fixup `{**out, "rule_version": ...}`
+                # spread wrote a dead key that was never consumed).
+                _write_baseline_row(
+                    journal, cand=cand, symbol=symbol, scan_batch_id=scan_batch_id,
+                    rule_version=rule_version + BASELINE_HOLD10_SUFFIX, out=out,
+                    # S-a: hold10 rows stamp the card that supplied THIS
+                    # arm's window (catalyst_momentum_v3), same law as the
+                    # v1 arms above.
+                    setup_card_id=BASELINE_HOLD10_PINNED_CARD_ID,
+                    decided_at=decided_at, lineage_id=lineage_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - the 10-day arm must never affect the v1 arms above
+            journal.log_system_event(
+                Severity.WARNING, "baseline",
+                f"{symbol}: hold10 arm recording failed: {exc}",
+            )
     except Exception as exc:  # noqa: BLE001 - shadow recording must never affect the live decision
         try:
             journal.log_system_event(
@@ -158,14 +276,77 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
     counterfactual ledger uses -- one replay engine, one truth. Idempotent:
     only 'pending' rows are touched; 'complete'/'unavailable' rows (already
     resolved at write time, see record_shadow_baseline_decisions) are never
-    revisited."""
+    revisited.
+
+    Audit-fixup HOLD-2 (HIGH-4, both audits convergent / STATUS CORRECTION
+    item 4): rule-AWARE resolution -- v1-arm and hold10-arm pending rows are
+    queried and budgeted SEPARATELY, each getting the FULL `limit`, rather
+    than one shared ``ORDER BY id ASC LIMIT`` across both arm-sets. hold10
+    rows resolve markedly slower (a real 10-trading-day hold plus this
+    build's own 30-day give-up, vs v1's 3-day hold / 15-day give-up), so a
+    shared query would let an aging hold10 backlog permanently occupy the
+    front of the id-ordered window once the COMBINED backlog exceeds
+    `limit` -- structurally starving v1 resolution of any progress at all,
+    exactly the harm ruling D2 exists to prevent (the pre-registered v1 arm
+    must never be affected by the new arm's own existence). Accepted
+    residual: this roughly doubles worst-case bars-API calls per invocation
+    (no caching exists between the two sub-calls -- noted in the build
+    report, not fixed here)."""
     counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     if bars_provider is None:
         return counts
 
+    for rule_versions in (BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10):
+        sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions)
+        for key in counts:
+            counts[key] += sub_counts[key]
+
+    _warn_on_orphaned_pending_rows(journal)
+    return counts
+
+
+def _warn_on_orphaned_pending_rows(journal) -> None:
+    """Round-2 audit-fixup (FIX-B, audit A NEW-2, LOW): the rule-aware split
+    above (HIGH-4) turned "resolve every pending row" into "resolve rows in
+    these two hardcoded arm-sets" -- a future arm label (e.g. a
+    threshold_v2, or any rule_version this module doesn't yet know about)
+    would stay pending FOREVER with zero signal that it's being silently
+    skipped. This is a cheap loudness guard, not a resolution attempt: any
+    pending row whose rule_version is in NEITHER known set is counted and
+    named in a WARNING system event, every call, so an operator watching
+    system_events would notice within one scheduler cycle rather than
+    discovering a growing, permanently-stuck backlog by accident."""
+    known = BASELINE_RULE_VERSIONS + BASELINE_RULE_VERSIONS_HOLD10
+    placeholders = ",".join("?" for _ in known)
+    orphans = journal.query(
+        f"SELECT rule_version, COUNT(*) AS cnt FROM shadow_baseline_decisions "
+        f"WHERE replay_status = 'pending' AND rule_version NOT IN ({placeholders}) "
+        "GROUP BY rule_version",
+        tuple(known),
+    )
+    if not orphans:
+        return
+    total = sum(r["cnt"] for r in orphans)
+    labels = sorted({r["rule_version"] for r in orphans})
+    journal.log_system_event(
+        Severity.WARNING, "baseline",
+        f"{total} shadow_baseline_decisions row(s) stuck pending under {len(labels)} "
+        f"rule_version(s) this resolver does not know about: {labels} -- "
+        "these will NEVER resolve until resolve_pending_baseline_decisions() is "
+        "extended to cover them.",
+    )
+
+
+def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_versions: tuple) -> dict:
+    """One arm-set's worth of ``resolve_pending_baseline_decisions`` --
+    factored out (HOLD-2 audit-fixup HIGH-4) so v1 and hold10 each get their
+    own independent query + budget. See the caller's own docstring for why."""
+    counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
-        "SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
-        "ORDER BY id ASC LIMIT ?", (limit,),
+        f"SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
+        f"AND rule_version IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+        (*rule_versions, limit),
     )
     counts["total"] = len(rows)
     now = timeutils.now_utc()
@@ -180,9 +361,18 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
         window_days = row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS
+        # HOLD-2 (STATUS CORRECTION item 3): hold10 rows get a wider
+        # calendar give-up -- see HOLD10_UNAVAILABLE_AFTER_DAYS's own
+        # module-level docstring for why the shared 15.0 would selectively
+        # censor hold10's own 0-R outcomes.
+        unavailable_after_days = (
+            HOLD10_UNAVAILABLE_AFTER_DAYS
+            if (row.get("rule_version") or "").endswith(BASELINE_HOLD10_SUFFIX)
+            else UNAVAILABLE_AFTER_DAYS
+        )
 
         if not forward_bars:
-            if age_days > UNAVAILABLE_AFTER_DAYS:
+            if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    "no_bars_after_window", None, "no_bars_after_window")
                 counts["unavailable"] += 1
@@ -208,7 +398,7 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
             # arrive next call; a "neither" here would be a premature,
             # not-yet-final mark-to-market read (mirrors
             # update_pending_outcomes' own bars_used>=N completeness gate).
-            if age_days > UNAVAILABLE_AFTER_DAYS:
+            if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    None, None, "window_never_completed")
                 counts["unavailable"] += 1
