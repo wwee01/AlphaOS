@@ -778,11 +778,21 @@ def test_10_cold_import_fails_loudly_from_a_different_cwd_without_pinning():
         )
     assert result.returncode == 0, result.stderr
     resolved = pathlib.Path(result.stdout.strip()).resolve()
-    assert not resolved.is_relative_to(_REPO_ROOT), (
-        "expected the UNPINNED subprocess to resolve OUTSIDE this worktree "
-        "(demonstrating the failure mode) -- if this now fails, either the "
-        "environment changed or this regression proof is stale"
-    )
+    if resolved.is_relative_to(_REPO_ROOT):
+        # Running from the CANONICAL checkout: the editable install resolves
+        # to this very tree, so the cross-checkout divergence this test
+        # documents structurally cannot manifest here. It only exists (and
+        # is only provable) from a worktree, where unpinned imports land in
+        # the main checkout instead. Post-merge failure caught 2026-08-07:
+        # this assert was written worktree-shaped and went red the moment
+        # the suite ran on main itself.
+        pytest.skip(
+            "unpinned import resolves to this checkout (canonical checkout; "
+            "editable-install target) -- cross-checkout failure mode cannot "
+            "manifest; run from a worktree to exercise this proof"
+        )
+    # In a worktree: the unpinned subprocess resolving OUTSIDE this tree IS
+    # the failure mode -- reaching this line without the skip is the proof.
 
 
 # ======================================= obligation 11: card v3 registration
