@@ -27,6 +27,8 @@ import json
 import sqlite3
 from datetime import timedelta
 
+import pytest
+
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.safety import KillSwitch, ShadowLabelSuspendSwitch
@@ -36,6 +38,26 @@ from alphaos.scheduler.job_runner import JobRunner
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 from conftest import make_settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_suspend_switch(tmp_path_factory, monkeypatch):
+    """Hermeticity guard (2026-08-07): ShadowLabelSuspendSwitch's default
+    path is CWD-RELATIVE ("data/SHADOW_LABEL_SUSPENDED"), and both
+    production call sites (scheduler/shadow_label.py, scheduler/digest.py)
+    instantiate it with that default. Run from the main checkout, every
+    test here that exercises those paths silently read the REAL production
+    latch file -- invisible for months because the file only exists while
+    SUSP-1 is engaged, then 4 tests went red the night the expected D2
+    legacy-row suspend fired (§9, EXP-1 arming row). Redirect the DEFAULT
+    to a per-test temp path; tests that pass an explicit path= (e.g. the
+    auto-suspend behavior test below) are unaffected.
+    """
+    tmp = tmp_path_factory.mktemp("suspend_switch_isolation")
+    monkeypatch.setattr(
+        ShadowLabelSuspendSwitch.__init__, "__defaults__",
+        (str(tmp / "SHADOW_LABEL_SUSPENDED"),),
+    )
 
 
 # --------------------------------------------------------------------- fakes
