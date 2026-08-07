@@ -300,7 +300,41 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
         sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions)
         for key in counts:
             counts[key] += sub_counts[key]
+
+    _warn_on_orphaned_pending_rows(journal)
     return counts
+
+
+def _warn_on_orphaned_pending_rows(journal) -> None:
+    """Round-2 audit-fixup (FIX-B, audit A NEW-2, LOW): the rule-aware split
+    above (HIGH-4) turned "resolve every pending row" into "resolve rows in
+    these two hardcoded arm-sets" -- a future arm label (e.g. a
+    threshold_v2, or any rule_version this module doesn't yet know about)
+    would stay pending FOREVER with zero signal that it's being silently
+    skipped. This is a cheap loudness guard, not a resolution attempt: any
+    pending row whose rule_version is in NEITHER known set is counted and
+    named in a WARNING system event, every call, so an operator watching
+    system_events would notice within one scheduler cycle rather than
+    discovering a growing, permanently-stuck backlog by accident."""
+    known = BASELINE_RULE_VERSIONS + BASELINE_RULE_VERSIONS_HOLD10
+    placeholders = ",".join("?" for _ in known)
+    orphans = journal.query(
+        f"SELECT rule_version, COUNT(*) AS cnt FROM shadow_baseline_decisions "
+        f"WHERE replay_status = 'pending' AND rule_version NOT IN ({placeholders}) "
+        "GROUP BY rule_version",
+        tuple(known),
+    )
+    if not orphans:
+        return
+    total = sum(r["cnt"] for r in orphans)
+    labels = sorted({r["rule_version"] for r in orphans})
+    journal.log_system_event(
+        Severity.WARNING, "baseline",
+        f"{total} shadow_baseline_decisions row(s) stuck pending under {len(labels)} "
+        f"rule_version(s) this resolver does not know about: {labels} -- "
+        "these will NEVER resolve until resolve_pending_baseline_decisions() is "
+        "extended to cover them.",
+    )
 
 
 def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_versions: tuple) -> dict:

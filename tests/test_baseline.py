@@ -943,6 +943,53 @@ def test_resolve_pending_baseline_decisions_stale_no_bars_marks_unavailable():
     j.close()
 
 
+def test_resolve_pending_baseline_decisions_warns_on_orphaned_rule_version():
+    """Round-2 audit-fixup (FIX-B, audit A NEW-2, LOW): HIGH-4's rule-aware
+    split turned "resolve every pending row" into "resolve rows in these
+    two hardcoded arm-sets" -- a foreign rule_version (e.g. a future
+    threshold_v2) would otherwise stay pending FOREVER with zero signal.
+    Proof: seed a pending row under a made-up rule_version, run the
+    resolver, assert (a) it stays pending -- no resolution attempted --
+    and (b) a WARNING system_events row fires naming the count and the
+    label, this codebase's own established convention for "the warning
+    fired" (log_system_event writes to system_events, not Python
+    logging -- see e.g. test_preflight_failure_emits_warning_and_assigns_
+    zero_per_candidates in test_s1c_activation.py for the same pattern)."""
+    j = JournalStore(":memory:")
+    _pending_row(j, candidate_id="cand_orphan", rule_version="threshold_v2_made_up")
+    provider = _FakeBarsProvider({})
+
+    resolve_pending_baseline_decisions(j, bars_provider=provider)
+
+    row = j.one("SELECT replay_status FROM shadow_baseline_decisions WHERE candidate_id = 'cand_orphan'")
+    assert row["replay_status"] == "pending"  # never touched
+
+    events = j.query(
+        "SELECT * FROM system_events WHERE category = 'baseline' AND severity = 'warning'"
+    )
+    assert events, "expected a WARNING system_events row naming the orphaned rule_version"
+    assert any("threshold_v2_made_up" in (e["message"] or "") for e in events)
+    assert any("1 shadow_baseline_decisions row" in (e["message"] or "") for e in events)
+    j.close()
+
+
+def test_resolve_pending_baseline_decisions_no_warning_when_nothing_orphaned():
+    """The guard must not false-positive on ordinary v1/hold10 rows."""
+    j = JournalStore(":memory:")
+    _pending_row(j, candidate_id="cand_v1_ok", rule_version=THRESHOLD_V1)
+    _pending_row(j, candidate_id="cand_h10_ok", rule_version=THRESHOLD_V1_HOLD10)
+    provider = _FakeBarsProvider({})
+
+    resolve_pending_baseline_decisions(j, bars_provider=provider)
+
+    events = j.query(
+        "SELECT * FROM system_events WHERE category = 'baseline' AND severity = 'warning' "
+        "AND message LIKE '%rule_version(s) this resolver does not know about%'"
+    )
+    assert not events
+    j.close()
+
+
 def test_hold10_arm_uses_wider_give_up_v1_arm_unaffected():
     """Audit-fixup HOLD-2 (HIGH-3, STATUS CORRECTION item 3, both audits
     convergent): UNAVAILABLE_AFTER_DAYS (15.0 calendar days) is sized for

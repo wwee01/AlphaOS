@@ -423,6 +423,94 @@ def test_medium8_dark_default_earnings_window_still_uses_3(monkeypatch):
     orch.close()
 
 
+def test_fixA_label_candidate_never_calls_get_default_card_internally(journal, monkeypatch):
+    """Round-2 audit-fixup (FIX-A, audit A NEW-3, LOW): _label_candidate()'s
+    own earnings-enrichment branch must NOT call get_default_card() itself
+    anymore -- the value is threaded in as ``active_card_hold_days`` by the
+    caller (a per-scan constant, hoisted once in run_scan_once). Proven by
+    making get_default_card() RAISE if called from within this scope, then
+    calling _label_candidate() (with earnings_mode="enrich") several times
+    directly and asserting none of those calls raise.
+
+    (A whole-scan call-count assertion would NOT isolate this specific
+    lookup: alphaos.scanner.candidate_scanner._resolve_card_assignment()
+    legitimately calls get_default_card() once per candidate during
+    scanning for an unrelated reason -- S1c/PER card-assignment fallback,
+    out of this fix's scope -- which would swamp any attempt to count
+    calls across a real run_scan_once().)"""
+    from alphaos.cards import registry as cards_mod
+    from alphaos.earnings.earnings_provider import EarningsProximityResult
+    from alphaos.scanner.scan_context import ScanContext
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "get_default_card() was called from inside _label_candidate() -- "
+            "the per-scan hoist (FIX-A) regressed; active_card_hold_days must "
+            "be threaded in by the caller, never re-derived here"
+        )
+
+    def _fake_earnings(sym):
+        return EarningsProximityResult(symbol=sym, earnings_date=None, status="unavailable", source="stub")
+
+    settings = make_settings(EARNINGS_PROXIMITY_ENABLED="true", LABELLING_ENABLED="true")
+    orch = Orchestrator(settings=settings, journal=journal)
+    orch.earnings_enricher._provider.get_earnings_for_symbol = _fake_earnings
+
+    monkeypatch.setattr(cards_mod, "get_default_card", _boom)
+    for i in range(3):
+        symbol = f"SYM{i}"
+        snapshot = {"last_price": 100.0, "change_pct": 0.05}
+        journal.insert("candidates", {
+            "candidate_id": f"cand_fixA_{i}", "symbol": symbol, "direction": "long",
+            "strategy": "swing", "momentum_score": 0.9,
+        })
+        cand = ScanContext(row=journal.candidate_by_id(f"cand_fixA_{i}"))
+        cand.snapshot = snapshot
+        # Must not raise -- proves no internal get_default_card() call.
+        orch._label_candidate(
+            cand, snapshot, "sb_fixA", enrich=False, l30_mode=None, earnings_mode="enrich",
+            active_card_hold_days=10,
+        )
+    orch.close()
+
+
+def test_fixA_label_candidate_threads_active_card_hold_days_directly(journal):
+    """Direct unit proof that _label_candidate's own earnings-enrichment
+    branch uses the CALLER-SUPPLIED active_card_hold_days verbatim (never
+    re-deriving it), i.e. the hoisted parameter is actually load-bearing,
+    not a dead/ignored argument."""
+    from alphaos.earnings.earnings_provider import EarningsProximityResult
+    from alphaos.scanner.scan_context import ScanContext
+
+    settings = make_settings(EARNINGS_PROXIMITY_ENABLED="true", LABELLING_ENABLED="true")
+    orch = Orchestrator(settings=settings, journal=journal)
+    symbol = "AAPL"
+    snapshot = orch.market.get_snapshot(symbol)
+    journal.insert("candidates", {
+        "candidate_id": "cand_fixA", "symbol": symbol, "direction": "long",
+        "strategy": "swing", "momentum_score": 0.9,
+    })
+    cand = ScanContext(row=journal.candidate_by_id("cand_fixA"))
+    cand.snapshot = snapshot
+
+    earnings_date = (timeutils.market_date() + timedelta(days=8)).isoformat()
+
+    def _fake_earnings(sym):
+        return EarningsProximityResult(symbol=sym, earnings_date=earnings_date, status="ok", source="stub")
+
+    orch.earnings_enricher._provider.get_earnings_for_symbol = _fake_earnings
+
+    classification = orch._label_candidate(
+        cand, snapshot, "sb_fixA", enrich=False, l30_mode=None, earnings_mode="enrich",
+        active_card_hold_days=10,  # hand-supplied, as if hoisted from a v3-active scan
+    )
+    assert classification is not None
+    row = journal.one("SELECT * FROM candidate_earnings WHERE candidate_id = 'cand_fixA'")
+    assert row["hold_days_used"] == 10
+    assert row["earnings_within_hold_window"] == 1  # 8 days out, inside a 10-trading-day hold
+    orch.close()
+
+
 # ============================ audit-fixup HIGH-5: reason-code misfiling
 def test_high5_max_holding_days_range_rejection_files_correct_reason_code(journal, monkeypatch):
     """Audit-fixup HOLD-2 (HIGH-5, audit A): OpenAIClient._live_eval()
