@@ -8,6 +8,7 @@ ONLY inside tests and never reaches the runtime path.
 from __future__ import annotations
 
 import os
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -24,6 +25,38 @@ from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
 
+# SUSP-1 latch hermeticity (2026-08-07): make_settings() pins the suspend
+# latch to a throwaway path, for the same reason ALPHAOS_DB_PATH defaults to
+# ":memory:" here -- the production default is now an ABSOLUTE repo-root path
+# (settings.SHADOW_LABEL_SUSPEND_DEFAULT_PATH), so a suite run from the main
+# checkout would otherwise read/engage the REAL production latch (the exact
+# incident behind test_exp1_shadow_labelling's hermeticity fixture). STABLE
+# per process (pid-keyed, xdist-safe), NOT unique per call: several tests
+# assert that two make_settings() results differing only in field X produce
+# EQUAL full config_hashes (test_earn1_alpha_vantage, test_proposal_ttl_flow),
+# and build_config_hashes hashes every non-secret field -- a per-call-unique
+# latch path would move the hash between the two calls and break that
+# established pattern. The bleed risk a stable path reintroduces (one test
+# engaging the latch, poisoning the next) is bounded by the session-start
+# cleanup fixture below plus the rule that every engaging test pins its own
+# tmp_path switch anyway.
+_TEST_SUSPEND_LATCH_PATH = os.path.join(
+    tempfile.gettempdir(),
+    f"alphaos-test-suspend-{os.getpid()}",
+    "SHADOW_LABEL_SUSPENDED",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _clean_stale_test_suspend_latch():
+    """A crashed earlier run (or a recycled pid) must not hand this run a
+    pre-engaged latch."""
+    try:
+        os.remove(_TEST_SUSPEND_LATCH_PATH)
+    except FileNotFoundError:
+        pass
+
+
 def make_settings(**overrides):
     env = {
         "ALPHAOS_MODE": "mock",
@@ -31,6 +64,7 @@ def make_settings(**overrides):
         "REAL_TRADING_ENABLED": "false",
         "ALPHAOS_DB_PATH": ":memory:",
         "MAX_AUTO_APPROVALS_PER_DAY": "1",
+        "SHADOW_LABEL_SUSPEND_PATH": _TEST_SUSPEND_LATCH_PATH,
     }
     env.update({k: str(v) for k, v in overrides.items()})
     return load_settings(load_env_file=False, env=env)

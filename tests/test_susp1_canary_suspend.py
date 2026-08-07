@@ -451,7 +451,7 @@ def test_susp1_e2e_not_confirmed_proceeds_to_labelling_via_run_shadow_label(tmp_
     )
 
     switch = ShadowLabelSuspendSwitch(path=str(tmp_path / "SHADOW_LABEL_SUSPENDED"))
-    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda: switch)
+    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda *a, **k: switch)
 
     try:
         result = shadow_label.run_shadow_label(orch)
@@ -480,7 +480,7 @@ def test_susp1_e2e_confirmed_suspends_engages_switch_and_pages_via_run_shadow_la
     # ALSO FIX (audit-fixup 2026-08, B NIT): monkeypatch.setattr, not a raw
     # module-attribute reassignment + manual try/finally restore -- pytest
     # reverts this automatically even if an assertion below raises.
-    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda: switch)
+    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", lambda *a, **k: switch)
 
     paged = {}
 
@@ -798,3 +798,41 @@ def test_susp1_cold_import_canary_modules_no_circular_import():
         assert result.returncode == 0, (
             f"cold import of {module_name!r} failed in a fresh interpreter:\n{result.stderr}"
         )
+
+
+def test_susp1_both_call_sites_thread_settings_latch_path(tmp_path, monkeypatch):
+    """SUSP-1 latch path hardening (2026-08-07): the settings-layer absolute
+    anchor is only real protection if the production call sites actually pass
+    ``settings.shadow_label_suspend_path`` instead of falling back to the
+    constructor default (the threading-sweep lesson: prove the live path,
+    don't grep it). Records every construction through BOTH call sites --
+    ``run_shadow_label`` and ``build_daily_digest`` -- and asserts each one
+    used the settings-threaded path, which make_settings pins to a hermetic
+    per-call tmp latch (asserted first, as the activation predicate: if that
+    pin ever regressed, this test would otherwise be exercising the REAL
+    production latch)."""
+    from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    from alphaos.scheduler import digest as digest_module
+
+    orch, _ = _orch_with_shadow_universe(tmp_path, _seed_symbols(2))
+    expected = orch.settings.shadow_label_suspend_path
+    assert expected != SHADOW_LABEL_SUSPEND_DEFAULT_PATH  # hermeticity predicate
+
+    seen: list = []
+    real = ShadowLabelSuspendSwitch
+
+    def _recording(*args, **kwargs):
+        seen.append(args[0] if args else kwargs.get("path"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(shadow_label, "ShadowLabelSuspendSwitch", _recording)
+    shadow_label.run_shadow_label(orch)
+    assert seen, "run_shadow_label never constructed the suspend switch"
+    assert all(p == expected for p in seen)
+
+    seen.clear()
+    monkeypatch.setattr(digest_module, "ShadowLabelSuspendSwitch", _recording)
+    digest_module.build_daily_digest(orch.journal, orch.settings, orch.kill_switch)
+    assert seen, "build_daily_digest never constructed the suspend switch"
+    assert all(p == expected for p in seen)
+    orch.journal.close()

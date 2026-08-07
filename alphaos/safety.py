@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from alphaos.config.settings import Settings
+from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH, Settings
 from alphaos.constants import REAL_TRADING_REQUIRED_VALUE, RuntimeMode
 
 
@@ -117,9 +117,20 @@ class ShadowLabelSuspendSwitch:
     future CLI command), never automatic -- an auto-suspend is "force off +
     page, don't wait to finish the week," not a condition that should
     silently self-heal the moment the metric recovers for one good tick.
+
+    Path discipline (2026-08-07 hardening): the default is the settings
+    layer's repo-root-anchored ABSOLUTE ``SHADOW_LABEL_SUSPEND_DEFAULT_PATH``,
+    and both production call sites (``scheduler/shadow_label.py``,
+    ``scheduler/digest.py``) pass ``settings.shadow_label_suspend_path``
+    explicitly -- never a bare default, never a cwd-relative literal. The old
+    default ("data/SHADOW_LABEL_SUSPENDED") made the authoritative latch a
+    function of process cwd: any job or CLI run with a different
+    WorkingDirectory got a DIFFERENT (nonexistent) latch, so an engaged
+    suspend looked disengaged. ``path=`` stays a keyword override so tests
+    pin the latch to tmp paths.
     """
 
-    def __init__(self, path: str = "data/SHADOW_LABEL_SUSPENDED"):
+    def __init__(self, path: str = SHADOW_LABEL_SUSPEND_DEFAULT_PATH):
         self.path = path
 
     def is_engaged(self) -> bool:

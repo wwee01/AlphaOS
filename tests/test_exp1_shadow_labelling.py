@@ -43,15 +43,24 @@ from conftest import make_settings
 @pytest.fixture(autouse=True)
 def _isolate_suspend_switch(tmp_path_factory, monkeypatch):
     """Hermeticity guard (2026-08-07): ShadowLabelSuspendSwitch's default
-    path is CWD-RELATIVE ("data/SHADOW_LABEL_SUSPENDED"), and both
-    production call sites (scheduler/shadow_label.py, scheduler/digest.py)
-    instantiate it with that default. Run from the main checkout, every
-    test here that exercises those paths silently read the REAL production
-    latch file -- invisible for months because the file only exists while
-    SUSP-1 is engaged, then 4 tests went red the night the expected D2
-    legacy-row suspend fired (§9, EXP-1 arming row). Redirect the DEFAULT
-    to a per-test temp path; tests that pass an explicit path= (e.g. the
-    auto-suspend behavior test below) are unaffected.
+    path was CWD-RELATIVE ("data/SHADOW_LABEL_SUSPENDED") and both
+    production call sites instantiated it bare. Run from the main checkout,
+    every test here that exercised those paths silently read the REAL
+    production latch file -- invisible for months because the file only
+    exists while SUSP-1 is engaged, then 4 tests went red the night the
+    expected D2 legacy-row suspend fired (§9, EXP-1 arming row).
+
+    Since the same-day hardening, the primary isolation lives elsewhere:
+    the default is repo-root-anchored ABSOLUTE (settings.
+    SHADOW_LABEL_SUSPEND_DEFAULT_PATH -- which, run from the main checkout,
+    IS the production latch) and the call sites thread
+    settings.shadow_label_suspend_path, which conftest.make_settings pins
+    to a per-call tmp latch. This fixture stays as defense-in-depth for any
+    DEFAULT-constructed switch (a future call site that forgets to thread
+    settings, or a test building settings without make_settings): redirect
+    the constructor default to a per-test temp path; tests that pass an
+    explicit path= (e.g. the auto-suspend behavior test below) are
+    unaffected.
     """
     tmp = tmp_path_factory.mktemp("suspend_switch_isolation")
     monkeypatch.setattr(
@@ -643,7 +652,9 @@ def test_auto_suspend_engages_switch_and_stays_engaged(tmp_path):
 
     import alphaos.scheduler.shadow_label as sl_module
     orig = sl_module.ShadowLabelSuspendSwitch
-    sl_module.ShadowLabelSuspendSwitch = lambda: switch
+    # (accepts the call site's settings-threaded path= and ignores it -- the
+    # test pins its own tmp latch)
+    sl_module.ShadowLabelSuspendSwitch = lambda *a, **k: switch
     try:
         result = shadow_label.run_shadow_label(orch)
         assert result["status"] == "skipped"

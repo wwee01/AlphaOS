@@ -36,6 +36,16 @@ from alphaos.constants import (
 PAPER_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 
+# SUSP-1 latch anchoring (2026-08-07): the ONE place the shadow-label suspend
+# latch's default location is computed -- the repo root the imported alphaos/
+# package lives in, never the process cwd. os.path.abspath(__file__) resolves
+# at import time, so every process that imports this module agrees on the same
+# absolute file regardless of WorkingDirectory. safety.ShadowLabelSuspendSwitch
+# uses this as its constructor default and load_settings() threads it through
+# Settings.shadow_label_suspend_path to the production call sites.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SHADOW_LABEL_SUSPEND_DEFAULT_PATH = os.path.join(_REPO_ROOT, "data", "SHADOW_LABEL_SUSPENDED")
+
 
 class SettingsError(Exception):
     """Raised only for unrecoverable configuration problems (e.g. mode=live)."""
@@ -581,6 +591,7 @@ class Settings:
     shadow_ai_cap_calls_per_day: int         # independent of both 30-day caps (default 3*K)
     shadow_label_min_feed_coverage: float    # trailing-14-day median feed_coverage arming gate
     shadow_suspend_canary_window_days: int   # SUSP-1: recency window for the canary auto-suspend arm
+    shadow_label_suspend_path: str           # SUSP-1 latch file; ALWAYS absolute (validated at load)
 
     # --- REG-1: regime classifier + packet stamping ---
     # Shadow/measurement only -- no arming, no gating, no allocation changes.
@@ -1328,6 +1339,35 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
             f"purpose of self-releasing resolved history)."
         )
 
+    # SUSP-1 latch path hardening (2026-08-07): the suspend latch is live
+    # safety machinery, and its old cwd-relative default
+    # ("data/SHADOW_LABEL_SUSPENDED") made the AUTHORITATIVE latch file a
+    # function of whatever WorkingDirectory the process happened to run with
+    # -- a launchd job or CLI invocation started anywhere but the repo root
+    # would read (and engage!) a DIFFERENT, nonexistent file, so an engaged
+    # suspend would look disengaged and shadow labelling would run straight
+    # through it. (Same cwd-relativity already burned the test suite: 4 tests
+    # silently read the REAL production latch the night the expected EXP-1
+    # legacy-row suspend fired -- see tests/test_exp1_shadow_labelling.py's
+    # hermeticity fixture, 2026-08-07.) The default is anchored ONCE, at
+    # module import, to the repo root (SHADOW_LABEL_SUSPEND_DEFAULT_PATH).
+    # The env override is a test/ops seam -- production leaves it unset --
+    # and must itself be absolute or it silently reintroduces the exact
+    # per-cwd hazard this axis removes. Present-but-blank coalesces to the
+    # default (the ND-8 lesson: blank must never mean "" or cwd-relative).
+    shadow_label_suspend_path = (
+        _get(src, "SHADOW_LABEL_SUSPEND_PATH", "").strip()
+        or SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    )
+    if not os.path.isabs(shadow_label_suspend_path):
+        raise SettingsError(
+            f"SHADOW_LABEL_SUSPEND_PATH={shadow_label_suspend_path!r} must be an absolute "
+            f"path: a relative value resolves against the process cwd, so two jobs with "
+            f"different WorkingDirectory values would read two different latch files and "
+            f"an engaged auto-suspend could be invisibly ignored. Leave it unset to use "
+            f"the repo-anchored default."
+        )
+
     scheduler_scan_windows = _get(
         src, "SCHEDULER_SCAN_WINDOWS", "09:35-09:50,12:00-12:15,15:45-16:00")
     _parse_scan_windows(scheduler_scan_windows)
@@ -1728,6 +1768,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         shadow_ai_cap_calls_per_day=shadow_ai_cap_calls_per_day,
         shadow_label_min_feed_coverage=shadow_label_min_feed_coverage,
         shadow_suspend_canary_window_days=shadow_suspend_canary_window_days,
+        shadow_label_suspend_path=shadow_label_suspend_path,
         regime_enabled=_get_bool(src, "REGIME_ENABLED", True),
         regime_backfill_lookback_days=_get_int(src, "REGIME_BACKFILL_LOOKBACK_DAYS", 900),
         text_archive_enabled=_get_bool(src, "TEXT_ARCHIVE_ENABLED", False),

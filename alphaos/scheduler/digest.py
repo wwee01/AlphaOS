@@ -400,7 +400,9 @@ def build_daily_digest(journal, settings, kill_switch) -> dict:
     shadow_fail_safe_today = sum(1 for r in shadow_label_rows_today if r["label_source"] == "fail_safe")
     shadow_confidences = [r["label_confidence"] for r in shadow_label_rows_today if r["label_confidence"] is not None]
     shadow_label_other_today = sum(1 for r in shadow_label_rows_today if r["primary_label"] == "Other/Unclassified")
-    shadow_suspend_engaged = ShadowLabelSuspendSwitch().is_engaged()
+    shadow_suspend_engaged = ShadowLabelSuspendSwitch(
+        path=settings.shadow_label_suspend_path
+    ).is_engaged()
 
     # EXP-1 mechanism 3: saturation-audit accumulation-progress status line.
     # Answers "how close are we to being able to trust a fresh

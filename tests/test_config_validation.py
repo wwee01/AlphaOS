@@ -172,3 +172,104 @@ def test_openai_review_model_setting_is_gone_and_stays_gone():
     assert '"openai_review_model": settings.' not in fingerprint, (
         "config fingerprint must not capture a setting that drives no call path"
     )
+
+
+# --------------------------------------------------------------------- SUSP-1
+# latch path hardening (2026-08-07): the suspend latch must be the SAME
+# absolute file for every process, regardless of WorkingDirectory. These pin
+# each face of that rule; the call-site threading proof lives in
+# tests/test_susp1_canary_suspend.py.
+
+_LATCH_MINIMAL_ENV = {
+    # make_settings minus its SHADOW_LABEL_SUSPEND_PATH hermeticity override,
+    # so the DEFAULT resolution path is what gets exercised.
+    "ALPHAOS_MODE": "mock",
+    "APPROVAL_MODE": "manual",
+    "REAL_TRADING_ENABLED": "false",
+    "ALPHAOS_DB_PATH": ":memory:",
+}
+
+
+def test_shadow_label_suspend_path_default_is_absolute_repo_anchored_and_cwd_independent(
+    tmp_path, monkeypatch
+):
+    import os
+
+    import alphaos
+    from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH, load_settings
+
+    s = load_settings(load_env_file=False, env=dict(_LATCH_MINIMAL_ENV))
+    assert s.shadow_label_suspend_path == SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    assert os.path.isabs(s.shadow_label_suspend_path)
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(alphaos.__file__)))
+    assert s.shadow_label_suspend_path == os.path.join(
+        repo_root, "data", "SHADOW_LABEL_SUSPENDED"
+    )
+
+    # The hazard itself: a different WorkingDirectory must NOT move the latch.
+    monkeypatch.chdir(tmp_path)
+    s2 = load_settings(load_env_file=False, env=dict(_LATCH_MINIMAL_ENV))
+    assert s2.shadow_label_suspend_path == s.shadow_label_suspend_path
+
+
+def test_shadow_label_suspend_path_blank_coalesces_to_default():
+    """Present-but-blank == unset (the ND-8 CONSOLE_BIND_HOST lesson): a
+    blank value must never mean '' or cwd-relative."""
+    from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH, load_settings
+
+    env = dict(_LATCH_MINIMAL_ENV, SHADOW_LABEL_SUSPEND_PATH="")
+    s = load_settings(load_env_file=False, env=env)
+    assert s.shadow_label_suspend_path == SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+
+    env = dict(_LATCH_MINIMAL_ENV, SHADOW_LABEL_SUSPEND_PATH="   ")
+    s = load_settings(load_env_file=False, env=env)
+    assert s.shadow_label_suspend_path == SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+
+
+def test_shadow_label_suspend_path_relative_override_fails_fast():
+    """A relative override silently reintroduces the per-cwd hazard the axis
+    exists to remove -- Tier-A refuse to load."""
+    from alphaos.config.settings import load_settings
+
+    with pytest.raises(SettingsError):
+        load_settings(
+            load_env_file=False,
+            env=dict(_LATCH_MINIMAL_ENV, SHADOW_LABEL_SUSPEND_PATH="data/SHADOW_LABEL_SUSPENDED"),
+        )
+
+
+def test_shadow_label_suspend_path_absolute_override_respected(tmp_path):
+    override = str(tmp_path / "latch" / "SHADOW_LABEL_SUSPENDED")
+    s = make_settings(SHADOW_LABEL_SUSPEND_PATH=override)
+    assert s.shadow_label_suspend_path == override
+
+
+def test_suspend_switch_constructor_default_is_the_settings_anchor():
+    """A DEFAULT-constructed switch (future call site that forgets to thread
+    settings) must still agree with the settings layer on the same absolute
+    file -- never a cwd-relative literal."""
+    import os
+
+    from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    from alphaos.safety import ShadowLabelSuspendSwitch
+
+    switch = ShadowLabelSuspendSwitch()
+    assert switch.path == SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    assert os.path.isabs(switch.path)
+
+
+def test_make_settings_pins_a_hermetic_stable_latch_path():
+    """conftest.make_settings must keep every test's latch away from the real
+    production latch (the 2026-08-07 four-red-tests incident), while staying
+    STABLE across calls -- several tests assert two make_settings() results
+    differing only in one field hash identically (build_config_hashes covers
+    every non-secret field), so a per-call-unique path would break them."""
+    import os
+    import tempfile
+
+    from alphaos.config.settings import SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+
+    a, b = make_settings(), make_settings()
+    assert a.shadow_label_suspend_path != SHADOW_LABEL_SUSPEND_DEFAULT_PATH
+    assert a.shadow_label_suspend_path == b.shadow_label_suspend_path
+    assert a.shadow_label_suspend_path.startswith(tempfile.gettempdir() + os.sep)

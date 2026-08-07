@@ -477,7 +477,7 @@ def run_shadow_label(orch) -> dict:
     if orch.kill_switch.is_engaged():
         return {"status": "skipped", "reason": "kill switch engaged", "shadow_calls": 0}
 
-    suspend_switch = ShadowLabelSuspendSwitch()
+    suspend_switch = ShadowLabelSuspendSwitch(path=settings.shadow_label_suspend_path)
     if suspend_switch.is_engaged():
         return {
             "status": "skipped",

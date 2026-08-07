@@ -322,6 +322,17 @@ class JournalStore:
             # as openai_prompt_version above; a v2<->v3 cutover must move
             # the config fingerprint.
             "active_card_id": settings.active_card_id,
+            # SUSP-1 latch hardening (2026-08-07): WHICH file is the
+            # authoritative shadow-label suspend latch is a real behavior
+            # axis -- the whole hazard being fixed was a process silently
+            # resolving a different latch and running through an engaged
+            # suspend. Fingerprinting the resolved absolute path makes
+            # exactly that divergence visible in provenance (a process with
+            # a different resolved path moves the fingerprint -- that is the
+            # point, not noise). One-time config_hash shift on adoption,
+            # same deliberately-accepted class as the INSTR-2/2026-07-28
+            # entries above.
+            "shadow_label_suspend_path": settings.shadow_label_suspend_path,
             "hypothesis_gen_shadow_enabled": settings.hypothesis_gen_shadow_enabled,
             "hypothesis_gen_recurring_enabled": settings.hypothesis_gen_recurring_enabled,
             "hypothesis_gen_max_calls_per_day": settings.hypothesis_gen_max_calls_per_day,
