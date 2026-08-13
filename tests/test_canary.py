@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 
 import pytest
 
@@ -27,6 +28,7 @@ from alphaos.orchestrator import Orchestrator
 from alphaos.scheduler import cadence, cost_guard
 from alphaos.scheduler.job_runner import JobRunner, _JOB_FUNCS
 from alphaos.scheduler.jobs import run_canary_run_job
+from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 from conftest import make_settings
 
@@ -1409,7 +1411,14 @@ def test_canary_config_hash_changes_with_its_own_settings_but_not_others():
 
 # ----------------------------------------------------------- cost accounting
 def test_cost_guard_counts_canary_results_from_non_mock_runs_only(journal):
-    since = "2026-07-09T00:00:00+00:00"
+    # GREEN-1 (date rot, §H.1 4th occurrence): was hardcoded "2026-07-09" --
+    # cost_guard's own window is a TRAILING 30 days from timeutils.now_utc(),
+    # so a literal date ages out of the window and this assertion goes
+    # permanently red the day it does (it did, on 2026-08-08). Stamped
+    # relative to now instead, same house pattern as cd057ce/233c74b/6ffbc2d.
+    # Mutation-tested: `--clock-shift-days=90` / `-90` both stay green (see
+    # tests/_dateshift.py).
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(days=1))
     journal.insert("canary_runs", {
         "run_id": "run_live", "corpus_dir": "data/canary", "is_mock": 0, "n_prompts": 1,
         "started_at_utc": since, "started_at_sgt": since,

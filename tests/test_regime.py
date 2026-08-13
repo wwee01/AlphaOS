@@ -641,7 +641,10 @@ def test_build_regime_arming_report_end_to_end(journal, settings):
     })
     journal.insert("candidate_outcomes", {
         "outcome_id": "out1", "candidate_id": "cand1", "symbol": "AAPL",
-        "candidate_type": "candidate", "replay_r": 1.2, "outcome_status": "resolved",
+        # VOCAB-1: was the phantom 'resolved' literal build_regime_arming_
+        # report() never actually filters on -- the real writer vocabulary
+        # is 'complete' (see constants.OUTCOME_STATUSES).
+        "candidate_type": "candidate", "replay_r": 1.2, "outcome_status": "complete",
     })
 
     rep = build_regime_arming_report(journal, settings)
@@ -665,4 +668,4 @@ def test_build_regime_arming_report_excludes_unresolved_and_missing_regime(journ
         "candidate_type": "candidate", "replay_r": 1.2, "outcome_status": "pending",
     })
     rep = build_regime_arming_report(journal, settings)
-    assert rep["cards"] == []  # neither row qualifies: no regime, and status='pending' not 'resolved'
+    assert rep["cards"] == []  # neither row qualifies: no regime, and status='pending' not 'complete'

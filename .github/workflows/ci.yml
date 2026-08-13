@@ -26,16 +26,76 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install (test extras only; mock mode needs no live deps)
+      # GREEN-1: tests/test_api_console*.py import fastapi, which lives in
+      # the separate "api" extra, not "test". Installing test-only here
+      # silently aborted collection with 6 errors, so the WHOLE suite never
+      # ran in CI from 0017b3f (2026-07-12) through this fix -- not a
+      # test-level importorskip, an actual missing dependency.
+      - name: Install (test + api extras; mock mode needs no live deps)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          pip install -e ".[test,api]"
 
       - name: Compile all modules
         run: python -m compileall alphaos
 
       - name: Run test suite (offline, mock mode)
         run: python -m pytest
+
+  test-clock-shift:
+    name: tests +90d (date-rot detector, advisory)
+    runs-on: ubuntu-latest
+    # GREEN-1 defect 4 (the date-rot class fix): §H.1's hardcoded-date flake
+    # has recurred four times (233c74b, 6ffbc2d, cd057ce, and the two tests
+    # this same spec's own GREEN-1 defect 1 re-seeds). A test that hardcodes
+    # "today" instead of deriving it from timeutils.now_utc() passes until
+    # the calendar rolls past its own trailing window, then goes red with no
+    # code change. Running the WHOLE suite once more, today, as if 90 days
+    # had already passed (tests/_dateshift.py's --clock-shift-days option)
+    # surfaces that class of latent failure BEFORE merge instead of weeks
+    # later. Advisory (continue-on-error) -- a red run here is a signal to
+    # investigate, never a merge blocker, since some failures may reflect a
+    # genuinely time-bound feature (e.g. a pre-registration's analysis_not_
+    # before date) rather than a bug.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install (test + api extras; mock mode needs no live deps)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test,api]"
+
+      - name: Run test suite 90 days in the future (advisory)
+        run: python -m pytest --clock-shift-days=90
+
+  console:
+    name: console (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test (build + vitest run)
+        run: npm test
 
   lint:
     name: lint (ruff + mypy)

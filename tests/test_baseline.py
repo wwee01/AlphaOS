@@ -23,7 +23,6 @@ import pathlib
 import pytest
 
 from alphaos.baseline.rules import (
-    BASELINE_HOLD10_SUFFIX,
     BASELINE_RULE_VERSIONS,
     BASELINE_RULE_VERSIONS_HOLD10,
     PROPOSE_ALL_V1,
@@ -437,7 +436,11 @@ def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, 
     })
     journal.insert("candidate_outcomes", {
         "outcome_id": new_id("outc"), "candidate_id": candidate_id, "symbol": "AAPL",
-        "candidate_type": "candidate", "outcome_status": "resolved", "replay_r": ai_r,
+        # VOCAB-1: was the phantom 'resolved' literal build_baseline_report()
+        # never actually filters on (the real writer vocabulary is 'complete',
+        # not 'resolved' -- see constants.OUTCOME_STATUSES); this fixture
+        # helper's whole point is a PAIRED row, so 'complete' is correct.
+        "candidate_type": "candidate", "outcome_status": "complete", "replay_r": ai_r,
     })
 
 

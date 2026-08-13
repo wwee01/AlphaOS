@@ -38,6 +38,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 
 from alphaos.cards.registry import get_default_card
+from alphaos.config.settings import Settings
 from alphaos.util.market_calendar import is_trading_day, nth_trading_day_after
 
 # Version of the SELECTION ALGORITHM/ORDERING itself -- distinct from the
@@ -261,7 +262,7 @@ def _resolve_current_belief(rows: list[dict]) -> list[dict]:
 
 
 def build_selector_context(
-    journal, assignment_as_of_utc: str, universe_symbols, settings: Optional[object] = None,
+    journal, assignment_as_of_utc: str, universe_symbols, settings: Optional[Settings] = None,
 ) -> SelectorContext:
     """THE ONLY function in this module that touches the journal (or, via
     ``get_default_card``, the card YAML on disk). Called ONCE per scan,

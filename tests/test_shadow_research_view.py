@@ -23,7 +23,6 @@ from __future__ import annotations
 
 from alphaos.journal.journal_store import JournalStore
 from alphaos.util.ids import new_id
-from conftest import make_settings
 from test_api_console import HEADERS, _client, _json_roundtrip, _seed
 
 

@@ -42,6 +42,7 @@ from typing import Iterable, Optional
 
 from alphaos.cards.per_evidence import s1c_activation_preflight
 from alphaos.cards.selector import SelectorContext, build_selector_context
+from alphaos.config.settings import Settings
 
 # Deliberately distinct from every alphaos.cards.selector.CacheHealth value
 # (ok/refresh_failed_recent/stale/cache_empty/unknown) -- this is a
@@ -69,7 +70,7 @@ class ScanCardActivation:
 
 
 def build_scan_card_activation(
-    journal, assignment_as_of_utc: str, universe_symbols: Iterable[str], settings: Optional[object] = None,
+    journal, assignment_as_of_utc: str, universe_symbols: Iterable[str], settings: Optional[Settings] = None,
 ) -> ScanCardActivation:
     """Called ONCE per scan batch -- before either ``CandidateScanner.scan()``
     or ``.scan_shadow_tier()`` runs -- so every candidate in the batch, core

@@ -23,6 +23,10 @@ from alphaos.strategy.proposal import TradeProposal
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
+# GREEN-1 defect 4: registers the --clock-shift-days option + its autouse
+# fixture (tests/_dateshift.py) -- the date-rot class detector.
+pytest_plugins = ["_dateshift"]
+
 
 def make_settings(**overrides):
     env = {

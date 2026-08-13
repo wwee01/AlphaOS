@@ -675,13 +675,18 @@ class OpenAIClient:
         # never compute this -- their system_prompt/user_prompt calls stay
         # byte-identical to pre-HOLD-2 (the frozen LEGACY_MAX_HOLDING_DAYS_
         # BOUND default on both builders).
-        max_holding_days_bound = None
+        max_holding_days_bound: Optional[int] = None
         if version == "v4":
             from alphaos.cards.registry import get_default_card
             active_card = get_default_card(settings=self.settings)
-            max_holding_days_bound = active_card["max_holding_days_default"]
+            max_holding_days_bound = int(active_card["max_holding_days_default"])
 
         if version == "v4":
+            # mypy: max_holding_days_bound is set unconditionally just above
+            # under the SAME "v4" guard, so it is never None here -- asserted
+            # (not `# type: ignore`) so a future refactor that breaks that
+            # invariant fails loud instead of silently typing past it.
+            assert max_holding_days_bound is not None
             user_prompt = pt.build_no_news_user_prompt(
                 prompt_candidate, snapshot, freshness_status,
                 atr_policy=snapshot.get("atr_policy"),
@@ -738,6 +743,9 @@ class OpenAIClient:
         # prompt's "1-5" text was advisory only); v4 is the only version
         # that makes it a real, code-enforced promise.
         if version == "v4" and str(obj.get("decision", "")).lower() == Decision.PROPOSE.value:
+            # mypy: same invariant as the assert above -- max_holding_days_bound
+            # is always set once version == "v4".
+            assert max_holding_days_bound is not None
             range_failure = validate_max_holding_days_range(obj, max_holding_days_bound)
             if range_failure:
                 if self.journal is not None:

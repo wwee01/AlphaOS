@@ -36,7 +36,7 @@ from typing import Optional
 import yaml
 
 from alphaos import lineage
-from alphaos.config.settings import SettingsError
+from alphaos.config.settings import Settings, SettingsError
 from alphaos.lineage.hashing import stable_hash
 
 CARDS_DIR = Path(__file__).parent
@@ -132,7 +132,7 @@ def get_card_by_id(card_id: str, cards_dir: Optional[Path] = None) -> dict:
     raise SettingsError(f"Setup card {card_id!r} not found in {cards_dir or CARDS_DIR}")
 
 
-def get_default_card(cards_dir: Optional[Path] = None, settings: Optional[object] = None) -> dict:
+def get_default_card(cards_dir: Optional[Path] = None, settings: Optional[Settings] = None) -> dict:
     """The single ACTIVE card. Every stamping call site uses this -- there is
     still no per-candidate card SELECTION (PR13), only ever one default at a
     time, so "the card that produced this candidate/proposal" and "the

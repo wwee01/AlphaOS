@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.constants import OUTCOME_STATUSES
 from alphaos.learning.outcomes_engine import forward_window_stats, replay_bracket
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
@@ -50,6 +51,14 @@ from alphaos.util.ids import new_id
 # AlphaOS-side classification a candidate can resolve to (the "primary" row,
 # one per candidate_id). 'user_override' is seeded separately, in parallel.
 _ALPHAOS_SIDE_TYPES = ("proposal", "blocked", "armed_watch", "reject", "candidate")
+
+# VOCAB-1: this module is THE single writer of candidate_outcomes.
+# outcome_status -- every literal it stamps is unpacked from the shared
+# constants.OUTCOME_STATUSES tuple (never re-typed here) so the writer and
+# every reader (reports/baseline_report.py, reports/regime_arming_scorer.py,
+# tests/test_vocab_guard.py's AST guard) can never spell the vocabulary
+# apart again.
+_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, _STATUS_UNAVAILABLE = OUTCOME_STATUSES
 
 # If we still have zero forward bars this many calendar days after a decision
 # was recorded, treat it as genuinely unavailable (not a transient gap) so the
@@ -196,7 +205,7 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
         "stop_price": info.get("stop_price"),
         "target_price": info.get("target_price"),
         "direction_hint": info.get("direction_hint"),
-        "outcome_status": "pending",
+        "outcome_status": _STATUS_PENDING,
         "lineage_id": info.get("lineage_id"),
     })
 
@@ -403,8 +412,8 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     a backlog, and anchoring on seed time would mislabel a multi-week-old
     candidate's next bar as a "1-day" return."""
     rows = journal.query(
-        "SELECT * FROM candidate_outcomes WHERE outcome_status IN ('pending','partial') "
-        "ORDER BY id ASC LIMIT ?", (limit,))
+        "SELECT * FROM candidate_outcomes WHERE outcome_status IN (?, ?) "
+        "ORDER BY id ASC LIMIT ?", (_STATUS_PENDING, _STATUS_PARTIAL, limit))
     counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
               "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     if bars_provider is None:
@@ -432,7 +441,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
                 # signal matters more than the more-obvious no-bars reason.
                 dq = row.get("data_quality_status") or "no_bars_after_window"
                 _update_row(journal, row["outcome_id"], {
-                    "outcome_status": "unavailable", "data_quality_status": dq})
+                    "outcome_status": _STATUS_UNAVAILABLE, "data_quality_status": dq})
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -483,7 +492,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             update["replay_exit_reason"] = replay["replay_exit_reason"]
 
         resolved = f5["bars_used"] >= 5
-        update["outcome_status"] = "complete" if resolved else "partial"
+        update["outcome_status"] = _STATUS_COMPLETE if resolved else _STATUS_PARTIAL
         # Don't clobber an unrecoverable-decision_at_utc flag from repair just
         # because the forward-return math itself succeeded — the anchor being
         # a fallback (not the true decision time) is still worth knowing.
@@ -525,9 +534,9 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
         return {"updated": 0, "completed": 0, "skipped": 0}
 
     rows = journal.query(
-        "SELECT * FROM candidate_outcomes WHERE outcome_status = 'complete' "
+        "SELECT * FROM candidate_outcomes WHERE outcome_status = ? "
         "AND (outcome_status_10d IS NULL OR outcome_status_10d != 'complete') "
-        "ORDER BY id ASC LIMIT ?", (limit,))
+        "ORDER BY id ASC LIMIT ?", (_STATUS_COMPLETE, limit))
     counts = {"updated": 0, "completed": 0, "skipped": 0}
     now = timeutils.now_utc()
     for row in rows:

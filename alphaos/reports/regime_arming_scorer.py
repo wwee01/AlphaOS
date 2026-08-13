@@ -197,7 +197,14 @@ def build_regime_arming_report(journal, settings, limit: int = 2000) -> dict:
     """Journal-facing entry point. Joins resolved candidate_outcomes ->
     candidate_packets (by candidate_id, for the regime stamp) -> candidates
     (by candidate_id, for card_id). PURE READ. Never called from any gate/
-    eval/risk/execution path."""
+    eval/risk/execution path.
+
+    Audit-fixup VOCAB-1 (seven-lens review P0-C, 2026-08-13): ``o.
+    outcome_status`` filtered the literal 'resolved', which ``alphaos/
+    learning/outcomes_tracker.py`` (the sole writer) has never emitted --
+    see ``build_baseline_report``'s own docstring in reports/baseline_
+    report.py for the full incident and ``constants.OUTCOME_STATUSES`` for
+    the real vocabulary. Now ``'complete'``."""
     from alphaos.util import timeutils
 
     rows = journal.query(
@@ -209,7 +216,7 @@ def build_regime_arming_report(journal, settings, limit: int = 2000) -> dict:
         "FROM candidate_outcomes o "
         "JOIN candidate_packets p ON p.candidate_id = o.candidate_id "
         "JOIN candidates c ON c.candidate_id = o.candidate_id "
-        "WHERE o.replay_r IS NOT NULL AND o.outcome_status = 'resolved' "
+        "WHERE o.replay_r IS NOT NULL AND o.outcome_status = 'complete' "
         "AND p.regime IS NOT NULL AND c.card_id IS NOT NULL "
         "ORDER BY o.id DESC LIMIT ?",
         (limit,),

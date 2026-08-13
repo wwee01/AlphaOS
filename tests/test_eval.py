@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import timedelta
 
 import pytest
 
@@ -29,6 +30,7 @@ from alphaos.eval.corpus import (
 from alphaos.eval.harness import run_eval
 from alphaos.journal.journal_store import JournalStore
 from alphaos.reports.eval_report import build_eval_report, render_markdown
+from alphaos.util import timeutils
 from conftest import make_settings
 
 
@@ -452,12 +454,25 @@ def test_run_eval_refuses_a_live_run_once_the_cost_cap_is_reached(tmp_path, jour
     seeds = select_seed_packets(journal)
     write_corpus(corpus_dir, seeds, as_of_date="2026-07-09")
 
+    # GREEN-1 (date rot, §H.1 4th occurrence): the 50 seeded calls must land
+    # INSIDE cost_guard's own trailing-30-day window, so they are stamped
+    # relative to timeutils.now_utc() -- never a hardcoded literal. This test
+    # previously seeded "2026-07-09" and passed only until the calendar
+    # rolled past 2026-08-08, at which point the rows aged out of the window
+    # and this genuine safety assertion (a live eval run refuses once the AI
+    # cost cap is reached) started failing every day. Same date-seeded flake
+    # class as cd057ce/233c74b/6ffbc2d -- see the repo's own flake record.
+    # Mutation-tested: `--clock-shift-days=90` / `-90` both stay green (see
+    # tests/_dateshift.py). Note as_of_date above is only the corpus
+    # manifest's label, never compared against the cost-cap window -- left
+    # as-is.
+    seeded_at = timeutils.to_iso(timeutils.now_utc() - timedelta(days=1))
     for _ in range(50):
         journal.conn.execute(
             "INSERT INTO openai_evaluations (eval_id, candidate_id, symbol, model, direction, "
             "decision, reasoning_summary, is_mock, created_at_utc, created_at_sgt) "
             "VALUES (?, ?, 'AAPL', 'gpt-4o-mini', 'long', 'reject', 'x', 0, ?, ?)",
-            (new_id("eval"), new_id("cand"), "2026-07-09T00:00:00+00:00", "2026-07-09T00:00:00+00:00"),
+            (new_id("eval"), new_id("cand"), seeded_at, seeded_at),
         )
     journal.conn.commit()
 

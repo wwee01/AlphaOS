@@ -189,7 +189,12 @@ def _insert_outcome(journal, candidate_id, symbol, decision_date, **fields):
         "symbol": symbol,
         "candidate_type": "candidate",
         "decision_at_utc": f"{decision_date}T12:00:00+00:00",
-        "outcome_status": "resolved",
+        # VOCAB-1: was the phantom 'resolved' literal -- none of this
+        # module's queries (alphaos/hypotheses/queries.py) actually filter
+        # on outcome_status, but 'complete' is the honest value for a row
+        # that already carries forward-return data (see
+        # constants.OUTCOME_STATUSES for the real writer vocabulary).
+        "outcome_status": "complete",
         **fields,
     })
 

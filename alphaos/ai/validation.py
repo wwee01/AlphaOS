@@ -74,6 +74,11 @@ def validate_max_holding_days_range(obj: dict, bound: int) -> Optional[str]:
         if not value.is_integer():
             return f"max_holding_days {value!r} must be an integral value (no fractional part)"
         value_int = int(value)
+    elif value is None:
+        # mypy: int() itself has no None overload -- narrowed explicitly
+        # here rather than leaning on the try/except below to catch it
+        # (same outcome, same message, statically honest about the type).
+        return f"max_holding_days {value!r} is missing or not an integer"
     else:
         try:
             value_int = int(value)
