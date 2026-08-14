@@ -7,7 +7,7 @@ nothing here ever raises regardless of failure mode.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -17,6 +17,7 @@ from alphaos.reports.benchmark_capture import (
     BENCHMARK_SYMBOL,
     capture_benchmark_spine,
 )
+from alphaos.util import timeutils
 from conftest import make_settings
 
 
@@ -197,7 +198,18 @@ def test_bars_backfill_no_op_when_already_up_to_date(journal):
                             ALPACA_PAPER="true", ALPACA_BASE_URL="https://paper-api.alpaca.markets",
                             EXECUTION_PROVIDER="simulated_internal")
     from alphaos.util.ids import new_id
-    today = date.today().isoformat()
+    # Audit-fixup GROUP-A round 1 (FIX-8, clock-shift job finding): was
+    # date.today() -- a DIFFERENT clock than capture_benchmark_spine's own
+    # timeutils.market_date(now=None) (-> timeutils.now_utc()), which this
+    # call doesn't override. Both clocks agree at the real wall-clock instant
+    # this runs, but diverge the moment either clock is shifted independently
+    # (e.g. tests/_dateshift.py's --clock-shift-days, which patches ONLY
+    # timeutils.now_utc, deliberately never the stdlib clock) -- the seeded
+    # row then sits under YESTERDAY's (real) date while the production code
+    # asks about a shifted "today", the cache lookup misses, and the "already
+    # up to date, never re-fetch" no-op this test exists to prove breaks.
+    # Same clock, same helper as production: no more possible mismatch.
+    today = timeutils.market_date().isoformat()
     journal.insert("benchmark_bars", {"bar_id": new_id("bar"), "symbol": "SPY", "bar_date": today, "close": 500.0})
     provider = _FakeBarsProvider([_bar("2099-01-01", 999.0)])  # would prove it if ever called
 

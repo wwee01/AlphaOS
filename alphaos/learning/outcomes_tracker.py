@@ -53,12 +53,26 @@ from alphaos.util.ids import new_id
 _ALPHAOS_SIDE_TYPES = ("proposal", "blocked", "armed_watch", "reject", "candidate")
 
 # VOCAB-1: this module is THE single writer of candidate_outcomes.
-# outcome_status -- every literal it stamps is unpacked from the shared
-# constants.OUTCOME_STATUSES tuple (never re-typed here) so the writer and
-# every reader (reports/baseline_report.py, reports/regime_arming_scorer.py,
-# tests/test_vocab_guard.py's AST guard) can never spell the vocabulary
-# apart again.
-_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, _STATUS_UNAVAILABLE = OUTCOME_STATUSES
+# outcome_status -- every literal it stamps is one of these four names, kept
+# consistent with the shared constants.OUTCOME_STATUSES tuple by the
+# assertion below (not a positional unpack -- audit-fixup GROUP-A round 1:
+# ``_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, _STATUS_UNAVAILABLE
+# = OUTCOME_STATUSES`` would crash this module's own import the moment a
+# 5th status is ever added to the tuple, or silently reorder the aliases if
+# an existing member's position changes -- neither of which VOCAB-1's own
+# "never spell the vocabulary apart again" intent should tolerate as an
+# import-time landmine). Named constants + an explicit set-equality check
+# give the SAME single-source-of-truth guarantee (drift is caught, not
+# silently possible) without being fragile to the tuple's own length or
+# order.
+_STATUS_PENDING = "pending"
+_STATUS_PARTIAL = "partial"
+_STATUS_COMPLETE = "complete"
+_STATUS_UNAVAILABLE = "unavailable"
+assert {_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, _STATUS_UNAVAILABLE} == set(OUTCOME_STATUSES), (
+    "outcomes_tracker's own status aliases have drifted from constants.OUTCOME_STATUSES -- "
+    "update both together"
+)
 
 # If we still have zero forward bars this many calendar days after a decision
 # was recorded, treat it as genuinely unavailable (not a transient gap) so the

@@ -19,7 +19,7 @@ All offline, in-memory, mock mode. No real money, no network.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import pytest
 
@@ -30,6 +30,7 @@ from alphaos.hypotheses.constants import HypothesisStatus, RiskClass, RISK_CLASS
 from alphaos.scheduler import cadence
 from alphaos.scheduler.job_runner import JobRunner
 from alphaos.stats.preregistration import register_hypothesis
+from alphaos.util import timeutils
 
 
 # --------------------------------------------------------------- constants
@@ -344,9 +345,22 @@ def test_h_rej_1_rows_passes_through_delta_r_unchanged(journal):
 def _seed_one(journal, hypothesis_id: str, monkeypatch=None, days_ago: int = 0):
     """Propose a single seeded hypothesis with analysis_not_before pinned to
     `days_ago` days before/after "now" (negative -> already due), bypassing
-    the real risk-class-derived wait so tests don't need 28-90 real days."""
+    the real risk-class-derived wait so tests don't need 28-90 real days.
+
+    Audit-fixup GROUP-A round 1 (FIX-8, clock-shift job finding): was
+    ``datetime.now(timezone.utc)`` -- a DIFFERENT clock than
+    ``hyp_resolver.resolve_due_hypotheses()``'s own ``today`` (derived from
+    ``timeutils.stamp(now=None)`` -> ``timeutils.now_utc()`` whenever a
+    caller, including every test here, omits ``now=``). Both clocks agree
+    at the real wall-clock instant this runs, but diverge the moment
+    ``timeutils.now_utc`` is shifted independently (tests/_dateshift.py's
+    ``--clock-shift-days`` deliberately never touches the stdlib clock) --
+    this fixture's own ``analysis_not_before`` then sits pinned to the REAL
+    date while the resolver asks "is it due?" against a shifted one, and a
+    hypothesis seeded 10 days in the future can silently read as already due.
+    Same clock, same helper as production: no more possible mismatch."""
     spec = next(h for h in SEEDED_HYPOTHESES if h["hypothesis_id"] == hypothesis_id)
-    now = datetime.now(timezone.utc) + timedelta(days=-days_ago)
+    now = timeutils.now_utc() + timedelta(days=-days_ago)
     return hyp_registry.propose_hypothesis(journal, spec, now=now)
 
 

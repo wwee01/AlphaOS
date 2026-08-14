@@ -669,3 +669,34 @@ def test_build_regime_arming_report_excludes_unresolved_and_missing_regime(journ
     })
     rep = build_regime_arming_report(journal, settings)
     assert rep["cards"] == []  # neither row qualifies: no regime, and status='pending' not 'complete'
+
+
+def test_build_regime_arming_report_never_scores_a_partial_outcome_row(journal, settings):
+    """Audit-fixup GROUP-A round 1 (FIX-7, both blind Opus audits'
+    highest-value finding): a 'partial' candidate_outcomes row is still on a
+    TRUNCATED bar window and gets silently overwritten by a later
+    update_pending_outcomes() pass -- scoring it into regime-arming evidence
+    now would freeze a censored, still-moving replay_r. This had ZERO test
+    coverage: an auditor mutated build_regime_arming_report()'s own SQL
+    filter to accept 'partial' alongside 'complete' and the full suite
+    stayed green. Proof: a 'partial' row with a real regime and a non-NULL
+    replay_r -- every OTHER join condition satisfied -- must still produce
+    zero scored cards."""
+    from alphaos.cards.registry import get_default_card
+
+    card = get_default_card()
+    journal.insert("candidates", {
+        "candidate_id": "cand_partial", "symbol": "AAPL", "card_id": card["card_id"],
+        "card_version": card["version"],
+    })
+    journal.insert("candidate_packets", {
+        "packet_id": "pkt_partial", "candidate_id": "cand_partial", "symbol": "AAPL",
+        "regime": "TREND_UP", "regime_rules_version": REGIME_RULES_V1,
+    })
+    journal.insert("candidate_outcomes", {
+        "outcome_id": "out_partial", "candidate_id": "cand_partial", "symbol": "AAPL",
+        "candidate_type": "candidate", "replay_r": 1.0, "outcome_status": "partial",
+    })
+
+    rep = build_regime_arming_report(journal, settings)
+    assert rep["cards"] == []  # the partial row must not be scored at all
