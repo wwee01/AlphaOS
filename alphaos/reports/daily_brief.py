@@ -184,6 +184,70 @@ def _backup_health() -> Optional[dict]:
     return build_backup_health()
 
 
+def _evaluator_health(journal, settings) -> dict:
+    """PRE-1a: grades the PRIMARY evaluator's (``openai_evaluations``, the
+    path that actually gates trades) recent fail-safe rate -- generalizes
+    ``ai/labeller_health.py::evaluate_failsafe_health`` (already used for the
+    labeller, via ``Orchestrator._labeller_failsafe_health``) rather than
+    forking it. The 2026-08-13 review's central finding: six days of a dead
+    OpenAI account produced "Nothing needs you" every morning because
+    nothing measured whether the evaluator machinery itself was working --
+    every rejection during that window looked identical to an ordinary,
+    healthy RR-floor/NO_ATR_DATA reject by every OTHER signal this brief
+    already reads.
+
+    Unlike every other ``_xxx_health`` helper in this module, this is NEVER
+    omitted (no ``Optional``/``None`` empty-state) -- ``_one_action`` needs
+    to reliably ask "is the level warn/critical" every single build, and an
+    omitted section here is exactly the silent-gap failure mode this ticket
+    exists to close."""
+    from alphaos.ai.labeller_health import (
+        evaluate_failsafe_health, is_openai_reject_row, summarize_failsafe_rows,
+    )
+
+    rows = journal.query(
+        "SELECT risk_flags_json FROM openai_evaluations ORDER BY id DESC LIMIT 50"
+    )
+    summary = summarize_failsafe_rows(rows, is_openai_reject_row, lambda _r: "OPENAI_REJECT")
+    return evaluate_failsafe_health(
+        summary,
+        settings.labeller_failsafe_warn_rate,
+        settings.labeller_failsafe_critical_rate,
+        settings.labeller_failsafe_min_sample,
+        source_label="Evaluator",
+    )
+
+
+def _preflight_health(journal) -> Optional[dict]:
+    """PRE-1b: the latest completed ``preflight`` job_runs row's own
+    per-check payload -- None when no preflight run has completed yet
+    (PRE-1b just merged, or the very first pre-open window hasn't happened
+    yet) -- omit, don't fabricate, same idiom as every other ``_xxx_health``
+    section here."""
+    import json
+
+    row = journal.one(
+        "SELECT result_summary_json, finished_at_sgt FROM job_runs "
+        "WHERE job_type = 'preflight' AND status = 'completed' "
+        "ORDER BY finished_at_utc DESC LIMIT 1"
+    )
+    if not row:
+        return None
+    raw = row.get("result_summary_json")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    result = parsed.get("preflight_result") or {}
+    return {
+        "ok": bool(result.get("ok")),
+        "checks": result.get("checks") or {},
+        "as_of_sgt": row.get("finished_at_sgt"),
+    }
+
+
 def _atr_health(journal) -> Optional[dict]:
     """INSTR-1's deferred KIV, added 2026-07-09 (operator-directed follow-up,
     Fable strategy review): a persistent per-symbol ATR gap silently and
@@ -373,9 +437,30 @@ def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
+def _positions_past_time_window(positions_health: list[dict]) -> list[dict]:
+    """TIME-1 part 2: open positions AT OR PAST their max_holding_days window
+    right now, regardless of whether TIME_EXIT_BREACH_ALERT_ENABLED is on
+    (this is visibility only -- arming enforcement is a separate, later
+    operator decision, out of scope for this ticket). max_holding_days has
+    NEVER bound a live broker-managed position (position_manager skips
+    _check_exit for execution_source=alpaca_paper -- an Alpaca bracket OCO
+    has no time leg), so this is the one place today's silent condition
+    becomes an actionable "## Needs you" line, independent of any
+    enforcement policy decision. Reads the SAME trading_days_held/
+    max_holding_days fields ``positions_health`` (assess_positions) already
+    computes for every open position -- no second day-count definition."""
+    out = []
+    for p in positions_health:
+        held = p.get("trading_days_held")
+        max_days = p.get("max_holding_days")
+        if held is not None and max_days and held >= max_days:
+            out.append({"symbol": p["symbol"], "trading_days_held": held, "max_holding_days": max_days})
+    return out
+
+
 def _needs_you(
     journal, digest: dict, fused_jobs: list[dict], hypothesis_resolution: Optional[dict] = None,
-    hypothesis_drafts_pending: Optional[dict] = None,
+    hypothesis_drafts_pending: Optional[dict] = None, positions_past_time_window: Optional[list] = None,
 ) -> dict:
     pending = journal.open_proposals()
     for p in pending:
@@ -389,6 +474,7 @@ def _needs_you(
         "fused_jobs": fused_jobs,
         "hypothesis_resolution": hypothesis_resolution,
         "hypothesis_drafts_pending": hypothesis_drafts_pending,
+        "positions_past_time_window": positions_past_time_window or [],
     }
 
 
@@ -660,24 +746,41 @@ MAX_SYMBOLS_IN_ONE_ACTION = 5
 
 
 def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict,
-                backup_health: Optional[dict] = None) -> str:
-    """Priority order per spec: incident > fused job > stale backup >
-    expiring approval > EXIT_REVIEW position > hypothesis resolution >
-    below-floor data note > "nothing needs you". Hypothesis resolution ranks
-    above the routine below-floor note (a rare, decision-relevant registry
-    event beats a near-daily "still gathering data" note) but below every
-    safety/time-critical item above it.
+                backup_health: Optional[dict] = None, evaluator_health: Optional[dict] = None) -> str:
+    """Priority order per spec: incident > fused job > provider health >
+    stale backup > expiring approval > EXIT_REVIEW position > positions past
+    their time-exit window > hypothesis resolution > below-floor data note >
+    "nothing needs you". Hypothesis resolution ranks above the routine
+    below-floor note (a rare, decision-relevant registry event beats a
+    near-daily "still gathering data" note) but below every safety/
+    time-critical item above it.
 
     Stale backup was ADDED 2026-07-17 (audit HIGH: nightly backups failed
     silently Jul 12-16 while this headline said "Nothing needs you") -- it
     ranks below live-trading safety items (incidents/fuses) but above
     approvals: an approval missed costs one trade; a backup outage during a
-    disk failure costs the whole ledger."""
+    disk failure costs the whole ledger.
+
+    PRE-1a (2026-08-13): the provider-health rung was ADDED above stale
+    backup -- six days of a dead OpenAI account produced "Nothing needs you"
+    every morning because nothing in this ladder measured whether the AI
+    machinery itself was working, only whether jobs completed and backups
+    ran. Ranks above stale backup: a dead evaluator silently stops the
+    entire trading function (nothing ever proposed again), a stale backup is
+    a data-durability risk that hasn't materialized yet.
+
+    TIME-1 part 2 (2026-08-13): the "past time window" rung was ADDED right
+    after EXIT_REVIEW -- max_holding_days has never bound a live
+    broker-managed position, so a position sitting past its window is
+    exactly as actionable as one already flagged EXIT_REVIEW, and is
+    reported independent of whether TIME_EXIT_BREACH_ALERT_ENABLED is armed."""
     if needs_you["open_incident_count"] > 0:
         return f"{needs_you['open_incident_count']} open protection incident(s) -- review immediately."
     if needs_you["fused_jobs"]:
         names = ", ".join(j["job_type"] for j in needs_you["fused_jobs"])
         return f"Scheduler job(s) self-halted: {names} -- run `scheduler_run_job <job_type>` to clear."
+    if evaluator_health and evaluator_health.get("level") in ("warn", "critical"):
+        return evaluator_health.get("message") or "AI evaluator fail-safe rate is elevated -- review immediately."
     if backup_health is not None and backup_health.get("stale"):
         days = backup_health.get("days_since_success")
         ago = f"{days} day(s)" if days is not None else "an unknown time"
@@ -695,6 +798,15 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
         remaining = len(exit_review) - len(shown)
         syms = ", ".join(shown) + (f", +{remaining} more" if remaining > 0 else "")
         return f"{len(exit_review)} position(s) flagged EXIT_REVIEW ({syms}) -- a human should look at these."
+    past_window = needs_you.get("positions_past_time_window") or []
+    if past_window:
+        shown = past_window[:MAX_SYMBOLS_IN_ONE_ACTION]
+        syms = ", ".join(f"{p['symbol']} ({p['trading_days_held']}/{p['max_holding_days']}td)" for p in shown)
+        remaining = len(past_window) - len(shown)
+        if remaining > 0:
+            syms += f", +{remaining} more"
+        return (f"{len(past_window)} position(s) past their time-exit window ({syms}) -- "
+                "max_holding_days is not enforced on broker-managed positions; a human should look.")
     hyp_res = needs_you.get("hypothesis_resolution")
     if hyp_res:
         ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
@@ -708,6 +820,23 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
     if moonshot_gap.get("status") == "below_sample_floor":
         return f"Nothing actionable yet -- still below the data floor ({moonshot_gap['data_progress']})."
     return "Nothing needs you right now."
+
+
+def _one_action_priority(needs_you: dict, evaluator_health: Optional[dict] = None) -> str:
+    """PRE-1a: the digest push priority companion to ``_one_action`` --
+    ``"high"`` exactly when the provider-health rung is the WINNING
+    (headline) rung in ``_one_action``'s own ladder, i.e. no open incident
+    and no fused job preempts it (both of those already show a message far
+    more urgent than provider health, even though this ticket leaves THEIR
+    push priority unchanged -- narrowly scoped to the one rung this ticket
+    adds). Every other rung's push priority is unchanged (still
+    ``"default"``), deliberately out of scope for this fix -- see
+    ``_one_action``'s own docstring for the full ladder this mirrors."""
+    if needs_you["open_incident_count"] > 0 or needs_you["fused_jobs"]:
+        return "default"
+    if evaluator_health and evaluator_health.get("level") in ("warn", "critical"):
+        return "high"
+    return "default"
 
 
 def build_daily_brief(
@@ -782,7 +911,13 @@ def build_daily_brief(
     fused_jobs = _fused_jobs(journal, settings)
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
-    needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
+    # TIME-1 part 2: independent of any enforcement policy decision -- see
+    # _positions_past_time_window's own docstring.
+    positions_past_time_window = _positions_past_time_window(positions_health)
+    needs_you = _needs_you(
+        journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending,
+        positions_past_time_window,
+    )
     working_orders = _working_orders(journal, now)
     todays_activity = _todays_activity(journal, since_market_day)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
@@ -790,11 +925,15 @@ def build_daily_brief(
     best_candidate = _best_candidate_today(journal, since_sgt)
     what_learned = _what_learned(journal, since_sgt)
     moonshot_gap = _moonshot_gap(journal, settings, now)
-    # backup_health computed here (not with the other *_health blocks below)
-    # because one_action needs it: a stale backup must reach the pushed ntfy
-    # HEADLINE, not just the long-form markdown body (2026-07-17 audit).
+    # backup_health/evaluator_health computed here (not with the other
+    # *_health blocks below) because one_action needs them: a stale backup
+    # or a dead AI provider must reach the pushed ntfy HEADLINE, not just the
+    # long-form markdown body (2026-07-17 audit; PRE-1a extends the same
+    # reasoning to provider health).
     backup_health = _backup_health()
-    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health)
+    evaluator_health = _evaluator_health(journal, settings)
+    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health, evaluator_health)
+    one_action_priority = _one_action_priority(needs_you, evaluator_health)
 
     # REG-1 acceptance criterion: the shadow arming-map scorer's first
     # (caveated) report surfaces in the brief. Import kept local -- avoids a
@@ -811,6 +950,7 @@ def build_daily_brief(
     card_scoreboard_health = _card_scoreboard_health(journal)
     per_selector_health = _per_selector_health(journal, since_market_day)
     hold1_health = _hold1_health(journal)
+    preflight_health = _preflight_health(journal)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -835,10 +975,13 @@ def build_daily_brief(
         "card_scoreboard_health": card_scoreboard_health,
         "per_selector_health": per_selector_health,
         "hold1_health": hold1_health,
+        "preflight_health": preflight_health,
+        "evaluator_health": evaluator_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
         "one_action": one_action,
+        "one_action_priority": one_action_priority,
     }
 
 
@@ -893,6 +1036,15 @@ def render_markdown(brief: dict) -> str:
             f"- Hypothesis drafts awaiting review: **{drafts_pending['count']}** "
             f"({', '.join(drafts_pending['draft_ids'])})"
         )
+    # TIME-1 part 2: always present (even at 0) -- this line existing at all,
+    # every day, is the point (a silent 0 that nobody has to remember to
+    # check for is exactly what this ticket replaces).
+    past_window = ny.get("positions_past_time_window") or []
+    lines.append(f"- Positions past their time-exit window: **{len(past_window)}**")
+    if past_window:
+        detail = ", ".join(f"{p['symbol']} ({p['trading_days_held']}/{p['max_holding_days']}td)"
+                           for p in past_window)
+        lines.append(f"  - {detail}")
     ua = brief.get("unattended_approvals")
     if ua:
         lines.append(
@@ -982,6 +1134,26 @@ def render_markdown(brief: dict) -> str:
         from alphaos.reports.backup_health import render_markdown as _render_backup
 
         lines += [_render_backup(bkh), ""]
+
+    # PRE-1b: one digest line, always (no run yet omits it, same idiom as
+    # every other never-run-yet health section).
+    pfh = brief.get("preflight_health")
+    if pfh:
+        status = "ALL PASS" if pfh["ok"] else f"{sum(1 for c in pfh['checks'].values() if not c.get('ok'))} FAILED"
+        lines += [f"## Preflight ({pfh.get('as_of_sgt', '')[:10]}): {status}", ""]
+
+    # PRE-1a: the "did anything happen" line -- proposals produced + AI
+    # error count by category, so a quiet day and a dead-provider day never
+    # look identical again.
+    eh = brief.get("evaluator_health")
+    if eh:
+        reasons = eh.get("top_reason")
+        lines += [
+            f"## AI evaluator health: {eh['level'].upper()} "
+            f"({eh.get('fail_safe', 0)}/{eh.get('sample', 0)} recent calls fail-safe"
+            + (f", top reason: {reasons}" if reasons else "") + ")",
+            "",
+        ]
 
     eh = brief.get("eval_health")
     if eh:
@@ -1082,12 +1254,19 @@ def render_compact(brief: dict) -> str:
         f"{mc['excess_return_pct']:+.2f}%" if mc.get("excess_return_pct") is not None else "n/a"
     )
     ny = brief["needs_you"]
+    ta = brief["todays_activity"]
+    eh = brief.get("evaluator_health") or {}
+    ai_errors = eh.get("fail_safe", 0)
     lines = [
         f"AlphaOS Daily Brief -- {brief['date_sgt']}",
         f"Action: {brief['one_action']}",
         f"vs S&P: {excess}  |  Positions: {len(brief['positions_health'])}  |  "
         f"Pending approvals: {ny['pending_approval_count']}",
         f"Open incidents: {ny['open_incident_count']}  |  Fused jobs: {len(ny['fused_jobs'])}",
+        # PRE-1a "did-anything-happen" line: proposals produced + AI error
+        # count -- a quiet day (0 proposed, 0 errors) and a dead-provider day
+        # (0 proposed, N errors) must never read identically again.
+        f"Today: {ta['proposed_today']} proposal(s) produced  |  AI errors: {ai_errors}",
     ]
     # 2026-07-24: one extra line ONLY when something is actually awaiting
     # fill -- the quiet path (the overwhelming majority of days) is byte-for-

@@ -21,6 +21,7 @@ from alphaos.constants import (
     ExecutionSource,
     OrderState,
     Severity,
+    TimeStopStatus,
     TradeDirection,
     target_profile_bundle,
 )
@@ -35,6 +36,25 @@ from alphaos.util.market_calendar import is_trading_day, trading_days_between
 
 FILL_PRICE_BASIS = "latest_quote_or_bar"
 
+
+def check_alpaca_reachable(settings, journal) -> tuple[bool, str]:
+    """PRE-1b preflight check 2 support: a cheap Alpaca paper account lookup.
+    Lives HERE (execution layer), not in scheduler/jobs.py, because
+    ``tests/test_scheduler.py::test_real_money_remains_unreachable_via_scheduler``
+    asserts every ``alphaos/scheduler/*.py`` file's source text never even
+    MENTIONS ``alpaca_client`` -- broker access is architecturally confined
+    to the execution layer; the scheduler only ever calls a function that
+    already lives here, never imports the broker client itself. Only ever
+    called when execution_provider=alpaca_paper and not mock mode (the
+    caller's own job checks that first) -- never a real call in mock mode."""
+    try:
+        from alphaos.broker.alpaca_client import AlpacaClient
+
+        client = AlpacaClient(settings, journal)
+        acct = client.get_account()
+        return True, f"Alpaca paper account reachable (status={acct.get('status')})"
+    except Exception as exc:  # noqa: BLE001 - the exact condition this check exists to catch
+        return False, f"Alpaca unreachable: {exc}"
 
 class PositionManager:
     def __init__(self, settings, journal, market_data=None):
@@ -161,9 +181,19 @@ class PositionManager:
                 continue
 
             if broker_managed:
-                # Exits are owned by the broker OCO + reconcile(); never exit
-                # a broker-managed position locally. Mark-to-market only.
+                # Exits are owned by the broker OCO + reconcile(); the local
+                # watchdog NEVER exits a broker-managed position -- and
+                # cannot: PositionManager is architecturally barred from
+                # calling the broker directly (see
+                # _maybe_alert_time_exit_breach's own docstring). TIME-1
+                # part 3 (settings.time_exit_breach_alert_enabled, default
+                # false, byte-identical to today when off) is a DETECT-ONLY
+                # signal layered on top -- it never closes anything (there is
+                # nothing for it to return that would change what happens
+                # below), so mark-to-market always still runs.
                 decision = None
+                if self.settings.time_exit_breach_alert_enabled:
+                    self._maybe_alert_time_exit_breach(pos, price)
                 self._mark_to_market(pos, price)
             else:
                 decision = self._check_exit(pos, price)
@@ -178,7 +208,7 @@ class PositionManager:
             # stop/target/time exit or abort the watchdog pass.
             try:
                 self._record_monitoring_snapshot(
-                    pos, price, decision, freshness_status, broker_managed=broker_managed
+                    pos, price, decision, freshness_status, broker_managed=broker_managed,
                 )
             except Exception as exc:  # pragma: no cover - defensive (audit-only)
                 try:
@@ -234,12 +264,32 @@ class PositionManager:
         )
         return unrealized_pnl, unrealized_r
 
+    @staticmethod
+    def _time_stop_status(decision: Optional[str], broker_managed: bool) -> str:
+        """TIME-1 part 1: an HONEST ``time_stop_status`` instead of always
+        writing "active" for a broker-managed position -- the local watchdog
+        never enforces max_holding_days against a broker-managed position (no
+        time leg exists at the broker), so writing "active" for it asserted
+        an enforcement that could not happen. Simulated-path meaning is
+        UNCHANGED (still "expired" iff decision=="time_expiry", else
+        "active"). A broker-managed position ALWAYS reads
+        NOT_ENFORCED_BROKER_MANAGED, regardless of
+        settings.time_exit_breach_alert_enabled -- that flag only adds an
+        extra alert (TIME-1 part 3, detect-only; see
+        _maybe_alert_time_exit_breach's own docstring for why it can never
+        change this status: PositionManager cannot enforce anything at the
+        broker, so there is no "enforced" state to report."""
+        if not broker_managed:
+            return TimeStopStatus.EXPIRED.value if decision == "time_expiry" else TimeStopStatus.ACTIVE.value
+        return TimeStopStatus.NOT_ENFORCED_BROKER_MANAGED.value
+
     def _record_monitoring_snapshot(self, pos, price, decision, freshness_status,
                                     broker_managed: bool = False) -> None:
         """Write one monitoring_snapshots row per open position per pass (audit
         only; never influences the exit decision or mark-to-market). For
-        broker-managed positions the watchdog takes no exit action, so the row is
-        labelled ``broker_managed``."""
+        broker-managed positions the watchdog takes no LOCAL exit action, so
+        the row is labelled ``broker_managed`` -- TIME-1 part 3's breach
+        alert never closes anything, so this is unconditional."""
         unrealized_pnl, unrealized_r = self._unrealized_r(pos, price)
         mfe, mae = self._fold_excursion(pos["position_id"], unrealized_r)
 
@@ -265,7 +315,7 @@ class PositionManager:
                 "target_profile": pos.get("target_profile"),
                 "stop_hit": 1 if decision == "stop" else 0,
                 "target_hit": 1 if decision == "target" else 0,
-                "time_stop_status": "expired" if decision == "time_expiry" else "active",
+                "time_stop_status": self._time_stop_status(decision, broker_managed),
                 "data_freshness_status": freshness_status,
                 "action_taken": (
                     "broker_managed" if broker_managed
@@ -331,6 +381,63 @@ class PositionManager:
             ):
                 return "time_expiry"
         return None
+
+    def _maybe_alert_time_exit_breach(self, pos: dict, price: float) -> None:
+        """TIME-1 part 3, DETECT-AND-ALERT ONLY -- only ever called from
+        monitor() when settings.time_exit_breach_alert_enabled is true
+        (default false). This method NEVER closes, cancels, or otherwise
+        mutates anything at the broker, and structurally CANNOT: a
+        pre-existing, deliberately-enforced architecture test
+        (tests/test_entry_ttl.py::test_position_manager_monitor_and_
+        protection_watchdog_never_touch_the_broker) asserts PositionManager's
+        own source NEVER calls the broker directly -- ALL broker mutation is
+        confined to execution/order_manager.py's OrderManager, which is
+        outside this ticket's declared file group (see the ticket spec for
+        the exact list). Implementing a real cancel/close here would either
+        break that boundary (an existing, reasoned invariant) or require
+        editing order_manager.py, out of scope for this ticket -- so this
+        method's only effect, ever, is one alert.
+
+        (Wording note: this docstring deliberately does NOT name the
+        reporting/health modules. The architecture ratchet asserting that no
+        decision-path module references them greps this file's SOURCE TEXT,
+        so prose naming one trips it exactly as a real import would -- the
+        same prose-vs-code trap that has now caught three separate tickets.)
+
+        Detects the past-window condition by reusing _check_exit's own
+        two-guard arithmetic (never a second, independently-drifting
+        definition), and raises ONE clear, loud signal per monitor pass so
+        an operator who arms this flag never gets silent inaction. Flag ON
+        and flag OFF are IDENTICAL in their effect on any position (this
+        method never closes anything either way) -- the critical invariant
+        ("the merge must not change when any live position exits") holds
+        trivially, by construction. Real broker-side enforcement (cancel-
+        then-verify-then-close) would have to be routed through OrderManager
+        (mirroring ENTRY-TTL-1's own cancel-only exemption there) as a
+        separate, not-yet-built ticket -- not a silent scope-check bypass
+        here.
+        """
+        decision = self._check_exit(pos, price)
+        if decision != "time_expiry":
+            return
+
+        symbol = pos["symbol"]
+        position_id = pos["position_id"]
+        self.journal.log_system_event(
+            Severity.WARNING, "time_exit_breach_alert",
+            f"{symbol}: past its {pos.get('max_holding_days')}td time window with "
+            "TIME_EXIT_BREACH_ALERT_ENABLED=true. This is a detect-and-alert-only signal -- "
+            "PositionManager never calls the broker, so the position was left untouched.",
+            {"position_id": position_id},
+        )
+        alerts.send_alert(
+            self.settings,
+            title=f"AlphaOS: position past its time-exit window — {symbol}",
+            message=f"{symbol} is past its {pos.get('max_holding_days')}td window. This is a "
+                    "detect-and-alert-only signal (TIME_EXIT_BREACH_ALERT_ENABLED) -- nothing was "
+                    "closed or cancelled at the broker; review and act manually if needed.",
+            priority="high", journal=self.journal,
+        )
 
     def _mark_to_market(self, pos: dict, price: float) -> None:
         qty = pos["qty"] or 0

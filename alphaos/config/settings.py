@@ -178,6 +178,59 @@ def load_dotenv(path: str = ".env") -> dict:
     return applied
 
 
+def _env_file_keys(path: str) -> set:
+    """Parse just the KEY set out of a ``.env``-shaped file (same minimal
+    format ``load_dotenv`` parses above), without touching ``os.environ``.
+    Used by the startup divergence check below -- a second parser is not
+    reusing ``load_dotenv`` itself because ``load_dotenv`` returns only the
+    keys it actually APPLIED (skipping ones already in ``os.environ``),
+    which is the wrong set for a pure documented-vs-local key comparison."""
+    keys: set = set()
+    if not os.path.exists(path):
+        return keys
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, _ = line.partition("=")
+                key = key.strip()
+                if key:
+                    keys.add(key)
+    except OSError:
+        pass
+    return keys
+
+
+def _log_env_divergence(dotenv_path: str = ".env", example_path: str = ".env.example") -> None:
+    """TIME-1 part 4: one startup line reporting any KEY present in
+    ``.env.example`` but missing from the real local ``.env`` -- missing KEY
+    NAMES only, NEVER values, NEVER secrets (this never reads or prints any
+    value, only compares the two files' own key sets). Root-caused this
+    ticket: ``.env.example`` had drifted stale on three axes
+    (EXECUTION_PROVIDER/ACTIVE_CARD_ID/OPENAI_PROMPT_VERSION) relative to
+    what production actually ran, and nothing would have surfaced a similar
+    drift on an operator's own real ``.env`` either.
+
+    Advisory only -- never raises, never blocks startup. Prints nothing when
+    there is no local ``.env`` file at all (an ``env=`` dict-injection test
+    run, or a fresh checkout that hasn't been configured yet -- neither is a
+    meaningful "divergence" from a template to report), and nothing when
+    there is no divergence.
+    """
+    if not os.path.exists(dotenv_path):
+        return
+    local_keys = _env_file_keys(dotenv_path)
+    example_keys = _env_file_keys(example_path)
+    missing = sorted(example_keys - local_keys)
+    if missing:
+        print(
+            f"[alphaos] .env is missing {len(missing)} key(s) documented in "
+            f"{example_path}: {', '.join(missing)}"
+        )
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable snapshot of resolved configuration."""
@@ -681,6 +734,31 @@ class Settings:
     jsonl_mirror: bool
     allow_fixture_news: bool
 
+    # --- PRE-1b: once-daily pre-open self-test (docs/roadmap/
+    # alphaos-post-review-remediation-spec.md, PRE-1b; original §5 item
+    # PREFLIGHT-1, written 2026-07-12) --- "HH:MM" SGT, once-daily cadence,
+    # same shape as every other once-daily job time above. Scheduled right
+    # after scheduler_text_archive_pull_time (07:00) -- last of the pre-open
+    # capture jobs, so it can meaningfully report on what THEY produced
+    # (canary staleness, backup age) before the first scan window opens.
+    scheduler_preflight_time: str
+
+    # --- TIME-1 part 3: broker-managed time-exit BREACH ALERT, detect-only -
+    # Default false. Named for exactly what it does: when true, a
+    # broker-managed (alpaca_paper) position past its max_holding_days
+    # window fires one additional high-priority alert per monitor pass it
+    # stays past-window. It does NOT close, cancel, or otherwise mutate
+    # anything at the broker, and structurally CANNOT -- PositionManager is
+    # architecturally barred from calling the broker directly (a
+    # pre-existing invariant; see tests/test_entry_ttl.py's own broker-
+    # isolation guard), so flag ON and flag OFF are identical in their
+    # effect on any position. Real broker-side enforcement (cancel-then-
+    # verify-then-close) would have to be routed through
+    # execution/order_manager.py's OrderManager -- a separate, not-yet-built
+    # ticket. Parts 1/2 of TIME-1 (honest time_stop_status + the "## Needs
+    # you" visibility line) are ALWAYS ON and unaffected by this flag.
+    time_exit_breach_alert_enabled: bool
+
     # ------------------------------------------------------------------ helpers
     @property
     def is_mock(self) -> bool:
@@ -1048,6 +1126,7 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     """
     if load_env_file and env is None:
         load_dotenv()
+        _log_env_divergence()
     src = env if env is not None else os.environ
 
     mode_raw = _get(src, "ALPHAOS_MODE", "mock").lower()
@@ -1471,6 +1550,13 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     scheduler_card_demotion_check_time = _get(src, "SCHEDULER_CARD_DEMOTION_CHECK_TIME", "06:50")
     _parse_hhmm(scheduler_card_demotion_check_time, "SCHEDULER_CARD_DEMOTION_CHECK_TIME")
 
+    # PRE-1b: once-daily pre-open self-test cadence, after text_archive_pull.
+    scheduler_preflight_time = _get(src, "SCHEDULER_PREFLIGHT_TIME", "07:15")
+    _parse_hhmm(scheduler_preflight_time, "SCHEDULER_PREFLIGHT_TIME")
+
+    # TIME-1 part 3: DARK by default -- see the field's own docstring above.
+    time_exit_breach_alert_enabled = _get_bool(src, "TIME_EXIT_BREACH_ALERT_ENABLED", False)
+
     # PR13.5: card_materialize's staging dir for proposed scaffolds/evidence.
     card_promotion_staging_dir = _get(src, "CARD_PROMOTION_STAGING_DIR", "data/promotions")
 
@@ -1774,4 +1860,6 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         db_path=_get(src, "ALPHAOS_DB_PATH", "data/alphaos.db"),
         jsonl_mirror=_get_bool(src, "ALPHAOS_JSONL_MIRROR", False),
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),
+        scheduler_preflight_time=scheduler_preflight_time,
+        time_exit_breach_alert_enabled=time_exit_breach_alert_enabled,
     )

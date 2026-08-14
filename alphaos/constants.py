@@ -1014,3 +1014,28 @@ CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
 # window-spec.md section 3.3). v1/v2/v3 stay byte-identical -- only v4's
 # own code path reads the interpolated bound.
 PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
+
+
+# --- GROUP-B / TIME-1: broker-managed position time-stop status vocabulary --
+# monitoring_snapshots.time_stop_status. Before TIME-1, every monitoring pass
+# wrote "active" for a broker-managed (execution_source=alpaca_paper)
+# position even though the local watchdog NEVER enforces max_holding_days
+# against it (position_manager.monitor() skips _check_exit entirely for
+# broker-managed positions -- an Alpaca bracket OCO has a stop leg and a
+# target leg but no time leg) -- the audit trail was asserting an
+# enforcement that could not happen. A broker-managed position ALWAYS reads
+# NOT_ENFORCED_BROKER_MANAGED, unconditionally -- TIME_EXIT_BREACH_ALERT_ENABLED
+# (default off) only adds an extra alert when a position is past its window;
+# PositionManager cannot mutate anything at the broker (a pre-existing,
+# deliberately-enforced architectural boundary -- see
+# execution/position_manager.py's own docstring), so there is no "enforced"
+# state for this status to ever report. EXPIRED keeps its existing
+# simulated_internal meaning (_check_exit returned "time_expiry" and the
+# local watchdog closed the position) unchanged; ACTIVE likewise unchanged.
+# This is a NEW, separate name area from VOCAB-1's constants.OUTCOME_STATUSES
+# (a different column, different table) -- see this ticket's own report for
+# the exact merge-order note.
+class TimeStopStatus(StrEnum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    NOT_ENFORCED_BROKER_MANAGED = "not_enforced_broker_managed"

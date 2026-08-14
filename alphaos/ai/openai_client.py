@@ -450,8 +450,16 @@ class OpenAIClient:
                         f"OpenAI evaluation failed for {candidate.get('symbol')}; rejecting.",
                         {"error": str(exc)},
                     )
+                # PRE-1a: inherit_from=evaluation -- the evaluation object at
+                # this point is whatever raw_evaluate() returned (unmutated;
+                # the exception above happened before _apply_atr_stop wrote
+                # anything to it), so if this was a REAL live call its
+                # ai_lineage + token usage are still on it. Without this, a
+                # real, paid call that hit a transient exception here (e.g. a
+                # DB error reading atr_history) would be recorded as if no
+                # call had ever happened -- undercounting real spend.
                 evaluation = self._rejection(candidate, "OpenAI call failed; rejected for safety.",
-                                             [ReasonCode.OPENAI_REJECT.value])
+                                             [ReasonCode.OPENAI_REJECT.value], inherit_from=evaluation)
         evaluation = self._enforce_min_reward_risk(evaluation, candidate)
         return evaluation
 
@@ -478,6 +486,13 @@ class OpenAIClient:
                 f"reward:risk {evaluation.expected_r} below minimum {floor}.",
                 [ReasonCode.REWARD_RISK_TOO_LOW.value],
                 freshness_status=evaluation.data_freshness_status,
+                # PRE-1a: RR-floor rejections are normal, working-as-designed
+                # model-level rejections -- NOT a provider failure -- but they
+                # still followed a REAL live call when evaluation.model_provider
+                # is set. Inherit that lineage + token usage so this row (which
+                # a real API call produced and was billed for) is never
+                # recorded as if no call happened.
+                inherit_from=evaluation,
             )
         return evaluation
 
@@ -516,6 +531,12 @@ class OpenAIClient:
                 f"No ATR(14) data available for {evaluation.symbol}; cannot compute a v2 stop.",
                 [ReasonCode.NO_ATR_DATA.value],
                 freshness_status=evaluation.data_freshness_status,
+                # PRE-1a: same reasoning as _enforce_min_reward_risk's own
+                # inherit_from -- NO_ATR_DATA is a normal rejection that can
+                # still follow a real, billed live call; never discard that
+                # call's lineage/tokens just because the pipeline rejected it
+                # one step later.
+                inherit_from=evaluation,
             )
 
         entry = float(evaluation.entry)
@@ -611,8 +632,26 @@ class OpenAIClient:
             is_mock=True,
         )
 
-    def _rejection(self, candidate, reason, flags, freshness_status="usable", validation_status="passed"):
-        return OpenAIEvaluation(
+    def _rejection(self, candidate, reason, flags, freshness_status="usable", validation_status="passed",
+                   inherit_from: Optional[OpenAIEvaluation] = None):
+        """Build a REJECT evaluation.
+
+        ``inherit_from`` (PRE-1a): when given, this rejection carries FORWARD
+        ``inherit_from``'s ai_lineage (model_provider/prompt_hash/
+        system_prompt_hash) and token usage (prompt_tokens/completion_tokens/
+        total_tokens) instead of leaving them at their None/unset dataclass
+        defaults. Used by post_process()'s own rejection paths (NO_ATR_DATA,
+        REWARD_RISK_TOO_LOW, and its own exception-catch fallback) -- each of
+        those can fire AFTER a real, billed live call already succeeded
+        (``inherit_from`` is that call's own evaluation, still carrying its
+        real lineage/tokens); without this, that real call would be recorded
+        in ``openai_evaluations`` indistinguishably from no call ever having
+        happened, undercounting real spend. Deliberately NOT the default
+        behavior everywhere: ``raw_evaluate``'s own exception-catch rejection
+        (the live call itself failed, before any response) has no lineage to
+        inherit and correctly omits this argument.
+        """
+        ev = OpenAIEvaluation(
             eval_id=new_id("eval"),
             candidate_id=candidate.get("candidate_id", ""),
             symbol=candidate.get("symbol"),
@@ -632,6 +671,14 @@ class OpenAIClient:
             raw={"mock": self.use_mock},
             is_mock=self.use_mock,
         )
+        if inherit_from is not None:
+            ev.model_provider = inherit_from.model_provider
+            ev.prompt_hash = inherit_from.prompt_hash
+            ev.system_prompt_hash = inherit_from.system_prompt_hash
+            ev.prompt_tokens = inherit_from.prompt_tokens
+            ev.completion_tokens = inherit_from.completion_tokens
+            ev.total_tokens = inherit_from.total_tokens
+        return ev
 
     # ------------------------------------------------------------------- live
     def _live_eval(self, candidate, snapshot, freshness_status) -> OpenAIEvaluation:  # pragma: no cover
