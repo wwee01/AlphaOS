@@ -58,6 +58,16 @@ MOONSHOT_TARGET_MONTHLY_PCT = 10.0
 
 UP_TO_N_LEARNED_SENTENCES = 3
 
+# PRE-1a audit-fixup MEDIUM-2: _evaluator_health's own lookback window.
+# Without a time bound, "last 50 rows" could span days/weeks on a quiet
+# book and, worse, an evaluator that stops producing rows ENTIRELY still
+# grades on the last 50 OLD (healthy) rows forever -- an instrument that
+# only ever looks at rows that exist cannot see their absence. 24h is
+# generous enough to not falsely trigger just because it's early in the
+# trading day, tight enough that a dead evaluator is caught the same or
+# next day, not silently forever.
+EVALUATOR_HEALTH_LOOKBACK_HOURS = 24
+
 
 def _market_condition(journal, settings) -> dict:
     rel_perf = build_relative_performance_report(journal, settings)
@@ -200,16 +210,41 @@ def _evaluator_health(journal, settings) -> dict:
     omitted (no ``Optional``/``None`` empty-state) -- ``_one_action`` needs
     to reliably ask "is the level warn/critical" every single build, and an
     omitted section here is exactly the silent-gap failure mode this ticket
-    exists to close."""
+    exists to close.
+
+    Audit-fixup MEDIUM-2 (two blind spots, same root cause -- an instrument
+    that only ever looks at rows that exist cannot see their absence):
+    (1) the query is now time-bounded to EVALUATOR_HEALTH_LOOKBACK_HOURS
+    (was an unbounded ``ORDER BY id DESC LIMIT 50``, which recovers slowly
+    on a quiet book and, worse, keeps grading on old healthy rows forever
+    if the evaluator stops producing output entirely); (2) zero rows in that
+    window on an actual trading day is now its own explicit WARN, not a
+    silent "insufficient sample" note that renders as if nothing were wrong.
+
+    Audit-fixup HIGH-2 (the ticket's own thesis): the OPENAI_REJECT
+    predicate alone cannot see a DIFFERENT silent-degrade shape -- paper
+    mode continuing live while OpenAIClient.use_mock has quietly flipped
+    true (a blank/rotated OPENAI_API_KEY). Mock rows never carry
+    OPENAI_REJECT (they never called the provider at all), so a paper-mode
+    window composed entirely of mock rows would otherwise read as perfectly
+    healthy. Flagged as its own CRITICAL arm below, additive to (never
+    replacing) the unchanged OPENAI_REJECT signal.
+    """
+    from datetime import timedelta
+
     from alphaos.ai.labeller_health import (
         evaluate_failsafe_health, is_openai_reject_row, summarize_failsafe_rows,
     )
+    from alphaos.util.market_calendar import is_trading_day
 
+    since = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=EVALUATOR_HEALTH_LOOKBACK_HOURS))
     rows = journal.query(
-        "SELECT risk_flags_json FROM openai_evaluations ORDER BY id DESC LIMIT 50"
+        "SELECT risk_flags_json, is_mock FROM openai_evaluations "
+        "WHERE created_at_utc >= ? ORDER BY id DESC LIMIT 50",
+        (since,),
     )
     summary = summarize_failsafe_rows(rows, is_openai_reject_row, lambda _r: "OPENAI_REJECT")
-    return evaluate_failsafe_health(
+    health = evaluate_failsafe_health(
         summary,
         settings.labeller_failsafe_warn_rate,
         settings.labeller_failsafe_critical_rate,
@@ -217,13 +252,44 @@ def _evaluator_health(journal, settings) -> dict:
         source_label="Evaluator",
     )
 
+    if not rows and not settings.is_mock and is_trading_day(timeutils.market_date()):
+        health["level"] = "warn"
+        health["note"] = None
+        health["message"] = (
+            f"Evaluator: zero evaluations in the trailing {EVALUATOR_HEALTH_LOOKBACK_HOURS}h on a "
+            "trading day -- the evaluator may have stopped producing output entirely. An absence of "
+            "rows is indistinguishable from a healthy quiet moment unless flagged explicitly."
+        )
+    elif not rows:
+        health["note"] = health.get("note") or (
+            f"insufficient sample (0 evaluations in the trailing {EVALUATOR_HEALTH_LOOKBACK_HOURS}h)"
+        )
 
-def _preflight_health(journal) -> Optional[dict]:
+    if rows and not settings.is_mock and sum(1 for r in rows if r.get("is_mock")) == len(rows):
+        health["level"] = "critical"
+        health["message"] = (
+            f"Evaluator: all {len(rows)} recent evaluation(s) in the trailing "
+            f"{EVALUATOR_HEALTH_LOOKBACK_HOURS}h are MOCK rows while ALPHAOS_MODE={settings.mode} -- "
+            "the evaluator has silently degraded to mock output (a blank or rotated OPENAI_API_KEY is "
+            "the likely cause) while live paper trading continues."
+        )
+
+    return health
+
+
+def _preflight_health(journal) -> dict:
     """PRE-1b: the latest completed ``preflight`` job_runs row's own
-    per-check payload -- None when no preflight run has completed yet
-    (PRE-1b just merged, or the very first pre-open window hasn't happened
-    yet) -- omit, don't fabricate, same idiom as every other ``_xxx_health``
-    section here."""
+    per-check payload.
+
+    Audit-fixup MEDIUM-3: ALWAYS present now (was ``Optional[dict]``,
+    ``None`` when no run had ever completed) -- a preflight job that STOPS
+    running silently deleted its own digest line under the old renderer's
+    ``if pfh:`` guard, exactly the "an instrument that can't see absence"
+    failure class this ticket exists to close (mirrors the "## Needs you"
+    positions-past-window line's own always-present-even-at-zero pattern).
+    ``ran=False`` is the honest "never completed a run yet" state,
+    distinguished from an actual pass/fail outcome.
+    """
     import json
 
     row = journal.one(
@@ -231,17 +297,19 @@ def _preflight_health(journal) -> Optional[dict]:
         "WHERE job_type = 'preflight' AND status = 'completed' "
         "ORDER BY finished_at_utc DESC LIMIT 1"
     )
+    never_run: dict = {"ran": False, "ok": None, "checks": {}, "as_of_sgt": None}
     if not row:
-        return None
+        return never_run
     raw = row.get("result_summary_json")
     if not raw:
-        return None
+        return never_run
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
-        return None
+        return never_run
     result = parsed.get("preflight_result") or {}
     return {
+        "ran": True,
         "ok": bool(result.get("ok")),
         "checks": result.get("checks") or {},
         "as_of_sgt": row.get("finished_at_sgt"),
@@ -1135,23 +1203,39 @@ def render_markdown(brief: dict) -> str:
 
         lines += [_render_backup(bkh), ""]
 
-    # PRE-1b: one digest line, always (no run yet omits it, same idiom as
-    # every other never-run-yet health section).
-    pfh = brief.get("preflight_health")
-    if pfh:
-        status = "ALL PASS" if pfh["ok"] else f"{sum(1 for c in pfh['checks'].values() if not c.get('ok'))} FAILED"
-        lines += [f"## Preflight ({pfh.get('as_of_sgt', '')[:10]}): {status}", ""]
+    # PRE-1b: ALWAYS present (audit-fixup MEDIUM-3 -- a preflight job that
+    # stops running must not silently delete its own line; "ran": False is
+    # the honest never-run-yet state, distinct from an actual pass/fail).
+    # Individually attributable: every check's own detail string renders,
+    # never a single undifferentiated "preflight failed".
+    pfh = brief.get("preflight_health") or {"ran": False, "ok": None, "checks": {}, "as_of_sgt": None}
+    if pfh.get("ran"):
+        checks = pfh.get("checks") or {}
+        n_failed = sum(1 for c in checks.values() if not c.get("ok"))
+        status = "ALL PASS" if pfh["ok"] else f"{n_failed} FAILED"
+        lines += [f"## Preflight ({pfh.get('as_of_sgt', '')[:10]}): {status}"]
+        for name, result in checks.items():
+            mark = "ok" if result.get("ok") else "FAIL"
+            lines.append(f"- {name}: {mark} — {result.get('detail', '')}")
+        lines.append("")
+    else:
+        lines += ["## Preflight: no run has completed yet", ""]
 
     # PRE-1a: the "did anything happen" line -- proposals produced + AI
     # error count by category, so a quiet day and a dead-provider day never
-    # look identical again.
+    # look identical again. Audit-fixup MEDIUM-2: an "insufficient sample"
+    # note renders honestly (never as a positive "OK" assurance from zero
+    # evidence).
     eh = brief.get("evaluator_health")
     if eh:
         reasons = eh.get("top_reason")
+        note = eh.get("note")
+        level_label = "INSUFFICIENT SAMPLE" if note else eh["level"].upper()
         lines += [
-            f"## AI evaluator health: {eh['level'].upper()} "
+            f"## AI evaluator health: {level_label} "
             f"({eh.get('fail_safe', 0)}/{eh.get('sample', 0)} recent calls fail-safe"
-            + (f", top reason: {reasons}" if reasons else "") + ")",
+            + (f", top reason: {reasons}" if reasons else "")
+            + (f"; {note}" if note else "") + ")",
             "",
         ]
 

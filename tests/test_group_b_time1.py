@@ -238,6 +238,33 @@ def test_flag_on_past_window_alerts_loudly_but_still_never_closes(journal, monke
     assert snap["action_taken"] == "broker_managed"
 
 
+def test_flag_on_alerts_once_per_day_per_position_not_every_monitor_pass(journal, monkeypatch):
+    """Audit-fixup MEDIUM-5: with no dedup, an armed flag would page on
+    EVERY monitor pass (~26x/trading day per stuck position at the default
+    5-minute interval), desensitizing exactly the channel this ticket
+    exists to keep meaningful. Three monitor() passes the SAME SGT day must
+    produce exactly ONE alert; a second position must still get its OWN
+    alert (the latch is per position_id, not global)."""
+    entry_date = date(2026, 7, 9)
+    _open_broker_position(journal, monkeypatch, entry_date, max_holding_days=3)
+    _open_broker_position(journal, monkeypatch, entry_date, max_holding_days=3, symbol="AVGO",
+                          broker_order_id=new_id("alpaca_ord"))
+    _freeze(monkeypatch, date(2026, 7, 20))
+    settings = make_settings(ALPHAOS_MODE="mock", TIME_EXIT_BREACH_ALERT_ENABLED="true")
+    alerts_sent = []
+    monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: alerts_sent.append(k))
+    pm = PositionManager(settings, journal)
+
+    pm.monitor(price_overrides={"AMD": 120.0, "AVGO": 120.0})
+    pm.monitor(price_overrides={"AMD": 120.0, "AVGO": 120.0})
+    pm.monitor(price_overrides={"AMD": 120.0, "AVGO": 120.0})
+
+    assert len(alerts_sent) == 2  # one per position, not one per (position x pass)
+    titles = {a["title"] for a in alerts_sent}
+    assert any("AMD" in t for t in titles)
+    assert any("AVGO" in t for t in titles)
+
+
 def test_flag_on_position_not_yet_past_window_never_alerts(journal, monkeypatch):
     """The 2-guard trading-day arithmetic is reused (not reimplemented):
     _maybe_alert_time_exit_breach delegates straight to _check_exit, which
@@ -305,6 +332,33 @@ def test_env_example_three_axes_resynced():
     assert "OPENAI_PROMPT_VERSION=v4" in content
     assert "ACTIVE_CARD_ID=catalyst_momentum_v3" in content
     assert "TIME_EXIT_BREACH_ALERT_ENABLED=false" in content
+    assert "ALPHAOS_MODE=paper" in content
+    assert "SCHEDULER_PREFLIGHT_TIME=07:15" in content
+
+
+def test_env_example_loads_without_a_settingserror():
+    """Audit-fixup HIGH-3: `cp .env.example .env` must not immediately raise
+    -- a previous edit set EXECUTION_PROVIDER=alpaca_paper while
+    ALPHAOS_MODE stayed mock, an internally-contradictory combination
+    settings.py refuses to load (\"EXECUTION_PROVIDER=alpaca_paper requires
+    ALPHAOS_MODE=paper\"). Parses .env.example with the SAME minimal parser
+    settings.py's own load_dotenv uses (key=value, '#' comments, blank
+    lines skipped) and feeds it through load_settings(env=...) directly --
+    proves the actual documented setup path boots, not just that two
+    strings happen to match."""
+    env: dict = {}
+    with open(".env.example", "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            env[key.strip()] = value.strip().strip('"').strip("'")
+
+    loaded = settings_module.load_settings(load_env_file=False, env=env)
+
+    assert loaded.mode.value == "paper"
+    assert loaded.execution_provider == "alpaca_paper"
 
 
 def test_env_divergence_log_silent_with_no_local_env_file(tmp_path, monkeypatch, capsys):

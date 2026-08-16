@@ -402,20 +402,32 @@ PREFLIGHT_CANARY_STALENESS_DAYS = 10
 
 def _preflight_check_openai_reachable(orch) -> dict:
     """Check 1 (spec's own #1, "this is the check that would have caught
-    P0-A"): one real, minimal OpenAI call -- honestly counted against the
-    existing AI cost cap via the SAME budget check run_scan_job already uses
-    (a budget-exhausted day degrades to an 'ok, skipped' detail, never a
-    false failure -- the cap is a capacity constraint, not a reachability
-    verdict). In mock mode / with no API key configured, live reachability
-    genuinely cannot be tested -- reports 'ok' with an honest 'not
-    applicable' detail rather than fabricating a pass or a fail. Any
-    exception on the real call (auth, quota, network, timeout) is the exact
-    failure class this check exists to surface."""
+    P0-A"): one real, minimal OpenAI call -- CHECKED against (never counted
+    toward, see MEDIUM-1 audit-fixup) the existing AI cost cap via the SAME
+    budget check run_scan_job already uses (a budget-exhausted day degrades
+    to an 'ok, skipped' detail, never a false failure -- the cap is a
+    capacity constraint, not a reachability verdict). Any exception on the
+    real call (auth, quota, network, timeout) is the exact failure class
+    this check exists to surface.
+
+    Audit-fixup HIGH-2 (the ticket's own thesis): a genuinely mock deploy
+    (ALPHAOS_MODE=mock) reports 'ok, not applicable' -- live reachability
+    truly cannot be tested there. But ALPHAOS_MODE=paper with a blank/rotated
+    OPENAI_API_KEY is NOT the same state, even though OpenAIClient.use_mock
+    also degrades to mock output for it -- that is a live-mode
+    misconfiguration (paper trading continuing on a silently-mocked
+    evaluator), and reporting it 'ok' is precisely the fail-open this ticket
+    exists to eliminate. That branch reports ``ok=False``.
+    """
     settings, journal = orch.settings, orch.journal
-    if settings.is_mock or not settings.has_openai_key:
+    if settings.is_mock:
+        return {"ok": True, "detail": "mock mode; live reachability not applicable"}
+    if not settings.has_openai_key:
         return {
-            "ok": True,
-            "detail": "mock mode / no OPENAI_API_KEY configured; live reachability not applicable",
+            "ok": False,
+            "detail": f"ALPHAOS_MODE={settings.mode} but OPENAI_API_KEY is blank -- the evaluator is "
+                      "silently running in MOCK mode while paper trading continues live; this is a "
+                      "misconfiguration, not a healthy 'not applicable' state.",
         }
     within_budget, budget_detail = cost_guard.check_scan_budget(settings, journal)
     if not within_budget:
@@ -424,10 +436,16 @@ def _preflight_check_openai_reachable(orch) -> dict:
         from openai import OpenAI  # lazy import; optional dependency, mirrors ai/openai_client.py
 
         client = OpenAI(api_key=settings.openai_api_key)
+        # gpt-5.x chat.completions REJECTS `max_tokens` (400) -- this repo has
+        # already learned this twice (ai/playbook_classifier.py,
+        # ai/last30days_polarity.py both use `max_completion_tokens`); a
+        # wrong param here would 400 on every healthy day and page at
+        # priority=high daily, recreating exactly the desensitization this
+        # ticket exists to kill.
         resp = client.chat.completions.create(
             model=settings.openai_primary_model,
             messages=[{"role": "user", "content": "ping"}],
-            max_tokens=5,
+            max_completion_tokens=5,
             timeout=15,
         )
         served_model = getattr(resp, "model", None) or settings.openai_primary_model
@@ -458,15 +476,38 @@ def _preflight_check_alpaca_reachable(orch) -> dict:
 def _preflight_check_market_data_freshness(orch) -> dict:
     """Check 3: a live snapshot for one reference symbol, run through the
     SAME FreshnessGuard every real scan/monitor pass already uses -- never a
-    second freshness definition."""
+    second freshness definition.
+
+    Audit-fixup HIGH-1: SCHEDULER_PREFLIGHT_TIME (07:15 SGT) is 19:15 ET the
+    PREVIOUS calendar day -- on SGT Sunday/Monday that previous-day ET
+    instant lands on a real weekend (Sat/Sun), so FreshnessGuard.assess()
+    correctly returns CLOSED_SESSION, which used to read as a plain
+    freshness FAILURE (is_usable=False) -- a false high-priority page on the
+    two pre-open windows every week that most need to be trusted (Monday's
+    is the worst: the first real signal after the weekend). A closed market
+    is not a data-freshness problem; there is nothing to be fresh. This
+    reads FreshnessGuard's own single source of truth for session state
+    (``report.freshness_status`` -- whatever the SNAPSHOT itself carries,
+    e.g. the real Alpaca path's own stamped session, takes priority over any
+    separately-computed wall-clock guess -- see FreshnessGuard.assess's own
+    ``session = snapshot.get("market_session") or ...`` precedence) rather
+    than adding a second, independently-drifting session computation here.
+    """
     settings, journal = orch.settings, orch.journal
     try:
+        from alphaos.constants import FreshnessStatus
         from alphaos.data.freshness_guard import FreshnessGuard
         from alphaos.data.market_data import MarketDataClient
 
         market = MarketDataClient(settings, journal)
         snap = market.get_snapshot(PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL)
         report = FreshnessGuard.from_settings(settings).assess(snap)
+        if report.freshness_status == FreshnessStatus.CLOSED_SESSION.value:
+            return {
+                "ok": True,
+                "detail": f"{PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL}: market closed "
+                          f"(session={report.market_session}); freshness check not applicable",
+            }
         detail = f"{PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL}: {report.freshness_status}"
         return {"ok": bool(report.is_usable), "detail": detail}
     except Exception as exc:  # noqa: BLE001 - the exact condition this check exists to catch

@@ -406,7 +406,12 @@ class PositionManager:
 
         Detects the past-window condition by reusing _check_exit's own
         two-guard arithmetic (never a second, independently-drifting
-        definition), and raises ONE clear, loud signal per monitor pass so
+        definition), and raises ONE clear, loud signal per DAY (not per
+        monitor pass -- audit-fixup MEDIUM-5: with no dedup this fired every
+        pass, ~26 high-priority pages/trading day at the default 5-minute
+        interval for one stuck position, which would desensitize exactly
+        the alert channel this ticket exists to keep meaningful; the latch
+        is per position_id, so N stuck positions still page once each) so
         an operator who arms this flag never gets silent inaction. Flag ON
         and flag OFF are IDENTICAL in their effect on any position (this
         method never closes anything either way) -- the critical invariant
@@ -423,9 +428,20 @@ class PositionManager:
 
         symbol = pos["symbol"]
         position_id = pos["position_id"]
+
+        st = timeutils.stamp()
+        today_sgt = st.local_sgt[:10]
+        already_alerted_today = self.journal.one(
+            "SELECT 1 FROM system_events WHERE category = 'time_exit_breach_alert' "
+            "AND message LIKE ? AND created_at_sgt >= ? LIMIT 1",
+            (f"%({position_id})%", today_sgt),
+        )
+        if already_alerted_today:
+            return
+
         self.journal.log_system_event(
             Severity.WARNING, "time_exit_breach_alert",
-            f"{symbol}: past its {pos.get('max_holding_days')}td time window with "
+            f"{symbol} ({position_id}): past its {pos.get('max_holding_days')}td time window with "
             "TIME_EXIT_BREACH_ALERT_ENABLED=true. This is a detect-and-alert-only signal -- "
             "PositionManager never calls the broker, so the position was left untouched.",
             {"position_id": position_id},
@@ -435,7 +451,8 @@ class PositionManager:
             title=f"AlphaOS: position past its time-exit window — {symbol}",
             message=f"{symbol} is past its {pos.get('max_holding_days')}td window. This is a "
                     "detect-and-alert-only signal (TIME_EXIT_BREACH_ALERT_ENABLED) -- nothing was "
-                    "closed or cancelled at the broker; review and act manually if needed.",
+                    "closed or cancelled at the broker; review and act manually if needed. (One alert "
+                    "per position per day -- see monitoring_snapshots for continuous status.)",
             priority="high", journal=self.journal,
         )
 

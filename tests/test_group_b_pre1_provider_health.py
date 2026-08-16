@@ -20,6 +20,8 @@ mock mode (no API key) for every test here.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from alphaos.ai.labeller_health import (
     evaluate_failsafe_health,
     is_openai_reject_row,
@@ -100,14 +102,18 @@ def test_is_openai_reject_row_handles_missing_and_malformed_json():
     assert is_openai_reject_row({"risk_flags_json": "not json at all"}) is False
 
 
-def _insert_eval(journal, symbol, risk_flags):
+def _insert_eval(journal, symbol, risk_flags, is_mock=0, created_at_utc=None):
     import json
 
-    journal.insert("openai_evaluations", {
+    row = {
         "eval_id": new_id("eval"), "candidate_id": new_id("cand"), "symbol": symbol,
         "model": "mock", "direction": "long", "decision": "reject",
-        "reasoning_summary": "test", "risk_flags_json": json.dumps(risk_flags), "is_mock": 0,
-    })
+        "reasoning_summary": "test", "risk_flags_json": json.dumps(risk_flags), "is_mock": is_mock,
+    }
+    if created_at_utc is not None:
+        row["created_at_utc"] = created_at_utc
+        row["created_at_sgt"] = created_at_utc
+    journal.insert("openai_evaluations", row)
 
 
 def test_evaluator_health_reads_openai_evaluations_and_grades_via_the_same_thresholds(journal):
@@ -142,6 +148,93 @@ def test_evaluator_health_all_rr_floor_rejections_stays_ok_despite_100pct_hash_l
         _insert_eval(journal, "AMD", ["REWARD_RISK_TOO_LOW"])
     health = _evaluator_health(journal, settings)
     assert health["fail_safe"] == 0
+
+
+# ---------------------------------------------- audit-fixup MEDIUM-2 / HIGH-2
+def test_evaluator_health_ignores_rows_older_than_the_lookback_window(journal):
+    """Audit-fixup MEDIUM-2 (blind spot 1): an OLD healthy row must not mask
+    a currently-dead evaluator -- the query is now time-bounded, not an
+    unbounded 'last 50 rows' that could span days/weeks."""
+    from alphaos.util import timeutils
+
+    settings = make_settings(
+        LABELLER_FAILSAFE_WARN_RATE="0.25", LABELLER_FAILSAFE_CRITICAL_RATE="0.5",
+        LABELLER_FAILSAFE_MIN_SAMPLE="1",
+    )
+    old = timeutils.to_iso(timeutils.now_utc() - timedelta(days=10))
+    _insert_eval(journal, "AMD", [], created_at_utc=old)  # 10 days old -- outside the window
+
+    health = _evaluator_health(journal, settings)
+
+    assert health["sample"] == 0
+
+
+def test_evaluator_health_starvation_arm_flags_zero_evaluations_on_a_trading_day(journal, monkeypatch):
+    """Audit-fixup MEDIUM-2 (blind spot 2, the important one): a dead
+    evaluator that stops producing ANY rows must not read as 'insufficient
+    sample, ok' during real market hours -- an instrument that only looks
+    at rows that exist cannot see their absence."""
+    from alphaos.util import market_calendar
+
+    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
+    monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: True)
+
+    health = _evaluator_health(journal, settings)
+
+    assert health["level"] == "warn"
+    assert "zero evaluations" in health["message"]
+
+
+def test_evaluator_health_starvation_arm_silent_on_a_non_trading_day(journal, monkeypatch):
+    """The starvation arm must not false-alarm on a genuinely quiet
+    weekend/holiday -- zero rows there is expected, not a failure."""
+    from alphaos.util import market_calendar
+
+    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
+    monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: False)
+
+    health = _evaluator_health(journal, settings)
+
+    assert health["level"] == "ok"
+    assert health.get("note")
+
+
+def test_evaluator_health_mock_rows_in_paper_mode_is_critical(journal):
+    """Audit-fixup HIGH-2 (the ticket's own thesis, second silent-degrade
+    shape): ALPHAOS_MODE=paper with a blank/rotated OPENAI_API_KEY makes
+    OpenAIClient.use_mock silently true -- every real evaluation call
+    becomes a mock row that never carries OPENAI_REJECT (it never called
+    the provider at all). Additive to (never replacing) the unchanged
+    OPENAI_REJECT signal."""
+    settings = make_settings(
+        ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s",
+        LABELLER_FAILSAFE_WARN_RATE="0.25", LABELLER_FAILSAFE_CRITICAL_RATE="0.5",
+        LABELLER_FAILSAFE_MIN_SAMPLE="1",
+    )
+    for _ in range(5):
+        _insert_eval(journal, "NVDA", [], is_mock=1)
+
+    health = _evaluator_health(journal, settings)
+
+    assert health["level"] == "critical"
+    assert "MOCK rows" in health["message"]
+    assert "ALPHAOS_MODE=paper" in health["message"]
+
+
+def test_evaluator_health_mock_rows_in_mock_mode_is_not_flagged(journal):
+    """The mock-in-paper arm must never fire for a genuinely mock deploy --
+    settings.is_mock guards it."""
+    settings = make_settings(
+        ALPHAOS_MODE="mock",
+        LABELLER_FAILSAFE_WARN_RATE="0.25", LABELLER_FAILSAFE_CRITICAL_RATE="0.5",
+        LABELLER_FAILSAFE_MIN_SAMPLE="1",
+    )
+    for _ in range(5):
+        _insert_eval(journal, "NVDA", [], is_mock=1)
+
+    health = _evaluator_health(journal, settings)
+
+    assert health["level"] == "ok"
     assert health["level"] == "ok"
 
 
