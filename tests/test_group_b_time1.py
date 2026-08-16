@@ -265,6 +265,69 @@ def test_flag_on_alerts_once_per_day_per_position_not_every_monitor_pass(journal
     assert any("AVGO" in t for t in titles)
 
 
+def test_flag_on_latch_lookup_failure_still_alerts_and_does_not_abort_the_pass(journal, monkeypatch):
+    """Audit-fixup FIX-2 (round 2): the M-5 dedup latch added a genuine DB
+    READ inside _maybe_alert_time_exit_breach, called UNGUARDED from
+    monitor(). A read failure there (e.g. 'database is locked', the
+    documented WAL-contention class on this project) must NOT abort the
+    entire monitor pass -- it must fail toward ALERTING ANYWAY, and a
+    LATER position in iteration order must still get its own full
+    snapshot/exit treatment. Proven with an injected raise on journal.one
+    scoped to the latch's own query shape only (other journal.one calls --
+    e.g. inside close_position -- must keep working)."""
+    entry_date = date(2026, 7, 9)
+    pos_broker = _open_broker_position(journal, monkeypatch, entry_date, max_holding_days=3)
+    # A SECOND, simulated_internal position that is ALSO genuinely past its
+    # window -- proves a DB error on the FIRST (broker-managed) position's
+    # latch lookup never prevents this one's real time_expiry exit later in
+    # the same monitor() iteration.
+    settings_for_sim = make_settings(ALPHAOS_MODE="mock")
+    pm_open = PositionManager(settings_for_sim, journal)
+    sim_row = _order_row(
+        symbol="MSFT", execution_source="simulated_internal", broker_order_id=None,
+    )
+    proposal_id = new_id("prop")
+    journal.insert("trade_proposals", {
+        "proposal_id": proposal_id, "candidate_id": new_id("cand"), "symbol": "MSFT",
+        "direction": "long", "strategy": "swing", "entry": 100.0, "stop": 50.0,
+        "target": 300.0, "max_holding_days": 3, "qty": 10.0,
+        "risk_per_share": 50.0, "dollar_risk": 500.0, "expected_r": 4.0,
+        "same_day_exit_eligible": 0, "status": "pending_approval",
+    })
+    sim_row["proposal_id"] = proposal_id
+    pm_open.open_position(sim_row, 100.0)
+
+    _freeze(monkeypatch, date(2026, 7, 20))
+    settings = make_settings(ALPHAOS_MODE="mock", TIME_EXIT_BREACH_ALERT_ENABLED="true")
+    alerts_sent = []
+    monkeypatch.setattr("alphaos.util.alerts.send_alert", lambda *a, **k: alerts_sent.append(k))
+
+    real_journal_one = journal.one
+
+    def _flaky_one(sql, params=()):
+        if "time_exit_breach_alert" in sql:
+            raise RuntimeError("database is locked")
+        return real_journal_one(sql, params)
+
+    monkeypatch.setattr(journal, "one", _flaky_one)
+    pm = PositionManager(settings, journal)
+
+    exits = pm.monitor(price_overrides={"AMD": 120.0, "MSFT": 120.0})
+
+    # The broker-managed position: latch lookup raised -> alert fired anyway
+    # (fail toward alerting, never toward silence).
+    assert len(alerts_sent) == 1
+    assert alerts_sent[0]["priority"] == "high"
+    # The simulated_internal position: a completely independent code path
+    # (never touches the latch at all) -- its genuine time_expiry exit must
+    # be entirely unaffected by the OTHER position's latch failure.
+    assert len(exits) == 1
+    assert exits[0]["symbol"] == "MSFT"
+    assert exits[0]["exit_reason"] == "time_expiry"
+    row = journal.one("SELECT status FROM positions WHERE position_id = ?", (pos_broker["position_id"],))
+    assert row["status"] == "open"  # broker-managed position untouched either way
+
+
 def test_flag_on_position_not_yet_past_window_never_alerts(journal, monkeypatch):
     """The 2-guard trading-day arithmetic is reused (not reimplemented):
     _maybe_alert_time_exit_breach delegates straight to _check_exit, which
@@ -326,26 +389,31 @@ def test_position_manager_source_never_calls_the_broker_directly():
 
 # ------------------------------------------------------------------ Part 4
 def test_env_example_three_axes_resynced():
+    """Audit-fixup FIX-4 (round 2, operator call): ALPHAOS_MODE and
+    EXECUTION_PROVIDER stay at their SAFE, offline-bootable defaults
+    (mock / simulated_internal) -- production's real values (paper /
+    alpaca_paper) are documented in the adjacent comments instead of being
+    this template's own bootable default. ACTIVE_CARD_ID and
+    OPENAI_PROMPT_VERSION (the other two TIME-1 part 4 axes, neither of
+    which conflicts with an offline boot) stay resynced to their live
+    values."""
     with open(".env.example", "r", encoding="utf-8") as fh:
         content = fh.read()
-    assert "EXECUTION_PROVIDER=alpaca_paper" in content
+    assert "EXECUTION_PROVIDER=simulated_internal" in content
     assert "OPENAI_PROMPT_VERSION=v4" in content
     assert "ACTIVE_CARD_ID=catalyst_momentum_v3" in content
     assert "TIME_EXIT_BREACH_ALERT_ENABLED=false" in content
-    assert "ALPHAOS_MODE=paper" in content
+    assert "ALPHAOS_MODE=mock" in content
     assert "SCHEDULER_PREFLIGHT_TIME=07:15" in content
 
 
 def test_env_example_loads_without_a_settingserror():
-    """Audit-fixup HIGH-3: `cp .env.example .env` must not immediately raise
-    -- a previous edit set EXECUTION_PROVIDER=alpaca_paper while
-    ALPHAOS_MODE stayed mock, an internally-contradictory combination
-    settings.py refuses to load (\"EXECUTION_PROVIDER=alpaca_paper requires
-    ALPHAOS_MODE=paper\"). Parses .env.example with the SAME minimal parser
-    settings.py's own load_dotenv uses (key=value, '#' comments, blank
-    lines skipped) and feeds it through load_settings(env=...) directly --
-    proves the actual documented setup path boots, not just that two
-    strings happen to match."""
+    """`cp .env.example .env` must boot cleanly, offline, with zero
+    credentials -- the whole point of FIX-4's reversal. Parses .env.example
+    with the SAME minimal parser settings.py's own load_dotenv uses
+    (key=value, '#' comments, blank lines skipped) and feeds it through
+    load_settings(env=...) directly -- proves the actual documented setup
+    path boots, not just that two strings happen to match."""
     env: dict = {}
     with open(".env.example", "r", encoding="utf-8") as fh:
         for line in fh:
@@ -357,8 +425,8 @@ def test_env_example_loads_without_a_settingserror():
 
     loaded = settings_module.load_settings(load_env_file=False, env=env)
 
-    assert loaded.mode.value == "paper"
-    assert loaded.execution_provider == "alpaca_paper"
+    assert loaded.mode.value == "mock"
+    assert loaded.execution_provider == "simulated_internal"
 
 
 def test_env_divergence_log_silent_with_no_local_env_file(tmp_path, monkeypatch, capsys):

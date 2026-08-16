@@ -58,15 +58,14 @@ MOONSHOT_TARGET_MONTHLY_PCT = 10.0
 
 UP_TO_N_LEARNED_SENTENCES = 3
 
-# PRE-1a audit-fixup MEDIUM-2: _evaluator_health's own lookback window.
-# Without a time bound, "last 50 rows" could span days/weeks on a quiet
-# book and, worse, an evaluator that stops producing rows ENTIRELY still
-# grades on the last 50 OLD (healthy) rows forever -- an instrument that
-# only ever looks at rows that exist cannot see their absence. 24h is
-# generous enough to not falsely trigger just because it's early in the
-# trading day, tight enough that a dead evaluator is caught the same or
-# next day, not silently forever.
-EVALUATOR_HEALTH_LOOKBACK_HOURS = 24
+# PRE-1a audit-fixup MEDIUM-2 (bound chosen in round 2 -- see
+# _last_completed_trading_day_start_utc): _evaluator_health's own lookback
+# window is the start of the last COMPLETED trading day, not a fixed
+# wall-clock duration -- without a time bound at all, "last 50 rows" could
+# span days/weeks on a quiet book and, worse, an evaluator that stops
+# producing rows ENTIRELY still grades on the last 50 OLD (healthy) rows
+# forever; an instrument that only ever looks at rows that exist cannot see
+# their absence.
 
 
 def _market_condition(journal, settings) -> dict:
@@ -194,6 +193,50 @@ def _backup_health() -> Optional[dict]:
     return build_backup_health()
 
 
+def _last_completed_trading_day_start_utc(now) -> str:
+    """The UTC instant for ET-midnight of the most recent trading day
+    STRICTLY BEFORE ``now``'s own ET calendar date -- a lower bound
+    GUARANTEED to include at least one full, completed regular session (the
+    found day's), regardless of what day/time ``now`` itself falls on.
+
+    Used by ``_evaluator_health`` (audit-fixup FIX-1, round 2) instead of a
+    fixed wall-clock hours window: a fixed window computed from a
+    fixed-SGT-instant digest run can land entirely inside a period with NO
+    real session (e.g. a Monday run whose trailing 24h spans Sunday into
+    early Monday, before that day's own session opens).
+
+    Reuses ``is_trading_day`` (this codebase's one source of truth for
+    trading-day status) purely to WALK BACK to the right calendar day, and
+    the same ET-midnight-to-UTC conversion idiom
+    ``JournalStore.start_of_trading_day_utc``/this module's own
+    ``_month_start_utc`` already use for the equivalent SGT case -- not a
+    second, independently-drifting notion of "session".
+
+    Bounded to ``_MAX_LOOKBACK_DAYS`` calendar days: real trading calendars
+    never have a gap that long, but a test (or a future caller) that
+    monkeypatches ``is_trading_day`` to always return False must never spin
+    this into an unbounded walk / date-arithmetic overflow -- falls back to
+    exactly ``_MAX_LOOKBACK_DAYS`` calendar days back in that case, the same
+    conservative "don't crash, don't hang" posture ``cadence.is_due`` uses
+    elsewhere in this codebase."""
+    from datetime import datetime as _dt, timedelta
+    from zoneinfo import ZoneInfo
+
+    from alphaos.util.market_calendar import is_trading_day
+
+    _MAX_LOOKBACK_DAYS = 30
+    start = timeutils.market_date(now) - timedelta(days=1)
+    d = start
+    for _ in range(_MAX_LOOKBACK_DAYS):
+        if is_trading_day(d):
+            break
+        d -= timedelta(days=1)
+    else:
+        d = start - timedelta(days=_MAX_LOOKBACK_DAYS)
+    et_midnight = _dt(d.year, d.month, d.day, tzinfo=ZoneInfo("America/New_York"))
+    return timeutils.to_iso(et_midnight.astimezone(ZoneInfo("UTC")))
+
+
 def _evaluator_health(journal, settings) -> dict:
     """PRE-1a: grades the PRIMARY evaluator's (``openai_evaluations``, the
     path that actually gates trades) recent fail-safe rate -- generalizes
@@ -214,12 +257,28 @@ def _evaluator_health(journal, settings) -> dict:
 
     Audit-fixup MEDIUM-2 (two blind spots, same root cause -- an instrument
     that only ever looks at rows that exist cannot see their absence):
-    (1) the query is now time-bounded to EVALUATOR_HEALTH_LOOKBACK_HOURS
-    (was an unbounded ``ORDER BY id DESC LIMIT 50``, which recovers slowly
-    on a quiet book and, worse, keeps grading on old healthy rows forever
-    if the evaluator stops producing output entirely); (2) zero rows in that
-    window on an actual trading day is now its own explicit WARN, not a
-    silent "insufficient sample" note that renders as if nothing were wrong.
+    (1) the query is now time-bounded (was an unbounded
+    ``ORDER BY id DESC LIMIT 50``, which recovers slowly on a quiet book
+    and, worse, keeps grading on old healthy rows forever if the evaluator
+    stops producing output entirely); (2) zero rows in that window is now
+    its own explicit WARN, not a silent "insufficient sample" note that
+    renders as if nothing were wrong.
+
+    Audit-fixup FIX-1 (round 2): the lookback bound is NOT a fixed 24 wall-
+    clock hours -- it is the start of the most recent trading day STRICTLY
+    BEFORE today (``_last_completed_trading_day_start_utc``), guaranteeing
+    the window always spans at least one FULL, COMPLETED regular session
+    regardless of what day/time this runs. A fixed-hours window broke on
+    Mondays: the digest runs at a constant SGT instant that lands BEFORE
+    that day's own session opens, so "trailing 24h" from a Monday run spans
+    Sunday 06:00 ET -> Monday 06:00 ET -- containing ZERO actual sessions --
+    while a same-shape check keyed on "is today a trading day" said True,
+    producing a false high-priority page every healthy Monday (~52/year
+    plus one after every holiday). Same defect class HIGH-1 already fixed
+    once in the preflight check, one function over: read the SAME existing
+    single source of truth (``is_trading_day``, this codebase's one
+    trading-day predicate) correctly instead of computing a second,
+    independent notion of "session".
 
     Audit-fixup HIGH-2 (the ticket's own thesis): the OPENAI_REJECT
     predicate alone cannot see a DIFFERENT silent-degrade shape -- paper
@@ -230,14 +289,11 @@ def _evaluator_health(journal, settings) -> dict:
     healthy. Flagged as its own CRITICAL arm below, additive to (never
     replacing) the unchanged OPENAI_REJECT signal.
     """
-    from datetime import timedelta
-
     from alphaos.ai.labeller_health import (
         evaluate_failsafe_health, is_openai_reject_row, summarize_failsafe_rows,
     )
-    from alphaos.util.market_calendar import is_trading_day
 
-    since = timeutils.to_iso(timeutils.now_utc() - timedelta(hours=EVALUATOR_HEALTH_LOOKBACK_HOURS))
+    since = _last_completed_trading_day_start_utc(timeutils.now_utc())
     rows = journal.query(
         "SELECT risk_flags_json, is_mock FROM openai_evaluations "
         "WHERE created_at_utc >= ? ORDER BY id DESC LIMIT 50",
@@ -252,24 +308,24 @@ def _evaluator_health(journal, settings) -> dict:
         source_label="Evaluator",
     )
 
-    if not rows and not settings.is_mock and is_trading_day(timeutils.market_date()):
+    if not rows and not settings.is_mock:
         health["level"] = "warn"
         health["note"] = None
         health["message"] = (
-            f"Evaluator: zero evaluations in the trailing {EVALUATOR_HEALTH_LOOKBACK_HOURS}h on a "
-            "trading day -- the evaluator may have stopped producing output entirely. An absence of "
-            "rows is indistinguishable from a healthy quiet moment unless flagged explicitly."
+            "Evaluator: zero evaluations since the start of the last completed trading session -- "
+            "the evaluator may have stopped producing output entirely. An absence of rows is "
+            "indistinguishable from a healthy quiet moment unless flagged explicitly."
         )
     elif not rows:
         health["note"] = health.get("note") or (
-            f"insufficient sample (0 evaluations in the trailing {EVALUATOR_HEALTH_LOOKBACK_HOURS}h)"
+            "insufficient sample (0 evaluations since the last completed trading session)"
         )
 
     if rows and not settings.is_mock and sum(1 for r in rows if r.get("is_mock")) == len(rows):
         health["level"] = "critical"
         health["message"] = (
-            f"Evaluator: all {len(rows)} recent evaluation(s) in the trailing "
-            f"{EVALUATOR_HEALTH_LOOKBACK_HOURS}h are MOCK rows while ALPHAOS_MODE={settings.mode} -- "
+            f"Evaluator: all {len(rows)} recent evaluation(s) since the last completed trading "
+            f"session are MOCK rows while ALPHAOS_MODE={settings.mode} -- "
             "the evaluator has silently degraded to mock output (a blank or rotated OPENAI_API_KEY is "
             "the likely cause) while live paper trading continues."
         )
@@ -277,7 +333,7 @@ def _evaluator_health(journal, settings) -> dict:
     return health
 
 
-def _preflight_health(journal) -> dict:
+def _preflight_health(journal, settings) -> dict:
     """PRE-1b: the latest completed ``preflight`` job_runs row's own
     per-check payload.
 
@@ -289,8 +345,20 @@ def _preflight_health(journal) -> dict:
     positions-past-window line's own always-present-even-at-zero pattern).
     ``ran=False`` is the honest "never completed a run yet" state,
     distinguished from an actual pass/fail outcome.
+
+    Audit-fixup FIX-3 (round 2): each check's own ``detail`` string is run
+    through ``util.alerts._sanitize`` (the SAME secret-redaction + length
+    bound the ntfy push path already applies) before it ever reaches the
+    returned payload -- a check detail can embed an arbitrary provider
+    exception message (e.g. ``f"OpenAI unreachable: {exc}"``), and unlike
+    the ntfy path, the digest markdown this feeds is persisted and rendered
+    in the console with no sanitization of its own. Sanitized at the
+    source (here) rather than at each render call site, so every consumer
+    of this payload is covered, not just render_markdown.
     """
     import json
+
+    from alphaos.util.alerts import _sanitize
 
     row = journal.one(
         "SELECT result_summary_json, finished_at_sgt FROM job_runs "
@@ -308,10 +376,15 @@ def _preflight_health(journal) -> dict:
     except (TypeError, ValueError):
         return never_run
     result = parsed.get("preflight_result") or {}
+    checks = result.get("checks") or {}
+    sanitized_checks = {
+        name: {**c, "detail": _sanitize(c.get("detail") or "", settings)}
+        for name, c in checks.items()
+    }
     return {
         "ran": True,
         "ok": bool(result.get("ok")),
-        "checks": result.get("checks") or {},
+        "checks": sanitized_checks,
         "as_of_sgt": row.get("finished_at_sgt"),
     }
 
@@ -1018,7 +1091,7 @@ def build_daily_brief(
     card_scoreboard_health = _card_scoreboard_health(journal)
     per_selector_health = _per_selector_health(journal, since_market_day)
     hold1_health = _hold1_health(journal)
-    preflight_health = _preflight_health(journal)
+    preflight_health = _preflight_health(journal, settings)
 
     return {
         "date_sgt": since_sgt[:10],

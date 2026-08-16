@@ -169,34 +169,79 @@ def test_evaluator_health_ignores_rows_older_than_the_lookback_window(journal):
     assert health["sample"] == 0
 
 
-def test_evaluator_health_starvation_arm_flags_zero_evaluations_on_a_trading_day(journal, monkeypatch):
-    """Audit-fixup MEDIUM-2 (blind spot 2, the important one): a dead
-    evaluator that stops producing ANY rows must not read as 'insufficient
-    sample, ok' during real market hours -- an instrument that only looks
-    at rows that exist cannot see their absence."""
-    from alphaos.util import market_calendar
+def _next_matching_trading_day(start, weekday):
+    """First real trading day on or after ``start`` whose ``date.weekday()``
+    equals ``weekday`` -- computed via the codebase's own ``is_trading_day``
+    (never a hardcoded/assumed calendar date), so these tests stay correct
+    even if the underlying holiday table changes."""
+    from alphaos.util.market_calendar import is_trading_day
+
+    d = start
+    while d.weekday() != weekday or not is_trading_day(d):
+        d += timedelta(days=1)
+    return d
+
+
+def test_evaluator_health_no_false_page_across_a_healthy_weekend_at_the_digest_instant(journal, monkeypatch):
+    """Audit-fixup FIX-1 (round 2): the digest runs at a FIXED SGT instant
+    (18:00 SGT = 06:00 ET) that, on Sat/Sun/the trading day right after a
+    holiday weekend, lands BEFORE that calendar day's own session has
+    opened -- a fixed 24h wall-clock window (or a same-shape gate keyed on
+    "is today a trading day") false-pages on every one of these healthy
+    check days. The fix reaches back to the start of the last COMPLETED
+    trading session (Friday's), so a system that produced a row during
+    Friday's real session must never false-page on Sat, Sun, OR the
+    following Monday -- reproducing the auditor's own 19-day probe shape at
+    unit-test scale."""
+    from datetime import date, datetime, timezone
+
+    from alphaos.util import timeutils
 
     settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
-    monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: True)
+
+    friday = _next_matching_trading_day(date(2026, 8, 10), weekday=4)  # Friday
+    saturday = friday + timedelta(days=1)
+    sunday = friday + timedelta(days=2)
+    monday = friday + timedelta(days=3)
+
+    # A real evaluation during Friday's own session (15:00 UTC = 11:00 ET).
+    friday_row_utc = timeutils.to_iso(
+        datetime(friday.year, friday.month, friday.day, 15, 0, tzinfo=timezone.utc)
+    )
+    _insert_eval(journal, "NVDA", [], created_at_utc=friday_row_utc)
+
+    for check_day in (saturday, sunday, monday):
+        # 18:00 SGT == 10:00 UTC on the same calendar date.
+        now = datetime(check_day.year, check_day.month, check_day.day, 10, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(timeutils, "now_utc", lambda n=now: n)
+        health = _evaluator_health(journal, settings)
+        assert health["level"] != "warn", (
+            f"false starvation page on {check_day.isoformat()} ({check_day.strftime('%A')})"
+        )
+
+
+def test_evaluator_health_genuine_mid_week_outage_still_pages(journal, monkeypatch):
+    """The quiet fix above must NOT disable the guard: a real outage
+    spanning a window that DID contain a completed session must still
+    warn -- this is the same shape as the original six-day dead-provider
+    incident, just checked mid-week instead of on a Monday."""
+    from datetime import date, datetime, timezone
+
+    from alphaos.util import timeutils
+
+    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
+
+    wednesday = _next_matching_trading_day(date(2026, 8, 10), weekday=2)  # Wednesday
+    thursday = wednesday + timedelta(days=1)
+    now = datetime(thursday.year, thursday.month, thursday.day, 10, 0, tzinfo=timezone.utc)  # 18:00 SGT Thursday
+    monkeypatch.setattr(timeutils, "now_utc", lambda: now)
+    # No rows inserted at all -- the window spans Wednesday's own completed
+    # session, so this must be a genuine, attributable warning.
 
     health = _evaluator_health(journal, settings)
 
     assert health["level"] == "warn"
     assert "zero evaluations" in health["message"]
-
-
-def test_evaluator_health_starvation_arm_silent_on_a_non_trading_day(journal, monkeypatch):
-    """The starvation arm must not false-alarm on a genuinely quiet
-    weekend/holiday -- zero rows there is expected, not a failure."""
-    from alphaos.util import market_calendar
-
-    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s")
-    monkeypatch.setattr(market_calendar, "is_trading_day", lambda d: False)
-
-    health = _evaluator_health(journal, settings)
-
-    assert health["level"] == "ok"
-    assert health.get("note")
 
 
 def test_evaluator_health_mock_rows_in_paper_mode_is_critical(journal):

@@ -371,7 +371,7 @@ def test_run_preflight_job_a_check_that_raises_is_recorded_not_propagated(orches
 def test_preflight_health_always_a_dict_never_run_yet(orchestrator):
     """Audit-fixup MEDIUM-3: ALWAYS a dict now (was None) -- a preflight job
     that STOPS running must not silently delete its own digest line."""
-    health = _preflight_health(orchestrator.journal)
+    health = _preflight_health(orchestrator.journal, orchestrator.settings)
     assert health == {"ran": False, "ok": None, "checks": {}, "as_of_sgt": None}
 
 
@@ -390,10 +390,48 @@ def test_preflight_health_reads_back_the_latest_completed_run(orchestrator):
         }),
     })
 
-    health = _preflight_health(orchestrator.journal)
+    health = _preflight_health(orchestrator.journal, orchestrator.settings)
     assert health["ran"] is True
     assert health["ok"] is False
     assert health["checks"]["openai_reachable"]["ok"] is False
+
+
+def test_preflight_health_sanitizes_check_details(journal):
+    """Audit-fixup FIX-3: a check's own ``detail`` can embed an arbitrary
+    provider exception (e.g. f"OpenAI unreachable: {exc}") -- unlike the
+    ntfy push path (util/alerts.py's own _sanitize), the digest markdown
+    this feeds is persisted and rendered in the console with no
+    sanitization of its own. Proves a configured secret VALUE embedded in a
+    check detail is redacted before this payload is ever returned."""
+    from alphaos.util import timeutils
+    from alphaos.util.ids import new_id
+
+    settings = make_settings(OPENAI_API_KEY="sk-super-secret-leak-me-1234567890")
+    st = timeutils.stamp()
+    journal.insert("job_runs", {
+        "job_run_id": new_id("jobrun"), "job_type": "preflight", "trigger_source": "scheduler",
+        "lock_key": "preflight:2026-08-13", "started_at_utc": st.utc, "started_at_sgt": st.local_sgt,
+        "status": "completed", "finished_at_utc": st.utc, "finished_at_sgt": st.local_sgt,
+        "result_summary_json": json.dumps({
+            "status": "completed",
+            "preflight_result": {
+                "ok": False,
+                "checks": {
+                    "openai_reachable": {
+                        "ok": False,
+                        "detail": "OpenAI unreachable: Incorrect API key provided: "
+                                  "sk-super-secret-leak-me-1234567890",
+                    },
+                },
+            },
+        }),
+    })
+
+    health = _preflight_health(journal, settings)
+
+    detail = health["checks"]["openai_reachable"]["detail"]
+    assert "sk-super-secret-leak-me-1234567890" not in detail
+    assert "***REDACTED***" in detail
 
 
 def test_render_markdown_preflight_section_always_present_and_attributable(orchestrator):

@@ -429,13 +429,35 @@ class PositionManager:
         symbol = pos["symbol"]
         position_id = pos["position_id"]
 
-        st = timeutils.stamp()
-        today_sgt = st.local_sgt[:10]
-        already_alerted_today = self.journal.one(
-            "SELECT 1 FROM system_events WHERE category = 'time_exit_breach_alert' "
-            "AND message LIKE ? AND created_at_sgt >= ? LIMIT 1",
-            (f"%({position_id})%", today_sgt),
-        )
+        # Audit-fixup FIX-2 (round 2): this SELECT is a genuine DB READ that
+        # did not exist before this latch -- monitor() calls this method
+        # UNGUARDED (no try/except at the call site), so a read failure here
+        # (e.g. "database is locked", the documented WAL-contention class on
+        # this project) would otherwise abort the ENTIRE monitor pass:
+        # no snapshots, no exit evaluation for any position after this one
+        # in iteration order. Whether a DIFFERENT (simulated_internal)
+        # position's genuine time_expiry exit survives becoming a function
+        # of row order is not a safety property. Fail toward ALERTING
+        # ANYWAY on a lookup failure -- a duplicate page is strictly better
+        # than a silently aborted watchdog pass.
+        today_sgt = timeutils.stamp().local_sgt[:10]
+        try:
+            already_alerted_today = self.journal.one(
+                "SELECT 1 FROM system_events WHERE category = 'time_exit_breach_alert' "
+                "AND message LIKE ? AND created_at_sgt >= ? LIMIT 1",
+                (f"%({position_id})%", today_sgt),
+            )
+        except Exception as exc:  # noqa: BLE001 - fail toward alerting, never toward aborting monitor()
+            already_alerted_today = None
+            try:
+                self.journal.log_system_event(
+                    Severity.WARNING, "time_exit_breach_alert",
+                    f"{symbol} ({position_id}): dedup-latch lookup failed; alerting anyway rather than "
+                    "risking a silently skipped monitor pass.",
+                    {"position_id": position_id, "error": str(exc)},
+                )
+            except Exception:  # pragma: no cover - best-effort, never compound the failure
+                pass
         if already_alerted_today:
             return
 
