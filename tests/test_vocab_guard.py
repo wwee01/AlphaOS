@@ -91,6 +91,20 @@ _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 _FROM_JOIN_RE = re.compile(r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(\w+)(?:\s+(?:AS\s+)?(\w+))?", re.IGNORECASE)
 # FIX-4(b)/(c): NOT IN and <> added alongside the original =/!=/IN.
 _OPERATORS = r"(?:NOT\s+IN|<>|!=|=|IN)"
+# Audit-fixup GROUP-A round 2 (FIX-B): a string must at least LOOK like SQL
+# (contain one of these keywords) before the quoted-literal heuristic below
+# is allowed to run over it at all. Without this, an ordinary error message
+# like `raise ValueError("outcome_status = 'resolved' is not a valid
+# status")` -- precisely the validation text someone writes BECAUSE of
+# VOCAB-1 -- or any bare non-docstring string statement mentioning the
+# field, gets scanned as if it were a real comparison. Deliberately NOT
+# applied to the call-based table-hint path (`_extract_sql_literals` called
+# with ``require_sql_shape=False``) -- that path already has a much
+# stronger signal (2-string-arg call shape) and gating it too would
+# regress journal_store.py's own real `count_rows("table", "field =
+# 'lit'")` predicate fragments, which never carry a literal WHERE/FROM
+# keyword (the caller's own helper prepends that itself).
+_SQL_SHAPE_RE = re.compile(r"\b(?:FROM|JOIN|UPDATE|INTO|WHERE)\b", re.IGNORECASE)
 
 
 def _sql_literal_pattern(field: str) -> "re.Pattern[str]":
@@ -131,9 +145,14 @@ def _resolve_table(text: str, alias: Optional[str]) -> Optional[str]:
     return next(iter(tables)) if len(tables) == 1 else None
 
 
-def _extract_sql_literals(text: str, field: str) -> list:
+def _extract_sql_literals(text: str, field: str, *, require_sql_shape: bool = True) -> list:
     """Returns ``(table_or_None, literal)`` pairs for every quoted-literal
-    comparison against ``field`` in one SQL string."""
+    comparison against ``field`` in one SQL string. FIX-B: by default the
+    string must contain a FROM/JOIN/UPDATE/INTO/WHERE keyword or it is
+    rejected outright, before the (much looser) quoted-literal regex is
+    even tried -- see the module-level ``_SQL_SHAPE_RE`` comment for why."""
+    if require_sql_shape and not _SQL_SHAPE_RE.search(text):
+        return []
     out = []
     for m in _sql_literal_pattern(field).finditer(text):
         table = _resolve_table(text, m.group(1))
@@ -142,12 +161,21 @@ def _extract_sql_literals(text: str, field: str) -> list:
     return out
 
 
-def _placeholder_literals(path: Path, sql_node: ast.Constant, params_node, field: str) -> list:
+def _placeholder_literals(path: Path, sql_node: ast.Constant, params_node, field: str, name_values: dict) -> list:
     """FIX-4(a): positionally matches ``?`` placeholders for ``field`` in a
     parameterized query string to the corresponding elements of a sibling
-    params tuple/list, extracting any that are raw string literals (a Name
-    reference, e.g. a properly constants-sourced value, is deliberately
-    NOT flagged -- that is the correct end state, not a gap)."""
+    params tuple/list.
+
+    Audit-fixup GROUP-A round 2 (FIX-C): a params-tuple element that is a
+    bare ``Name`` (e.g. ``(_STATUS_PENDING, _STATUS_PARTIAL, limit)``) is
+    now resolved through the SAME same-file ``name_values`` map the
+    ``==``/``in`` comparison path already uses, via ``_literal_strings_in``
+    -- previously only a direct string ``Constant`` was recognized here,
+    which made BOTH of this codebase's own real parameterized writer call
+    sites (``outcomes_tracker.py``'s ``outcome_status IN (?, ?)`` and
+    ``outcome_status = ?`` updates) structurally invisible to the guard,
+    and would let a future reader module's own bad same-file constant slip
+    through unnoticed."""
     text = sql_node.value
     m = _placeholder_pattern(field).search(text)
     if not m:
@@ -159,18 +187,50 @@ def _placeholder_literals(path: Path, sql_node: ast.Constant, params_node, field
     out = []
     for i in range(start, min(start + n, len(elts))):
         el = elts[i]
-        if isinstance(el, ast.Constant) and isinstance(el.value, str):
-            out.append(Finding(path, sql_node.lineno, el.value, table))
+        for lit in _literal_strings_in(el, name_values):
+            out.append(Finding(path, sql_node.lineno, lit, table))
     return out
 
 
 # ================================================================ Python
-def _is_field_access(node: ast.AST, field: str) -> bool:
+def _field_derived_names(tree: ast.AST, field: str) -> set:
+    """Audit-fixup GROUP-A round 2 (FIX-D): names assigned DIRECTLY from a
+    dict/row access keyed by ``field`` (``x = row.get("field")`` / ``x =
+    row["field"]``) -- a bare ``Name`` is only treated as a field access
+    below when it can be traced to one of these assignments, never merely
+    because the LOCAL VARIABLE'S OWN NAME happens to match the field
+    (auditor's counter-example: ``replay_status = resp.get("http_state")``
+    followed by ``replay_status == "timed_out"`` must never be read as the
+    DB column just because someone called the variable ``replay_status``).
+    Same single-file, purely-syntactic scope as ``_name_values`` -- no real
+    scope analysis, just "was this exact name EVER assigned from the right
+    shape, anywhere in the file"."""
+    trusted = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            value = node.value
+            derived = False
+            if isinstance(value, ast.Subscript):
+                idx = value.slice
+                if isinstance(idx, ast.Constant) and idx.value == field:
+                    derived = True
+            elif isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute) and value.func.attr == "get":
+                if value.args and isinstance(value.args[0], ast.Constant) and value.args[0].value == field:
+                    derived = True
+            if derived:
+                trusted.add(node.targets[0].id)
+    return trusted
+
+
+def _is_field_access(node: ast.AST, field: str, trusted_names: frozenset = frozenset()) -> bool:
     """True for ``<expr>["field"]``, ``<expr>.get("field")``, or a bare
-    local variable NAMED after the field (FIX-1's cited gap: ``replay_result
-    = co_row.get("replay_result")`` followed by ``replay_result ==
-    "ambiguous_same_bar"`` a few lines later -- the second comparison has no
-    subscript/``.get()`` shape at all, just the variable's own name)."""
+    local variable NAMED after the field AND present in ``trusted_names``
+    (FIX-1's cited gap: ``replay_result = co_row.get("replay_result")``
+    followed by ``replay_result == "ambiguous_same_bar"`` a few lines later
+    -- the second comparison has no subscript/``.get()`` shape at all, just
+    the variable's own name -- narrowed by FIX-D so a coincidentally-named
+    unrelated variable is never treated as the DB column; see
+    ``_field_derived_names``)."""
     if isinstance(node, ast.Subscript):
         idx = node.slice
         if isinstance(idx, ast.Constant) and idx.value == field:
@@ -178,7 +238,7 @@ def _is_field_access(node: ast.AST, field: str) -> bool:
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
         if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == field:
             return True
-    if isinstance(node, ast.Name) and node.id == field:
+    if isinstance(node, ast.Name) and node.id == field and node.id in trusted_names:
         return True
     return False
 
@@ -228,13 +288,36 @@ def _name_values(tree: ast.AST) -> dict:
     see through a bare name on either side of a comparison. Deliberately
     single-file and purely syntactic -- no cross-import resolution, no
     partial evaluation of expressions -- a documented boundary, not an
-    attempt at full data-flow analysis."""
-    out: dict = {}
+    attempt at full data-flow analysis.
+
+    Audit-fixup GROUP-A round 2 (FIX-A): this walker never does real scope
+    analysis, so if the SAME name is assigned MORE THAN ONE DISTINCT
+    literal value anywhere in the file (an unrelated ``status =
+    "resolved"`` in one function and ``status = "complete"`` in another),
+    a single resolved answer here is not well-defined. Previously this
+    silently kept whichever assignment ``ast.walk`` happened to visit
+    LAST -- worse than not resolving at all: it reports a confident,
+    possibly-WRONG value, the anti-vacuity assert still passes, and a
+    reviewer reading the findings list sees a clean vocabulary. An
+    ambiguous name now resolves to an explicit sentinel string instead
+    (never a member of ANY real vocabulary, so it always surfaces as a
+    flagged finding -- visible, not silently laundered) rather than
+    last-write-wins."""
+    raw: dict = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             values = _literal_strings_in(node.value, {})
             if values:
-                out[node.targets[0].id] = values
+                raw.setdefault(node.targets[0].id, set()).add(tuple(sorted(values)))
+    out: dict = {}
+    for name, distinct_value_sets in raw.items():
+        if len(distinct_value_sets) > 1:
+            out[name] = (
+                f"<AMBIGUOUS NAME {name!r}: {len(distinct_value_sets)} distinct literal "
+                "assignments found in this file -- classify by hand, never resolved automatically>",
+            )
+        else:
+            out[name] = next(iter(distinct_value_sets))
     return out
 
 
@@ -259,6 +342,7 @@ def collect_field_literals(field: str, roots=_DEFAULT_ROOTS) -> list:
             tree = ast.parse(source, filename=str(path))
             docstring_ids = _docstring_node_ids(tree)
             names = _name_values(tree)
+            trusted = frozenset(_field_derived_names(tree, field))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     if id(node) in docstring_ids:
@@ -266,9 +350,9 @@ def collect_field_literals(field: str, roots=_DEFAULT_ROOTS) -> list:
                     for table, lit in _extract_sql_literals(node.value, field):
                         found.append(Finding(path, node.lineno, lit, table))
                 elif isinstance(node, ast.Compare):
-                    left_is_field = _is_field_access(node.left, field)
+                    left_is_field = _is_field_access(node.left, field, trusted)
                     for comparator in node.comparators:
-                        right_is_field = _is_field_access(comparator, field)
+                        right_is_field = _is_field_access(comparator, field, trusted)
                         if left_is_field and not right_is_field:
                             for lit in _literal_strings_in(comparator, names):
                                 found.append(Finding(path, node.lineno, lit, None))
@@ -309,7 +393,13 @@ def collect_field_literals(field: str, roots=_DEFAULT_ROOTS) -> list:
                             and re.search(rf"\b{re.escape(field)}\b", second.value)
                         ):
                             # `X("table", "field = 'lit'")` -- count_rows-style.
-                            for _, lit in _extract_sql_literals(second.value, field):
+                            # require_sql_shape=False: this string is already
+                            # gated by the 2-string-arg call shape + field-name
+                            # presence above, a stronger signal than a bare
+                            # scan -- and journal_store.py's own real
+                            # count_rows() predicate fragments never carry a
+                            # literal WHERE/FROM keyword themselves.
+                            for _, lit in _extract_sql_literals(second.value, field, require_sql_shape=False):
                                 found.append(Finding(path, node.lineno, lit, table_hint))
                         elif isinstance(second, ast.Dict):
                             # `X("table", {"field": "lit"})` -- insert-style.
@@ -335,7 +425,7 @@ def collect_field_literals(field: str, roots=_DEFAULT_ROOTS) -> list:
                         elif isinstance(a, (ast.Tuple, ast.List)):
                             params_arg = a
                     if sql_arg is not None and params_arg is not None:
-                        found.extend(_placeholder_literals(path, sql_arg, params_arg, field))
+                        found.extend(_placeholder_literals(path, sql_arg, params_arg, field, names))
     return _dedupe_prefer_tabled(found)
 
 
@@ -562,6 +652,98 @@ def test_ast_guard_catches_a_named_constant_mutation(tmp_path):
     findings = collect_field_literals("outcome_status", roots=(pkg,))
     literals = {f.literal for f in findings}
     assert "resolved" in literals, _format_findings(findings)
+
+
+def test_ast_guard_never_last_write_wins_on_an_ambiguous_name(tmp_path):
+    """FIX-A proof (the auditor's own exact shape): a name assigned TWO
+    DIFFERENT literal values in two UNRELATED functions in the same file
+    must never resolve to either one silently. Before this fix, the walker
+    reported a confident (WRONG) 'complete' finding and flagged nothing --
+    worse than the original bug, because it looked clean. Now it must
+    surface as a visibly-bad (never-valid) finding instead."""
+    pkg = tmp_path / "fake_alphaos_ambiguous"
+    pkg.mkdir()
+    (pkg / "ambiguous.py").write_text(
+        "def bad_reader(row):\n"
+        "    status = 'resolved'\n"
+        "    return row['outcome_status'] == status\n"
+        "\n"
+        "def unrelated():\n"
+        "    status = 'complete'\n"
+        "    return status\n"
+    )
+    findings = collect_field_literals("outcome_status", roots=(pkg,))
+    literals = {f.literal for f in findings}
+    # The old (last-write-wins) bug: exactly {'complete'}, nothing flagged.
+    assert literals != {"complete"}, (
+        f"last-write-wins regression: resolved silently to 'complete' with nothing flagged: {_format_findings(findings)}"
+    )
+    bad = _check_against_table_vocab(findings, _OUTCOME_STATUS_TABLE_VOCAB)
+    assert bad, "an ambiguous name must surface as a visibly-flagged finding, not pass silently"
+
+
+def test_ast_guard_does_not_scan_a_validation_error_message_as_sql(tmp_path):
+    """FIX-B proof (the auditor's own exact example): an ordinary
+    ``raise ValueError(...)`` message that happens to mention the field and
+    a bad-looking literal -- precisely the validation text someone writes
+    BECAUSE of VOCAB-1 -- must never be treated as a real comparison. Same
+    for a bare (non-docstring-position) string statement."""
+    pkg = tmp_path / "fake_alphaos_error_message"
+    pkg.mkdir()
+    (pkg / "validation.py").write_text(
+        "def validate(value):\n"
+        "    if value not in ('pending', 'partial', 'complete', 'unavailable'):\n"
+        "        raise ValueError(\"outcome_status = 'resolved' is not a valid status\")\n"
+        "\n"
+        "def bare_string_statement():\n"
+        "    \"outcome_status = 'resolved', a leftover note, not a docstring position\"\n"
+        "    return 1\n"
+    )
+    findings = collect_field_literals("outcome_status", roots=(pkg,))
+    assert findings == [], f"an error message / bare string was scanned as real SQL text: {_format_findings(findings)}"
+
+
+def test_ast_guard_resolves_names_in_parameterized_placeholder_params(tmp_path):
+    """FIX-C proof: a `?`-placeholder's own params-tuple element that is a
+    bare Name (not an inline literal) is now resolved through the same
+    same-file name map the ``==``/``in`` comparison path already used --
+    exactly the shape outcomes_tracker.py's own real writer uses
+    (``outcome_status IN (?, ?)``, params sourced from module-level status
+    aliases), which was previously invisible to the guard entirely."""
+    pkg = tmp_path / "fake_alphaos_placeholder_name"
+    pkg.mkdir()
+    (pkg / "placeholder_name.py").write_text(
+        "_BAD = 'resolved'\n"
+        "\n"
+        "def q(journal):\n"
+        "    return journal.query(\n"
+        "        \"SELECT * FROM candidate_outcomes WHERE outcome_status = ?\",\n"
+        "        (_BAD,),\n"
+        "    )\n"
+    )
+    findings = collect_field_literals("outcome_status", roots=(pkg,))
+    literals = {f.literal for f in findings}
+    assert "resolved" in literals, _format_findings(findings)
+
+
+def test_ast_guard_ignores_a_coincidentally_named_unrelated_variable(tmp_path):
+    """FIX-D proof (the auditor's own exact example): a local variable
+    merely NAMED after the field, but assigned from something else
+    entirely (never a dict/row access keyed by this field), must NOT be
+    treated as the DB column. ``replay_status = resp.get("http_state")``
+    followed by ``replay_status == "timed_out"`` is about an HTTP response,
+    not candidate_outcomes/shadow_baseline_decisions at all."""
+    pkg = tmp_path / "fake_alphaos_coincidental_name"
+    pkg.mkdir()
+    (pkg / "coincidental.py").write_text(
+        "def poll(resp):\n"
+        "    replay_status = resp.get('http_state')\n"
+        "    return replay_status == 'timed_out'\n"
+    )
+    findings = collect_field_literals("replay_status", roots=(pkg,))
+    assert findings == [], (
+        f"a coincidentally-named unrelated variable was treated as the DB column: {_format_findings(findings)}"
+    )
 
 
 # ================================================== replay_result sweep

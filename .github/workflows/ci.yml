@@ -43,20 +43,34 @@ jobs:
         run: python -m pytest
 
   test-clock-shift:
-    name: tests +90d (date-rot detector, advisory)
+    name: tests clock-shift ${{ matrix.clock-shift-days }}d (date-rot detector, advisory)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Audit-fixup GROUP-A round 2: +90 ONLY missed a REAL, pre-existing
+        # date-rot pair (test_benchmark_capture.py's own
+        # test_bars_backfill_only_fetches_the_gap_since_last_cached_date /
+        # test_bars_backfill_is_rerun_safe_via_the_unique_index -- both
+        # hardcoded a "last cached date" that sits in the FUTURE relative to
+        # a -90d "today", tripping capture_benchmark_spine's own `start >
+        # market_dt` early-out) -- both directions are needed, not just the
+        # forward one, since a hardcoded date can just as easily be stale
+        # against a PAST shift as a future one.
+        clock-shift-days: [90, -90]
     # GREEN-1 defect 4 (the date-rot class fix): §H.1's hardcoded-date flake
-    # has recurred four times (233c74b, 6ffbc2d, cd057ce, and the two tests
-    # this same spec's own GREEN-1 defect 1 re-seeds). A test that hardcodes
-    # "today" instead of deriving it from timeutils.now_utc() passes until
-    # the calendar rolls past its own trailing window, then goes red with no
-    # code change. Running the WHOLE suite once more, today, as if 90 days
-    # had already passed (tests/_dateshift.py's --clock-shift-days option)
-    # surfaces that class of latent failure BEFORE merge instead of weeks
-    # later. Advisory (continue-on-error) -- a red run here is a signal to
-    # investigate, never a merge blocker, since some failures may reflect a
-    # genuinely time-bound feature (e.g. a pre-registration's analysis_not_
-    # before date) rather than a bug.
+    # has recurred many times (233c74b, 6ffbc2d, cd057ce, and the four tests
+    # this spec's own GREEN-1/audit-fixup rounds re-seeded). A test that
+    # hardcodes "today" instead of deriving it from timeutils.now_utc()
+    # passes until the calendar rolls past its own trailing window (or, for
+    # a "last known date" style fixture, until the calendar rolls far enough
+    # PAST it), then goes red with no code change. Running the WHOLE suite
+    # once more, today, as if N days had already passed (tests/_dateshift.py's
+    # --clock-shift-days option) surfaces that class of latent failure BEFORE
+    # merge instead of weeks later. Advisory (continue-on-error) -- a red run
+    # here is a signal to investigate, never a merge blocker, since some
+    # failures may reflect a genuinely time-bound feature (e.g. a
+    # pre-registration's analysis_not_before date) rather than a bug.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -72,8 +86,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[test,api]"
 
-      - name: Run test suite 90 days in the future (advisory)
-        run: python -m pytest --clock-shift-days=90
+      - name: Run test suite ${{ matrix.clock-shift-days }} days shifted (advisory)
+        run: python -m pytest --clock-shift-days=${{ matrix.clock-shift-days }}
 
   console:
     name: console (vitest)
