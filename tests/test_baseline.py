@@ -23,7 +23,6 @@ import pathlib
 import pytest
 
 from alphaos.baseline.rules import (
-    BASELINE_HOLD10_SUFFIX,
     BASELINE_RULE_VERSIONS,
     BASELINE_RULE_VERSIONS_HOLD10,
     PROPOSE_ALL_V1,
@@ -437,8 +436,56 @@ def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, 
     })
     journal.insert("candidate_outcomes", {
         "outcome_id": new_id("outc"), "candidate_id": candidate_id, "symbol": "AAPL",
-        "candidate_type": "candidate", "outcome_status": "resolved", "replay_r": ai_r,
+        # VOCAB-1: was the phantom 'resolved' literal build_baseline_report()
+        # never actually filters on (the real writer vocabulary is 'complete',
+        # not 'resolved' -- see constants.OUTCOME_STATUSES); this fixture
+        # helper's whole point is a PAIRED row, so 'complete' is correct.
+        "candidate_type": "candidate", "outcome_status": "complete", "replay_r": ai_r,
     })
+
+
+def test_build_baseline_report_never_pairs_a_partial_outcome_row(journal, settings):
+    """Audit-fixup GROUP-A round 1 (FIX-7, both blind Opus audits'
+    highest-value finding): VOCAB-1's own spec text is explicit -- 'partial'
+    is deliberately NOT included alongside 'complete' in build_baseline_
+    report()'s outcome_status filter, because a 'partial' row's 1/3/5-day
+    columns are still on a TRUNCATED bar window (fewer than 5 forward bars
+    resolved yet) and get silently OVERWRITTEN by a later
+    update_pending_outcomes() pass once more bars arrive -- pairing on one
+    now would freeze that censored, still-moving value into BASELINE's
+    pre-registered evidence forever. This exclusion had ZERO test coverage:
+    an auditor mutated the SQL filter to
+    ``outcome_status IN ('complete', 'partial')`` -- a direct violation of
+    the spec's own ruling -- and the FULL SUITE STAYED GREEN. Proof: a
+    'partial' row with replay_r already populated (exactly the shape a
+    still-resolving row can have) must NOT be counted as paired, even
+    though every other join condition (matching candidate_id, non-null
+    replay_r) is satisfied."""
+    from alphaos.util.ids import new_id
+
+    journal.insert("shadow_baseline_decisions", {
+        "baseline_decision_id": new_id("basedec"), "candidate_id": "cand_partial", "symbol": "AAPL",
+        "rule_version": THRESHOLD_V1, "decision": "propose", "decision_reason": "above_threshold",
+        "direction": "long", "entry": 100.0, "stop": 96.0, "target": 104.8,
+        "max_holding_days": 3, "input_sha": "deadbeef", "decision_at_utc": "2026-01-01T00:00:00+00:00",
+        "replay_status": "complete", "replay_result": "target_hit", "replay_r": 0.0,
+    })
+    journal.insert("candidate_outcomes", {
+        "outcome_id": new_id("outc"), "candidate_id": "cand_partial", "symbol": "AAPL",
+        # The row under test: 'partial', NOT 'complete' -- still on a
+        # truncated bar window -- but replay_r is already non-NULL (the
+        # exact shape that would slip through an accidental 'IN
+        # (complete, partial)' filter).
+        "candidate_type": "candidate", "outcome_status": "partial", "replay_r": 1.0,
+    })
+    # A genuinely paired 'complete' row too, so the assertion below proves
+    # the partial row is SPECIFICALLY excluded, not that pairing is broken
+    # entirely.
+    _seed_complete_paired_row(journal, candidate_id="cand_complete", rule_version=THRESHOLD_V1)
+
+    rep = build_baseline_report(journal, settings)
+    assert rep["n_shadow_resolved"] == 2  # both shadow_baseline_decisions rows are 'complete'
+    assert rep["n_paired_total"] == 1  # only the 'complete' outcome row pairs
 
 
 def test_build_baseline_report_v1_not_diluted_by_newer_hold10_rows(journal, settings):

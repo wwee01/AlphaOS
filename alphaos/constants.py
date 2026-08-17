@@ -1014,3 +1014,22 @@ CANARY_CONFIRMATION_STATUS_NOT_CONFIRMED = "not_confirmed"
 # window-spec.md section 3.3). v1/v2/v3 stay byte-identical -- only v4's
 # own code path reads the interpolated bound.
 PROMPT_VERSIONS = ("v1", "v2", "v3", "v4")
+
+
+# VOCAB-1 (seven-lens review P0-C, 2026-08-13): the ONE candidate_outcomes.
+# outcome_status vocabulary, written ONLY by alphaos/learning/
+# outcomes_tracker.py (seed -> 'pending'; update -> 'complete'/'partial';
+# no-forward-data give-up -> 'unavailable'). Centralized here -- same plain-
+# tuple shape as PROMPT_VERSIONS above -- because two reports (baseline_
+# report.py, regime_arming_scorer.py) had independently spelled a phantom
+# 'resolved' literal the writer has NEVER emitted, silently zeroing
+# BASELINE's paired evidence for 35 days while every existing test stayed
+# green (the fixtures reproduced the same phantom spelling). The writer
+# unpacks its own status literals from this same tuple (see outcomes_
+# tracker.py's own _STATUS_* aliases) so a future rename can never fork the
+# reader and writer spellings apart again; tests/test_vocab_guard.py's AST
+# walker enforces every outcome_status literal anywhere in alphaos/ is a
+# member of this set. Ordered seed -> terminal, matching the state
+# machine's own progression (pending -> partial/complete -> unavailable is
+# also reachable from pending directly).
+OUTCOME_STATUSES = ("pending", "partial", "complete", "unavailable")

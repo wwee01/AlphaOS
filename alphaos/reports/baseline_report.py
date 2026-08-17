@@ -178,12 +178,24 @@ def build_baseline_report(
     merge with zero actual change to the v1 evidence. Filtering at the SQL
     layer means the v1 report's own ``LIMIT`` is never diluted by rows it
     was never going to report on anyway -- default ``rule_versions``
-    reproduces the pre-fixup v1-only query exactly."""
+    reproduces the pre-fixup v1-only query exactly.
+
+    Audit-fixup VOCAB-1 (seven-lens review P0-C, 2026-08-13): the inner
+    join's own ``co.outcome_status`` filter was the LITERAL 'resolved' --
+    a status ``alphaos/learning/outcomes_tracker.py`` (the only writer of
+    that column) has never once emitted (real vocabulary: 'pending' /
+    'partial' / 'complete' / 'unavailable' -- see ``constants.
+    OUTCOME_STATUSES``). Every existing test stayed green because the same
+    phantom literal was baked into the fixtures too. Now ``'complete'`` --
+    deliberately NOT ``'partial'``, whose 1/3/5-day columns are still on a
+    truncated bar window and get overwritten by a later pass; pairing on a
+    partial row would freeze a value the next tick silently changes
+    underneath it."""
     placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
         "SELECT sbd.rule_version, sbd.decision_at_utc, sbd.replay_r AS baseline_replay_r, "
         "(SELECT co.replay_r FROM candidate_outcomes co "
-        " WHERE co.candidate_id = sbd.candidate_id AND co.outcome_status = 'resolved' "
+        " WHERE co.candidate_id = sbd.candidate_id AND co.outcome_status = 'complete' "
         " AND co.replay_r IS NOT NULL ORDER BY co.id DESC LIMIT 1) AS ai_replay_r "
         "FROM shadow_baseline_decisions sbd "
         "WHERE sbd.replay_status = 'complete' AND sbd.replay_r IS NOT NULL "

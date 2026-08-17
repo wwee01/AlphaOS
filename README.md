@@ -45,12 +45,12 @@ This is not NightDesk and does not depend on it.
 ## Quick start (mock mode, zero external keys)
 
 ```bash
-# Python 3.11+ (developed on 3.11/3.12). Only test deps are needed for mock mode.
-pip install -e ".[test]"           # pytest + tzdata
+# Python 3.11+ (developed on 3.11/3.12). Only test + api deps are needed for mock mode.
+pip install -e ".[test,api]"       # pytest + tzdata + fastapi/uvicorn (test_api_console*.py needs the latter)
 # For real Alpaca paper execution, also: pip install -e ".[live]"  (adds alpaca-py)
 
 # Run the test suite (offline, in-memory SQLite):
-python -m pytest                   # 48 tests, ~0.2s
+python -m pytest                   # 2550 passed, 3 skipped (see "Test results" below)
 
 # One-shot CLI runners (mock mode is the default):
 python -m alphaos status                 # mode / safety / startup checks
@@ -337,7 +337,7 @@ reports, and the dashboard's System Health view.
 
 ```
 python -m pytest
-90 passed, 3 skipped   # the 3 skips are gated live Alpaca tests (RUN_LIVE_ALPACA_TESTS)
+2550 passed, 3 skipped   # the 3 skips are gated live Alpaca tests (RUN_LIVE_ALPACA_TESTS)
 ```
 
 Tests prove: real-money trading is disabled/unreachable (even with

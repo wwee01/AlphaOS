@@ -42,7 +42,9 @@ def _insert_candidate_with_outcome(
     journal.insert("candidate_outcomes", {
         "outcome_id": f"out-{candidate_id}", "candidate_id": candidate_id, "symbol": symbol,
         "candidate_type": candidate_type, "decision_at_utc": f"{decision_date}T12:00:00+00:00",
-        "outcome_status": "resolved", "replay_r": replay_r,
+        # VOCAB-1: was the phantom 'resolved' literal (the real writer
+        # vocabulary is 'complete' -- see constants.OUTCOME_STATUSES).
+        "outcome_status": "complete", "replay_r": replay_r,
     })
 
 
@@ -141,12 +143,14 @@ def test_scoreboard_dedupes_a_parallel_user_override_outcome_row(journal):
     journal.insert("candidate_outcomes", {
         "outcome_id": "out-c1", "candidate_id": "c1", "symbol": "AAPL",
         "candidate_type": "proposal", "decision_at_utc": "2026-01-01T12:00:00+00:00",
-        "outcome_status": "resolved", "replay_r": 0.5,
+        # VOCAB-1: was the phantom 'resolved' literal (the real writer
+        # vocabulary is 'complete' -- see constants.OUTCOME_STATUSES).
+        "outcome_status": "complete", "replay_r": 0.5,
     })
     journal.insert("candidate_outcomes", {
         "outcome_id": "out-c1-override", "candidate_id": "c1", "symbol": "AAPL",
         "candidate_type": "user_override", "decision_at_utc": "2026-01-01T12:00:00+00:00",
-        "outcome_status": "resolved", "replay_r": 99.0,
+        "outcome_status": "complete", "replay_r": 99.0,
     })
 
     rows = card_scoreboard._card_replay_r_rows(journal, "card_a", 1)

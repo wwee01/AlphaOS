@@ -60,7 +60,12 @@ def _seed_clustered_candidates(journal, card_id, card_version, n, values, start=
         journal.insert("candidate_outcomes", {
             "outcome_id": f"out-{cid}", "candidate_id": cid, "symbol": f"SYM{i}",
             "candidate_type": "proposal", "decision_at_utc": f"{(base + timedelta(days=i)).isoformat()}T12:00:00+00:00",
-            "outcome_status": "resolved", "replay_r": values[i % len(values)],
+            # VOCAB-1: was the phantom 'resolved' literal -- NOT the same
+            # vocabulary as this file's OWN hypothesis_proposals.status
+            # ('met'/'resolved'/etc, a genuinely different column); the
+            # real candidate_outcomes writer vocabulary is 'complete' (see
+            # constants.OUTCOME_STATUSES).
+            "outcome_status": "complete", "replay_r": values[i % len(values)],
         })
 
 

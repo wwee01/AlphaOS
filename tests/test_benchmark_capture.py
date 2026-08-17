@@ -7,7 +7,7 @@ nothing here ever raises regardless of failure mode.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -17,6 +17,7 @@ from alphaos.reports.benchmark_capture import (
     BENCHMARK_SYMBOL,
     capture_benchmark_spine,
 )
+from alphaos.util import timeutils
 from conftest import make_settings
 
 
@@ -182,14 +183,28 @@ def test_bars_backfill_only_fetches_the_gap_since_last_cached_date(journal):
                             ALPACA_PAPER="true", ALPACA_BASE_URL="https://paper-api.alpaca.markets",
                             EXECUTION_PROVIDER="simulated_internal")
     from alphaos.util.ids import new_id
+    # Audit-fixup GROUP-A round 2 (pre-existing, confirmed against 0002d7d --
+    # invisible to CI because the clock-shift job only ran +90): was two
+    # hardcoded literals ("2026-07-03"/"2026-07-04") relative to nothing.
+    # capture_benchmark_spine's own `if start > market_dt: return 0` early-out
+    # means a HARDCODED last-cached-date sitting in the future relative to a
+    # shifted "today" (e.g. -90d) makes _backfill_benchmark_bars return 0
+    # WITHOUT ever calling the provider at all -- provider.calls stays empty
+    # and this assertion IndexErrors. Both dates now derive from the SAME
+    # timeutils.market_date() clock capture_benchmark_spine's own (unshifted-
+    # override) market_dt uses, so `last_cached + 1 <= today` holds under any
+    # shift, not just the literal window this test happened to be written in.
+    today = timeutils.market_date()
+    last_cached = today - timedelta(days=1)
+    gap_day = today
     journal.insert("benchmark_bars", {
-        "bar_id": new_id("bar"), "symbol": "SPY", "bar_date": "2026-07-03", "close": 501.0,
+        "bar_id": new_id("bar"), "symbol": "SPY", "bar_date": last_cached.isoformat(), "close": 501.0,
     })
-    provider = _FakeBarsProvider([_bar("2026-07-04", 505.0)])
+    provider = _FakeBarsProvider([_bar(gap_day.isoformat(), 505.0)])
 
     capture_benchmark_spine(journal, settings, alpaca_client=_FakeAlpacaClient(), bars_provider=provider)
 
-    assert provider.calls[0][1] == "2026-07-04"  # start = last cached date + 1, not the 90d lookback
+    assert provider.calls[0][1] == gap_day.isoformat()  # start = last cached date + 1, not the 90d lookback
 
 
 def test_bars_backfill_no_op_when_already_up_to_date(journal):
@@ -197,7 +212,18 @@ def test_bars_backfill_no_op_when_already_up_to_date(journal):
                             ALPACA_PAPER="true", ALPACA_BASE_URL="https://paper-api.alpaca.markets",
                             EXECUTION_PROVIDER="simulated_internal")
     from alphaos.util.ids import new_id
-    today = date.today().isoformat()
+    # Audit-fixup GROUP-A round 1 (FIX-8, clock-shift job finding): was
+    # date.today() -- a DIFFERENT clock than capture_benchmark_spine's own
+    # timeutils.market_date(now=None) (-> timeutils.now_utc()), which this
+    # call doesn't override. Both clocks agree at the real wall-clock instant
+    # this runs, but diverge the moment either clock is shifted independently
+    # (e.g. tests/_dateshift.py's --clock-shift-days, which patches ONLY
+    # timeutils.now_utc, deliberately never the stdlib clock) -- the seeded
+    # row then sits under YESTERDAY's (real) date while the production code
+    # asks about a shifted "today", the cache lookup misses, and the "already
+    # up to date, never re-fetch" no-op this test exists to prove breaks.
+    # Same clock, same helper as production: no more possible mismatch.
+    today = timeutils.market_date().isoformat()
     journal.insert("benchmark_bars", {"bar_id": new_id("bar"), "symbol": "SPY", "bar_date": today, "close": 500.0})
     provider = _FakeBarsProvider([_bar("2099-01-01", 999.0)])  # would prove it if ever called
 
@@ -217,14 +243,25 @@ def test_bars_backfill_is_rerun_safe_via_the_unique_index(journal):
                             ALPACA_PAPER="true", ALPACA_BASE_URL="https://paper-api.alpaca.markets",
                             EXECUTION_PROVIDER="simulated_internal")
     from alphaos.util.ids import new_id
-    journal.insert("benchmark_bars", {"bar_id": new_id("bar"), "symbol": "SPY", "bar_date": "2026-07-05", "close": 1.0})
+    # Audit-fixup GROUP-A round 2 (pre-existing, confirmed against 0002d7d --
+    # invisible to CI because the clock-shift job only ran +90): same
+    # last-cached-date-vs-market_dt early-out hazard as the test above --
+    # two hardcoded literals replaced with dates derived from the SAME
+    # timeutils.market_date() clock, with a 2-day margin so `seeded + 1 <=
+    # today` holds under any shift.
+    today = timeutils.market_date()
+    seeded_date = today - timedelta(days=2)
+    next_date = seeded_date + timedelta(days=1)
+    journal.insert("benchmark_bars", {
+        "bar_id": new_id("bar"), "symbol": "SPY", "bar_date": seeded_date.isoformat(), "close": 1.0,
+    })
     # Force the provider to return an OVERLAPPING date (simulating a race/rerun).
-    provider = _FakeBarsProvider([_bar("2026-07-05", 2.0), _bar("2026-07-06", 3.0)])
+    provider = _FakeBarsProvider([_bar(seeded_date.isoformat(), 2.0), _bar(next_date.isoformat(), 3.0)])
 
     result = capture_benchmark_spine(journal, settings, alpaca_client=_FakeAlpacaClient(), bars_provider=provider)
 
     assert result["benchmark_bars_written"] == 1  # only the genuinely new date
-    assert journal.count_rows("benchmark_bars", "bar_date = '2026-07-05'") == 1  # not duplicated
+    assert journal.count_rows("benchmark_bars", "bar_date = ?", (seeded_date.isoformat(),)) == 1  # not duplicated
 
 
 def test_bars_backfill_mock_mode_is_a_clean_noop(journal):
