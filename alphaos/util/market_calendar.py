@@ -129,17 +129,23 @@ def trading_days_between(start: date, end: date) -> int:
     at precisely the point ``replay_bracket``'s ``bars[:max_days]`` window
     would have fully resolved. See ``PositionManager._check_exit``.
 
-    Two audit-recorded nuances (2026-07-12): (a) the candidate-outcomes
-    ledger path calls ``replay_bracket`` WITHOUT ``max_days`` (fixed
-    1/3/5-day forward stats, ``DEFAULT_REPLAY_WINDOW_DAYS``) by design --
-    the max-days alignment claim above applies to the live exit check and
-    ``baseline/tracker.py``, which do pass it; (b) quantizing to trading-day
-    granularity means a late-day entry in a window containing zero
-    weekends/holidays can exit up to ~one session EARLIER within the same
-    final calendar date than the old 24h-multiple rule (first fresh-data
-    tick of the expiry session vs. entry-time + N*24h). Bounded, exposure-
-    reducing, inherent to day-granularity semantics; every weekend/holiday-
-    spanning hold expires strictly LATER than before, which is the fix."""
+    One audit-recorded nuance (2026-07-12, STATUS CORRECTED by AILEG-1,
+    2026-08-16): quantizing to trading-day granularity means a late-day
+    entry in a window containing zero weekends/holidays can exit up to
+    ~one session EARLIER within the same final calendar date than the old
+    24h-multiple rule (first fresh-data tick of the expiry session vs.
+    entry-time + N*24h). Bounded, exposure-reducing, inherent to
+    day-granularity semantics; every weekend/holiday-spanning hold expires
+    strictly LATER than before, which is the fix.
+
+    (The candidate-outcomes ledger path used to call ``replay_bracket``
+    WITHOUT ``max_days`` -- fixed always-5-day forward stats via
+    ``DEFAULT_REPLAY_WINDOW_DAYS`` -- "by design", so the max-days alignment
+    claim above used to apply only to the live exit check and
+    ``baseline/tracker.py``. AILEG-1 (docs/roadmap/alphaos-aileg1-replay-
+    window-coherence-spec.md) closed that gap: ``learning/outcomes_tracker.py``
+    now resolves and passes an explicit, card-derived ``max_days`` too, so
+    the alignment claim above holds for all three call sites.)"""
     if end <= start:
         return 0
     count = 0

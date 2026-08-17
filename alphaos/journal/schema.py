@@ -1524,6 +1524,24 @@ SCHEMA: list[tuple[str, str]] = [
             -- never_depends_on_10d_family).
             outcome_status_10d TEXT,
             data_quality_status TEXT,
+            -- AILEG-1 (2026-08-16, docs/roadmap/alphaos-aileg1-replay-
+            -- window-coherence-spec.md, spec section 2): the bracket-replay
+            -- window ACTUALLY passed to replay_bracket()'s max_days for
+            -- this row -- the card that governed the candidate
+            -- (candidates.card_id, resolved BY ID -- never the live
+            -- ACTIVE_CARD_ID default, the HOLD-2 lesson), falling back to
+            -- the pinned catalyst_momentum_v2 value only when the
+            -- candidate carries no card at all. NULL for a row where no
+            -- replay was ever attempted (missing entry/stop/target), and
+            -- NULL on every row written before this column existed --
+            -- additive, SCHEMA_VERSION stays 3 (_reconcile_columns handles
+            -- this on an existing DB, same law every prior additive column
+            -- here follows). A replay result whose horizon isn't recorded
+            -- is not reproducible -- see outcomes_tracker.py/baseline/
+            -- tracker.py for the write path, and scripts/replay_recompute.py
+            -- (operator-invoked, dry-run by default) for the separate,
+            -- explicit repair pass over pre-existing NULL rows.
+            replay_window_days INTEGER,
             updated_at_utc TEXT,
             updated_at_sgt TEXT,
             lineage_id TEXT,
@@ -2084,6 +2102,20 @@ SCHEMA: list[tuple[str, str]] = [
             replay_result TEXT,
             replay_r REAL,
             replay_exit_reason TEXT,
+            -- AILEG-1 (2026-08-16, spec section 2): the bracket-replay
+            -- window ACTUALLY passed to replay_bracket()'s max_days when
+            -- this row was resolved -- for the v1 arms (threshold_v1/
+            -- propose_all_v1) always the pinned catalyst_momentum_v2 value
+            -- (3), for the hold10 arms always the pinned catalyst_momentum_v3
+            -- value (10), BOTH by explicit card id, unconditionally -- no
+            -- `row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS`
+            -- fallback reachable any more (see BASELINE_V1_PINNED_CARD_ID /
+            -- BASELINE_HOLD10_PINNED_CARD_ID). NULL for 'no_action'/
+            -- 'unavailable' rows (no bracket was ever built, so no window
+            -- was ever used) and for every row written before this column
+            -- existed -- additive, SCHEMA_VERSION stays 3
+            -- (_reconcile_columns handles this on an existing DB).
+            replay_window_days INTEGER,
             lineage_id TEXT,
             created_at_utc TEXT NOT NULL,
             created_at_sgt TEXT NOT NULL

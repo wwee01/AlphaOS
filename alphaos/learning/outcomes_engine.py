@@ -21,6 +21,19 @@ from alphaos.constants import TradeDirection
 
 # Replay/forward-window default when no explicit hold-days is known for a
 # candidate (matches the swing playbook's default hold).
+#
+# AILEG-1 (2026-08-16, docs/roadmap/alphaos-aileg1-replay-window-coherence-
+# spec.md, spec section 2): this default is NOT reachable from any
+# production call site any more -- every production caller
+# (learning/outcomes_tracker.py, baseline/tracker.py) now passes an explicit
+# `max_days` resolved from the card that governed the row (by id, never the
+# live ACTIVE_CARD_ID default -- the HOLD-2 lesson). It survives here only
+# as an explicit, named default for ad-hoc/CLI callers that have no card to
+# resolve against (e.g. a one-off script) -- never silently relied on by
+# anything that writes to candidate_outcomes/shadow_baseline_decisions. See
+# tests/test_aileg1_replay_window_coherence.py's AST/grep guard, which pins
+# this claim structurally (in the style of tests/test_vocab_guard.py-class
+# vocabulary guards elsewhere in this codebase).
 DEFAULT_REPLAY_WINDOW_DAYS = 5
 
 
@@ -116,7 +129,19 @@ def replay_bracket(entry: Optional[float], stop: Optional[float], target: Option
     using daily bars observed AFTER the decision (idealized fills at the exact
     level, no slippage modeled — this is a decision replay, not a backtest).
     Long/short breach convention matches ``position_manager._check_exit``
-    exactly. Returns ``{result, replay_r, replay_exit_reason}``:
+    exactly.
+
+    AILEG-1 (2026-08-16): ``max_days`` is a required-in-spirit parameter for
+    every PRODUCTION caller (both the AI leg and the baseline leg resolve an
+    explicit, card-derived window and pass it here — see this module's own
+    ``DEFAULT_REPLAY_WINDOW_DAYS`` docstring). It stays ``Optional`` at the
+    signature level only so ad-hoc/CLI callers (with no card to resolve
+    against) still get a sane default — never because a production call site
+    is allowed to omit it. This function's own arithmetic is otherwise
+    UNCHANGED by AILEG-1 (scope: signature/docstring only, per the spec's
+    own section 3).
+
+    Returns ``{result, replay_r, replay_exit_reason}``:
 
     * ``target_hit`` / ``stop_hit`` — replay_r = +reward:risk / exactly -1.0
     * ``neither``            — window exhausted with no level touched;

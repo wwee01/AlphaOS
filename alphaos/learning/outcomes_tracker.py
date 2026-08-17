@@ -43,9 +43,63 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.cards.registry import get_card_by_id
 from alphaos.learning.outcomes_engine import forward_window_stats, replay_bracket
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+
+# AILEG-1 (2026-08-16, docs/roadmap/alphaos-aileg1-replay-window-coherence-
+# spec.md, spec section 2): the AI leg's replay window is the
+# `max_holding_days_default` of the card stamped on the CANDIDATE
+# (candidates.card_id), resolved BY EXPLICIT ID -- never
+# alphaos.cards.registry.get_default_card()/DEFAULT_CARD_ID, which tracks
+# the LIVE ACTIVE_CARD_ID and can move (the HOLD-2 lesson: a frozen replay
+# window must never follow the live default -- see
+# alphaos.baseline.tracker.BASELINE_V1_PINNED_CARD_ID's own docstring for
+# the identical law already applied to the baseline leg). This fallback is
+# used ONLY when the candidate carries no card_id at all (pre-card-stamping
+# legacy rows, or a user_override/reject row sourced from a candidate that
+# never got a card) -- pinned by explicit literal, deliberately NOT an
+# import of DEFAULT_CARD_ID (which is itself allowed to move, e.g. INSTR-1
+# already moved it once).
+AI_LEG_FALLBACK_CARD_ID = "catalyst_momentum_v2"
+
+# Stamped into data_quality_status (never a NEW column -- the spec's own
+# section 3 scopes journal/schema.py to exactly two additive columns, one
+# per table, both named replay_window_days) whenever the fallback path
+# above was used, so a reader can tell which of the two §2 paths produced a
+# given row's window without re-deriving it from candidates.card_id. Never
+# overwrites a more specific existing data_quality_status value (e.g.
+# 'decision_time_unrecoverable') -- same "don't clobber" law
+# _repair_missing_decision_at_utc already follows for this column.
+REPLAY_WINDOW_FALLBACK_DQ_STATUS = "replay_window_fallback_pinned_v2"
+
+
+def resolve_ai_replay_window(journal, candidate_id: Optional[str]) -> tuple[int, bool]:
+    """AILEG-1 spec section 2: resolve the AI leg's replay window for one
+    candidate_outcomes row. Returns ``(window_days, used_fallback)`` --
+    ``used_fallback`` is True only when the candidate carries no card_id at
+    all (never for any other reason). Raises ``SettingsError`` (propagated,
+    never swallowed) if the resolved card_id isn't in the registry or has no
+    usable ``max_holding_days_default`` -- a malformed/missing card is a
+    genuinely unexpected registry state, not something to silently paper
+    over with a fabricated window (same law
+    ``record_shadow_baseline_decisions`` already applies to its own card
+    lookups)."""
+    card_id = None
+    if candidate_id:
+        cand = journal.candidate_by_id(candidate_id)
+        card_id = (cand or {}).get("card_id")
+    used_fallback = not card_id
+    resolved_card_id = card_id or AI_LEG_FALLBACK_CARD_ID
+    card = get_card_by_id(resolved_card_id)
+    window_days = card.get("max_holding_days_default")
+    if not isinstance(window_days, int) or isinstance(window_days, bool) or window_days <= 0:
+        raise ValueError(
+            f"card {resolved_card_id!r} has no usable max_holding_days_default "
+            f"(got {window_days!r}) -- cannot resolve an AI-leg replay window."
+        )
+    return window_days, used_fallback
 
 # AlphaOS-side classification a candidate can resolve to (the "primary" row,
 # one per candidate_id). 'user_override' is seeded separately, in parallel.
@@ -476,18 +530,37 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
         }
 
         target = row.get("target_price")
+        used_fallback_window = False
         if ref is not None and stop and target:
-            replay = replay_bracket(ref, stop, target, direction, forward_bars)
+            # AILEG-1 spec section 2: the AI leg's window comes from the
+            # card that governed THIS candidate, resolved by id -- never
+            # DEFAULT_REPLAY_WINDOW_DAYS (see outcomes_engine's own updated
+            # docstring; this is now the one production call site that used
+            # to omit max_days entirely).
+            window_days, used_fallback_window = resolve_ai_replay_window(journal, row.get("candidate_id"))
+            replay = replay_bracket(ref, stop, target, direction, forward_bars, max_days=window_days)
             update["replay_result"] = replay["result"]
             update["replay_r"] = replay["replay_r"]
             update["replay_exit_reason"] = replay["replay_exit_reason"]
+            update["replay_window_days"] = window_days
 
         resolved = f5["bars_used"] >= 5
         update["outcome_status"] = "complete" if resolved else "partial"
         # Don't clobber an unrecoverable-decision_at_utc flag from repair just
         # because the forward-return math itself succeeded — the anchor being
         # a fallback (not the true decision time) is still worth knowing.
-        update["data_quality_status"] = row.get("data_quality_status") or "ok"
+        # AILEG-1: the fallback-card stamp is the SECOND-priority data
+        # quality signal -- a pre-existing flag (e.g.
+        # 'decision_time_unrecoverable') always wins, since that flag
+        # already implies "this row's provenance is degraded" and is the
+        # more specific/urgent fact of the two.
+        existing_dq = row.get("data_quality_status")
+        if existing_dq:
+            update["data_quality_status"] = existing_dq
+        elif used_fallback_window:
+            update["data_quality_status"] = REPLAY_WINDOW_FALLBACK_DQ_STATUS
+        else:
+            update["data_quality_status"] = "ok"
         _update_row(journal, row["outcome_id"], update)
         counts["updated"] += 1
         if resolved:

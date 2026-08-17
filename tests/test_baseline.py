@@ -818,11 +818,11 @@ def _days_ago_iso(n: int) -> str:
 
 def _pending_row(j, *, entry=100.0, stop=96.0, target=104.8, direction="long",
                  days_ago: int = 1, max_holding_days=3, candidate_id="cand1",
-                 rule_version=THRESHOLD_V1):
+                 rule_version=THRESHOLD_V1, symbol="AAPL"):
     from alphaos.util.ids import new_id
     decision_at_utc = _days_ago_iso(days_ago)
     j.insert("shadow_baseline_decisions", {
-        "baseline_decision_id": new_id("basedec"), "candidate_id": candidate_id, "symbol": "AAPL",
+        "baseline_decision_id": new_id("basedec"), "candidate_id": candidate_id, "symbol": symbol,
         "rule_version": rule_version, "decision": "propose", "decision_reason": "above_threshold",
         "direction": direction, "entry": entry, "stop": stop, "target": target,
         "max_holding_days": max_holding_days, "input_sha": "deadbeef",
@@ -998,22 +998,36 @@ def test_hold10_arm_uses_wider_give_up_v1_arm_unaffected():
     outcomes get marked unavailable/window_never_completed (a stop/target
     hit resolves immediately regardless of age), so the shared give-up
     SELECTIVELY censors hold10's own losing/flat outcomes -- a directional
-    bias. Proof: two rows with the IDENTICAL shape (16 calendar days
-    elapsed, 9 forward bars, neither level hit, max_holding_days=10) must
-    resolve DIFFERENTLY purely based on rule_version: the v1-labelled row
-    (15.0 give-up) gives up (unavailable); the _hold10-labelled row (30.0
+    bias.
+
+    AILEG-1 update (2026-08-16): since AILEG-1 pins each arm-set's replay
+    window UNCONDITIONALLY by card id (v1 always 3, hold10 always 10 --
+    regardless of a row's own stored ``max_holding_days``, see
+    ``resolve_pending_baseline_decisions``), the two rows can no longer
+    share one identical bar count to prove this -- "window not yet
+    elapsed" is now relative to each arm's OWN pinned window. v1 (window=3)
+    gets 2 forward bars (< 3, genuinely partial); hold10 (window=10) gets 9
+    forward bars (< 10, genuinely partial) -- different symbols so the fake
+    provider can serve each arm its own bar count under the same shared
+    decision_at_utc. Proof: two rows, each genuinely mid-window for its OWN
+    arm, 16 calendar days elapsed, neither level hit, must resolve
+    DIFFERENTLY purely based on rule_version: the v1-labelled row (15.0
+    give-up) gives up (unavailable); the _hold10-labelled row (30.0
     give-up) stays pending -- more bars may still complete its real
     10-trading-day window."""
     j = JournalStore(":memory:")
     decision_at_utc = _pending_row(
-        j, candidate_id="cand_v1", days_ago=16, max_holding_days=10, rule_version=THRESHOLD_V1,
+        j, candidate_id="cand_v1", days_ago=16, rule_version=THRESHOLD_V1, symbol="AAPL",
     )
     _pending_row(
-        j, candidate_id="cand_h10", days_ago=16, max_holding_days=10, rule_version=THRESHOLD_V1_HOLD10,
+        j, candidate_id="cand_h10", days_ago=16, rule_version=THRESHOLD_V1_HOLD10, symbol="MSFT",
     )
-    dates = _bar_dates_after(decision_at_utc, 9)  # neither level hit, window not yet complete (needs 10)
-    bars = [{"date": d, "high": 101.0, "low": 99.0, "close": 100.5} for d in dates]
-    provider = _FakeBarsProvider({"AAPL": bars})
+    v1_dates = _bar_dates_after(decision_at_utc, 2)    # < pinned v1 window (3): genuinely partial
+    h10_dates = _bar_dates_after(decision_at_utc, 9)   # < pinned hold10 window (10): genuinely partial
+    provider = _FakeBarsProvider({
+        "AAPL": [{"date": d, "high": 101.0, "low": 99.0, "close": 100.5} for d in v1_dates],
+        "MSFT": [{"date": d, "high": 101.0, "low": 99.0, "close": 100.5} for d in h10_dates],
+    })
 
     resolve_pending_baseline_decisions(j, bars_provider=provider)
 
