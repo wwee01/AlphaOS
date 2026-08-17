@@ -58,6 +58,15 @@ MOONSHOT_TARGET_MONTHLY_PCT = 10.0
 
 UP_TO_N_LEARNED_SENTENCES = 3
 
+# PRE-1a audit-fixup MEDIUM-2 (bound chosen in round 2 -- see
+# _last_completed_trading_day_start_utc): _evaluator_health's own lookback
+# window is the start of the last COMPLETED trading day, not a fixed
+# wall-clock duration -- without a time bound at all, "last 50 rows" could
+# span days/weeks on a quiet book and, worse, an evaluator that stops
+# producing rows ENTIRELY still grades on the last 50 OLD (healthy) rows
+# forever; an instrument that only ever looks at rows that exist cannot see
+# their absence.
+
 
 def _market_condition(journal, settings) -> dict:
     rel_perf = build_relative_performance_report(journal, settings)
@@ -182,6 +191,202 @@ def _backup_health() -> Optional[dict]:
     from alphaos.reports.backup_health import build_backup_health
 
     return build_backup_health()
+
+
+def _last_completed_trading_day_start_utc(now) -> str:
+    """The UTC instant for ET-midnight of the most recent trading day
+    STRICTLY BEFORE ``now``'s own ET calendar date -- a lower bound
+    GUARANTEED to include at least one full, completed regular session (the
+    found day's), regardless of what day/time ``now`` itself falls on.
+
+    Used by ``_evaluator_health`` (audit-fixup FIX-1, round 2) instead of a
+    fixed wall-clock hours window: a fixed window computed from a
+    fixed-SGT-instant digest run can land entirely inside a period with NO
+    real session (e.g. a Monday run whose trailing 24h spans Sunday into
+    early Monday, before that day's own session opens).
+
+    Reuses ``is_trading_day`` (this codebase's one source of truth for
+    trading-day status) purely to WALK BACK to the right calendar day, and
+    the same ET-midnight-to-UTC conversion idiom
+    ``JournalStore.start_of_trading_day_utc``/this module's own
+    ``_month_start_utc`` already use for the equivalent SGT case -- not a
+    second, independently-drifting notion of "session".
+
+    Bounded to ``_MAX_LOOKBACK_DAYS`` calendar days: real trading calendars
+    never have a gap that long, but a test (or a future caller) that
+    monkeypatches ``is_trading_day`` to always return False must never spin
+    this into an unbounded walk / date-arithmetic overflow -- falls back to
+    exactly ``_MAX_LOOKBACK_DAYS`` calendar days back in that case, the same
+    conservative "don't crash, don't hang" posture ``cadence.is_due`` uses
+    elsewhere in this codebase."""
+    from datetime import datetime as _dt, timedelta
+    from zoneinfo import ZoneInfo
+
+    from alphaos.util.market_calendar import is_trading_day
+
+    _MAX_LOOKBACK_DAYS = 30
+    start = timeutils.market_date(now) - timedelta(days=1)
+    d = start
+    for _ in range(_MAX_LOOKBACK_DAYS):
+        if is_trading_day(d):
+            break
+        d -= timedelta(days=1)
+    else:
+        d = start - timedelta(days=_MAX_LOOKBACK_DAYS)
+    et_midnight = _dt(d.year, d.month, d.day, tzinfo=ZoneInfo("America/New_York"))
+    return timeutils.to_iso(et_midnight.astimezone(ZoneInfo("UTC")))
+
+
+def _evaluator_health(journal, settings) -> dict:
+    """PRE-1a: grades the PRIMARY evaluator's (``openai_evaluations``, the
+    path that actually gates trades) recent fail-safe rate -- generalizes
+    ``ai/labeller_health.py::evaluate_failsafe_health`` (already used for the
+    labeller, via ``Orchestrator._labeller_failsafe_health``) rather than
+    forking it. The 2026-08-13 review's central finding: six days of a dead
+    OpenAI account produced "Nothing needs you" every morning because
+    nothing measured whether the evaluator machinery itself was working --
+    every rejection during that window looked identical to an ordinary,
+    healthy RR-floor/NO_ATR_DATA reject by every OTHER signal this brief
+    already reads.
+
+    Unlike every other ``_xxx_health`` helper in this module, this is NEVER
+    omitted (no ``Optional``/``None`` empty-state) -- ``_one_action`` needs
+    to reliably ask "is the level warn/critical" every single build, and an
+    omitted section here is exactly the silent-gap failure mode this ticket
+    exists to close.
+
+    Audit-fixup MEDIUM-2 (two blind spots, same root cause -- an instrument
+    that only ever looks at rows that exist cannot see their absence):
+    (1) the query is now time-bounded (was an unbounded
+    ``ORDER BY id DESC LIMIT 50``, which recovers slowly on a quiet book
+    and, worse, keeps grading on old healthy rows forever if the evaluator
+    stops producing output entirely); (2) zero rows in that window is now
+    its own explicit WARN, not a silent "insufficient sample" note that
+    renders as if nothing were wrong.
+
+    Audit-fixup FIX-1 (round 2): the lookback bound is NOT a fixed 24 wall-
+    clock hours -- it is the start of the most recent trading day STRICTLY
+    BEFORE today (``_last_completed_trading_day_start_utc``), guaranteeing
+    the window always spans at least one FULL, COMPLETED regular session
+    regardless of what day/time this runs. A fixed-hours window broke on
+    Mondays: the digest runs at a constant SGT instant that lands BEFORE
+    that day's own session opens, so "trailing 24h" from a Monday run spans
+    Sunday 06:00 ET -> Monday 06:00 ET -- containing ZERO actual sessions --
+    while a same-shape check keyed on "is today a trading day" said True,
+    producing a false high-priority page every healthy Monday (~52/year
+    plus one after every holiday). Same defect class HIGH-1 already fixed
+    once in the preflight check, one function over: read the SAME existing
+    single source of truth (``is_trading_day``, this codebase's one
+    trading-day predicate) correctly instead of computing a second,
+    independent notion of "session".
+
+    Audit-fixup HIGH-2 (the ticket's own thesis): the OPENAI_REJECT
+    predicate alone cannot see a DIFFERENT silent-degrade shape -- paper
+    mode continuing live while OpenAIClient.use_mock has quietly flipped
+    true (a blank/rotated OPENAI_API_KEY). Mock rows never carry
+    OPENAI_REJECT (they never called the provider at all), so a paper-mode
+    window composed entirely of mock rows would otherwise read as perfectly
+    healthy. Flagged as its own CRITICAL arm below, additive to (never
+    replacing) the unchanged OPENAI_REJECT signal.
+    """
+    from alphaos.ai.labeller_health import (
+        evaluate_failsafe_health, is_openai_reject_row, summarize_failsafe_rows,
+    )
+
+    since = _last_completed_trading_day_start_utc(timeutils.now_utc())
+    rows = journal.query(
+        "SELECT risk_flags_json, is_mock FROM openai_evaluations "
+        "WHERE created_at_utc >= ? ORDER BY id DESC LIMIT 50",
+        (since,),
+    )
+    summary = summarize_failsafe_rows(rows, is_openai_reject_row, lambda _r: "OPENAI_REJECT")
+    health = evaluate_failsafe_health(
+        summary,
+        settings.labeller_failsafe_warn_rate,
+        settings.labeller_failsafe_critical_rate,
+        settings.labeller_failsafe_min_sample,
+        source_label="Evaluator",
+    )
+
+    if not rows and not settings.is_mock:
+        health["level"] = "warn"
+        health["note"] = None
+        health["message"] = (
+            "Evaluator: zero evaluations since the start of the last completed trading session -- "
+            "the evaluator may have stopped producing output entirely. An absence of rows is "
+            "indistinguishable from a healthy quiet moment unless flagged explicitly."
+        )
+    elif not rows:
+        health["note"] = health.get("note") or (
+            "insufficient sample (0 evaluations since the last completed trading session)"
+        )
+
+    if rows and not settings.is_mock and sum(1 for r in rows if r.get("is_mock")) == len(rows):
+        health["level"] = "critical"
+        health["message"] = (
+            f"Evaluator: all {len(rows)} recent evaluation(s) since the last completed trading "
+            f"session are MOCK rows while ALPHAOS_MODE={settings.mode} -- "
+            "the evaluator has silently degraded to mock output (a blank or rotated OPENAI_API_KEY is "
+            "the likely cause) while live paper trading continues."
+        )
+
+    return health
+
+
+def _preflight_health(journal, settings) -> dict:
+    """PRE-1b: the latest completed ``preflight`` job_runs row's own
+    per-check payload.
+
+    Audit-fixup MEDIUM-3: ALWAYS present now (was ``Optional[dict]``,
+    ``None`` when no run had ever completed) -- a preflight job that STOPS
+    running silently deleted its own digest line under the old renderer's
+    ``if pfh:`` guard, exactly the "an instrument that can't see absence"
+    failure class this ticket exists to close (mirrors the "## Needs you"
+    positions-past-window line's own always-present-even-at-zero pattern).
+    ``ran=False`` is the honest "never completed a run yet" state,
+    distinguished from an actual pass/fail outcome.
+
+    Audit-fixup FIX-3 (round 2): each check's own ``detail`` string is run
+    through ``util.alerts._sanitize`` (the SAME secret-redaction + length
+    bound the ntfy push path already applies) before it ever reaches the
+    returned payload -- a check detail can embed an arbitrary provider
+    exception message (e.g. ``f"OpenAI unreachable: {exc}"``), and unlike
+    the ntfy path, the digest markdown this feeds is persisted and rendered
+    in the console with no sanitization of its own. Sanitized at the
+    source (here) rather than at each render call site, so every consumer
+    of this payload is covered, not just render_markdown.
+    """
+    import json
+
+    from alphaos.util.alerts import _sanitize
+
+    row = journal.one(
+        "SELECT result_summary_json, finished_at_sgt FROM job_runs "
+        "WHERE job_type = 'preflight' AND status = 'completed' "
+        "ORDER BY finished_at_utc DESC LIMIT 1"
+    )
+    never_run: dict = {"ran": False, "ok": None, "checks": {}, "as_of_sgt": None}
+    if not row:
+        return never_run
+    raw = row.get("result_summary_json")
+    if not raw:
+        return never_run
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return never_run
+    result = parsed.get("preflight_result") or {}
+    checks = result.get("checks") or {}
+    sanitized_checks = {
+        name: {**c, "detail": _sanitize(c.get("detail") or "", settings)}
+        for name, c in checks.items()
+    }
+    return {
+        "ran": True,
+        "ok": bool(result.get("ok")),
+        "checks": sanitized_checks,
+        "as_of_sgt": row.get("finished_at_sgt"),
+    }
 
 
 def _atr_health(journal) -> Optional[dict]:
@@ -373,9 +578,30 @@ def _hypothesis_resolution_status(journal, since_sgt: str) -> Optional[dict]:
     }
 
 
+def _positions_past_time_window(positions_health: list[dict]) -> list[dict]:
+    """TIME-1 part 2: open positions AT OR PAST their max_holding_days window
+    right now, regardless of whether TIME_EXIT_BREACH_ALERT_ENABLED is on
+    (this is visibility only -- arming enforcement is a separate, later
+    operator decision, out of scope for this ticket). max_holding_days has
+    NEVER bound a live broker-managed position (position_manager skips
+    _check_exit for execution_source=alpaca_paper -- an Alpaca bracket OCO
+    has no time leg), so this is the one place today's silent condition
+    becomes an actionable "## Needs you" line, independent of any
+    enforcement policy decision. Reads the SAME trading_days_held/
+    max_holding_days fields ``positions_health`` (assess_positions) already
+    computes for every open position -- no second day-count definition."""
+    out = []
+    for p in positions_health:
+        held = p.get("trading_days_held")
+        max_days = p.get("max_holding_days")
+        if held is not None and max_days and held >= max_days:
+            out.append({"symbol": p["symbol"], "trading_days_held": held, "max_holding_days": max_days})
+    return out
+
+
 def _needs_you(
     journal, digest: dict, fused_jobs: list[dict], hypothesis_resolution: Optional[dict] = None,
-    hypothesis_drafts_pending: Optional[dict] = None,
+    hypothesis_drafts_pending: Optional[dict] = None, positions_past_time_window: Optional[list] = None,
 ) -> dict:
     pending = journal.open_proposals()
     for p in pending:
@@ -389,6 +615,7 @@ def _needs_you(
         "fused_jobs": fused_jobs,
         "hypothesis_resolution": hypothesis_resolution,
         "hypothesis_drafts_pending": hypothesis_drafts_pending,
+        "positions_past_time_window": positions_past_time_window or [],
     }
 
 
@@ -660,24 +887,41 @@ MAX_SYMBOLS_IN_ONE_ACTION = 5
 
 
 def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict,
-                backup_health: Optional[dict] = None) -> str:
-    """Priority order per spec: incident > fused job > stale backup >
-    expiring approval > EXIT_REVIEW position > hypothesis resolution >
-    below-floor data note > "nothing needs you". Hypothesis resolution ranks
-    above the routine below-floor note (a rare, decision-relevant registry
-    event beats a near-daily "still gathering data" note) but below every
-    safety/time-critical item above it.
+                backup_health: Optional[dict] = None, evaluator_health: Optional[dict] = None) -> str:
+    """Priority order per spec: incident > fused job > provider health >
+    stale backup > expiring approval > EXIT_REVIEW position > positions past
+    their time-exit window > hypothesis resolution > below-floor data note >
+    "nothing needs you". Hypothesis resolution ranks above the routine
+    below-floor note (a rare, decision-relevant registry event beats a
+    near-daily "still gathering data" note) but below every safety/
+    time-critical item above it.
 
     Stale backup was ADDED 2026-07-17 (audit HIGH: nightly backups failed
     silently Jul 12-16 while this headline said "Nothing needs you") -- it
     ranks below live-trading safety items (incidents/fuses) but above
     approvals: an approval missed costs one trade; a backup outage during a
-    disk failure costs the whole ledger."""
+    disk failure costs the whole ledger.
+
+    PRE-1a (2026-08-13): the provider-health rung was ADDED above stale
+    backup -- six days of a dead OpenAI account produced "Nothing needs you"
+    every morning because nothing in this ladder measured whether the AI
+    machinery itself was working, only whether jobs completed and backups
+    ran. Ranks above stale backup: a dead evaluator silently stops the
+    entire trading function (nothing ever proposed again), a stale backup is
+    a data-durability risk that hasn't materialized yet.
+
+    TIME-1 part 2 (2026-08-13): the "past time window" rung was ADDED right
+    after EXIT_REVIEW -- max_holding_days has never bound a live
+    broker-managed position, so a position sitting past its window is
+    exactly as actionable as one already flagged EXIT_REVIEW, and is
+    reported independent of whether TIME_EXIT_BREACH_ALERT_ENABLED is armed."""
     if needs_you["open_incident_count"] > 0:
         return f"{needs_you['open_incident_count']} open protection incident(s) -- review immediately."
     if needs_you["fused_jobs"]:
         names = ", ".join(j["job_type"] for j in needs_you["fused_jobs"])
         return f"Scheduler job(s) self-halted: {names} -- run `scheduler_run_job <job_type>` to clear."
+    if evaluator_health and evaluator_health.get("level") in ("warn", "critical"):
+        return evaluator_health.get("message") or "AI evaluator fail-safe rate is elevated -- review immediately."
     if backup_health is not None and backup_health.get("stale"):
         days = backup_health.get("days_since_success")
         ago = f"{days} day(s)" if days is not None else "an unknown time"
@@ -695,6 +939,15 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
         remaining = len(exit_review) - len(shown)
         syms = ", ".join(shown) + (f", +{remaining} more" if remaining > 0 else "")
         return f"{len(exit_review)} position(s) flagged EXIT_REVIEW ({syms}) -- a human should look at these."
+    past_window = needs_you.get("positions_past_time_window") or []
+    if past_window:
+        shown = past_window[:MAX_SYMBOLS_IN_ONE_ACTION]
+        syms = ", ".join(f"{p['symbol']} ({p['trading_days_held']}/{p['max_holding_days']}td)" for p in shown)
+        remaining = len(past_window) - len(shown)
+        if remaining > 0:
+            syms += f", +{remaining} more"
+        return (f"{len(past_window)} position(s) past their time-exit window ({syms}) -- "
+                "max_holding_days is not enforced on broker-managed positions; a human should look.")
     hyp_res = needs_you.get("hypothesis_resolution")
     if hyp_res:
         ids = ", ".join(r["hypothesis_id"] for r in hyp_res["resolved_today"])
@@ -708,6 +961,23 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
     if moonshot_gap.get("status") == "below_sample_floor":
         return f"Nothing actionable yet -- still below the data floor ({moonshot_gap['data_progress']})."
     return "Nothing needs you right now."
+
+
+def _one_action_priority(needs_you: dict, evaluator_health: Optional[dict] = None) -> str:
+    """PRE-1a: the digest push priority companion to ``_one_action`` --
+    ``"high"`` exactly when the provider-health rung is the WINNING
+    (headline) rung in ``_one_action``'s own ladder, i.e. no open incident
+    and no fused job preempts it (both of those already show a message far
+    more urgent than provider health, even though this ticket leaves THEIR
+    push priority unchanged -- narrowly scoped to the one rung this ticket
+    adds). Every other rung's push priority is unchanged (still
+    ``"default"``), deliberately out of scope for this fix -- see
+    ``_one_action``'s own docstring for the full ladder this mirrors."""
+    if needs_you["open_incident_count"] > 0 or needs_you["fused_jobs"]:
+        return "default"
+    if evaluator_health and evaluator_health.get("level") in ("warn", "critical"):
+        return "high"
+    return "default"
 
 
 def build_daily_brief(
@@ -782,7 +1052,13 @@ def build_daily_brief(
     fused_jobs = _fused_jobs(journal, settings)
     hypothesis_resolution = _hypothesis_resolution_status(journal, since_sgt)
     hypothesis_drafts_pending = _hypothesis_drafts_pending(journal)
-    needs_you = _needs_you(journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending)
+    # TIME-1 part 2: independent of any enforcement policy decision -- see
+    # _positions_past_time_window's own docstring.
+    positions_past_time_window = _positions_past_time_window(positions_health)
+    needs_you = _needs_you(
+        journal, digest, fused_jobs, hypothesis_resolution, hypothesis_drafts_pending,
+        positions_past_time_window,
+    )
     working_orders = _working_orders(journal, now)
     todays_activity = _todays_activity(journal, since_market_day)
     unattended_approvals = _unattended_approvals_today(journal, since_sgt)
@@ -790,11 +1066,15 @@ def build_daily_brief(
     best_candidate = _best_candidate_today(journal, since_sgt)
     what_learned = _what_learned(journal, since_sgt)
     moonshot_gap = _moonshot_gap(journal, settings, now)
-    # backup_health computed here (not with the other *_health blocks below)
-    # because one_action needs it: a stale backup must reach the pushed ntfy
-    # HEADLINE, not just the long-form markdown body (2026-07-17 audit).
+    # backup_health/evaluator_health computed here (not with the other
+    # *_health blocks below) because one_action needs them: a stale backup
+    # or a dead AI provider must reach the pushed ntfy HEADLINE, not just the
+    # long-form markdown body (2026-07-17 audit; PRE-1a extends the same
+    # reasoning to provider health).
     backup_health = _backup_health()
-    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health)
+    evaluator_health = _evaluator_health(journal, settings)
+    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health, evaluator_health)
+    one_action_priority = _one_action_priority(needs_you, evaluator_health)
 
     # REG-1 acceptance criterion: the shadow arming-map scorer's first
     # (caveated) report surfaces in the brief. Import kept local -- avoids a
@@ -811,6 +1091,7 @@ def build_daily_brief(
     card_scoreboard_health = _card_scoreboard_health(journal)
     per_selector_health = _per_selector_health(journal, since_market_day)
     hold1_health = _hold1_health(journal)
+    preflight_health = _preflight_health(journal, settings)
 
     return {
         "date_sgt": since_sgt[:10],
@@ -835,10 +1116,13 @@ def build_daily_brief(
         "card_scoreboard_health": card_scoreboard_health,
         "per_selector_health": per_selector_health,
         "hold1_health": hold1_health,
+        "preflight_health": preflight_health,
+        "evaluator_health": evaluator_health,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
         "one_action": one_action,
+        "one_action_priority": one_action_priority,
     }
 
 
@@ -893,6 +1177,15 @@ def render_markdown(brief: dict) -> str:
             f"- Hypothesis drafts awaiting review: **{drafts_pending['count']}** "
             f"({', '.join(drafts_pending['draft_ids'])})"
         )
+    # TIME-1 part 2: always present (even at 0) -- this line existing at all,
+    # every day, is the point (a silent 0 that nobody has to remember to
+    # check for is exactly what this ticket replaces).
+    past_window = ny.get("positions_past_time_window") or []
+    lines.append(f"- Positions past their time-exit window: **{len(past_window)}**")
+    if past_window:
+        detail = ", ".join(f"{p['symbol']} ({p['trading_days_held']}/{p['max_holding_days']}td)"
+                           for p in past_window)
+        lines.append(f"  - {detail}")
     ua = brief.get("unattended_approvals")
     if ua:
         lines.append(
@@ -982,6 +1275,42 @@ def render_markdown(brief: dict) -> str:
         from alphaos.reports.backup_health import render_markdown as _render_backup
 
         lines += [_render_backup(bkh), ""]
+
+    # PRE-1b: ALWAYS present (audit-fixup MEDIUM-3 -- a preflight job that
+    # stops running must not silently delete its own line; "ran": False is
+    # the honest never-run-yet state, distinct from an actual pass/fail).
+    # Individually attributable: every check's own detail string renders,
+    # never a single undifferentiated "preflight failed".
+    pfh = brief.get("preflight_health") or {"ran": False, "ok": None, "checks": {}, "as_of_sgt": None}
+    if pfh.get("ran"):
+        checks = pfh.get("checks") or {}
+        n_failed = sum(1 for c in checks.values() if not c.get("ok"))
+        status = "ALL PASS" if pfh["ok"] else f"{n_failed} FAILED"
+        lines += [f"## Preflight ({pfh.get('as_of_sgt', '')[:10]}): {status}"]
+        for name, result in checks.items():
+            mark = "ok" if result.get("ok") else "FAIL"
+            lines.append(f"- {name}: {mark} — {result.get('detail', '')}")
+        lines.append("")
+    else:
+        lines += ["## Preflight: no run has completed yet", ""]
+
+    # PRE-1a: the "did anything happen" line -- proposals produced + AI
+    # error count by category, so a quiet day and a dead-provider day never
+    # look identical again. Audit-fixup MEDIUM-2: an "insufficient sample"
+    # note renders honestly (never as a positive "OK" assurance from zero
+    # evidence).
+    eh = brief.get("evaluator_health")
+    if eh:
+        reasons = eh.get("top_reason")
+        note = eh.get("note")
+        level_label = "INSUFFICIENT SAMPLE" if note else eh["level"].upper()
+        lines += [
+            f"## AI evaluator health: {level_label} "
+            f"({eh.get('fail_safe', 0)}/{eh.get('sample', 0)} recent calls fail-safe"
+            + (f", top reason: {reasons}" if reasons else "")
+            + (f"; {note}" if note else "") + ")",
+            "",
+        ]
 
     eh = brief.get("eval_health")
     if eh:
@@ -1082,12 +1411,19 @@ def render_compact(brief: dict) -> str:
         f"{mc['excess_return_pct']:+.2f}%" if mc.get("excess_return_pct") is not None else "n/a"
     )
     ny = brief["needs_you"]
+    ta = brief["todays_activity"]
+    eh = brief.get("evaluator_health") or {}
+    ai_errors = eh.get("fail_safe", 0)
     lines = [
         f"AlphaOS Daily Brief -- {brief['date_sgt']}",
         f"Action: {brief['one_action']}",
         f"vs S&P: {excess}  |  Positions: {len(brief['positions_health'])}  |  "
         f"Pending approvals: {ny['pending_approval_count']}",
         f"Open incidents: {ny['open_incident_count']}  |  Fused jobs: {len(ny['fused_jobs'])}",
+        # PRE-1a "did-anything-happen" line: proposals produced + AI error
+        # count -- a quiet day (0 proposed, 0 errors) and a dead-provider day
+        # (0 proposed, N errors) must never read identically again.
+        f"Today: {ta['proposed_today']} proposal(s) produced  |  AI errors: {ai_errors}",
     ]
     # 2026-07-24: one extra line ONLY when something is actually awaiting
     # fill -- the quiet path (the overwhelming majority of days) is byte-for-

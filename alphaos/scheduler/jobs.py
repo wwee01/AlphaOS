@@ -17,7 +17,10 @@ genuinely unexpected exceptions are allowed to propagate up to
 
 from __future__ import annotations
 
-from alphaos.constants import Severity, TriggerSource
+import os
+import shutil
+
+from alphaos.constants import ExecutionProvider, Severity, TriggerSource
 from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cost_guard
 
@@ -198,11 +201,16 @@ def run_daily_digest_job(orch, runner) -> dict:
 
     digest = build_daily_digest(orch.journal, orch.settings, orch.kill_switch)
     brief = build_daily_brief(orch.journal, orch.settings, orch.kill_switch)
+    # PRE-1a: the push priority follows the brief's OWN one_action_priority --
+    # 'high' exactly when the provider-health rung is this build's headline
+    # (see reports/daily_brief.py::_one_action_priority). Every other rung
+    # keeps today's 'default' priority unchanged -- deliberately narrow, not
+    # a general repriority of every headline this job has ever sent.
     alerts.send_alert(
         orch.settings,
         title=brief["one_action"],
         message=render_compact(brief),
-        priority="default",
+        priority=brief.get("one_action_priority", "default"),
         journal=orch.journal,
     )
     return {"status": "completed", "digest": digest, "brief": brief}
@@ -353,3 +361,303 @@ def run_text_archive_pull_job(orch, runner) -> dict:
         )
 
     return {"status": "completed", "cik_map_result": cik_map_result, "pull_result": pull_result}
+
+
+# ---------------------------------------------------------------- PRE-1b ----
+# PREFLIGHT-1 (§5, written 2026-07-12; built here as PRE-1b, the class fix
+# for P0-A -- six days of a dead OpenAI account produced "Nothing needs you"
+# every morning because nothing measured whether the machinery that actually
+# matters -- the AI provider, the broker, market data, the evidence chain --
+# was reachable at all before the first scan window opened).
+#
+# Each check below returns ``{"ok": bool, "detail": str}`` -- individually
+# attributable per the spec ("a single 'preflight failed' string is not
+# acceptable"). ``run_preflight_job`` aggregates them, alerts ONCE
+# (priority=high) listing every failed check by name if any failed, and
+# always returns the full per-check payload for the daily digest's own one
+# line (reports/daily_brief.py::_preflight_health).
+
+# Reference symbol for the market-data freshness check -- deliberately NOT
+# read from the scan universe (SPY is liquid, always in the core book
+# regardless of universe file changes, and this check's only job is "is the
+# data feed itself alive", not "is today's universe healthy").
+PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL = "SPY"
+
+# Below this many megabytes free on the journal's own filesystem, preflight
+# fails the disk-headroom check -- chosen as a conservative floor well above
+# a single day's DB growth (the journal is a few MB/day in steady state);
+# this exists to catch "the disk is nearly full" days ahead of an actual
+# write failure, not to police normal usage.
+PREFLIGHT_MIN_DISK_HEADROOM_MB = 500
+
+# Canary staleness: fails once the most recent run is older than this many
+# days. CANARY's own cadence is weekly (scheduler_canary_run_time/weekday),
+# so 10 days gives one full missed week of slack before paging -- long
+# enough to absorb a single delayed/skipped run, short enough that two
+# consecutive missed weeks is caught promptly. Reported as a fail ONLY when
+# CANARY_ENABLED is actually on (an operator who hasn't opted into CANARY
+# yet gets an 'ok, not enabled' detail, never a false failure).
+PREFLIGHT_CANARY_STALENESS_DAYS = 10
+
+
+def _preflight_check_openai_reachable(orch) -> dict:
+    """Check 1 (spec's own #1, "this is the check that would have caught
+    P0-A"): one real, minimal OpenAI call -- CHECKED against (never counted
+    toward, see MEDIUM-1 audit-fixup) the existing AI cost cap via the SAME
+    budget check run_scan_job already uses (a budget-exhausted day degrades
+    to an 'ok, skipped' detail, never a false failure -- the cap is a
+    capacity constraint, not a reachability verdict). Any exception on the
+    real call (auth, quota, network, timeout) is the exact failure class
+    this check exists to surface.
+
+    Audit-fixup HIGH-2 (the ticket's own thesis): a genuinely mock deploy
+    (ALPHAOS_MODE=mock) reports 'ok, not applicable' -- live reachability
+    truly cannot be tested there. But ALPHAOS_MODE=paper with a blank/rotated
+    OPENAI_API_KEY is NOT the same state, even though OpenAIClient.use_mock
+    also degrades to mock output for it -- that is a live-mode
+    misconfiguration (paper trading continuing on a silently-mocked
+    evaluator), and reporting it 'ok' is precisely the fail-open this ticket
+    exists to eliminate. That branch reports ``ok=False``.
+    """
+    settings, journal = orch.settings, orch.journal
+    if settings.is_mock:
+        return {"ok": True, "detail": "mock mode; live reachability not applicable"}
+    if not settings.has_openai_key:
+        return {
+            "ok": False,
+            "detail": f"ALPHAOS_MODE={settings.mode} but OPENAI_API_KEY is blank -- the evaluator is "
+                      "silently running in MOCK mode while paper trading continues live; this is a "
+                      "misconfiguration, not a healthy 'not applicable' state.",
+        }
+    within_budget, budget_detail = cost_guard.check_scan_budget(settings, journal)
+    if not within_budget:
+        return {"ok": True, "detail": f"skipped (respecting the AI cost cap): {budget_detail}"}
+    try:
+        from openai import OpenAI  # lazy import; optional dependency, mirrors ai/openai_client.py
+
+        client = OpenAI(api_key=settings.openai_api_key)
+        # gpt-5.x chat.completions REJECTS `max_tokens` (400) -- this repo has
+        # already learned this twice (ai/playbook_classifier.py,
+        # ai/last30days_polarity.py both use `max_completion_tokens`); a
+        # wrong param here would 400 on every healthy day and page at
+        # priority=high daily, recreating exactly the desensitization this
+        # ticket exists to kill.
+        resp = client.chat.completions.create(
+            model=settings.openai_primary_model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_completion_tokens=5,
+            timeout=15,
+        )
+        served_model = getattr(resp, "model", None) or settings.openai_primary_model
+        return {"ok": True, "detail": f"reachable (model={served_model})"}
+    except Exception as exc:  # noqa: BLE001 - the exact condition this check exists to catch
+        return {"ok": False, "detail": f"OpenAI unreachable: {exc}"}
+
+
+def _preflight_check_alpaca_reachable(orch) -> dict:
+    """Check 2: Alpaca account lookup (paper). Only exercised when
+    EXECUTION_PROVIDER=alpaca_paper AND not mock mode -- simulated_internal
+    deployments never touch the broker at all, so 'reachability' has no
+    meaning for them; reports 'ok, not applicable' rather than a fabricated
+    verdict. The actual broker call lives in
+    execution/position_manager.py::check_alpaca_reachable, NOT here -- this
+    file's own architectural test asserts nothing under alphaos/scheduler/
+    ever names the broker client module directly; this function only ever
+    calls the execution-layer helper, never that module."""
+    settings, journal = orch.settings, orch.journal
+    if settings.is_mock or settings.execution_provider != ExecutionProvider.ALPACA_PAPER.value:
+        return {"ok": True, "detail": "execution_provider != alpaca_paper (or mock mode); not applicable"}
+    from alphaos.execution.position_manager import check_alpaca_reachable
+
+    ok, detail = check_alpaca_reachable(settings, journal)
+    return {"ok": ok, "detail": detail}
+
+
+def _preflight_check_market_data_freshness(orch) -> dict:
+    """Check 3: a live snapshot for one reference symbol, run through the
+    SAME FreshnessGuard every real scan/monitor pass already uses -- never a
+    second freshness definition.
+
+    Audit-fixup HIGH-1: SCHEDULER_PREFLIGHT_TIME (07:15 SGT) is 19:15 ET the
+    PREVIOUS calendar day -- on SGT Sunday/Monday that previous-day ET
+    instant lands on a real weekend (Sat/Sun), so FreshnessGuard.assess()
+    correctly returns CLOSED_SESSION, which used to read as a plain
+    freshness FAILURE (is_usable=False) -- a false high-priority page on the
+    two pre-open windows every week that most need to be trusted (Monday's
+    is the worst: the first real signal after the weekend). A closed market
+    is not a data-freshness problem; there is nothing to be fresh. This
+    reads FreshnessGuard's own single source of truth for session state
+    (``report.freshness_status`` -- whatever the SNAPSHOT itself carries,
+    e.g. the real Alpaca path's own stamped session, takes priority over any
+    separately-computed wall-clock guess -- see FreshnessGuard.assess's own
+    ``session = snapshot.get("market_session") or ...`` precedence) rather
+    than adding a second, independently-drifting session computation here.
+    """
+    settings, journal = orch.settings, orch.journal
+    try:
+        from alphaos.constants import FreshnessStatus
+        from alphaos.data.freshness_guard import FreshnessGuard
+        from alphaos.data.market_data import MarketDataClient
+
+        market = MarketDataClient(settings, journal)
+        snap = market.get_snapshot(PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL)
+        report = FreshnessGuard.from_settings(settings).assess(snap)
+        if report.freshness_status == FreshnessStatus.CLOSED_SESSION.value:
+            return {
+                "ok": True,
+                "detail": f"{PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL}: market closed "
+                          f"(session={report.market_session}); freshness check not applicable",
+            }
+        detail = f"{PREFLIGHT_MARKET_DATA_REFERENCE_SYMBOL}: {report.freshness_status}"
+        return {"ok": bool(report.is_usable), "detail": detail}
+    except Exception as exc:  # noqa: BLE001 - the exact condition this check exists to catch
+        return {"ok": False, "detail": f"market-data freshness check failed: {exc}"}
+
+
+def _preflight_check_canary_staleness(orch) -> dict:
+    """Check 4: days since the last canary TRIGGER run (never a confirmation
+    replay -- build_canary_report already excludes those). 'ok, not enabled'
+    when CANARY_ENABLED is off or no run has ever happened yet (an expected
+    state, not a failure)."""
+    settings, journal = orch.settings, orch.journal
+    if not settings.canary_enabled:
+        return {"ok": True, "detail": "CANARY_ENABLED is false; not applicable"}
+    from alphaos.reports.canary_report import build_canary_report
+    from alphaos.util import timeutils
+
+    rep = build_canary_report(journal)
+    if rep.get("status") == "no_runs_yet":
+        return {"ok": True, "detail": "CANARY_ENABLED but no run has completed yet"}
+    started_at_sgt = rep.get("started_at_sgt")
+    if started_at_sgt is None:
+        return {"ok": False, "detail": f"latest canary run ({rep.get('run_id')}) has no started_at_sgt"}
+    age_seconds = timeutils.age_seconds(started_at_sgt)
+    if age_seconds is None:
+        return {"ok": False, "detail": f"latest canary run ({rep.get('run_id')}) has an unparseable timestamp"}
+    age_days = age_seconds / 86400.0
+    ok = age_days < PREFLIGHT_CANARY_STALENESS_DAYS
+    return {
+        "ok": ok,
+        "detail": f"latest canary run {age_days:.1f}d ago (run_id={rep.get('run_id')}, "
+                  f"threshold {PREFLIGHT_CANARY_STALENESS_DAYS}d)",
+    }
+
+
+def _preflight_check_backup_age(orch) -> dict:
+    """Check 5: ``data/backup_status.json`` via the SAME build_backup_health()
+    the daily brief's own backup_health section (and its priority='high'
+    stale-backup one_action rung) already reads -- one definition of
+    'stale', not a second one."""
+    from alphaos.reports.backup_health import build_backup_health
+
+    bh = build_backup_health()
+    if bh is None:
+        return {"ok": True, "detail": "no backup run recorded yet"}
+    if bh.get("stale"):
+        days = bh.get("days_since_success")
+        return {"ok": False, "detail": f"backup stale: {days} day(s) since last success"}
+    return {"ok": True, "detail": "backup current"}
+
+
+def _preflight_check_journal_and_disk(orch) -> dict:
+    """Check 6: the journal DB is readable, its directory is writable, and
+    free disk space on that filesystem clears PREFLIGHT_MIN_DISK_HEADROOM_MB."""
+    journal = orch.journal
+    try:
+        journal.conn.execute("SELECT 1")
+    except Exception as exc:  # noqa: BLE001 - the exact condition this check exists to catch
+        return {"ok": False, "detail": f"journal not readable: {exc}"}
+
+    db_path = getattr(journal, "db_path", None) or orch.settings.db_path
+    directory = os.path.dirname(os.path.abspath(db_path)) or "."
+    if not os.access(directory, os.W_OK):
+        return {"ok": False, "detail": f"journal directory not writable: {directory}"}
+    try:
+        usage = shutil.disk_usage(directory)
+    except OSError as exc:
+        return {"ok": False, "detail": f"disk headroom check failed: {exc}"}
+    free_mb = usage.free / (1024 * 1024)
+    if free_mb < PREFLIGHT_MIN_DISK_HEADROOM_MB:
+        return {
+            "ok": False,
+            "detail": f"low disk headroom: {free_mb:.0f}MB free (< {PREFLIGHT_MIN_DISK_HEADROOM_MB}MB)",
+        }
+    return {"ok": True, "detail": f"journal writable; {free_mb:.0f}MB free"}
+
+
+def _preflight_check_kill_switch_state(orch) -> dict:
+    """Check 7: kill switch + shadow-label suspend latch state, REPORTED not
+    JUDGED (spec's own wording) -- always ``ok=True`` regardless of engaged
+    state; an engaged kill switch is an intentional, already-visible safety
+    state elsewhere (kill_switch_engaged is its own top-level brief field),
+    not a preflight FAILURE."""
+    from alphaos.safety import ShadowLabelSuspendSwitch
+
+    kill_engaged = orch.kill_switch.is_engaged()
+    kill_reason = orch.kill_switch.reason()
+    suspend = ShadowLabelSuspendSwitch()
+    suspend_engaged = suspend.is_engaged()
+    detail = f"kill_switch_engaged={kill_engaged}"
+    if kill_engaged:
+        detail += f" ({kill_reason})"
+    detail += f"; shadow_label_suspended={suspend_engaged}"
+    if suspend_engaged:
+        detail += f" ({suspend.reason()})"
+    return {"ok": True, "detail": detail}
+
+
+# Name -> check FUNCTION NAME (a string, looked up on this module at call
+# time -- not a bound function reference captured at import time) -- in the
+# spec's own numbered order (also the dict/report iteration order in Python
+# 3.7+). The indirection matters for testability: a test that monkeypatches
+# ``jobs._preflight_check_backup_age`` must actually change what
+# ``run_preflight_job`` calls, the same way ``cost_guard.check_scan_budget``
+# is called via module-attribute lookup elsewhere in this file, never a
+# reference bound once at module-load time.
+_PREFLIGHT_CHECKS = (
+    ("openai_reachable", "_preflight_check_openai_reachable"),
+    ("alpaca_reachable", "_preflight_check_alpaca_reachable"),
+    ("market_data_freshness", "_preflight_check_market_data_freshness"),
+    ("canary_staleness", "_preflight_check_canary_staleness"),
+    ("backup_age", "_preflight_check_backup_age"),
+    ("journal_and_disk", "_preflight_check_journal_and_disk"),
+    ("kill_switch_state", "_preflight_check_kill_switch_state"),
+)
+
+
+def run_preflight_job(orch, runner) -> dict:
+    """Scheduler wrapper for PRE-1b's once-daily pre-open self-test. Runs
+    each of the 7 checks above (never lets one check's own exception abort
+    the rest -- a check that raises unexpectedly is recorded as a failed
+    check, not a failed job), aggregates pass/fail, and sends exactly ONE
+    ntfy alert (priority=high) naming every failed check when any fail --
+    never a single undifferentiated 'preflight failed' string. All-pass
+    produces no alert (the daily digest already always sends and gets its
+    own one-line summary via reports/daily_brief.py::_preflight_health)."""
+    import sys
+
+    from alphaos.util import alerts
+
+    this_module = sys.modules[__name__]
+    checks: dict = {}
+    for name, fn_name in _PREFLIGHT_CHECKS:
+        try:
+            fn = getattr(this_module, fn_name)
+            checks[name] = fn(orch)
+        except Exception as exc:  # noqa: BLE001 - one check's bug must never sink the whole job
+            checks[name] = {"ok": False, "detail": f"check raised unexpectedly: {exc}"}
+
+    failed = [name for name, result in checks.items() if not result.get("ok")]
+    overall_ok = not failed
+
+    if failed:
+        lines = [f"{name}: {checks[name]['detail']}" for name in failed]
+        alerts.send_alert(
+            orch.settings,
+            title=f"AlphaOS preflight: {len(failed)} check(s) failed ({', '.join(failed)})",
+            message="\n".join(lines),
+            priority="high",
+            journal=orch.journal,
+        )
+
+    return {"status": "completed", "preflight_result": {"ok": overall_ok, "checks": checks}}

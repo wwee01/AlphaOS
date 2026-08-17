@@ -35,6 +35,7 @@ _JOB_FUNCS = {
     cadence.JobType.HYPOTHESIS_RESOLVE: jobs.run_hypothesis_resolve_job,
     cadence.JobType.CARD_DEMOTION_CHECK: jobs.run_card_demotion_check_job,
     cadence.JobType.SHADOW_LABEL: jobs.run_shadow_label_job,
+    cadence.JobType.PREFLIGHT: jobs.run_preflight_job,
 }
 
 
@@ -309,6 +310,10 @@ class JobRunner:
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
             cadence.JobType.CARD_DEMOTION_CHECK,
+            # PRE-1b: pre-open self-test, after the other pre-open capture
+            # jobs above (so it can meaningfully report on what they
+            # produced) and before SHADOW_LABEL (kept last -- see below).
+            cadence.JobType.PREFLIGHT,
             # EXP-1 mechanism 4: labelling never rides inside SCAN and is
             # ORDERED LAST in the tick -- a budget squeeze hits research,
             # never the live book; core SCAN/MONITOR are never delayed.
@@ -411,6 +416,7 @@ class JobRunner:
             cadence.JobType.CANARY_RUN,
             cadence.JobType.HYPOTHESIS_RESOLVE,
             cadence.JobType.CARD_DEMOTION_CHECK,
+            cadence.JobType.PREFLIGHT,
             # EXP-1 mechanism 4: labelling never rides inside SCAN and is
             # ORDERED LAST in the tick -- a budget squeeze hits research,
             # never the live book; core SCAN/MONITOR are never delayed.
