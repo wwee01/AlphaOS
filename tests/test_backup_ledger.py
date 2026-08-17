@@ -14,12 +14,14 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "backup_ledger.sh"
+REPO_DIR = Path(__file__).resolve().parents[1]
+SCRIPT = REPO_DIR / "deploy" / "backup_ledger.sh"
 
 
 def _run_backup(
@@ -640,3 +642,45 @@ def test_status_json_written_with_expected_fields(tmp_path, monkeypatch):
         assert "offsite_configured" in status
     finally:
         status_file.unlink(missing_ok=True)
+
+
+def test_settings_load_never_writes_diagnostics_to_stdout(tmp_path):
+    """Post-merge regression guard (2026-08-17, caught on main only).
+
+    `_log_env_divergence` originally printed its ".env is missing N key(s)"
+    diagnostic to STDOUT. deploy/backup_ledger.sh reads the stdout of a
+    `load_settings()` probe POSITIONALLY (`sed -n '1p'` -> BACKUP2_METHOD,
+    `2p` -> BACKUP2_DEST), so the warning text became the method value: a
+    machine with offsite backup UNCONFIGURED was read as "configured but
+    unencrypted", and the nightly backup fired a false alert every night.
+
+    Both feature branches were green because a git worktree has no .env, so
+    the function returned early -- the defect only existed against a real
+    .env. This test pins the contract the shell script depends on: importing
+    and calling load_settings() writes NOTHING to stdout, whatever it may
+    write to stderr.
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("ALPHAOS_MODE=mock\n", encoding="utf-8")
+    example = tmp_path / ".env.example"
+    # documented keys the .env above lacks -> guarantees the divergence path fires
+    example.write_text(
+        "ALPHAOS_MODE=mock\nSOME_DOCUMENTED_KEY=1\nANOTHER_DOCUMENTED_KEY=2\n", encoding="utf-8"
+    )
+
+    code = (
+        "from alphaos.config import settings as s\n"
+        f"s._log_env_divergence({str(env_file)!r}, {str(example)!r})\n"
+        "print('SENTINEL')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
+        cwd=str(REPO_DIR), env={**os.environ, "PYTHONPATH": str(REPO_DIR)},
+    )
+    assert result.returncode == 0, result.stderr
+    # stdout must contain ONLY what the caller printed -- nothing else.
+    assert result.stdout.strip() == "SENTINEL", (
+        f"load_settings diagnostics leaked to stdout: {result.stdout!r}"
+    )
+    # the diagnostic itself must still be emitted, just on stderr
+    assert "is missing" in result.stderr

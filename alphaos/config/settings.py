@@ -17,6 +17,7 @@ Settings are plain data. Enforcement lives here (validation) and in
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -225,9 +226,20 @@ def _log_env_divergence(dotenv_path: str = ".env", example_path: str = ".env.exa
     example_keys = _env_file_keys(example_path)
     missing = sorted(example_keys - local_keys)
     if missing:
+        # STDERR, never stdout. Post-merge regression caught on main
+        # 2026-08-17: this diagnostic originally printed to stdout, and
+        # deploy/backup_ledger.sh reads the stdout of a `load_settings()`
+        # probe POSITIONALLY (`sed -n '1p'` -> BACKUP2_METHOD). The warning
+        # text became the method value, so a machine with offsite backup
+        # UNCONFIGURED read as "configured but unencrypted" and the nightly
+        # backup fired a false alert every night. Invisible in both feature
+        # branches because a git worktree has no .env, so this function
+        # returned early -- it only manifests against a real .env. Any
+        # diagnostic a shell script might parse belongs on stderr.
         print(
             f"[alphaos] .env is missing {len(missing)} key(s) documented in "
-            f"{example_path}: {', '.join(missing)}"
+            f"{example_path}: {', '.join(missing)}",
+            file=sys.stderr,
         )
 
 

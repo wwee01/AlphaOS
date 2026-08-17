@@ -443,11 +443,17 @@ def test_env_divergence_log_reports_missing_keys_only_never_values(tmp_path, mon
     (tmp_path / ".env").write_text("FOO=whatever\n", encoding="utf-8")
     settings_module._log_env_divergence()
     captured = capsys.readouterr()
-    assert "BAR" in captured.out
-    assert "BAZ" in captured.out
-    assert "FOO" not in captured.out  # present locally -- not a divergence
-    assert "super-secret-value" not in captured.out  # never values, only key names
-    assert "2 key" in captured.out
+    # STDERR, never stdout (post-merge regression fix 2026-08-17):
+    # deploy/backup_ledger.sh parses the stdout of a load_settings() probe
+    # positionally, so any diagnostic on stdout corrupts BACKUP2_METHOD.
+    # See tests/test_backup_ledger.py::test_settings_load_never_writes_
+    # diagnostics_to_stdout for the contract this must not break.
+    assert captured.out == "", f"diagnostic leaked to stdout: {captured.out!r}"
+    assert "BAR" in captured.err
+    assert "BAZ" in captured.err
+    assert "FOO" not in captured.err  # present locally -- not a divergence
+    assert "super-secret-value" not in captured.err  # never values, only key names
+    assert "2 key" in captured.err
 
 
 def test_env_divergence_log_silent_when_nothing_missing(tmp_path, monkeypatch, capsys):
