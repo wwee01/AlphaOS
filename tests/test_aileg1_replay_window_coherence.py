@@ -28,12 +28,9 @@ import ast
 import pathlib
 import sqlite3
 
-import pytest
 
 from alphaos.baseline.rules import THRESHOLD_V1, THRESHOLD_V1_HOLD10
 from alphaos.baseline.tracker import (
-    BASELINE_HOLD10_PINNED_CARD_ID,
-    BASELINE_V1_PINNED_CARD_ID,
     record_shadow_baseline_decisions,
     resolve_baseline_arm_windows,
     resolve_pending_baseline_decisions,
@@ -41,7 +38,6 @@ from alphaos.baseline.tracker import (
 from alphaos.journal.journal_store import JournalStore
 from alphaos.journal.schema import SCHEMA_VERSION
 from alphaos.learning.outcomes_tracker import (
-    AI_LEG_FALLBACK_CARD_ID,
     REPLAY_WINDOW_FALLBACK_DQ_STATUS,
     resolve_ai_replay_window,
     seed_pending_outcomes,
@@ -478,7 +474,7 @@ def _bars_for_decision(decision_at_utc: str, n: int) -> list[dict]:
 def test_5_recompute_determinism_unchanged_row_twice_byte_identical():
     j = JournalStore(":memory:")
     ai_row = _seed_legacy_ai_leg_row(j)
-    base_row = _seed_legacy_baseline_row(j)
+    _seed_legacy_baseline_row(j)  # seeded for its side effect; the row itself is not asserted on
     bars = {"AAPL": _bars_for_decision(ai_row["decision_at_utc"], 10)}
     provider = _FakeBars(bars)
 
