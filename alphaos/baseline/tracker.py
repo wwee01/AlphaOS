@@ -30,7 +30,7 @@ from alphaos.baseline.rules import (
 from alphaos.cards.registry import get_card_by_id
 from alphaos.constants import Severity
 from alphaos.data.atr import ATR_RULES_V1
-from alphaos.learning.outcomes_engine import DEFAULT_REPLAY_WINDOW_DAYS, replay_bracket
+from alphaos.learning.outcomes_engine import replay_bracket
 from alphaos.learning.outcomes_tracker import UNAVAILABLE_AFTER_DAYS
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
@@ -270,6 +270,41 @@ def record_shadow_baseline_decisions(
             pass
 
 
+def _require_positive_int_holding_days(card: dict, card_id: str) -> int:
+    days = card.get("max_holding_days_default")
+    if not isinstance(days, int) or isinstance(days, bool) or days <= 0:
+        raise ValueError(
+            f"card {card_id!r} has no usable max_holding_days_default "
+            f"(got {days!r}) -- cannot resolve a baseline replay window."
+        )
+    return days
+
+
+def resolve_baseline_arm_windows() -> dict[str, int]:
+    """AILEG-1 (2026-08-16, spec section 2): the two pinned arm-set replay
+    windows -- v1 (threshold_v1/propose_all_v1) from
+    ``BASELINE_V1_PINNED_CARD_ID``, hold10 (their ``_hold10`` twins) from
+    ``BASELINE_HOLD10_PINNED_CARD_ID`` -- BOTH resolved by explicit card id,
+    unconditionally, never a ``row.get("max_holding_days") or
+    DEFAULT_REPLAY_WINDOW_DAYS`` fallback. This is the SINGLE source both
+    ``resolve_pending_baseline_decisions`` (the live scheduled resolver) and
+    ``scripts/replay_recompute.py`` (the separate, operator-invoked repair
+    pass over pre-existing rows) read from, so the two can never silently
+    diverge. Returns ``{rule_version: window_days}`` covering every
+    rule_version in EITHER arm-set, so a caller holding one row can look up
+    its window directly by that row's own ``rule_version``."""
+    v1_card = get_card_by_id(BASELINE_V1_PINNED_CARD_ID)
+    v1_window_days = _require_positive_int_holding_days(v1_card, BASELINE_V1_PINNED_CARD_ID)
+    hold10_card = get_card_by_id(BASELINE_HOLD10_PINNED_CARD_ID)
+    hold10_window_days = _require_positive_int_holding_days(hold10_card, BASELINE_HOLD10_PINNED_CARD_ID)
+    windows: dict[str, int] = {}
+    for rv in BASELINE_RULE_VERSIONS:
+        windows[rv] = v1_window_days
+    for rv in BASELINE_RULE_VERSIONS_HOLD10:
+        windows[rv] = hold10_window_days
+    return windows
+
+
 def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int = 200) -> dict:
     """Resolve 'pending' shadow_baseline_decisions rows (decision='propose')
     with a bracket replay, via the SAME replay_bracket() the primary
@@ -296,8 +331,20 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
     if bars_provider is None:
         return counts
 
+    # AILEG-1 (2026-08-16, spec section 2): resolve each arm-set's window
+    # ONCE per call, by explicit pinned card id -- never per-row, never a
+    # `row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS` fallback.
+    # Same pinned-by-id law record_shadow_baseline_decisions already applies
+    # at WRITE time; this is the identical resolution repeated at REPLAY
+    # time (via the shared resolve_baseline_arm_windows()) so the two can
+    # never silently diverge (e.g. a row whose stored max_holding_days is
+    # NULL/stale for any reason no longer changes what window actually gets
+    # replayed).
+    arm_windows = resolve_baseline_arm_windows()
+
     for rule_versions in (BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10):
-        sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions)
+        window_days = arm_windows[rule_versions[0]]
+        sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions, window_days)
         for key in counts:
             counts[key] += sub_counts[key]
 
@@ -337,10 +384,21 @@ def _warn_on_orphaned_pending_rows(journal) -> None:
     )
 
 
-def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_versions: tuple) -> dict:
+def _resolve_pending_rows_for_arm_set(
+    journal, bars_provider, limit: int, rule_versions: tuple, window_days: int,
+) -> dict:
     """One arm-set's worth of ``resolve_pending_baseline_decisions`` --
     factored out (HOLD-2 audit-fixup HIGH-4) so v1 and hold10 each get their
-    own independent query + budget. See the caller's own docstring for why."""
+    own independent query + budget. See the caller's own docstring for why.
+
+    AILEG-1 (2026-08-16): ``window_days`` is now resolved ONCE by the
+    caller (from the arm-set's own pinned card id) and passed in constant
+    for every row in this arm-set -- no more per-row
+    ``row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS`` fallback.
+    A row's OWN stored ``max_holding_days`` (set at write time in
+    ``_write_baseline_row``) is provenance for "what the card said when this
+    row was written"; it is no longer read here at all, so the two can never
+    silently diverge."""
     counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
@@ -360,7 +418,6 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
         decision_date = decision_at.date().isoformat()
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
-        window_days = row.get("max_holding_days") or DEFAULT_REPLAY_WINDOW_DAYS
         # HOLD-2 (STATUS CORRECTION item 3): hold10 rows get a wider
         # calendar give-up -- see HOLD10_UNAVAILABLE_AFTER_DAYS's own
         # module-level docstring for why the shared 15.0 would selectively
@@ -374,7 +431,7 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
         if not forward_bars:
             if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
-                                   "no_bars_after_window", None, "no_bars_after_window")
+                                   "no_bars_after_window", None, "no_bars_after_window", window_days)
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -389,7 +446,7 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
             # entry/stop/target/risk_per_share genuinely invalid -- this can
             # NEVER resolve regardless of how many more bars arrive.
             _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
-                               None, None, replay["replay_exit_reason"])
+                               None, None, replay["replay_exit_reason"], window_days)
             counts["unavailable"] += 1
             continue
 
@@ -400,7 +457,7 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
             # update_pending_outcomes' own bars_used>=N completeness gate).
             if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
-                                   None, None, "window_never_completed")
+                                   None, None, "window_never_completed", window_days)
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -411,7 +468,7 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
         # (replay_r stays None in that one sub-case -- matches the primary
         # ledger's own convention of a 'complete' row with a null replay_r).
         _mark_baseline_row(journal, row["baseline_decision_id"], "complete",
-                           replay["result"], replay["replay_r"], replay["replay_exit_reason"])
+                           replay["result"], replay["replay_r"], replay["replay_exit_reason"], window_days)
         counts["updated"] += 1
         counts["completed"] += 1
 
@@ -419,10 +476,11 @@ def _resolve_pending_rows_for_arm_set(journal, bars_provider, limit: int, rule_v
 
 
 def _mark_baseline_row(journal, baseline_decision_id: str, replay_status: str,
-                       replay_result, replay_r, replay_exit_reason) -> None:
+                       replay_result, replay_r, replay_exit_reason,
+                       replay_window_days: Optional[int] = None) -> None:
     journal.conn.execute(
         "UPDATE shadow_baseline_decisions SET replay_status = ?, replay_result = ?, "
-        "replay_r = ?, replay_exit_reason = ? WHERE baseline_decision_id = ?",
-        (replay_status, replay_result, replay_r, replay_exit_reason, baseline_decision_id),
+        "replay_r = ?, replay_exit_reason = ?, replay_window_days = ? WHERE baseline_decision_id = ?",
+        (replay_status, replay_result, replay_r, replay_exit_reason, replay_window_days, baseline_decision_id),
     )
     journal.conn.commit()
