@@ -99,3 +99,44 @@ invariant or the two ratchet tests.
    through the normal exit path.
 10. Both existing ratchet tests still pass, unmodified.
 11. Cold-import subprocess check on every touched module.
+
+
+---
+
+## STATUS CORRECTION (2026-08-28, after audit round 2 — Fable strategist)
+
+The blind Opus audit of `7b6dcc8` returned REQUEST-CHANGES with two BLOCKERs; the
+re-audit of `990fd1a` returned APPROVE-WITH-FINDINGS with one HIGH residual, closed in
+`641dcbb`. Two corrections to THIS SPEC, which governs where it contradicts the text
+above.
+
+1. **Obligation 8 ("stale data → no action") is WITHDRAWN as written.** It was
+   copied from `PositionManager`'s price-conditional exit logic, where refusing to act
+   on a bad price is correct. A time exit is a *market liquidation on a calendar
+   condition* — it reads no price and makes no price-conditional decision, so there is
+   no price to guard and a `FreshnessGuard` gate would be theatre. The honest
+   substitute, which the implementation carries, is
+   `test_enforcement_never_touches_market_data_immune_to_stale_feed`: enforcement has
+   ZERO market-data coupling. Recorded rather than quietly dropped.
+2. **The eligibility clause "the broker still reports the position open this pass" was
+   the load-bearing line, and the first build omitted it entirely.** Both BLOCKERs
+   traced to that single omission — the only staleness guard inspected the parent
+   order's legs, which cannot see a position that closed by any other route. The
+   corrected implementation takes `list_positions()` once per pass as a precondition
+   AND a second fresh read inside the recovery path before any submit. Any future
+   ticket touching this path must preserve both.
+
+**Open operator ruling, deliberately not decided by the build:** with the kill switch
+ENGAGED, enforcement still cancels a filled position's protection and liquidates it at
+market; only the protective-OCO *submit* is blocked. The auditor's read, which the
+strategist shares: the exposure-reducing argument that carries ENTRY-TTL-1's cancel
+does NOT transfer cleanly — that cancels an *unfilled* order which cannot move the
+book, whereas this cancels a *filled* position's protection and then sells, with a real
+if brief unprotected interval, at exactly the moment an operator has signalled they do
+not trust the system to trade. Recommendation: gate it. If the ruling is to keep it
+ungated, that belongs in the Never-List explicitly, not inferred from a docstring.
+
+**Known boundary, accepted:** R1's remedy converts a failed OCO-id persist into a
+visible BLOCKING critical incident carrying the abandoned order id for manual
+cleanup. It does not auto-cancel that orphaned OCO on a later pass; a full
+reconciliation loop was out of scope. The incident text says so.
