@@ -154,6 +154,51 @@ class AlpacaClient:
         )
         return client.submit_order(request)  # pragma: no cover
 
+    # TIME-2 recovery leg: re-place stop+target protection on an EXISTING
+    # position (no entry leg -- the position is already filled) after a
+    # close_position() call raised having already cancelled the prior legs.
+    # Used ONLY by OrderManager's close-failure recovery path (spec fail-
+    # direction 2: never leave a position naked). Guarded by the same
+    # preflight() every other broker-mutating method on this class calls.
+    def submit_protective_oco(self, symbol: str, qty: float, direction: str,
+                              stop: float, target: float, tif: str) -> dict:
+        """Submit a stop-loss/take-profit OCO pair against an already-open
+        position. Returns a normalized order dict for the (take-profit leg
+        of the) OCO pair."""
+        self.preflight()  # never bypassed
+        client = self._trading_client()
+        spec = {
+            "symbol": symbol,
+            "qty": int(qty),
+            "side": "sell" if direction != TradeDirection.SHORT.value else "buy",
+            "target": round(float(target), 2),
+            "stop": round(float(stop), 2),
+            "tif": tif,
+        }
+        if getattr(client, "FAKE", False):
+            order = client.submit_oco(spec)
+        else:  # pragma: no cover - exercised only with the live SDK + creds
+            from alpaca.trading.requests import LimitOrderRequest, StopLossRequest
+            from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+
+            side = OrderSide.SELL if spec["side"] == "sell" else OrderSide.BUY
+            tif_map = {"day": TimeInForce.DAY, "gtc": TimeInForce.GTC}
+            request = LimitOrderRequest(
+                symbol=spec["symbol"], qty=spec["qty"], side=side,
+                time_in_force=tif_map.get(spec["tif"], TimeInForce.DAY),
+                limit_price=spec["target"], order_class=OrderClass.OCO,
+                stop_loss=StopLossRequest(stop_price=spec["stop"]),
+            )
+            order = client.submit_order(request)
+        normalized = order_mapping.normalize_order(order)
+        if self.journal is not None:
+            self.journal.log_system_event(
+                Severity.WARNING, "broker",
+                f"Alpaca PAPER protective OCO re-placed for {symbol} "
+                f"(broker_order_id={normalized['broker_order_id']}, status={normalized['status']}).",
+            )
+        return normalized
+
     # ----------------------------------------------------- reconciliation
     def get_order(self, broker_order_id: str) -> dict:
         client = self._trading_client()
@@ -170,6 +215,34 @@ class AlpacaClient:
 
     def cancel_order(self, broker_order_id: str) -> None:
         self._trading_client().cancel_order_by_id(broker_order_id)
+
+    # TIME-2: per-symbol close, the capability gap the ticket's own spec
+    # names -- submit_order() above deliberately raises ("use submit_bracket
+    # for real paper execution") and flatten_paper() is all-or-nothing, so
+    # neither can close ONE broker-managed position on its own clock.
+    # Alpaca DELETE /v2/positions/{symbol}: submits a market order that
+    # liquidates the entire position. Guarded by the same preflight() every
+    # other broker-mutating method on this class calls -- never bypassed.
+    def close_position(self, symbol: str) -> dict:
+        """Close ONE open paper position at the broker (DELETE
+        /v2/positions/{symbol}). Returns the normalized liquidation order --
+        callers must not assume ``filled_avg_price`` is present (Alpaca may
+        return the order before it fills; a caller needing the fill price
+        defers to the standard reconcile path rather than guessing one)."""
+        self.preflight()
+        client = self._trading_client()
+        if getattr(client, "FAKE", False):
+            order = client.close_position(symbol)
+        else:  # pragma: no cover - exercised only with the live SDK + creds
+            order = client.close_position(symbol_or_asset_id=symbol)
+        normalized = order_mapping.normalize_order(order)
+        if self.journal is not None:
+            self.journal.log_system_event(
+                Severity.WARNING, "broker",
+                f"Alpaca PAPER position closed for {symbol} "
+                f"(broker_order_id={normalized['broker_order_id']}, status={normalized['status']}).",
+            )
+        return normalized
 
     def flatten_paper(self) -> dict:
         """Cancel ALL open paper orders and close ALL open paper positions.

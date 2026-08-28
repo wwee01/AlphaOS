@@ -29,15 +29,18 @@ from alphaos.constants import (
     OrderState,
     ProposalStatus,
     ProtectionPath,
+    ProtectionStatus,
     ReasonCode,
     Severity,
 )
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import entry_staleness, order_schema, protection_watchdog
 from alphaos.execution.position_manager import PositionManager
+from alphaos.execution.protection_watchdog import ProtectionCheckResult
 from alphaos.safety import KillSwitch, real_trading_guard
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
+from alphaos.util.market_calendar import is_trading_day, trading_days_between
 
 FILL_PRICE_BASIS = "latest_quote_or_bar"
 EXEC_MODE_SIM = "internal_simulation"
@@ -49,6 +52,12 @@ ENTRY_STALENESS_EVENT_CATEGORY = "entry_staleness"
 # Dedupe marker category for the partial-fill alert (spec 3.5: alert once,
 # not every monitor pass -- see OrderManager._alert_partial_fill_once).
 PARTIAL_FILL_ALERT_CATEGORY = "entry_staleness_partial_fill"
+# TIME-2: system_events category for the enforcement pass (kept distinct from
+# "entry_staleness" -- a different mechanism with a different failure shape --
+# and from "execution"/"reconcile", so an operator can filter this
+# mechanism's audit trail on its own, same rationale as ENTRY-TTL-1's own
+# category constant above).
+TIME_EXIT_EVENT_CATEGORY = "time_exit_enforcement"
 
 
 @dataclass
@@ -446,6 +455,16 @@ class OrderManager:
         results["stale_cancelled"] = stale["cancelled"]
         results["stale_errors"] = stale["errors"]
         results["stale_partial_fill_alerts"] = stale["partial_fill_alerts"]
+
+        # TIME-2: enforcement runs AFTER both the state-sync loop above AND
+        # the staleness-cancel pass -- mirroring ENTRY-TTL-1's own wiring
+        # and for the identical reason (spec 2): a fill or leg-close from
+        # THIS SAME pass is already reflected in ``positions`` before any
+        # time-exit decision is made here.
+        expiry = self.enforce_time_exits()
+        results["time_exits_closed"] = expiry["closed"]
+        results["time_exits_deferred"] = expiry["deferred"]
+        results["time_exits_errors"] = expiry["errors"]
         return results
 
     # --------------------------------------------- ENTRY-TTL-1: staleness
@@ -802,6 +821,279 @@ class OrderManager:
             priority="default", journal=self.journal,
         )
         return {"ok": True, "order_id": order_id, **trigger_detail}
+
+    # ------------------------------------------------------- TIME-2: enforcement
+    def enforce_time_exits(self, now=None) -> dict:
+        """Close broker-managed positions whose OWN stamped max_holding_days
+        window has elapsed (docs/roadmap/alphaos-time2-broker-time-exit-spec.md).
+
+        Per position, in this exact order: cancel the live protective legs ->
+        VERIFY the cancel (re-read; a non-raising cancel is not proof -- the
+        ENTRY-TTL-1 lesson) -> close -> record through the SAME exit path
+        every other exit uses. Every fail direction leaves the position OPEN
+        AND PROTECTED, never naked -- see ``_enforce_time_exit_one`` and
+        ``_recover_unprotected_position`` for exactly how each failure is
+        handled.
+
+        Eligibility mirrors ``PositionManager._check_exit``'s own two-guard
+        rule EXACTLY (imported, never redefined): ``is_trading_day(now)`` AND
+        ``trading_days_between(opened, now) >= max_holding_days``, using each
+        position's OWN stamped value -- never a forced constant (operator
+        ruling, 2026-08-26; see the spec's own header)."""
+        result: dict = {"closed": [], "deferred": [], "errors": []}
+        if not self.settings.time_exit_enforcement_enabled:
+            return result
+        if not (self.real_paper and self.broker_connected and self.alpaca):
+            return result
+        now = now or timeutils.now_utc()
+        now_et_date = timeutils.to_et(now).date()
+
+        rows = self.journal.query(
+            "SELECT * FROM positions WHERE execution_source = ? AND status = 'open'",
+            (ExecutionSource.ALPACA_PAPER.value,),
+        )
+        for pos in rows:
+            if not self._time_exit_due(pos, now_et_date):
+                continue
+            outcome = self._enforce_time_exit_one(pos)
+            if outcome.get("ok"):
+                result["closed"].append(outcome)
+            elif outcome.get("deferred"):
+                result["deferred"].append(outcome)
+            else:
+                result["errors"].append(outcome)
+        return result
+
+    def _time_exit_due(self, pos: dict, now_et_date) -> bool:
+        """The exact two-guard rule ``PositionManager._check_exit`` enforces
+        against a simulated_internal position, reused verbatim (never a
+        second, independently-drifting definition) against a broker-managed
+        one. ``max_holding_days`` is each position's OWN stamped value -- the
+        evaluator picks 1-10 per setup under prompt v4; a legacy position
+        stamped 3 (card-v2 era) is due at 3, never floored or forced."""
+        max_days = pos.get("max_holding_days")
+        if not (max_days and max_days > 0):
+            return False
+        # PositionManager._opened_et_date is the SAME helper _check_exit and
+        # close_position()'s own holding_trading_days column both use --
+        # reused here (not reimplemented) so the live exit check and every
+        # other reader of "days held" agree on the exact same entry date.
+        opened_et_date = self.positions._opened_et_date(pos)
+        if opened_et_date is None:
+            return False
+        if not is_trading_day(now_et_date):
+            return False
+        return trading_days_between(opened_et_date, now_et_date) >= max_days
+
+    def _enforce_time_exit_one(self, pos: dict) -> dict:
+        """Cancel -> verify -> close -> record for ONE position past its own
+        window. Never raises -- every branch returns a result dict; the
+        caller sorts into closed/deferred/errors."""
+        symbol, position_id = pos["symbol"], pos["position_id"]
+        boid = pos.get("broker_order_id")
+        if not boid:
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}) is past its {pos.get('max_holding_days')}td window but "
+                f"has no broker_order_id -- cannot locate its protective legs; needs operator review.",
+                {"position_id": position_id},
+            )
+            return {"ok": False, "position_id": position_id, "symbol": symbol,
+                    "error": "missing_broker_order_id"}
+
+        # --- re-read the broker's CURRENT view of the bracket's legs (never
+        # act on a stale local view) ---
+        try:
+            norm = self.alpaca.get_order(boid)
+        except Exception as exc:
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}): get_order failed while enforcing the time exit; "
+                f"skipping this pass, will retry.",
+                {"position_id": position_id, "error": str(exc)},
+            )
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                    "error": str(exc)}
+
+        legs = [leg for leg in (norm.get("legs") or []) if leg.get("role") in ("stop_loss", "take_profit")]
+        if any((leg.get("filled_qty") or 0) > 0 for leg in legs):
+            # A protective leg already filled (stop/target hit) since the
+            # state-sync loop ran earlier THIS SAME pass -- the broker's view
+            # has moved past our stale local one. Never act on it: the
+            # normal bracket-leg-fill branch of reconcile() records the real
+            # exit on the next pass.
+            self.journal.log_system_event(
+                Severity.INFO, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}): a protective leg already filled at the broker; "
+                f"time-exit enforcement stands down for this position.",
+                {"position_id": position_id},
+            )
+            return {"ok": False, "position_id": position_id, "symbol": symbol, "stale_view": True}
+
+        # --- step 1: cancel every live protective leg ---
+        open_legs = [leg for leg in legs if leg.get("state") not in
+                    (OrderState.CANCELLED.value, OrderState.EXPIRED.value, OrderState.REJECTED.value)]
+        cancel_errors = []
+        for leg in open_legs:
+            leg_boid = leg.get("broker_order_id")
+            if not leg_boid:
+                cancel_errors.append({"leg": leg.get("role"), "error": "missing_leg_broker_order_id"})
+                continue
+            try:
+                self.alpaca.cancel_order(leg_boid)
+            except Exception as exc:
+                cancel_errors.append({"leg": leg.get("role"), "broker_order_id": leg_boid, "error": str(exc)})
+
+        # --- step 2: VERIFY -- re-read every leg; a non-raising cancel is
+        # only a REQUEST, never proof (the ENTRY-TTL-1 audit's lesson, spec
+        # 2). Any leg not confirmed terminally cancelled -> STOP, no close. -
+        verified = True
+        verify_detail = []
+        for leg in open_legs:
+            leg_boid = leg.get("broker_order_id")
+            if not leg_boid:
+                verified = False
+                continue
+            try:
+                leg_norm = self.alpaca.get_order(leg_boid)
+            except Exception as exc:
+                verified = False
+                verify_detail.append({"leg": leg.get("role"), "broker_order_id": leg_boid, "error": str(exc)})
+                continue
+            if (leg_norm.get("filled_qty") or 0) > 0:
+                # Raced a fill during the cancel window -- the same hole
+                # ENTRY-TTL-1's audit found on the entry side. Never close on
+                # top of this; the normal leg-fill reconcile path takes over.
+                verified = False
+                verify_detail.append({"leg": leg.get("role"), "broker_order_id": leg_boid, "raced_fill": True})
+                continue
+            raw_status = (leg_norm.get("status") or "").lower()
+            if raw_status not in self._TERMINAL_NO_FILL_RAW_STATUSES:
+                verified = False
+                verify_detail.append({"leg": leg.get("role"), "broker_order_id": leg_boid, "status": raw_status})
+
+        if cancel_errors or not verified:
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}): time-exit cancel not fully verified -- NO close "
+                f"submitted; the position stays open and protected. Will retry next pass.",
+                {"position_id": position_id, "cancel_errors": cancel_errors, "verify_detail": verify_detail},
+            )
+            alerts.send_alert(
+                self.settings,
+                title=f"AlphaOS: time-exit cancel unverified — {symbol}",
+                message=f"{symbol} ({position_id}) is past its {pos.get('max_holding_days')}td window "
+                        f"but its protective legs could not be verified cancelled; left untouched "
+                        f"and protected. Will retry next pass.",
+                priority="high", journal=self.journal,
+            )
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                    "cancel_errors": cancel_errors, "verify_detail": verify_detail}
+
+        # --- step 3: close the now-unprotected (legs verified gone) position ---
+        try:
+            close_norm = self.alpaca.close_position(symbol)
+        except Exception as exc:
+            return self._recover_unprotected_position(pos, exc)
+
+        exit_price = close_norm.get("filled_avg_price")
+        if exit_price is None:
+            # The liquidation order was accepted but hasn't reported a fill
+            # yet -- never guess a price. The position is flat/closing at the
+            # broker either way (no legs left to protect, so this is NOT the
+            # naked case), just not yet RECORDED locally; defer to a later
+            # pass rather than write a guessed exit.
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}): close submitted but no fill price yet -- will record "
+                f"once the broker reports a fill.",
+                {"position_id": position_id, "broker_order_id": close_norm.get("broker_order_id")},
+            )
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                    "pending_close_order": close_norm.get("broker_order_id")}
+
+        # --- step 4: record through the SAME exit path every other exit uses ---
+        ex = self.positions.close_position(
+            position_id, exit_price, "time_expiry", triggered_by="order_manager_time_exit",
+            execution_source=ExecutionSource.ALPACA_PAPER.value,
+            broker_order_id=close_norm.get("broker_order_id"),
+        )
+        self.journal.log_system_event(
+            Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+            f"Time exit enforced for {symbol} ({position_id}): past its "
+            f"{pos.get('max_holding_days')}td window -- legs cancelled and verified, closed @ "
+            f"{exit_price}.",
+            {"position_id": position_id, "broker_order_id": close_norm.get("broker_order_id")},
+        )
+        return {"ok": True, "position_id": position_id, "symbol": symbol, "exit": ex}
+
+    def _recover_unprotected_position(self, pos: dict, close_exc: Exception) -> dict:
+        """Reached only when the protective legs were already cancelled and
+        VERIFIED gone, and the subsequent close call raised -- the position
+        is open at the broker with NO protection. Never left that way: try
+        once to re-place a stop+target OCO pair immediately; if that also
+        fails, open a CRITICAL protection incident through the SAME
+        mechanism the broker protection watchdog uses (so it blocks new
+        entries exactly like any other unprotected position already does)."""
+        symbol, position_id = pos["symbol"], pos["position_id"]
+        self.journal.log_system_event(
+            Severity.ERROR, TIME_EXIT_EVENT_CATEGORY,
+            f"{symbol} ({position_id}): close FAILED after protective legs were cancelled and "
+            f"verified -- position is UNPROTECTED. Attempting to re-place stop+target.",
+            {"position_id": position_id, "error": str(close_exc)},
+        )
+        replace_error = None
+        try:
+            self.alpaca.submit_protective_oco(
+                symbol=symbol, qty=pos.get("qty"), direction=pos.get("direction"),
+                stop=pos.get("stop_price"), target=pos.get("target_price"),
+                tif=self.settings.protective_order_time_in_force,
+            )
+        except Exception as exc:
+            replace_error = str(exc)
+
+        if replace_error is None:
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}): protection re-placed after the time-exit close "
+                f"failed. Position remains open; will retry the time exit next pass.",
+                {"position_id": position_id, "close_error": str(close_exc)},
+            )
+            alerts.send_alert(
+                self.settings,
+                title=f"AlphaOS: time-exit close failed, protection restored — {symbol}",
+                message=f"{symbol} ({position_id})'s time-exit close failed ({close_exc}); its "
+                        f"stop and target were re-placed. Position remains open; will retry.",
+                priority="high", journal=self.journal,
+            )
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                    "close_error": str(close_exc), "reprotected": True}
+
+        # Re-placement ALSO failed -- open a CRITICAL protection incident
+        # through the exact same table/dedup/supersede logic the periodic
+        # broker protection watchdog uses (reused, not reimplemented), so
+        # this position blocks new entries exactly like any other
+        # unprotected position and shows up in the same incident queue an
+        # operator already knows to check.
+        result = ProtectionCheckResult(
+            position_id=position_id, symbol=symbol,
+            protection_status=ProtectionStatus.UNPROTECTED.value, severity=Severity.CRITICAL.value,
+            detail=(f"{symbol}: time-exit close failed ({close_exc}) AND re-placing its "
+                    f"protective stop/target ALSO failed ({replace_error}) -- this position may "
+                    f"have NO stop/target at the broker. Manual intervention required immediately."),
+            stop_live=False, target_live=False, broker_position_exists=True,
+        )
+        protection_watchdog._record_check(self.journal, pos, result, scheduler_run_id=None)
+        alerts.send_alert(
+            self.settings,
+            title=f"AlphaOS: CRITICAL — {symbol} may be unprotected",
+            message=f"{symbol} ({position_id})'s time-exit close failed and re-placing its "
+                    f"protective stop/target also failed. This position may have no stop/target "
+                    f"at the broker. Manual intervention required immediately.",
+            priority="high", journal=self.journal,
+        )
+        return {"ok": False, "position_id": position_id, "symbol": symbol,
+                "close_error": str(close_exc), "replace_error": replace_error, "critical": True}
 
     def cancel_order_operator(self, identifier: str) -> dict:
         """Operator-invoked targeted cancel (spec 3.7):
