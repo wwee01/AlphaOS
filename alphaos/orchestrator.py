@@ -1389,7 +1389,15 @@ class Orchestrator:
         )
         # Local watchdog handles only simulated_internal positions.
         exits = self.positions.monitor(price_overrides=price_overrides)
-        all_exits = list(recon.get("exits", [])) + exits
+        # TIME-2 audit fixup M4: a time-exit close lands in
+        # recon["time_exits_closed"] (each entry wraps the same close_position()
+        # return dict recon["exits"] entries already ARE, under an "exit" key),
+        # not recon["exits"] -- without this, an armed operator's monitor pass
+        # that actually closes a past-window position logs "0 exit(s)" and
+        # returns exits: [] even though the ledger tables are correct. Pure
+        # observability; no ledger/behavior change.
+        time_exit_records = [c["exit"] for c in recon.get("time_exits_closed", []) if c.get("exit")]
+        all_exits = list(recon.get("exits", [])) + time_exit_records + exits
         done = timeutils.stamp()
         self.journal.conn.execute(
             "UPDATE scheduler_runs SET status = ?, completed_at_utc = ?, completed_at_sgt = ?, "

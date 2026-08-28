@@ -771,6 +771,20 @@ class Settings:
     # you" visibility line) are ALWAYS ON and unaffected by this flag.
     time_exit_breach_alert_enabled: bool
 
+    # --- TIME-2: broker-managed time-exit ENFORCEMENT (cancel+verify+close) -
+    # Default false. Independent of time_exit_breach_alert_enabled above
+    # (that flag only ever alerts; this one is the first flag in the
+    # system's history that can actually close a broker-managed position on
+    # its own clock). When true, OrderManager.enforce_time_exits() (wired
+    # into reconcile() right after the staleness-cancel pass) closes an
+    # alpaca_paper position once its OWN stamped max_holding_days window has
+    # elapsed -- never a forced constant (operator ruling, 2026-08-26). Flag
+    # OFF is BYTE-IDENTICAL to today: enforce_time_exits() returns
+    # immediately without reading a single row. See the TIME-2 spec
+    # (docs/roadmap/alphaos-time2-broker-time-exit-spec.md) for the full
+    # cancel -> verify -> close -> record sequence and its fail directions.
+    time_exit_enforcement_enabled: bool
+
     # ------------------------------------------------------------------ helpers
     @property
     def is_mock(self) -> bool:
@@ -1108,6 +1122,40 @@ class Settings:
                     "unfilled entry order will ever be auto-cancelled. Set at least one leg "
                     "above 0, or set ENTRY_ORDER_STALENESS_ENABLED=false to make the disabled "
                     "state explicit.",
+                    Severity.WARNING,
+                )
+            )
+
+        # 9) TIME-2 configured-but-inert trap: enforcement ON but there is no
+        # broker to enforce anything against (EXECUTION_PROVIDER isn't
+        # alpaca_paper, or Alpaca keys are missing) -- OrderManager.
+        # enforce_time_exits() itself already checks broker_connected on
+        # every call and no-ops when it's false, so this is a same-class
+        # visibility warning, not a second enforcement of that gate. WARNING,
+        # not ERROR/CRITICAL: an operator who arms this flag before wiring up
+        # a broker connection loses nothing except the (currently inert)
+        # enforcement -- same severity class as ENTRY_ORDER_STALENESS's own
+        # inert-config warning above.
+        if self.time_exit_enforcement_enabled and not self.real_paper_execution:
+            checks.append(
+                StartupCheck(
+                    "time_exit_enforcement_configured_but_inert",
+                    False,
+                    "TIME_EXIT_ENFORCEMENT_ENABLED=true but EXECUTION_PROVIDER is not "
+                    "alpaca_paper -- there is no broker-managed position for this to ever "
+                    "act on. Set EXECUTION_PROVIDER=alpaca_paper, or set "
+                    "TIME_EXIT_ENFORCEMENT_ENABLED=false to make the disabled state explicit.",
+                    Severity.WARNING,
+                )
+            )
+        elif self.time_exit_enforcement_enabled and self.real_paper_execution and not self.has_alpaca_keys:
+            checks.append(
+                StartupCheck(
+                    "time_exit_enforcement_configured_but_inert",
+                    False,
+                    "TIME_EXIT_ENFORCEMENT_ENABLED=true but no Alpaca API key/secret is "
+                    "configured -- enforcement cannot connect to the broker and will no-op "
+                    "every pass until keys are set.",
                     Severity.WARNING,
                 )
             )
@@ -1569,6 +1617,15 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
     # TIME-1 part 3: DARK by default -- see the field's own docstring above.
     time_exit_breach_alert_enabled = _get_bool(src, "TIME_EXIT_BREACH_ALERT_ENABLED", False)
 
+    # TIME-2: DARK by default -- see the field's own docstring above. Validated
+    # at load only via _get_bool's own tolerant true/false parsing (matching
+    # every other on/off switch in this file) -- there is no numeric range or
+    # cross-field requirement for a plain master switch. The "configured but
+    # can never fire" trap this flag IS exposed to (ON with no broker
+    # connected) is checked in startup_checks() below, same severity class as
+    # ENTRY_ORDER_STALENESS_ENABLED's own inert-config warning.
+    time_exit_enforcement_enabled = _get_bool(src, "TIME_EXIT_ENFORCEMENT_ENABLED", False)
+
     # PR13.5: card_materialize's staging dir for proposed scaffolds/evidence.
     card_promotion_staging_dir = _get(src, "CARD_PROMOTION_STAGING_DIR", "data/promotions")
 
@@ -1874,4 +1931,5 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         allow_fixture_news=_get_bool(src, "ALLOW_FIXTURE_NEWS", False),
         scheduler_preflight_time=scheduler_preflight_time,
         time_exit_breach_alert_enabled=time_exit_breach_alert_enabled,
+        time_exit_enforcement_enabled=time_exit_enforcement_enabled,
     )

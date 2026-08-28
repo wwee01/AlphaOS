@@ -153,25 +153,45 @@ def run_monitor_job(orch, runner) -> dict:
     """Scheduler wrapper around ``orch.run_monitor_once()``.
 
     No kill-switch or cost-cap gating: monitor/protection must keep running
-    even when the kill switch is engaged (it only detects + blocks; it never
-    submits or closes on its own, and it never touches the protective legs
-    of a filled position). Never calls close_position/resolve_incident/
-    acknowledge_incident.
+    even when the kill switch is engaged. This job's original absolute law
+    ("detect and alert only -- never submits, never closes, never touches a
+    filled position's protective legs") has TWO narrowly-scoped, explicitly
+    documented amendments below: ENTRY-TTL-1's unfilled-entry cancel (always
+    on) and TIME-2's broker-side time-exit enforcement (dark by default --
+    off unless an operator explicitly arms ``TIME_EXIT_ENFORCEMENT_ENABLED``).
+    With TIME-2's flag off (the shipped default), this job still never
+    submits a new order and never closes a position on its own, exactly as
+    it did before either amendment existed.
 
     ENTRY-TTL-1 LAW AMENDMENT (2026-07-31, spec
     docs/roadmap/entry-ttl-1-working-order-staleness.md 3.2): the monitor may
-    now initiate exactly ONE class of broker action -- cancelling an UNFILLED
+    initiate exactly ONE class of broker action -- cancelling an UNFILLED
     ENTRY order via ``OrderManager.reconcile()``'s own staleness pass
     (``OrderManager._cancel_stale_entries``), when that order's thesis has
     aged out (TTL) or the market has moved decisively past it (adverse
-    drift). This is deliberately exempted from the "never cancels" rule
-    above because it is exposure-REDUCING only -- it never re-prices, never
-    submits, never closes a position, and never cancels the protective
-    (stop/target) legs of a FILLED position. Everything else in the previous
-    law still holds without exception: still never submits an order, still
-    never closes a position, still never touches a filled position's
-    protective legs. The staleness cancel also runs regardless of the kill
-    switch, for the same "cancel-only can only reduce exposure" reasoning.
+    drift). Deliberately exempted from the broader rule because it is
+    exposure-REDUCING only -- this cancel path never re-prices, never
+    submits a new order, never closes a position, and never touches the
+    protective (stop/target) legs of a FILLED position. Runs regardless of
+    the kill switch, for the same "cancel-only can only reduce exposure"
+    reasoning.
+
+    TIME-2 LAW AMENDMENT (2026-08-28, spec
+    docs/roadmap/alphaos-time2-broker-time-exit-spec.md, audit fixup HIGH-3 --
+    this docstring previously still claimed the pre-TIME-2 absolute after the
+    behavior it described had already changed): a SEPARATE, independently
+    flagged exception now also exists, for a FILLED, broker-managed position
+    past its own stamped ``max_holding_days`` window. Via
+    ``orch.run_monitor_once() -> OrderManager.reconcile() ->
+    enforce_time_exits()``, this job now DOES cancel that position's
+    protective legs, DOES submit a close order, and DOES close the position
+    -- the exact three actions ENTRY-TTL-1's amendment above still forbids
+    for every other case. Its one NEW-order path (re-placing protection
+    after a failed close) is gated on the kill switch; the cancel/close path
+    itself is deliberately left ungated, matching the entry-side cancel's
+    own "exposure-reducing while halted" reasoning above -- an explicit,
+    not-yet-ruled operator question (TIME-2 audit fixup HIGH-2, 2026-08-28).
+    Never calls resolve_incident/acknowledge_incident.
     """
     monitor_result = orch.run_monitor_once(trigger_source=TriggerSource.SCHEDULER.value)
     blocking = protection_watchdog.has_blocking_incident(orch.journal)

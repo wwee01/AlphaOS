@@ -326,6 +326,15 @@ class JournalStore:
             "hypothesis_gen_recurring_enabled": settings.hypothesis_gen_recurring_enabled,
             "hypothesis_gen_max_calls_per_day": settings.hypothesis_gen_max_calls_per_day,
             "hypothesis_gen_max_proposals_per_run": settings.hypothesis_gen_max_proposals_per_run,
+            # TIME-2 audit fixup MEDIUM-2: this is the FIRST flag in the
+            # system's history that can actually CLOSE a live position
+            # (TIME_EXIT_BREACH_ALERT_ENABLED, already captured via
+            # dataclasses.asdict() in build_config_hashes()'s own
+            # whole-settings hash, only ever alerts) -- arming it must move
+            # THIS provenance snapshot's config_hash too, or no record here
+            # distinguishes trades made before vs. after enforcement was
+            # armed.
+            "time_exit_enforcement_enabled": settings.time_exit_enforcement_enabled,
         }
         payload = json.dumps(safe, sort_keys=True, default=str)
         # PR9.5 fix: builtin hash() on a str is PYTHONHASHSEED-randomized (a
