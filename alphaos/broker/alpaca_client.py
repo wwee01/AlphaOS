@@ -167,12 +167,19 @@ class AlpacaClient:
         of the) OCO pair."""
         self.preflight()  # never bypassed
         client = self._trading_client()
+        # Locals first, then the dict -- the SDK branch below uses THESE, not
+        # spec[...] read-backs. A heterogeneous dict infers dict[str, object],
+        # so reading values back out lost their types and tripped mypy; the
+        # values are already typed on the way in, so keep them that way.
+        side_str = "sell" if direction != TradeDirection.SHORT.value else "buy"
+        target_r = round(float(target), 2)
+        stop_r = round(float(stop), 2)
         spec = {
             "symbol": symbol,
             "qty": int(qty),
-            "side": "sell" if direction != TradeDirection.SHORT.value else "buy",
-            "target": round(float(target), 2),
-            "stop": round(float(stop), 2),
+            "side": side_str,
+            "target": target_r,
+            "stop": stop_r,
             "tif": tif,
         }
         if getattr(client, "FAKE", False):
@@ -181,13 +188,13 @@ class AlpacaClient:
             from alpaca.trading.requests import LimitOrderRequest, StopLossRequest
             from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 
-            side = OrderSide.SELL if spec["side"] == "sell" else OrderSide.BUY
+            side = OrderSide.SELL if side_str == "sell" else OrderSide.BUY
             tif_map = {"day": TimeInForce.DAY, "gtc": TimeInForce.GTC}
             request = LimitOrderRequest(
-                symbol=spec["symbol"], qty=spec["qty"], side=side,
-                time_in_force=tif_map.get(spec["tif"], TimeInForce.DAY),
-                limit_price=spec["target"], order_class=OrderClass.OCO,
-                stop_loss=StopLossRequest(stop_price=spec["stop"]),
+                symbol=symbol, qty=int(qty), side=side,
+                time_in_force=tif_map.get(tif, TimeInForce.DAY),
+                limit_price=target_r, order_class=OrderClass.OCO,
+                stop_loss=StopLossRequest(stop_price=stop_r),
             )
             order = client.submit_order(request)
         normalized = order_mapping.normalize_order(order)

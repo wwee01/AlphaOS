@@ -865,8 +865,8 @@ class OrderManager:
             # ENTIRE pass rather than act on an unknown/stale view.
             self.journal.log_system_event(
                 Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
-                f"list_positions() failed while enforcing time exits; skipping this entire pass "
-                f"rather than acting on a stale/unknown broker view. Will retry next pass.",
+                "list_positions() failed while enforcing time exits; skipping this entire pass "
+                "rather than acting on a stale/unknown broker view. Will retry next pass.",
                 {"error": str(exc)},
             )
             return result
