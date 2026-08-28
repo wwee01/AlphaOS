@@ -324,6 +324,35 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
                           note="protection confirmed restored on a later watchdog pass")
 
 
+def open_protection_incident(journal, position: dict, *, protection_status: str, severity: str,
+                             detail: str, stop_live: Optional[bool] = None, target_live: Optional[bool] = None,
+                             broker_position_exists: Optional[bool] = None, broker_qty: Optional[float] = None,
+                             qty_match: Optional[bool] = None,
+                             scheduler_run_id: Optional[str] = None) -> Optional[str]:
+    """PUBLIC entry point for a caller OUTSIDE this module's own periodic
+    watchdog pass to open/record a protection incident (TIME-2 audit
+    fixup, 2026-08-28: the original build called the private ``_record_check``
+    directly, with no stability contract and with ``broker_qty``/
+    ``scheduler_run_id`` left None regardless of whether the caller actually
+    had better data -- a caller that DOES have a fresher broker read should
+    pass it here). Runs through the EXACT SAME table/dedup/supersede logic
+    ``run_watchdog_pass()`` uses internally, so an externally-detected
+    incident (e.g. ``OrderManager.enforce_time_exits()``'s close-failure
+    recovery path) blocks new entries and shows up in the same incident
+    queue an operator already knows to check -- never a second, parallel
+    incident mechanism. Returns the new check_id iff this call opened a
+    genuinely NEW incident (None if it's a repeat of an already-open one of
+    the same type -- see ``_record_check``'s own dedup rule)."""
+    result = ProtectionCheckResult(
+        position_id=position["position_id"], symbol=position["symbol"],
+        protection_status=protection_status, severity=severity, detail=detail,
+        stop_live=stop_live, target_live=target_live,
+        broker_position_exists=broker_position_exists, broker_qty=broker_qty, qty_match=qty_match,
+    )
+    _record_check(journal, position, result, scheduler_run_id=scheduler_run_id)
+    return result.incident_id
+
+
 def _open_incident_count(journal) -> int:
     row = journal.one(
         "SELECT COUNT(*) AS n FROM protection_checks WHERE protection_status IN (?, ?, ?) "

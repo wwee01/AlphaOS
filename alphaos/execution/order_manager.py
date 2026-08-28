@@ -36,7 +36,6 @@ from alphaos.constants import (
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import entry_staleness, order_schema, protection_watchdog
 from alphaos.execution.position_manager import PositionManager
-from alphaos.execution.protection_watchdog import ProtectionCheckResult
 from alphaos.safety import KillSwitch, real_trading_guard
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
@@ -833,13 +832,23 @@ class OrderManager:
         every other exit uses. Every fail direction leaves the position OPEN
         AND PROTECTED, never naked -- see ``_enforce_time_exit_one`` and
         ``_recover_unprotected_position`` for exactly how each failure is
-        handled.
+        handled. Never raises: an unexpected failure for ONE position is
+        caught per-position (audit fixup MEDIUM-1) so it can never abort the
+        rest of the pass.
 
         Eligibility mirrors ``PositionManager._check_exit``'s own two-guard
         rule EXACTLY (imported, never redefined): ``is_trading_day(now)`` AND
         ``trading_days_between(opened, now) >= max_holding_days``, using each
         position's OWN stamped value -- never a forced constant (operator
-        ruling, 2026-08-26; see the spec's own header)."""
+        ruling, 2026-08-26; see the spec's own header) -- PLUS a broker-
+        position precondition (audit fixup BLOCKER-2, spec 2's own eligibility
+        list: "the broker still reports the position open this pass -- never
+        act on a stale view"). A single ``list_positions()`` snapshot is taken
+        ONCE per pass (same convention as ``reconcile()``'s own single state-
+        sync loop) -- a symbol the broker reports FLAT is a local/broker
+        mismatch this method must never act on; the existing protection
+        watchdog already detects and incidents that condition on its own
+        scheduled pass."""
         result: dict = {"closed": [], "deferred": [], "errors": []}
         if not self.settings.time_exit_enforcement_enabled:
             return result
@@ -848,14 +857,50 @@ class OrderManager:
         now = now or timeutils.now_utc()
         now_et_date = timeutils.to_et(now).date()
 
+        try:
+            broker_positions = self.alpaca.list_positions()
+        except Exception as exc:
+            # Audit fixup BLOCKER-2 / spec 2: without a fresh broker-position
+            # read, ELIGIBILITY itself can't be verified honestly -- skip the
+            # ENTIRE pass rather than act on an unknown/stale view.
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"list_positions() failed while enforcing time exits; skipping this entire pass "
+                f"rather than acting on a stale/unknown broker view. Will retry next pass.",
+                {"error": str(exc)},
+            )
+            return result
+        broker_qty_by_symbol = {
+            p["symbol"]: abs(p.get("qty") or 0) for p in broker_positions if p.get("symbol")
+        }
+
         rows = self.journal.query(
             "SELECT * FROM positions WHERE execution_source = ? AND status = 'open'",
             (ExecutionSource.ALPACA_PAPER.value,),
         )
         for pos in rows:
-            if not self._time_exit_due(pos, now_et_date):
+            symbol, position_id = pos.get("symbol"), pos.get("position_id")
+            try:
+                if not self._time_exit_due(pos, now_et_date):
+                    continue
+                outcome = self._enforce_time_exit_one(pos, broker_qty_by_symbol)
+            except Exception as exc:  # noqa: BLE001 - audit fixup MEDIUM-1
+                # One position's unexpected failure must never abort the
+                # pass for every OTHER position (this loop previously had no
+                # such guard at all).
+                try:
+                    self.journal.log_system_event(
+                        Severity.ERROR, TIME_EXIT_EVENT_CATEGORY,
+                        f"{symbol} ({position_id}): unexpected error enforcing its time exit -- "
+                        f"this position is skipped THIS PASS only; other positions are unaffected. "
+                        f"Will retry.",
+                        {"position_id": position_id, "error": str(exc)},
+                    )
+                except Exception:  # pragma: no cover - logging must never compound the failure
+                    pass
+                result["errors"].append({"ok": False, "position_id": position_id, "symbol": symbol,
+                                         "error": str(exc), "unexpected": True})
                 continue
-            outcome = self._enforce_time_exit_one(pos)
             if outcome.get("ok"):
                 result["closed"].append(outcome)
             elif outcome.get("deferred"):
@@ -885,11 +930,37 @@ class OrderManager:
             return False
         return trading_days_between(opened_et_date, now_et_date) >= max_days
 
-    def _enforce_time_exit_one(self, pos: dict) -> dict:
+    def _enforce_time_exit_one(self, pos: dict, broker_qty_by_symbol: dict) -> dict:
         """Cancel -> verify -> close -> record for ONE position past its own
-        window. Never raises -- every branch returns a result dict; the
-        caller sorts into closed/deferred/errors."""
+        window. Every branch returns a result dict; the caller
+        (``enforce_time_exits``) additionally guards against an unexpected
+        raise here (audit fixup MEDIUM-1) so this docstring makes no
+        stronger claim than that."""
         symbol, position_id = pos["symbol"], pos["position_id"]
+
+        # Audit fixup BLOCKER-2 / spec 2's own eligibility list: "the broker
+        # still reports the position open this pass -- never act on a stale
+        # view." A symbol the broker reports FLAT while the local ledger
+        # still says open is exactly the protection watchdog's own
+        # CLOSED_MISMATCH condition (it closed via a path this pass's state-
+        # sync loop didn't observe -- e.g. a PRIOR pass's own deferred
+        # liquidation completing between passes; this is precisely how the
+        # original build's BLOCKER-2 defect was reachable). Stand down
+        # entirely: no cancel, no close, no recovery attempt. The existing
+        # protection watchdog already detects and incidents this condition
+        # on its own scheduled pass.
+        if not broker_qty_by_symbol.get(symbol):
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"{symbol} ({position_id}) is past its {pos.get('max_holding_days')}td window, but "
+                f"the broker reports this symbol FLAT (local ledger still shows it open) -- standing "
+                f"down; never acting on a stale view. The protection watchdog's own mismatch "
+                f"detection will incident this on its next pass.",
+                {"position_id": position_id},
+            )
+            return {"ok": False, "position_id": position_id, "symbol": symbol,
+                    "stale_view": True, "broker_flat": True}
+
         boid = pos.get("broker_order_id")
         if not boid:
             self.journal.log_system_event(
@@ -1002,7 +1073,11 @@ class OrderManager:
             # yet -- never guess a price. The position is flat/closing at the
             # broker either way (no legs left to protect, so this is NOT the
             # naked case), just not yet RECORDED locally; defer to a later
-            # pass rather than write a guessed exit.
+            # pass rather than write a guessed exit. The broker-position
+            # precondition at the top of this method is what makes that safe
+            # (audit fixup BLOCKER-2): if this liquidation fills before the
+            # next pass, that pass sees the symbol FLAT and stands down
+            # instead of retrying close()/recovery blind.
             self.journal.log_system_event(
                 Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
                 f"{symbol} ({position_id}): close submitted but no fill price yet -- will record "
@@ -1012,52 +1087,213 @@ class OrderManager:
             return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
                     "pending_close_order": close_norm.get("broker_order_id")}
 
+        # Audit fixup HIGH-1: a PARTIAL liquidation fill must never be
+        # recorded as a full close -- PositionManager.close_position() always
+        # uses the LOCAL qty, so doing so here would misstate the exit AND
+        # leave the unfilled residual open at the broker with its protective
+        # legs already cancelled (naked). Alpaca's close_position(symbol)
+        # takes no qty parameter -- it always flattens whatever it CURRENTLY
+        # holds, so a retry next pass is self-correcting for the symbol's
+        # actual remaining quantity; this method does not itself attempt to
+        # reconcile a running total across multiple partial fills (a known,
+        # declared gap -- see the ticket report).
+        filled_qty = close_norm.get("filled_qty") or 0
+        local_qty = float(pos.get("qty") or 0)
+        if filled_qty and local_qty and abs(filled_qty - local_qty) > 1e-6:
+            detail = (f"{symbol}: liquidation PARTIALLY filled ({filled_qty}/{local_qty} shares) -- "
+                      f"the residual is open at the broker with NO protective legs (already "
+                      f"cancelled this pass). Never recording a full close on a partial fill.")
+            self.journal.log_system_event(
+                Severity.CRITICAL, TIME_EXIT_EVENT_CATEGORY, detail,
+                {"position_id": position_id, "filled_qty": filled_qty, "local_qty": local_qty,
+                 "broker_order_id": close_norm.get("broker_order_id")},
+            )
+            try:
+                protection_watchdog.open_protection_incident(
+                    self.journal, pos, protection_status=ProtectionStatus.UNPROTECTED.value,
+                    severity=Severity.CRITICAL.value, detail=detail, stop_live=False, target_live=False,
+                    broker_position_exists=True, broker_qty=filled_qty and (local_qty - filled_qty),
+                )
+            except Exception:  # pragma: no cover - the alert below is the load-bearing signal
+                pass
+            alerts.send_alert(
+                self.settings,
+                title=f"AlphaOS: CRITICAL — {symbol} partial close, residual unprotected",
+                message=detail, priority="high", journal=self.journal,
+            )
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                    "partial_fill": True, "filled_qty": filled_qty, "local_qty": local_qty}
+
         # --- step 4: record through the SAME exit path every other exit uses ---
-        ex = self.positions.close_position(
-            position_id, exit_price, "time_expiry", triggered_by="order_manager_time_exit",
-            execution_source=ExecutionSource.ALPACA_PAPER.value,
-            broker_order_id=close_norm.get("broker_order_id"),
-        )
-        self.journal.log_system_event(
-            Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
-            f"Time exit enforced for {symbol} ({position_id}): past its "
-            f"{pos.get('max_holding_days')}td window -- legs cancelled and verified, closed @ "
-            f"{exit_price}.",
-            {"position_id": position_id, "broker_order_id": close_norm.get("broker_order_id")},
-        )
+        try:
+            ex = self.positions.close_position(
+                position_id, exit_price, "time_expiry", triggered_by="order_manager_time_exit",
+                execution_source=ExecutionSource.ALPACA_PAPER.value,
+                broker_order_id=close_norm.get("broker_order_id"),
+            )
+            self.journal.log_system_event(
+                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                f"Time exit enforced for {symbol} ({position_id}): past its "
+                f"{pos.get('max_holding_days')}td window -- legs cancelled and verified, closed @ "
+                f"{exit_price}.",
+                {"position_id": position_id, "broker_order_id": close_norm.get("broker_order_id")},
+            )
+        except Exception as exc:
+            # Audit fixup MEDIUM-1: the broker close ALREADY SUCCEEDED at
+            # this point -- this is a genuine ledger/broker mismatch
+            # (closed_mismatch: broker flat, local still open), not an
+            # unprotected-but-open position. Never let a DB/ledger failure
+            # here escape unhandled -- it must not abort the rest of the
+            # pass for OTHER positions, and it must leave a precise,
+            # actionable record rather than a generic error.
+            detail = (f"{symbol}: broker close SUCCEEDED (filled @ {exit_price}) but recording the "
+                      f"exit failed ({exc}) -- the LOCAL ledger still shows this position open while "
+                      f"the broker is flat. Reconcile manually; do NOT retry the time exit (there is "
+                      f"nothing left to close at the broker).")
+            self.journal.log_system_event(
+                Severity.CRITICAL, TIME_EXIT_EVENT_CATEGORY, detail,
+                {"position_id": position_id, "error": str(exc), "exit_price": exit_price,
+                 "broker_order_id": close_norm.get("broker_order_id")},
+            )
+            try:
+                protection_watchdog.open_protection_incident(
+                    self.journal, pos, protection_status=ProtectionStatus.CLOSED_MISMATCH.value,
+                    severity=Severity.CRITICAL.value, detail=detail, broker_position_exists=False,
+                )
+            except Exception:  # pragma: no cover - the alert below is the load-bearing signal
+                pass
+            try:
+                alerts.send_alert(
+                    self.settings, title=f"AlphaOS: CRITICAL — {symbol} exit not recorded",
+                    message=detail, priority="high", journal=self.journal,
+                )
+            except Exception:  # pragma: no cover - never compound the failure
+                pass
+            return {"ok": False, "position_id": position_id, "symbol": symbol,
+                    "error": str(exc), "closed_mismatch": True, "critical": True}
         return {"ok": True, "position_id": position_id, "symbol": symbol, "exit": ex}
 
     def _recover_unprotected_position(self, pos: dict, close_exc: Exception) -> dict:
         """Reached only when the protective legs were already cancelled and
         VERIFIED gone, and the subsequent close call raised -- the position
-        is open at the broker with NO protection. Never left that way: try
-        once to re-place a stop+target OCO pair immediately; if that also
-        fails, open a CRITICAL protection incident through the SAME
-        mechanism the broker protection watchdog uses (so it blocks new
-        entries exactly like any other unprotected position already does)."""
+        MAY be open at the broker with NO protection (a raised close() is
+        itself ambiguous: it could also mean the broker already considers
+        the symbol flat, e.g. a prior deferred liquidation completed
+        between passes -- audit fixup BLOCKER-2). Before ever submitting a
+        replacement order, this re-checks the broker's CURRENT position
+        state fresh (not the top-of-pass snapshot ``enforce_time_exits``
+        already took): if the broker is flat, submitting a protective OCO
+        would be an OPENING order onto nothing, not protection -- so this
+        stands down and hands off to the SAME incident mechanism with the
+        accurate ``closed_mismatch`` status instead. Only when the broker
+        genuinely still shows the position open does this try once to
+        re-place a stop+target OCO pair (gated on the kill switch --
+        KillSwitch's own contract is "block all NEW orders", and this is
+        one -- audit fixup HIGH-2); if that also fails (or is blocked), a
+        CRITICAL protection incident is opened through the SAME mechanism
+        the broker protection watchdog uses, so it blocks new entries
+        exactly like any other unprotected position already does."""
         symbol, position_id = pos["symbol"], pos["position_id"]
         self.journal.log_system_event(
             Severity.ERROR, TIME_EXIT_EVENT_CATEGORY,
             f"{symbol} ({position_id}): close FAILED after protective legs were cancelled and "
-            f"verified -- position is UNPROTECTED. Attempting to re-place stop+target.",
+            f"verified. Checking the broker's current position state before attempting recovery.",
             {"position_id": position_id, "error": str(close_exc)},
         )
-        replace_error = None
+
+        # Audit fixup BLOCKER-2: fresh (not stale-per-pass) broker read.
         try:
-            self.alpaca.submit_protective_oco(
-                symbol=symbol, qty=pos.get("qty"), direction=pos.get("direction"),
-                stop=pos.get("stop_price"), target=pos.get("target_price"),
-                tif=self.settings.protective_order_time_in_force,
-            )
+            broker_positions = self.alpaca.list_positions()
         except Exception as exc:
-            replace_error = str(exc)
+            broker_positions = None  # unknown -- fail toward NOT submitting blind, below
+            list_error = str(exc)
+        else:
+            list_error = None
+        broker_qty = None
+        if broker_positions is not None:
+            broker_qty = next(
+                (abs(p.get("qty") or 0) for p in broker_positions if p.get("symbol") == symbol), 0.0
+            )
+
+        if broker_positions is not None and not broker_qty:
+            # Confirmed flat: there is nothing left to protect. Never submit
+            # a new order here -- that would OPEN a fresh naked position,
+            # not protect one. Hand off with the ACCURATE status.
+            detail = (f"{symbol}: time-exit close failed ({close_exc}), but the broker now reports "
+                      f"this symbol FLAT -- it closed via some other path (most likely this same "
+                      f"close order completing between passes). Standing down: NOT submitting a new "
+                      f"protective order (that would open a fresh naked position). The LOCAL ledger "
+                      f"still shows this position open -- reconcile manually.")
+            self.journal.log_system_event(
+                Severity.CRITICAL, TIME_EXIT_EVENT_CATEGORY, detail, {"position_id": position_id},
+            )
+            try:
+                protection_watchdog.open_protection_incident(
+                    self.journal, pos, protection_status=ProtectionStatus.CLOSED_MISMATCH.value,
+                    severity=Severity.CRITICAL.value, detail=detail, broker_position_exists=False,
+                    broker_qty=0.0,
+                )
+            except Exception:  # pragma: no cover - the alert below is the load-bearing signal
+                pass
+            alerts.send_alert(
+                self.settings, title=f"AlphaOS: CRITICAL — {symbol} ledger/broker mismatch",
+                message=detail, priority="high", journal=self.journal,
+            )
+            return {"ok": False, "position_id": position_id, "symbol": symbol,
+                    "close_error": str(close_exc), "closed_mismatch": True, "critical": True}
+
+        # The broker genuinely still shows this position open (or its state
+        # is UNKNOWN -- list_positions() itself failed) -- either way, only
+        # a genuine, verified-open broker position is ever eligible for a
+        # replacement OCO below.
+        replace_error = None
+        new_boid = None
+        if broker_positions is None:
+            replace_error = f"could not verify current broker position state ({list_error}); refusing to submit a new order blind"
+        elif self.kill_switch.is_engaged():
+            # Audit fixup HIGH-2: KillSwitch's own contract is "presence
+            # means engaged -- block all NEW orders." submit_protective_oco
+            # is a new order. The cancel/close path above is deliberately
+            # left ungated (an explicit, not-yet-ruled operator question --
+            # see the ticket report); this ONE new-order path is not.
+            replace_error = f"kill switch engaged ({self.kill_switch.reason()}); new-order submission blocked"
+        else:
+            try:
+                new_order = self.alpaca.submit_protective_oco(
+                    symbol=symbol, qty=pos.get("qty"), direction=pos.get("direction"),
+                    stop=pos.get("stop_price"), target=pos.get("target_price"),
+                    tif=self.settings.protective_order_time_in_force,
+                )
+            except Exception as exc:
+                replace_error = str(exc)
+            else:
+                new_boid = new_order.get("broker_order_id")
 
         if replace_error is None:
+            # Audit fixup BLOCKER-1: persist the RE-PLACED OCO's own
+            # broker_order_id onto the position. Without this, the NEXT
+            # pass's ``_enforce_time_exit_one`` would re-read the OLD (now
+            # dead, all-legs-cancelled) bracket parent, see zero open legs,
+            # "verify" vacuously, and close the position while the NEWLY
+            # placed stop/target legs stay live and orphaned at the broker
+            # -- a naked short/long waiting to trigger with no position or
+            # stop behind it. Pointing broker_order_id at the NEW protective
+            # order means the next pass cancels the RIGHT legs (and, as a
+            # side effect, fixes protection_watchdog.check_position() too --
+            # it also reads this same column, so it now sees the position as
+            # genuinely PROTECTED instead of opening a false CRITICAL
+            # "no downside protection" incident on top of a real one).
+            if new_boid:
+                self.journal.conn.execute(
+                    "UPDATE positions SET broker_order_id = ? WHERE position_id = ?",
+                    (new_boid, position_id),
+                )
+                self.journal.conn.commit()
             self.journal.log_system_event(
                 Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
                 f"{symbol} ({position_id}): protection re-placed after the time-exit close "
                 f"failed. Position remains open; will retry the time exit next pass.",
-                {"position_id": position_id, "close_error": str(close_exc)},
+                {"position_id": position_id, "close_error": str(close_exc), "new_broker_order_id": new_boid},
             )
             alerts.send_alert(
                 self.settings,
@@ -1067,33 +1303,37 @@ class OrderManager:
                 priority="high", journal=self.journal,
             )
             return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
-                    "close_error": str(close_exc), "reprotected": True}
+                    "close_error": str(close_exc), "reprotected": True, "new_broker_order_id": new_boid}
 
-        # Re-placement ALSO failed -- open a CRITICAL protection incident
-        # through the exact same table/dedup/supersede logic the periodic
-        # broker protection watchdog uses (reused, not reimplemented), so
-        # this position blocks new entries exactly like any other
-        # unprotected position and shows up in the same incident queue an
-        # operator already knows to check.
-        result = ProtectionCheckResult(
-            position_id=position_id, symbol=symbol,
-            protection_status=ProtectionStatus.UNPROTECTED.value, severity=Severity.CRITICAL.value,
-            detail=(f"{symbol}: time-exit close failed ({close_exc}) AND re-placing its "
-                    f"protective stop/target ALSO failed ({replace_error}) -- this position may "
-                    f"have NO stop/target at the broker. Manual intervention required immediately."),
-            stop_live=False, target_live=False, broker_position_exists=True,
-        )
-        protection_watchdog._record_check(self.journal, pos, result, scheduler_run_id=None)
+        # Re-placement was skipped/blocked/failed -- open a CRITICAL
+        # protection incident through the exact same table/dedup/supersede
+        # logic the periodic broker protection watchdog uses (reused, not
+        # reimplemented), so this position blocks new entries exactly like
+        # any other unprotected position and shows up in the same incident
+        # queue an operator already knows to check.
+        detail = (f"{symbol}: time-exit close failed ({close_exc}) AND re-placing its protective "
+                  f"stop/target ALSO failed or was blocked ({replace_error}) -- this position may "
+                  f"have NO stop/target at the broker. Manual intervention required immediately.")
+        try:
+            protection_watchdog.open_protection_incident(
+                self.journal, pos, protection_status=ProtectionStatus.UNPROTECTED.value,
+                severity=Severity.CRITICAL.value, detail=detail, stop_live=False, target_live=False,
+                broker_position_exists=True, broker_qty=broker_qty,
+            )
+        except Exception:  # pragma: no cover - the alert below is the load-bearing signal
+            pass
         alerts.send_alert(
             self.settings,
             title=f"AlphaOS: CRITICAL — {symbol} may be unprotected",
             message=f"{symbol} ({position_id})'s time-exit close failed and re-placing its "
-                    f"protective stop/target also failed. This position may have no stop/target "
-                    f"at the broker. Manual intervention required immediately.",
+                    f"protective stop/target also failed or was blocked ({replace_error}). This "
+                    f"position may have no stop/target at the broker. Manual intervention required "
+                    f"immediately.",
             priority="high", journal=self.journal,
         )
         return {"ok": False, "position_id": position_id, "symbol": symbol,
                 "close_error": str(close_exc), "replace_error": replace_error, "critical": True}
+
 
     def cancel_order_operator(self, identifier: str) -> dict:
         """Operator-invoked targeted cancel (spec 3.7):
