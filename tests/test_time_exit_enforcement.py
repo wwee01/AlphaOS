@@ -64,6 +64,24 @@ Audit fixup round (each a named test below):
     protection_watchdog.open_protection_incident() entry point, not the
     private _record_check.
 
+Round 2 (re-audit APPROVE-WITH-FINDINGS, 2026-08-28) adds:
+ R1 (gates arming): a failed LOCAL persist of the re-placed OCO's
+    broker_order_id reproduced the B1 orphan through a non-broker failure
+    (disk I/O, locked DB, full disk) -- the write is now wrapped, and on
+    failure falls through to the SAME CRITICAL incident path a failed
+    re-placement already uses. Proven with an injected DB write failure,
+    run twice, asserting no false success and no later false close.
+ R2: a submit that returns no broker_order_id (same remedy as R1) is now
+    also treated as a replace failure, never success.
+ R3 (nit): the broker-flat stand-down is now classified as a deferral,
+    not an error -- it was a correct, intended no-op inflating the error
+    count an operator reads.
+ M4 (orchestrator.py, explicit one-file authorization): a time-exit close
+    lands in recon["time_exits_closed"], not recon["exits"] -- routed into
+    Orchestrator.run_monitor_once()'s summary so an armed operator's
+    monitor pass doesn't log "0 exit(s)" for a pass that actually closed a
+    position.
+
 All datetimes are fixed/injected (enforce_time_exits(now=...) takes an
 explicit clock; no test relies on real wall-clock "today") -- house law,
 matching test_hold1_trading_day_holding_period.py's own convention. Offline,
@@ -1126,3 +1144,156 @@ def test_also_incident_coupling_uses_the_public_entry_point_not_private():
     text = pathlib.Path(str(om_mod.__file__)).read_text(encoding="utf-8")
     assert "_record_check" not in text
     assert "protection_watchdog.open_protection_incident(" in text
+
+
+# ======================================================= round 2 fixup: R1
+def test_r1_failed_local_persist_of_new_oco_id_never_reported_as_success():
+    """Auditor's own probe (B1-2): a failed LOCAL persist of the re-placed
+    OCO's broker_order_id reproduces the B1 orphan through a non-broker
+    failure (disk I/O, locked DB, full disk) -- the OCO is live at the
+    broker, but if the failed write is reported as success anyway, the
+    position row keeps pointing at the DEAD old bracket; the next pass
+    would verify vacuously against it and close while the new legs stay
+    resting with nothing behind them. Run TWICE (the injected failure is
+    sticky, simulating an ongoing disk/DB problem, not a one-off blip): the
+    position must NEVER be reported as reprotected, and must NEVER
+    transition to closed while an unpersisted, untracked OCO is live."""
+    fake = FakeTradingClient()
+    _, journal, om = _paper_om(fake)
+    opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
+    pos, old_boid = _open_broker_position(journal, fake, symbol="AAPL", max_holding_days=5,
+                                          opened_market_date=opened)
+    fake.raise_on_close_for.add("AAPL")
+
+    # sqlite3.Connection.execute is a read-only C-level attribute -- it can't
+    # be monkeypatched directly. Swap the whole connection for a thin proxy
+    # that intercepts ONLY the one UPDATE statement and forwards everything
+    # else (queries, commit, cursor, ...) straight to the real connection.
+    class _BoomOnPersistConn:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *a, **kw):
+            if "UPDATE positions SET broker_order_id" in sql:
+                raise RuntimeError("simulated disk I/O failure persisting broker_order_id")
+            return self._real.execute(sql, *a, **kw)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    journal.conn = _BoomOnPersistConn(journal.conn)
+
+    for _ in range(2):
+        result = om.enforce_time_exits(now=_NOW)
+        assert not any(o.get("reprotected") for o in result["deferred"]), (
+            "must never report a failed persist as a successful reprotect"
+        )
+        assert len(result["errors"]) == 1
+        assert result["errors"][0].get("critical") is True
+        row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
+        assert row["broker_order_id"] == old_boid, "must never silently update to an unconfirmed id"
+        assert row["status"] == "open", (
+            f"FAIL R1: position closed despite an unpersisted, untracked re-placed OCO "
+            f"(broker_order_id still {row['broker_order_id']!r})"
+        )
+
+    # A human sees this: a blocking CRITICAL incident, with the abandoned
+    # OCO's own broker_order_id preserved in the audit trail so it can be
+    # found and cancelled manually.
+    incident = protection_watchdog.has_blocking_incident(journal)
+    assert incident is not None
+    assert incident["symbol"] == "AAPL"
+    assert incident["protection_status"] == "unprotected"
+    assert incident["severity"] == "critical"
+    assert "broker_order_id=" in incident["detail"]
+
+
+# ======================================================= round 2 fixup: R2
+def test_r2_oco_submitted_with_no_broker_order_id_treated_as_replace_failure():
+    """Same remedy as R1: a submit that raises nothing but returns NO
+    broker_order_id is not a successful re-protect either -- there is
+    nothing to persist, so the next pass could never find the right legs."""
+    fake = FakeTradingClient()
+    _, journal, om = _paper_om(fake)
+    opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
+    pos, old_boid = _open_broker_position(journal, fake, symbol="MSFT", max_holding_days=5,
+                                          opened_market_date=opened)
+    fake.raise_on_close_for.add("MSFT")
+
+    orig_submit_oco = fake.submit_oco
+
+    def _submit_oco_no_id(spec):
+        order = orig_submit_oco(spec)
+        fake.orders.pop(order.id, None)
+        order.id = None  # simulate a broker response carrying no id
+        return order
+
+    fake.submit_oco = _submit_oco_no_id
+
+    result = om.enforce_time_exits(now=_NOW)
+
+    assert not any(o.get("reprotected") for o in result["deferred"])
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].get("critical") is True
+    assert "no broker_order_id" in result["errors"][0]["replace_error"]
+    row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
+    assert row["broker_order_id"] == old_boid
+    assert row["status"] == "open"
+
+    incident = protection_watchdog.has_blocking_incident(journal)
+    assert incident is not None and incident["symbol"] == "MSFT"
+
+
+# ======================================================= round 2 fixup: R3
+def test_r3_broker_flat_standdown_classified_as_deferred_not_error():
+    """A correct, intended stand-down (spec eligibility: never act on a
+    stale broker view) must land in "deferred", not "errors" -- it was
+    previously miscounted as an error, inflating the count an operator
+    reads off enforce_time_exits()'s summary."""
+    fake = FakeTradingClient()
+    _, journal, om = _paper_om(fake)
+    opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
+    _open_broker_position(journal, fake, symbol="XLV", max_holding_days=5, opened_market_date=opened)
+    fake.set_broker_qty("XLV", 0)  # broker already reports this symbol flat
+
+    result = om.enforce_time_exits(now=_NOW)
+
+    assert result["errors"] == [], "a correct stand-down must not inflate the error count"
+    assert len(result["deferred"]) == 1
+    assert result["deferred"][0].get("broker_flat") is True
+
+
+# ======================================================= round 2 fixup: M4
+def test_m4_time_exits_closed_routed_into_orchestrator_monitor_summary():
+    """Orchestrator.run_monitor_once() previously logged "0 exit(s)" and
+    returned exits: [] for a monitor pass that ACTUALLY closed a
+    past-window position via TIME-2 -- the close lands in
+    recon["time_exits_closed"], not recon["exits"]. Pure observability fix
+    (orchestrator.py, explicitly authorized one-file touch): route it into
+    the same summary an operator already reads, with no ledger/behavior
+    change (the underlying tables were always correct)."""
+    from alphaos.orchestrator import Orchestrator
+
+    journal = JournalStore(":memory:")
+    orch = Orchestrator(settings=make_settings(), journal=journal)
+    fake_exit = {
+        "exit_id": "exit_fake1", "position_id": "pos_fake1", "symbol": "XLV",
+        "exit_reason": "time_expiry", "exit_price": 105.0, "classification": "profit-taking",
+        "is_same_day": False, "net_pnl": 50.0, "realized_r": 0.83,
+    }
+    orch.orders.reconcile = lambda: {
+        "reconciled": 0, "opened": [], "exits": [],
+        "time_exits_closed": [{"ok": True, "position_id": "pos_fake1", "symbol": "XLV", "exit": fake_exit}],
+        "time_exits_deferred": [], "time_exits_errors": [],
+        "stale_cancelled": [], "stale_errors": [], "stale_partial_fill_alerts": [],
+    }
+    orch.positions.monitor = lambda price_overrides=None: []
+
+    result = orch.run_monitor_once()
+
+    assert fake_exit in result["exits"]
+    assert len(result["exits"]) == 1
+    log_row = journal.one(
+        "SELECT * FROM system_events WHERE category = 'monitor' ORDER BY id DESC LIMIT 1"
+    )
+    assert "1 exit(s)" in log_row["message"]

@@ -958,7 +958,12 @@ class OrderManager:
                 f"detection will incident this on its next pass.",
                 {"position_id": position_id},
             )
-            return {"ok": False, "position_id": position_id, "symbol": symbol,
+            # Audit fixup R3: this is a correct, intended stand-down, not a
+            # failure -- classify it as a deferral (retried next pass, same
+            # as every other "not safe to act this pass" outcome) so it
+            # doesn't inflate the error count an operator reads off
+            # enforce_time_exits()'s summary.
+            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
                     "stale_view": True, "broker_flat": True}
 
         boid = pos.get("broker_order_id")
@@ -1269,48 +1274,75 @@ class OrderManager:
             else:
                 new_boid = new_order.get("broker_order_id")
 
+        # Audit fixup R2: a submit that raised nothing but returned no
+        # broker_order_id is NOT a successful re-protect -- there is nothing
+        # to persist, so the next pass could never find the right legs.
+        # Same remedy as R1 below: treat it as a replace failure, never as
+        # success.
+        if replace_error is None and not new_boid:
+            replace_error = "protective OCO submitted but the broker response carried no broker_order_id"
+
         if replace_error is None:
-            # Audit fixup BLOCKER-1: persist the RE-PLACED OCO's own
-            # broker_order_id onto the position. Without this, the NEXT
-            # pass's ``_enforce_time_exit_one`` would re-read the OLD (now
-            # dead, all-legs-cancelled) bracket parent, see zero open legs,
-            # "verify" vacuously, and close the position while the NEWLY
-            # placed stop/target legs stay live and orphaned at the broker
-            # -- a naked short/long waiting to trigger with no position or
-            # stop behind it. Pointing broker_order_id at the NEW protective
-            # order means the next pass cancels the RIGHT legs (and, as a
-            # side effect, fixes protection_watchdog.check_position() too --
-            # it also reads this same column, so it now sees the position as
-            # genuinely PROTECTED instead of opening a false CRITICAL
-            # "no downside protection" incident on top of a real one).
-            if new_boid:
+            # Audit fixup BLOCKER-1 / R1: persist the RE-PLACED OCO's own
+            # broker_order_id onto the position BEFORE reporting success.
+            # Without this, the NEXT pass's ``_enforce_time_exit_one`` would
+            # re-read the OLD (now dead, all-legs-cancelled) bracket parent,
+            # see zero open legs, "verify" vacuously, and close the position
+            # while the NEWLY placed stop/target legs stay live and
+            # orphaned at the broker -- a naked short/long waiting to
+            # trigger with no position or stop behind it. Pointing
+            # broker_order_id at the NEW protective order means the next
+            # pass cancels the RIGHT legs (and, as a side effect, fixes
+            # protection_watchdog.check_position() too -- it also reads
+            # this same column, so it now sees the position as genuinely
+            # PROTECTED instead of opening a false CRITICAL "no downside
+            # protection" incident on top of a real one).
+            #
+            # R1: the OCO is now LIVE at the broker -- if this write itself
+            # fails (disk I/O, locked DB, full disk), reporting success
+            # anyway reproduces the EXACT B1 orphan through a non-broker
+            # failure: the position row keeps pointing at the dead bracket,
+            # the next pass verifies vacuously against it, and closes while
+            # the re-placed stop/target stay resting with nothing behind
+            # them. So a failed persist here is NOT reported as success --
+            # it falls through to the SAME CRITICAL incident path below,
+            # exactly like a failed re-placement, turning a silent orphan
+            # into a blocking incident a human sees.
+            try:
                 self.journal.conn.execute(
                     "UPDATE positions SET broker_order_id = ? WHERE position_id = ?",
                     (new_boid, position_id),
                 )
                 self.journal.conn.commit()
-            self.journal.log_system_event(
-                Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
-                f"{symbol} ({position_id}): protection re-placed after the time-exit close "
-                f"failed. Position remains open; will retry the time exit next pass.",
-                {"position_id": position_id, "close_error": str(close_exc), "new_broker_order_id": new_boid},
-            )
-            alerts.send_alert(
-                self.settings,
-                title=f"AlphaOS: time-exit close failed, protection restored — {symbol}",
-                message=f"{symbol} ({position_id})'s time-exit close failed ({close_exc}); its "
-                        f"stop and target were re-placed. Position remains open; will retry.",
-                priority="high", journal=self.journal,
-            )
-            return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
-                    "close_error": str(close_exc), "reprotected": True, "new_broker_order_id": new_boid}
+            except Exception as exc:
+                replace_error = (
+                    f"protective OCO submitted (broker_order_id={new_boid}) but persisting it "
+                    f"locally failed ({exc}); treating as a failed re-placement so this is never "
+                    f"silently reported as protected"
+                )
+            else:
+                self.journal.log_system_event(
+                    Severity.WARNING, TIME_EXIT_EVENT_CATEGORY,
+                    f"{symbol} ({position_id}): protection re-placed after the time-exit close "
+                    f"failed. Position remains open; will retry the time exit next pass.",
+                    {"position_id": position_id, "close_error": str(close_exc), "new_broker_order_id": new_boid},
+                )
+                alerts.send_alert(
+                    self.settings,
+                    title=f"AlphaOS: time-exit close failed, protection restored — {symbol}",
+                    message=f"{symbol} ({position_id})'s time-exit close failed ({close_exc}); its "
+                            f"stop and target were re-placed. Position remains open; will retry.",
+                    priority="high", journal=self.journal,
+                )
+                return {"ok": False, "deferred": True, "position_id": position_id, "symbol": symbol,
+                        "close_error": str(close_exc), "reprotected": True, "new_broker_order_id": new_boid}
 
-        # Re-placement was skipped/blocked/failed -- open a CRITICAL
-        # protection incident through the exact same table/dedup/supersede
-        # logic the periodic broker protection watchdog uses (reused, not
-        # reimplemented), so this position blocks new entries exactly like
-        # any other unprotected position and shows up in the same incident
-        # queue an operator already knows to check.
+        # Re-placement was skipped/blocked/failed/unpersisted -- open a
+        # CRITICAL protection incident through the exact same table/dedup/
+        # supersede logic the periodic broker protection watchdog uses
+        # (reused, not reimplemented), so this position blocks new entries
+        # exactly like any other unprotected position and shows up in the
+        # same incident queue an operator already knows to check.
         detail = (f"{symbol}: time-exit close failed ({close_exc}) AND re-placing its protective "
                   f"stop/target ALSO failed or was blocked ({replace_error}) -- this position may "
                   f"have NO stop/target at the broker. Manual intervention required immediately.")
