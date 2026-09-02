@@ -28,7 +28,16 @@ const BANNED_STRINGS = ['CONSOLE_01', 'OPERATOR_ACTIVE', 'NQ1!', 'ES1!'];
 // network request happens; it names the specific strings this pass
 // verified are safe, so nothing new can slip in unnoticed.
 const ALLOWED_URL_SUBSTRINGS = [
-  'localhost:8502',  // ND-3's own documented Streamlit deep-link (api.js STREAMLIT_URL)
+  // The LIVE deep-link value, host-derived at runtime. Strictly MORE inert
+  // than the hardcoded host it replaced: it can only ever resolve to the
+  // origin the console was already loaded from, so it cannot introduce a
+  // new network destination -- which is precisely what this guard exists
+  // to prevent. (2026-09-02: hardcoded `localhost` meant THE PHONE when the
+  // console was opened over Tailscale, so every break-glass link was dead.)
+  'http://${window.location.hostname}:8502',
+  'localhost:8502',  // api.js STREAMLIT_URL's test/SSR fallback only -- the live value is
+                     // derived from window.location.hostname (fixed 2026-09-02: a hardcoded
+                     // localhost meant THE PHONE when loaded over Tailscale)
   'w3.org',           // W3C namespace URIs (SVG/XHTML/MathML/XML) -- inert markup, not network calls
   'react.dev',        // React 19's own bundled minified-error reference URL
   'reactjs.org',       // older React internals still reference this error-decoder host

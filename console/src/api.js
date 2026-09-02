@@ -44,7 +44,19 @@ export const getTradePacket = (params) => {
 // requires following this link -- scan/monitor/report and kill-switch
 // ENGAGE moved here in ND-3; approve/reject and kill-switch DISENGAGE move
 // here in ND-4 (postApprove/postReject/postKillSwitchDisengage below).
-export const STREAMLIT_URL = 'http://localhost:8502';
+// 2026-09-02 (CK: "not working on my browser shortcut on iPhone"): this was
+// a hardcoded `http://localhost:8502`. Loaded from a phone over Tailscale,
+// `localhost` resolves to THE PHONE, so every break-glass link was dead --
+// the console shell rendered fine (relative /api/v1 URLs on :8601) while
+// this one link pointed at a service on the wrong machine. Derive the host
+// from wherever the console was actually loaded from, so the link follows
+// you: IP -> IP, MagicDNS name -> MagicDNS name, localhost -> localhost.
+// The literal fallback keeps this defined under test/SSR where `window`
+// does not exist (and keeps guard.test.js's allowlist entry accurate).
+export const STREAMLIT_URL =
+  typeof window !== 'undefined' && window.location && window.location.hostname
+    ? `http://${window.location.hostname}:8502`
+    : 'http://localhost:8502';
 
 // ND-3 write routes (docs/roadmap/console-migration-nd.md §4 ND-3 scope).
 // Every write POSTs `{ pin, nonce, ...extra }` in the request BODY (never a
