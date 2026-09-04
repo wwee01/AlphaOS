@@ -46,9 +46,15 @@ decision is not re-litigated from scratch:
 
 1. ChatGPT (desktop, weekly) writes `inbox/YYYY-MM-DD.md`. Prompt:
    `docs/research/CHATGPT_TASK_PROMPT.md`.
-2. A scheduled Claude Code session reads new files, cross-references them
-   against AlphaOS's actual open questions, and briefs the operator.
-3. The operator decides whether anything becomes work. Nothing else acts.
+2. A scheduled Claude Code session reads UNREVIEWED files, cross-references
+   them against AlphaOS's actual open questions, and briefs the operator.
+3. It appends one row to `REVIEWED.md` per digest briefed — the ONLY write
+   that session is authorized to make, and it commits that file alone.
+4. The operator decides whether anything becomes work. Nothing else acts.
+
+"Unreviewed" is keyed on `(filename, sha256)`, not filename alone: a digest
+that is rewritten after review gets a new hash and is correctly re-reviewed.
+A filename-only ledger would silently skip changed content.
 
 If a digest is malformed or missing, the reading session must say so LOUDLY
 rather than summarising nothing — the most-repeated lesson on this project is

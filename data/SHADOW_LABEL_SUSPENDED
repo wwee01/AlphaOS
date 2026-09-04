@@ -1,0 +1,1 @@
+CANARY drift latch [legacy-conservative]: run_id='canaryrun_f607c73a2589' (trigger tier TIER_1), started_at_utc='2026-08-02T02:06:01.724024+00:00', within the 14-day recency window (SHADOW_SUSPEND_CANARY_WINDOW_DAYS) -- shadow labels flow through the exact same PlaybookClassifier CANARY watches
