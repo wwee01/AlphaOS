@@ -28,7 +28,7 @@ from alphaos.regime.classifier import (
     REGIME_RULES_V1,
     classify_regime_series,
 )
-from alphaos.regime.service import backfill_regime_days, ensure_regime_for_today
+from alphaos.regime.service import REGIME_BINDING_VERSION, backfill_regime_days, ensure_regime_for_today
 from alphaos.reports.daily_brief import build_daily_brief, render_markdown
 from alphaos.reports.regime_arming_scorer import (
     MIN_DISTINCT_REGIME_EPISODES,
@@ -57,8 +57,13 @@ def _dated_series(n, end=None):
     from alphaos.util import timeutils
 
     end_date = end if end is not None else timeutils.market_date()
-    start_date = end_date - timedelta(days=n - 1)
-    return [(start_date + timedelta(days=i)).isoformat() for i in range(n)]
+    from alphaos.util.market_calendar import is_trading_day
+    out = []
+    while len(out) < n:
+        if is_trading_day(end_date):
+            out.append(end_date.isoformat())
+        end_date -= timedelta(days=1)
+    return list(reversed(out))
 
 
 def _flat_bars(n, price=100.0, end=None):
@@ -320,7 +325,7 @@ def test_backfill_regime_days_stamps_existing_null_packets(journal, settings):
 
     stamped = journal.one("SELECT regime, regime_rules_version FROM candidate_packets WHERE packet_id = 'pkt1'")
     assert stamped["regime"] is not None
-    assert stamped["regime_rules_version"] == REGIME_RULES_V1
+    assert stamped["regime_rules_version"] == REGIME_BINDING_VERSION
 
     # Idempotent: re-run stamps zero more (already non-NULL).
     result2 = backfill_regime_days(journal, settings, bars_provider=provider, initial_lookback_days=2000)
@@ -414,7 +419,7 @@ def test_scan_stamps_regime_on_every_packet_when_available(tmp_path):
     distinct = {(p["regime"], p["regime_rules_version"]) for p in packets}
     assert len(distinct) == 1  # once-per-scan computation, reused for every packet
     regime, version = next(iter(distinct))
-    assert regime is not None and version == REGIME_RULES_V1
+    assert regime is not None and version == REGIME_BINDING_VERSION
     journal.close()
 
 
@@ -700,3 +705,36 @@ def test_build_regime_arming_report_never_scores_a_partial_outcome_row(journal, 
 
     rep = build_regime_arming_report(journal, settings)
     assert rep["cards"] == []  # the partial row must not be scored at all
+
+
+def test_regime_uses_previous_session_and_excludes_current_or_future_closes(journal, settings):
+    from datetime import date
+    today = date(2026, 9, 8)  # Tuesday after Monday's Labor Day closure
+    bars = _trend_bars(MIN_BARS_FOR_FIRST_CLASSIFICATION + 30, end=date(2026, 9, 4))
+    from alphaos.util.ids import new_id
+    for bar in bars:
+        journal.insert("benchmark_bars", {"bar_id": new_id("b"), "symbol": "SPY", "bar_date": bar["date"], "close": bar["close"]})
+    # Poison current/future bars; neither is available at today's morning scan.
+    for d in ("2026-09-08", "2026-09-09"):
+        journal.insert("benchmark_bars", {"bar_id": new_id("b"), "symbol": "SPY", "bar_date": d, "close": 0.01})
+    row = ensure_regime_for_today(journal, settings, market_dt=today, bars_provider=_FakeBars([]))
+    expected = classify_regime_series(bars)[-1]
+    assert row is not None
+    assert row["market_date"] == "2026-09-08"
+    assert row["source_bar_date"] == "2026-09-04"
+    assert row["spy_close"] == expected["spy_close"]
+    assert row["regime"] == expected["regime"]
+    assert row["regime_rules_version"] == REGIME_BINDING_VERSION
+
+
+def test_deep_backfill_extends_history_before_existing_recent_bars(journal, settings):
+    from datetime import date
+    from alphaos.reports.benchmark_capture import _backfill_benchmark_bars
+    from alphaos.util.ids import new_id
+    end = date(2026, 9, 10)
+    bars = _trend_bars(320, end=end)
+    for bar in bars[-20:]:
+        journal.insert("benchmark_bars", {"bar_id": new_id("b"), "symbol": "SPY", "bar_date": bar["date"], "close": bar["close"]})
+    assert _backfill_benchmark_bars(journal, settings, "SPY", end, _FakeBars(bars), initial_lookback_days=700) == 300
+    assert journal.count_rows("benchmark_bars") == 320
+    assert _backfill_benchmark_bars(journal, settings, "SPY", end, _FakeBars(bars), initial_lookback_days=700) == 0

@@ -61,11 +61,11 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
     ASCENDING by date (market_date / bar_date respectively) -- callers own
     the query's ORDER BY. No clock, no I/O, no RNG.
 
-    A "paired day" is a date where BOTH an equity snapshot and a benchmark
+    A "paired day" is an interval ending on a date where BOTH an equity snapshot and a benchmark
     bar exist -- only paired days ever contribute to a return/beta
     comparison; an equity-only day still extends the equity curve but is
-    invisible to every benchmark-relative number, which is the honest
-    behavior (there is nothing to compare it against).
+    not itself a benchmark endpoint. Adjacent paired observations span intervening
+    weekends or data gaps; a missing session valuation suppresses daily beta.
     """
     bench_close_by_date = {r["bar_date"]: r["close"] for r in benchmark_rows if r.get("close") is not None}
 
@@ -73,31 +73,45 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
     paired = []  # list of (date, equity_return, bench_return)
     cum_equity = 1.0
     prev_equity_row = None
+    prev_paired_row = None
+    benchmark_dates = sorted(bench_close_by_date)
+    benchmark_index = {d: i for i, d in enumerate(benchmark_dates)}
+    multi_session_intervals = 0
 
     for row in equity_rows:
         d, eq = row["market_date"], row["equity"]
         if prev_equity_row is None:
             equity_curve.append({"date": d, "cum_return_pct": 0.0})
-            prev_equity_row = row
+        else:
+            prev_eq = prev_equity_row["equity"]
+            r_eq = (eq / prev_eq - 1.0) if prev_eq else 0.0
+            cum_equity *= (1.0 + r_eq)
+            equity_curve.append({"date": d, "cum_return_pct": _pct(cum_equity - 1.0)})
+        prev_equity_row = row
+
+        # A non-comparable valuation interrupts the evidence window; never
+        # bridge a deposit, unknown cashflow or invalid valuation silently.
+        if row.get("comparison_eligible", True) is False:
+            prev_paired_row = None
             continue
-
-        prev_d, prev_eq = prev_equity_row["market_date"], prev_equity_row["equity"]
-        r_eq = (eq / prev_eq - 1.0) if prev_eq else 0.0
-        cum_equity *= (1.0 + r_eq)
-        equity_curve.append({"date": d, "cum_return_pct": _pct(cum_equity - 1.0)})
-
-        if d in bench_close_by_date and prev_d in bench_close_by_date and bench_close_by_date[prev_d]:
+        if d not in bench_close_by_date or not bench_close_by_date[d] or not eq:
+            continue
+        if prev_paired_row is not None:
+            prev_d, prev_eq = prev_paired_row["market_date"], prev_paired_row["equity"]
+            r_eq = eq / prev_eq - 1.0
             r_bench = bench_close_by_date[d] / bench_close_by_date[prev_d] - 1.0
             paired.append((d, r_eq, r_bench))
-
-        prev_equity_row = row
+            if benchmark_index[d] - benchmark_index[prev_d] > 1:
+                multi_session_intervals += 1
+        prev_paired_row = row
 
     n_paired = len(paired)
     paired_eq_returns = [p[1] for p in paired]
     paired_bench_returns = [p[2] for p in paired]
 
     # --- total/excess return over the full paired window ---
-    if n_paired >= MIN_PAIRED_DAYS_FOR_RELATIVE_RETURN:
+    invalid_valuations = sum(r.get("comparison_eligible", True) is False for r in equity_rows)
+    if n_paired >= MIN_PAIRED_DAYS_FOR_RELATIVE_RETURN and not invalid_valuations:
         cum_eq_total = 1.0
         cum_bench_total = 1.0
         for _, r_eq, r_bench in paired:
@@ -116,8 +130,11 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
             "below floor, no comparison shown"
         )
 
+    if invalid_valuations:
+        relative_return_note = f"unavailable: {invalid_valuations} valuations have reported or unknown cashflows"
+
     # --- rolling beta over the trailing window ---
-    if n_paired >= MIN_PAIRED_DAYS_FOR_BETA:
+    if n_paired >= MIN_PAIRED_DAYS_FOR_BETA and not multi_session_intervals and not invalid_valuations:
         window_eq = paired_eq_returns[-ROLLING_BETA_WINDOW_DAYS:]
         window_bench = paired_bench_returns[-ROLLING_BETA_WINDOW_DAYS:]
         bench_var = _variance(window_bench)
@@ -126,6 +143,11 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
     else:
         beta = None
         beta_note = f"paired_days={n_paired} (< {MIN_PAIRED_DAYS_FOR_BETA}); below floor, no beta shown"
+
+    if invalid_valuations:
+        beta_note = "unavailable: reported or unknown cashflows"
+    if multi_session_intervals:
+        beta_note = "unavailable: missing valuations create multi-session intervals"
 
     # --- per-calendar-month excess return ---
     months: dict[str, list[tuple]] = {}
@@ -139,7 +161,7 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
             "paired_days": n,
             "is_complete_month": month != current_month,
         }
-        if n >= MIN_PAIRED_DAYS_FOR_MONTHLY_LINE:
+        if n >= MIN_PAIRED_DAYS_FOR_MONTHLY_LINE and not invalid_valuations and not multi_session_intervals:
             cum_eq, cum_bench = 1.0, 1.0
             for r_eq, r_bench in rows:
                 cum_eq *= (1.0 + r_eq)
@@ -158,6 +180,7 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
     return {
         "equity_curve": equity_curve,
         "paired_trading_days": n_paired,
+        "multi_session_intervals": multi_session_intervals,
         "equity_total_return_pct": equity_total_return_pct,
         "benchmark_total_return_pct": benchmark_total_return_pct,
         "excess_return_pct": excess_return_pct,
@@ -173,15 +196,36 @@ def build_relative_performance_report(journal, settings, limit: int = 3650) -> d
     """PURE READ. Never writes, never touches gates/execution. ``limit`` is a
     generous ~10-year row cap, not a meaningful floor -- floors are applied
     inside compute_relative_performance on PAIRED days, not raw row counts."""
-    equity_rows = journal.query(
+    from alphaos.reports.close_equity import VALUATION_METHOD
+
+    legacy_rows = journal.query(
         "SELECT market_date, equity, equity_source, is_mock FROM equity_snapshots "
         "WHERE is_mock = 0 ORDER BY market_date ASC LIMIT ?", (limit,),
     )
+    tables = journal.query("SELECT name FROM sqlite_master WHERE type='table' AND name='equity_close_snapshots'")
+    equity_rows = journal.query(
+        "SELECT * FROM equity_close_snapshots WHERE is_mock = 0 "
+        "AND valuation_method_version = ? ORDER BY market_date ASC LIMIT ?",
+        (VALUATION_METHOD, limit),
+    ) if tables else []
+    for row in equity_rows:
+        row["comparison_eligible"] = row["cashflow_status"] == "none_reported"
     benchmark_rows = journal.query(
         "SELECT bar_date, close FROM benchmark_bars WHERE symbol = 'SPY' "
         "ORDER BY bar_date ASC LIMIT ?", (limit,),
     )
     rep = compute_relative_performance(equity_rows, benchmark_rows)
+    rep["legacy_snapshot_count"] = len(legacy_rows)
+    rep["legacy_equity_curve"] = compute_relative_performance(legacy_rows, [])["equity_curve"]
+    rep["valuation_method"] = VALUATION_METHOD
+    rep["excluded_cashflow_observations"] = sum(not r["comparison_eligible"] for r in equity_rows)
+    rep["measurement_status"] = "matched_session_closes" if equity_rows else "awaiting_verified_closes"
+    rep["caveat"] += (
+        " Legacy account snapshots are preserved but excluded: their valuation times were not matched to SPY close."
+        " The benchmark is SPY price return, not dividend-reinvested total return."
+        " Reported or unknown cashflows interrupt the comparison; no cashflow-adjusted performance is claimed."
+        " Results start at the first verified paired observation, not account inception."
+    )
     rep["as_of"] = timeutils.market_date().isoformat()
     rep["mode"] = settings.mode.value
     rep["equity_snapshot_count"] = len(equity_rows)
@@ -207,6 +251,8 @@ def render_markdown(rep: dict) -> str:
         ]
     else:
         lines.append(f"- Relative return: _{rep['relative_return_note']}_")
+    if rep.get("legacy_snapshot_count"):
+        lines.append(f"- Legacy snapshots excluded from comparison: **{rep['legacy_snapshot_count']}** (valuation timing unverified)")
     lines.append(
         f"- Rolling beta: **{rep['rolling_beta']}**" if rep["rolling_beta"] is not None
         else f"- Rolling beta: _{rep['rolling_beta_note']}_"

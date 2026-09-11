@@ -93,9 +93,8 @@ def _backfill_benchmark_bars(
     ``bars_provider`` is injectable (a fake in tests); production call sites
     always omit it and get ``make_bars_provider``'s real result.
 
-    ``initial_lookback_days`` is an override for the FIRST-EVER-RUN window
-    only (once any bar exists for ``symbol``, backfill always resumes from
-    the last cached date regardless of this parameter) -- REG-1's regime
+    ``initial_lookback_days`` explicitly extends the requested history even
+    when newer cached bars already exist (duplicates are preserved) -- REG-1's regime
     backfill needs much deeper SPY history (~2+ years, to cover its
     classifier's own trailing-1-year vol-percentile window plus a
     meaningful history beyond that) than the benchmark-spine job's own
@@ -115,8 +114,13 @@ def _backfill_benchmark_bars(
         lookback = initial_lookback_days if initial_lookback_days is not None else INITIAL_BENCHMARK_LOOKBACK_DAYS
         start = market_dt - timedelta(days=lookback)
 
+    if initial_lookback_days is not None:
+        # An explicit deep backfill must also fill history BEFORE the first
+        # cached bar. Resuming solely at MAX(date)+1 left REG-1 permanently cold.
+        start = min(start, market_dt - timedelta(days=initial_lookback_days))
+
     if start > market_dt:
-        return 0  # already up to date (e.g. a second run the same day)
+        return 0
 
     written = 0
     for _ in range(_MAX_BACKFILL_PAGES):
@@ -211,4 +215,16 @@ def capture_benchmark_spine(
         except Exception:  # noqa: BLE001 - best-effort logging must not itself crash
             pass
 
+    try:
+        from alphaos.reports.close_equity import capture_close_equity
+
+        result["close_equity"] = capture_close_equity(journal, settings, now=now, alpaca_client=alpaca_client)
+    except Exception as exc:  # independent append-only evidence capture
+        msg = f"daily close equity unavailable: {type(exc).__name__}: {exc}"
+        result["warnings"].append(msg)
+        result["close_equity"] = {"status": "unavailable", "written": 0}
+        try:
+            journal.log_system_event(Severity.WARNING, "benchmark_spine", msg)
+        except Exception:
+            pass
     return result

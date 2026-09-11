@@ -92,12 +92,12 @@ def _regime_header(journal) -> Optional[dict]:
     when no regime_days row exists for today (REG-1 disabled, cold start, or
     a benchmark-spine gap) -- the brief omits the section entirely rather
     than fabricate a regime; see render_markdown."""
-    from alphaos.regime.classifier import REGIME_RULES_V1
+    from alphaos.regime.service import REGIME_BINDING_VERSION
 
     today_row = journal.one(
         "SELECT * FROM regime_days WHERE market_date = ? AND regime_rules_version = ? "
         "ORDER BY id DESC LIMIT 1",
-        (timeutils.market_date().isoformat(), REGIME_RULES_V1),
+        (timeutils.market_date().isoformat(), REGIME_BINDING_VERSION),
     )
     if not today_row:
         return None
@@ -105,7 +105,7 @@ def _regime_header(journal) -> Optional[dict]:
     history = journal.query(
         "SELECT market_date, regime FROM regime_days WHERE regime_rules_version = ? "
         "AND market_date <= ? ORDER BY market_date DESC",
-        (REGIME_RULES_V1, today_row["market_date"]),
+        (REGIME_BINDING_VERSION, today_row["market_date"]),
     )
     streak = 0
     for row in history:

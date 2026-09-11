@@ -13,18 +13,18 @@ own docstring.
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any, Optional
 
 from alphaos.constants import Severity
 from alphaos.regime.classifier import (
     MIN_BARS_FOR_FIRST_CLASSIFICATION,
-    REGIME_RULES_V1,
     classify_regime_series,
 )
 from alphaos.reports.benchmark_capture import BENCHMARK_SYMBOL, _backfill_benchmark_bars
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+from alphaos.util.market_calendar import is_trading_day, nth_trading_day_after
 
 # Calendar-day buffer added on top of MIN_BARS_FOR_FIRST_CLASSIFICATION when
 # querying benchmark_bars for a single day's classification -- trading days
@@ -32,8 +32,25 @@ from alphaos.util.ids import new_id
 # gap between "trading days needed" and "calendar days to query back".
 _CALENDAR_DAY_BUFFER = 120
 
+# Classifier thresholds stay frozen v1; this version records the corrected
+# binding of a completed source bar to the NEXT session's observations.
+REGIME_BINDING_VERSION = "regime_rules_v1_prior_close_v2"
 
-def _read_spy_closes(journal, limit_calendar_days: Optional[int] = None) -> list:
+
+def _previous_session(today):
+    d = today - timedelta(days=1)
+    while not is_trading_day(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _bind_prior_close(row):
+    return {**row, "date": nth_trading_day_after(date.fromisoformat(row["date"]), 1).isoformat(),
+            "source_bar_date": row["date"], "rules_version": REGIME_BINDING_VERSION}
+
+
+
+def _read_spy_closes(journal, limit_calendar_days: Optional[int] = None, market_dt=None) -> list:
     """Ascending-by-date ``{"date", "close"}`` list from ``benchmark_bars``.
     ``limit_calendar_days=None`` reads the FULL stored history (the backfill's
     use); an int reads only the trailing window (the per-scan use, cheaper)."""
@@ -44,13 +61,13 @@ def _read_spy_closes(journal, limit_calendar_days: Optional[int] = None) -> list
             (BENCHMARK_SYMBOL,),
         )
     else:
-        cutoff = (timeutils.market_date() - timedelta(days=limit_calendar_days)).isoformat()
+        cutoff = ((market_dt or timeutils.market_date()) - timedelta(days=limit_calendar_days)).isoformat()
         rows = journal.query(
             "SELECT bar_date, close FROM benchmark_bars WHERE symbol = ? "
             "AND close IS NOT NULL AND bar_date >= ? ORDER BY bar_date ASC",
             (BENCHMARK_SYMBOL, cutoff),
         )
-    return [{"date": r["bar_date"], "close": r["close"]} for r in rows]
+    return [{"date": r["bar_date"], "close": r["close"]} for r in rows if is_trading_day(date.fromisoformat(r["bar_date"]))]
 
 
 def _insert_regime_day(journal, row: dict) -> bool:
@@ -72,6 +89,7 @@ def _insert_regime_day(journal, row: dict) -> bool:
             "dev_from_sma50_pct": row["dev_from_sma50_pct"],
             "chop_streak_days": row["chop_streak_days"],
             "computed_at_utc": timeutils.stamp().utc,
+            "source_bar_date": row.get("source_bar_date"),
         })
         return True
     except sqlite3.IntegrityError:
@@ -93,9 +111,12 @@ def ensure_regime_for_today(journal, settings, market_dt=None, bars_provider=Non
     """
     try:
         today = market_dt if market_dt is not None else timeutils.market_date()
+        if not is_trading_day(today):
+            return None
+        source_date = _previous_session(today)
         existing = journal.one(
             "SELECT * FROM regime_days WHERE market_date = ? AND regime_rules_version = ?",
-            (today.isoformat(), REGIME_RULES_V1),
+            (today.isoformat(), REGIME_BINDING_VERSION),
         )
         if existing:
             return dict(existing)
@@ -103,29 +124,19 @@ def ensure_regime_for_today(journal, settings, market_dt=None, bars_provider=Non
         # Best-effort: extend benchmark_bars coverage before reading (a no-op
         # in mock/offline mode or if already up to date -- see
         # _backfill_benchmark_bars's own fail-safe design).
-        _backfill_benchmark_bars(journal, settings, BENCHMARK_SYMBOL, today, bars_provider=bars_provider)
+        _backfill_benchmark_bars(journal, settings, BENCHMARK_SYMBOL, source_date, bars_provider=bars_provider)
 
         window_days = (MIN_BARS_FOR_FIRST_CLASSIFICATION * 7 // 5) + _CALENDAR_DAY_BUFFER
-        bars = _read_spy_closes(journal, limit_calendar_days=window_days)
+        bars = _read_spy_closes(journal, limit_calendar_days=window_days, market_dt=today)
+        bars = [b for b in bars if b["date"] <= source_date.isoformat()]
         classified = classify_regime_series(bars)
         if not classified:
             return None  # insufficient trailing history -- caller alerts, never blocks
 
         latest = classified[-1]
-        # Correctness/safety audit finding (2026-07-09): a stale benchmark-
-        # spine (a job outage, a multi-day gap) means the MOST RECENT
-        # classifiable day can be well before today -- `classify_regime_
-        # series`'s own row is still correctly dated (a derivation, never
-        # fabricated), but silently treating "most recent computable" as
-        # "today's regime" would stamp a stale label onto TODAY's packets
-        # with no marker distinguishing it from a fresh one. Fail the same
-        # way as insufficient history -- packets stamp NULL, one loud alert,
-        # never a silently-wrong-but-plausible value. A caller wanting the
-        # last KNOWN regime regardless of staleness can still query
-        # regime_days directly; this function's contract is specifically
-        # "today's regime, or None."
-        if latest["date"] != today.isoformat():
-            return None
+        if latest["date"] != source_date.isoformat():
+            return None  # missing the immediately previous session is stale
+        latest = _bind_prior_close(latest)
         _insert_regime_day(journal, latest)
         # Re-read rather than trust the just-computed dict verbatim, so the
         # returned shape always matches the DB row shape (incl. regime_day_id).
@@ -163,7 +174,7 @@ def backfill_regime_days(journal, settings, bars_provider=None, initial_lookback
     """
     lookback = initial_lookback_days if initial_lookback_days is not None else settings.regime_backfill_lookback_days
     result: dict[str, Any] = {
-        "rules_version": REGIME_RULES_V1,
+        "rules_version": REGIME_BINDING_VERSION,
         "regime_days_written": 0,
         "regime_days_already_present": 0,
         "packets_stamped": 0,
@@ -178,7 +189,10 @@ def backfill_regime_days(journal, settings, bars_provider=None, initial_lookback
 
         bars = _read_spy_closes(journal, limit_calendar_days=None)
         classified = classify_regime_series(bars)
-        for row in classified:
+        for source_row in classified:
+            row = _bind_prior_close(source_row)
+            if row["date"] > today.isoformat():
+                continue
             if _insert_regime_day(journal, row):
                 result["regime_days_written"] += 1
             else:
@@ -188,7 +202,7 @@ def backfill_regime_days(journal, settings, bars_provider=None, initial_lookback
             r["market_date"]: r
             for r in journal.query(
                 "SELECT market_date, regime, regime_rules_version FROM regime_days "
-                "WHERE regime_rules_version = ?", (REGIME_RULES_V1,),
+                "WHERE regime_rules_version = ?", (REGIME_BINDING_VERSION,),
             )
         }
 
@@ -219,7 +233,7 @@ def backfill_regime_days(journal, settings, bars_provider=None, initial_lookback
         journal.log_system_event(
             Severity.INFO, "regime_backfill",
             f"regime_backfill: {result['regime_days_written']} new regime_days rows, "
-            f"{result['packets_stamped']} packets stamped (rules {REGIME_RULES_V1}).",
+            f"{result['packets_stamped']} packets stamped (rules {REGIME_BINDING_VERSION}).",
             result,
         )
     except Exception as exc:  # noqa: BLE001 - a backfill failure must be visible, never silent

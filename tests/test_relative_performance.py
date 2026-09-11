@@ -173,7 +173,7 @@ def test_unmatched_dates_are_excluded_from_pairing_but_not_from_the_equity_curve
     rep = compute_relative_performance(equity_rows, bench_rows)
 
     assert len(rep["equity_curve"]) == 3          # all 3 equity points render
-    assert rep["paired_trading_days"] == 0        # neither day-over-day pair has both bench dates
+    assert rep["paired_trading_days"] == 1        # interval uses the two shared endpoints
 
 
 # -------------------------------------------------------------------- caveat
@@ -213,7 +213,8 @@ def test_build_report_reads_real_rows_in_ascending_date_order():
 
     rep = build_relative_performance_report(journal, settings)
 
-    dates_in_curve = [c["date"] for c in rep["equity_curve"]]
+    assert rep["equity_curve"] == []  # legacy timestamps are not close valuations
+    dates_in_curve = [c["date"] for c in rep["legacy_equity_curve"]]
     assert dates_in_curve == ["2026-07-01", "2026-07-02", "2026-07-03"]  # ASC, not insert order
     journal.close()
 
@@ -242,3 +243,40 @@ def test_relative_performance_module_never_referenced_by_decision_paths():
     for mod, name in ((approval_mod, "approval.py"), (risk_mod, "risk_engine.py")):
         text = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
         assert "relative_performance" not in text, f"{name} references the relative-performance module"
+
+
+def test_weekend_observations_do_not_erase_monday_return():
+    # The old code advanced its shared anchor on Saturday and Sunday,
+    # dropping Monday's 10% gain despite a matching Friday SPY endpoint.
+    pairs = [("2026-08-07", 100), ("2026-08-08", 100), ("2026-08-09", 100),
+             ("2026-08-10", 110), ("2026-08-11", 110), ("2026-08-12", 110),
+             ("2026-08-13", 110), ("2026-08-14", 110)]
+    spy = [(d, 100 if d < "2026-08-10" else 105) for d, _ in pairs if d not in {"2026-08-08", "2026-08-09"}]
+    rep = compute_relative_performance(_eq_rows(pairs), _bench_rows(spy))
+    assert rep["paired_trading_days"] == 5
+    assert rep["equity_total_return_pct"] == 10
+    assert rep["benchmark_total_return_pct"] == 5
+    assert rep["excess_return_pct"] == 5
+    assert rep["equity_curve"][-1]["cum_return_pct"] == 10
+
+
+def test_missing_equity_session_preserves_endpoint_total_but_suppresses_daily_beta():
+    from datetime import date, timedelta
+    dates = [(date(2026, 8, 1) + timedelta(days=i)).isoformat() for i in range(25)]
+    equity = [(d, 100 + i) for i, d in enumerate(dates) if i != 3]
+    spy = [(d, 100 + i / 2) for i, d in enumerate(dates)]
+    rep = compute_relative_performance(_eq_rows(equity), _bench_rows(spy))
+    assert rep["equity_total_return_pct"] == 24
+    assert rep["benchmark_total_return_pct"] == 12
+    assert rep["multi_session_intervals"] == 1
+    assert rep["rolling_beta"] is None
+    assert "missing valuations" in rep["rolling_beta_note"]
+
+
+def test_cashflow_cannot_appear_as_trading_return_or_be_dropped_silently():
+    rows = _eq_rows(zip(_WORKED_DATES, _WORKED_EQUITY))
+    rows[2]["comparison_eligible"] = False
+    rep = compute_relative_performance(rows, _bench_rows(zip(_WORKED_DATES, _WORKED_SPY)))
+    assert rep["equity_total_return_pct"] is None
+    assert rep["excess_return_pct"] is None
+    assert "cashflows" in rep["relative_return_note"]
