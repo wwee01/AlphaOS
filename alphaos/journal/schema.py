@@ -1080,6 +1080,7 @@ SCHEMA: list[tuple[str, str]] = [
             market_date TEXT NOT NULL,
             regime TEXT NOT NULL,
             regime_rules_version TEXT NOT NULL,
+            source_bar_date TEXT,
             spy_close REAL,
             sma_50 REAL,
             sma_200 REAL,
@@ -1542,6 +1543,12 @@ SCHEMA: list[tuple[str, str]] = [
             -- (operator-invoked, dry-run by default) for the separate,
             -- explicit repair pass over pre-existing NULL rows.
             replay_window_days INTEGER,
+            -- RESEARCH-REPAIR: replay maturity is independent of the 5d
+            -- outcome family. NULL on legacy rows deliberately means
+            -- unverified, never implicitly complete or prospectively valid.
+            replay_status TEXT,
+            replay_method_version TEXT,
+            replay_bars_used INTEGER,
             updated_at_utc TEXT,
             updated_at_sgt TEXT,
             lineage_id TEXT,
@@ -2921,6 +2928,50 @@ INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_ab_eval_results_run ON ab_eval_results(ab_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_ab_eval_results_eval_model ON ab_eval_results(eval_id, model)",
 ]
+
+# Versioned research repairs are additive. Neither table replaces historical
+# observations or a preregistration's frozen evidence.
+SCHEMA.extend([
+    ("replay_evidence_corrections", """
+        CREATE TABLE IF NOT EXISTS replay_evidence_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            correction_id TEXT NOT NULL UNIQUE,
+            outcome_id TEXT NOT NULL,
+            method_version TEXT NOT NULL,
+            input_sha256 TEXT NOT NULL,
+            original_json TEXT NOT NULL,
+            corrected_json TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+    """),
+    ("equity_close_snapshots", """
+        CREATE TABLE IF NOT EXISTS equity_close_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL UNIQUE,
+            market_date TEXT NOT NULL,
+            equity REAL NOT NULL,
+            equity_source TEXT NOT NULL,
+            valuation_method_version TEXT NOT NULL,
+            valuation_at_utc TEXT NOT NULL,
+            source_timestamp_utc TEXT NOT NULL,
+            captured_at_utc TEXT NOT NULL,
+            cashflow_net REAL,
+            cashflow_status TEXT NOT NULL,
+            raw_evidence_json TEXT NOT NULL,
+            is_mock INTEGER DEFAULT 0,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL
+        )
+    """),
+])
+INDEXES.extend([
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_replay_corrections_input "
+    "ON replay_evidence_corrections(outcome_id, method_version, input_sha256)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_equity_close_snapshots_date_version "
+    "ON equity_close_snapshots(market_date, valuation_method_version)",
+])
 
 # Canonical table-name list (used by tests to assert completeness).
 ALL_TABLES = [name for name, _ in SCHEMA]
