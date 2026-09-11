@@ -357,6 +357,11 @@ def _benchmark_spine_due(settings, journal, now: Optional[datetime]) -> tuple[bo
 
 
 def _text_archive_pull_due(settings, journal, now: Optional[datetime]) -> tuple[bool, str]:
+    # Disabled is a persistent configuration state, not a failed attempt.
+    # Refuse dispatch here so every tick does not append another skipped job.
+    # Enabling later the same day remains eligible under the normal cadence.
+    if not settings.text_archive_enabled:
+        return False, "TEXT_ARCHIVE_ENABLED is false"
     return _once_daily_due(
         JobType.TEXT_ARCHIVE_PULL, settings.scheduler_text_archive_pull_time, settings, journal, now,
     )

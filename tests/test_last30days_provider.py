@@ -5,7 +5,9 @@ is monkeypatched; no real process, no network)."""
 from __future__ import annotations
 
 import json
-import subprocess
+import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,6 +79,13 @@ def _cli():
     return CliLast30DaysProvider(s)
 
 
+def _patch_process(monkeypatch, result):
+    def start(*args, **kwargs):
+        result.communicate = lambda timeout: (result.stdout, result.stderr)
+        return result
+    monkeypatch.setattr(l30p.subprocess, "Popen", start)
+
+
 def test_cli_parses_canned_json(monkeypatch):
     canned = {
         "clusters": [
@@ -92,7 +101,7 @@ def test_cli_parses_canned_json(monkeypatch):
         stdout = json.dumps(canned)
         stderr = "[safari] cookie warning (ignored)"
 
-    monkeypatch.setattr(l30p.subprocess, "run", lambda *a, **k: _R())
+    _patch_process(monkeypatch, _R())
     res = _cli().get_research_for_symbol("NVDA", "NVDA stock")
     assert res.item_count == 3                                # 2 + 1 candidate_ids
     assert res.clusters[0]["title"] == "NVDA earnings thread"
@@ -107,7 +116,7 @@ def test_cli_raises_on_nonzero_exit(monkeypatch):
         stdout = ""
         stderr = "boom"
 
-    monkeypatch.setattr(l30p.subprocess, "run", lambda *a, **k: _R())
+    _patch_process(monkeypatch, _R())
     with pytest.raises(RuntimeError):
         _cli().get_research_for_symbol("NVDA", "NVDA stock")
 
@@ -118,18 +127,25 @@ def test_cli_raises_on_bad_json(monkeypatch):
         stdout = "not-json"
         stderr = ""
 
-    monkeypatch.setattr(l30p.subprocess, "run", lambda *a, **k: _R())
+    _patch_process(monkeypatch, _R())
     with pytest.raises(json.JSONDecodeError):
         _cli().get_research_for_symbol("NVDA", "NVDA stock")
 
 
-def test_cli_raises_on_timeout(monkeypatch):
-    def _boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="last30days", timeout=1)
-
-    monkeypatch.setattr(l30p.subprocess, "run", _boom)
-    with pytest.raises(subprocess.TimeoutExpired):
-        _cli().get_research_for_symbol("NVDA", "NVDA stock")
+def test_cli_timeout_stops_descendant_process(tmp_path):
+    """A real harmless child would outlive subprocess.run's parent-only kill."""
+    marker = tmp_path / "child-completed"
+    child = "import time,pathlib; time.sleep(.7); pathlib.Path(" + repr(str(marker)) + ").write_text('leaked')"
+    parent = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c'," + repr(child) + "]); time.sleep(10)"
+    provider = CliLast30DaysProvider(SimpleNamespace(last30days_timeout_seconds=.2))
+    provider._build_cmd = lambda query: [sys.executable, "-c", parent]
+    provider._repo_path = lambda: str(tmp_path)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="process group stopped"):
+        provider.get_research_for_symbol("TEST", "TEST stock")
+    assert time.monotonic() - started < 3
+    time.sleep(.8)
+    assert not marker.exists(), "timed-out CLI left a child process running"
 
 
 def test_cli_builds_python312_command(monkeypatch):
@@ -144,13 +160,16 @@ def test_cli_builds_python312_command(monkeypatch):
 
     def _capture(cmd, *a, **k):
         captured["cmd"] = cmd
-        return _R()
+        result = _R()
+        result.communicate = lambda timeout: (result.stdout, result.stderr)
+        captured["kwargs"] = k
+        return result
 
     s = make_settings(LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli",
                       LAST30DAYS_REPO_PATH="/tmp/last30days-fake",
                       LAST30DAYS_PYTHON="/opt/py/python3.12",
                       LAST30DAYS_SOURCES="reddit,hackernews,polymarket,github")
-    monkeypatch.setattr(l30p.subprocess, "run", _capture)
+    monkeypatch.setattr(l30p.subprocess, "Popen", _capture)
     CliLast30DaysProvider(s).get_research_for_symbol("NVDA", "NVDA stock")
     cmd = captured["cmd"]
     assert isinstance(cmd, list)                              # no shell=True string
@@ -158,3 +177,4 @@ def test_cli_builds_python312_command(monkeypatch):
     assert "--emit" in cmd and cmd[cmd.index("--emit") + 1] == "json"
     assert "reddit,hackernews,polymarket,github" in cmd
     assert "--quick" in cmd
+    assert captured["kwargs"]["start_new_session"] is True

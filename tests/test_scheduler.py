@@ -1313,7 +1313,7 @@ def test_cli_benchmark_spine_is_a_valid_scheduler_run_job_choice():
 # spine's own cadence tests above exactly -- same _once_daily_due helper).
 # =============================================================================
 def test_text_archive_pull_not_due_before_its_configured_time():
-    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00")
+    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00", TEXT_ARCHIVE_ENABLED="true")
     j = JournalStore(":memory:")
     # 06:00 SGT = 22:00 UTC (previous day) -- before 07:00 SGT.
     before = datetime(2026, 7, 5, 22, 0, tzinfo=timezone.utc)
@@ -1326,7 +1326,7 @@ def test_text_archive_pull_not_due_before_its_configured_time():
 
 
 def test_text_archive_pull_due_at_or_after_its_configured_time_and_not_yet_run():
-    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00")
+    s = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00", TEXT_ARCHIVE_ENABLED="true")
     j = JournalStore(":memory:")
     # 08:00 SGT = 00:00 UTC -- after 07:00 SGT, no prior run today.
     after = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
@@ -1338,11 +1338,7 @@ def test_text_archive_pull_due_at_or_after_its_configured_time_and_not_yet_run()
 
 
 def test_text_archive_pull_not_due_twice_same_sgt_day(orchestrator):
-    # TEXT_ARCHIVE_ENABLED=true so the dispatched job actually reaches
-    # status='completed' -- disabled (the default) returns 'skipped', which
-    # _once_daily_due deliberately does NOT treat as "already done today"
-    # (see _once_daily_due's own "status = 'completed'" filter), so a
-    # disabled job stays due all day, harmlessly re-skipping each tick.
+    # Enabled jobs still complete at most once on a given SGT day.
     orchestrator.settings = make_settings(
         SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00", TEXT_ARCHIVE_ENABLED="true",
     )
@@ -1416,3 +1412,17 @@ def test_cli_text_archive_pull_is_a_valid_scheduler_run_job_choice():
 
     args = build_parser().parse_args(["scheduler_run_job", "text_archive_pull"])
     assert args.job_type == "text_archive_pull"
+
+
+def test_disabled_text_archive_never_dispatches_and_enable_same_day_is_due():
+    j = JournalStore(":memory:")
+    now = datetime(2026, 7, 6, 0, 0, tzinfo=timezone.utc)
+    disabled = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00")
+    for _ in range(3):
+        due, reason = cadence.is_due(cadence.JobType.TEXT_ARCHIVE_PULL, disabled, j, now=now)
+        assert not due
+        assert "TEXT_ARCHIVE_ENABLED is false" == reason
+    assert j.count_rows("job_runs") == 0
+    enabled = make_settings(SCHEDULER_TEXT_ARCHIVE_PULL_TIME="07:00", TEXT_ARCHIVE_ENABLED="true")
+    assert cadence.is_due(cadence.JobType.TEXT_ARCHIVE_PULL, enabled, j, now=now)[0]
+    j.close()

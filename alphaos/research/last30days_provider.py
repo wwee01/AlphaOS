@@ -23,6 +23,7 @@ import json
 import os
 import random
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
@@ -137,15 +138,35 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
 
     def get_research_for_symbol(self, symbol: str, query: str) -> Last30DaysResult:
         cmd = self._build_cmd(query)
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=float(self.s.last30days_timeout_seconds), cwd=self._repo_path() or None,
+        # The upstream CLI launches helpers (Node/yt-dlp). Killing only its
+        # Python parent leaves those running and holding stdout/stderr open.
+        # Give this invocation its own process group and stop the whole group
+        # on timeout. Keep the configured deadline and source set unchanged.
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=self._repo_path() or None, start_new_session=True,
         )
+        timeout = float(self.s.last30days_timeout_seconds)
+        try:
+            stdout, _stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            # Do not wait for inherited pipe handles in a descendant that
+            # deliberately created its own session. Parent reaping is bounded.
+            proc.wait(timeout=5)
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+            # TimeoutExpired's default repr includes the command. Templates
+            # can contain credentials, so never journal command/output text.
+            raise TimeoutError(f"last30days timed out after {timeout:g}s; process group stopped") from None
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"last30days exited {proc.returncode}: {(proc.stderr or '')[:200]}"
-            )
-        data = json.loads(proc.stdout)   # JSON on stdout; warnings go to stderr
+            raise RuntimeError(f"last30days exited {proc.returncode}; provider output omitted")
+        data = json.loads(stdout)   # JSON on stdout; warnings go to stderr
         return self._parse(data, symbol, query)
 
     # ---- command construction (no shell=True; list args) ----
