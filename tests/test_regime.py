@@ -271,11 +271,14 @@ def test_ensure_regime_for_today_cold_start_returns_none_without_a_prior_backfil
     assert journal.count_rows("benchmark_bars") < MIN_BARS_FOR_FIRST_CLASSIFICATION
 
 
-def test_ensure_regime_for_today_idempotent_same_day_after_a_prior_backfill(journal, settings):
+def test_ensure_regime_for_today_idempotent_same_day_after_a_prior_backfill(journal, settings, monkeypatch):
     """The realistic sequence: an operator has already run backfill_regime_days
     once (deep history) -- ensure_regime_for_today must then read the
     existing row back idempotently across repeated same-day calls, never
     inserting a duplicate."""
+    from datetime import datetime, timezone
+    from alphaos.util import timeutils
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 9, 11, 21, tzinfo=timezone.utc))
     bars = _trend_bars(MIN_BARS_FOR_FIRST_CLASSIFICATION + 30)
     provider = _FakeBars(bars)
     backfill_regime_days(journal, settings, bars_provider=provider, initial_lookback_days=2000)
@@ -405,7 +408,10 @@ def test_regime_config_hash_present_and_lineage_intact(journal, settings):
 
 
 # ----------------------------------------------------------- orchestrator wiring
-def test_scan_stamps_regime_on_every_packet_when_available(tmp_path):
+def test_scan_stamps_regime_on_every_packet_when_available(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from alphaos.util import timeutils
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 9, 11, 21, tzinfo=timezone.utc))
     bars = _trend_bars(MIN_BARS_FOR_FIRST_CLASSIFICATION + 30)
     settings = make_settings(LABELLING_ENABLED="true", REGIME_BACKFILL_LOOKBACK_DAYS="2000")
     journal = JournalStore(":memory:")
@@ -456,7 +462,10 @@ def test_regime_header_none_when_no_regime_days_row(journal, settings):
     assert "## Regime:" not in md
 
 
-def test_regime_header_renders_with_streak_and_caveat(journal, settings):
+def test_regime_header_renders_with_streak_and_caveat(journal, settings, monkeypatch):
+    from datetime import datetime, timezone
+    from alphaos.util import timeutils
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 9, 11, 21, tzinfo=timezone.utc))
     bars = _trend_bars(MIN_BARS_FOR_FIRST_CLASSIFICATION + 10)
     backfill_regime_days(journal, settings, bars_provider=_FakeBars(bars), initial_lookback_days=2000)
     brief = build_daily_brief(journal, settings, KillSwitch())

@@ -111,10 +111,19 @@ def read_exposure(client, journal) -> dict:
         for leg in parent.get("legs", []):
             if leg.get("role") in {"stop_loss", "take_profit"}:
                 known_reductions.add(leg["broker_order_id"])
-        live_roles = {leg.get("role") for leg in parent.get("legs", [])
-                      if leg.get("state") in {"accepted", "submitted", "partially_filled"}
-                      and leg.get("side") == expected_side
-                      and abs(_number(leg.get("qty"), "protective order quantity")) == abs(float(held["qty"]))}
+        live_roles = set()
+        for leg in parent.get("legs", []):
+            # Normalization maps unfamiliar/pending-cancel statuses for display;
+            # only explicitly working raw states authorize new exposure.
+            if leg.get("status") not in {"new", "accepted", "partially_filled"}:
+                continue
+            leg_qty = _number(leg.get("qty"), "protective order quantity", positive=True)
+            filled_qty = _number(leg.get("filled_qty"), "protective filled quantity")
+            if not 0 <= filled_qty <= leg_qty:
+                raise ExposureUnavailable("invalid protective cumulative fill quantity")
+            if (leg.get("side") == expected_side
+                    and abs((leg_qty - filled_qty) - abs(float(held["qty"]))) < 1e-6):
+                live_roles.add(leg.get("role"))
         if not {"stop_loss", "take_profit"} <= live_roles:
             raise ExposureUnavailable("current matching stop and target protection is not verified")
     known = {r["broker_order_id"]: r for r in journal.query(
