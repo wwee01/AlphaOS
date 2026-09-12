@@ -219,6 +219,39 @@ def test_build_report_reads_real_rows_in_ascending_date_order():
     journal.close()
 
 
+def test_clean_cashflows_cannot_certify_provisional_valuation_timing():
+    from alphaos.reports.close_equity import VALUATION_METHOD
+    from alphaos.reports.relative_performance import render_markdown
+    journal = JournalStore(":memory:")
+    # Enough observations for the old return floor, but their timing remains
+    # unverified. An optimistic raw metadata flag must not bypass the method.
+    for i, day in enumerate(_WORKED_DATES):
+        journal.insert("equity_close_snapshots", {
+            "snapshot_id": f"provisional-{i}", "market_date": day,
+            "equity": 100000 + i * 1000, "equity_source": "alpaca_portfolio_history",
+            "valuation_method_version": VALUATION_METHOD,
+            "valuation_at_utc": day + "T20:00:00+00:00",
+            "source_timestamp_utc": day + "T19:59:00+00:00",
+            "captured_at_utc": day + "T20:30:00+00:00",
+            "cashflow_net": 0, "cashflow_status": "none_reported",
+            "raw_evidence_json": {"comparison_eligible": True}, "is_mock": 0,
+        })
+        journal.insert("benchmark_bars", {"bar_id": f"spy-{i}", "symbol": "SPY", "bar_date": day, "close": 500 + i})
+    rep = build_relative_performance_report(journal, make_settings())
+    assert rep["excess_return_pct"] is None
+    assert rep["rolling_beta"] is None
+    assert rep["equity_curve"] == []
+    assert rep["equity_total_return_pct"] is None
+    assert rep["paired_trading_days"] == 0
+    assert rep["excluded_cashflow_observations"] == 0
+    assert rep["excluded_timing_observations"] == 6
+    assert rep["measurement_status"] == "provisional_timing_unverified"
+    assert rep["provisional_account_value_curve"][-1]["equity"] == 105000
+    assert "timing" in rep["relative_return_note"]
+    assert "Provisional account value" in render_markdown(rep)
+    journal.close()
+
+
 def test_render_markdown_never_raises_on_empty_report():
     from alphaos.reports.relative_performance import render_markdown
 

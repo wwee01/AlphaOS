@@ -214,23 +214,41 @@ def build_relative_performance_report(journal, settings, limit: int = 3650) -> d
         "AND valuation_method_version = ? ORDER BY market_date ASC LIMIT ?",
         (VALUATION_METHOD, limit),
     ) if tables else []
+    # The broker's documented closing-minute interval is a useful account
+    # observation, but empirical daily/one-minute disagreement means that it
+    # is not an independently verified match for the SPY closing valuation.
+    # A clean cashflow response alone must never promote this method.
     for row in equity_rows:
-        row["comparison_eligible"] = row["cashflow_status"] == "none_reported"
+        row["comparison_eligible"] = False
     benchmark_rows = journal.query(
         "SELECT bar_date, close FROM benchmark_bars WHERE symbol = 'SPY' "
         "ORDER BY bar_date ASC LIMIT ?", (limit,),
     )
     rep = compute_relative_performance(equity_rows, benchmark_rows)
+    rep["provisional_account_value_curve"] = [
+        {"date": r["market_date"], "equity": r["equity"],
+         "valuation_at_utc": r["valuation_at_utc"], "cashflow_status": r["cashflow_status"]}
+        for r in equity_rows
+    ]
+    # Raw account values may include external flows; do not present their
+    # percentage change as a verified investment-return curve.
+    rep["equity_curve"] = []
     rep["legacy_snapshot_count"] = len(legacy_rows)
     rep["legacy_equity_curve"] = compute_relative_performance(legacy_rows, [])["equity_curve"]
     rep["valuation_method"] = VALUATION_METHOD
-    rep["excluded_cashflow_observations"] = sum(not r["comparison_eligible"] for r in equity_rows)
-    rep["measurement_status"] = "matched_session_closes" if equity_rows else "awaiting_verified_closes"
+    rep["excluded_cashflow_observations"] = sum(
+        r["cashflow_status"] not in {"none_reported", "internal_only"} for r in equity_rows)
+    rep["excluded_timing_observations"] = len(equity_rows)
+    rep["measurement_status"] = "provisional_timing_unverified" if equity_rows else "awaiting_verified_closes"
+    if equity_rows:
+        rep["relative_return_note"] = "unavailable: broker closing-window timing is provisional; SPY comparison is not verified"
+        rep["rolling_beta_note"] = "unavailable: account and benchmark valuation timing is not verified"
     rep["caveat"] += (
         " Legacy account snapshots are preserved but excluded: their valuation times were not matched to SPY close."
         " The benchmark is SPY price return, not dividend-reinvested total return."
         " Reported or unknown cashflows interrupt the comparison; no cashflow-adjusted performance is claimed."
-        " Results start at the first verified paired observation, not account inception."
+        " Closing-minute account values are provisional and excluded from benchmark comparisons."
+        " No method currently certifies a common account/SPY closing valuation."
     )
     rep["as_of"] = timeutils.market_date().isoformat()
     rep["mode"] = settings.mode.value
@@ -259,6 +277,10 @@ def render_markdown(rep: dict) -> str:
         lines.append(f"- Relative return: _{rep['relative_return_note']}_")
     if rep.get("legacy_snapshot_count"):
         lines.append(f"- Legacy snapshots excluded from comparison: **{rep['legacy_snapshot_count']}** (valuation timing unverified)")
+    if rep.get("provisional_account_value_curve"):
+        latest = rep["provisional_account_value_curve"][-1]
+        lines.append(f"- Provisional account value ({latest['date']}): **{latest['equity']:,.2f}**; "
+                     "closing-window timing is unverified, so no investment return or SPY comparison is claimed.")
     lines.append(
         f"- Rolling beta: **{rep['rolling_beta']}**" if rep["rolling_beta"] is not None
         else f"- Rolling beta: _{rep['rolling_beta_note']}_"
