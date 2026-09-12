@@ -803,7 +803,7 @@ def test_qty_mismatch_reported_in_summary_and_logged():
 
     report = pw.status_report(journal)
     assert report["qty_mismatches"] == 1
-    assert report["blocking"] is False  # visible, not blocking -- protection legs are still live
+    assert report["blocking"] is True  # CK repair policy: unresolved quantity mismatch halts new risk
 
 
 def test_qty_mismatch_does_not_spam_every_pass():

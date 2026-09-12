@@ -345,7 +345,8 @@ class AlpacaClient:
     def get_account(self) -> dict:
         client = self._trading_client()
         acct = client.get_account()
-        value = lambda key: acct.get(key) if isinstance(acct, dict) else getattr(acct, key, None)
+        def value(key):
+            return acct.get(key) if isinstance(acct, dict) else getattr(acct, key, None)
         return {
             "account_number": value("account_number"),
             "status": order_mapping._s(value("status")),

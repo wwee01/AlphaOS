@@ -93,10 +93,8 @@ releases it, never the project's own data/KILL_SWITCH.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
-import tempfile
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
@@ -181,6 +179,9 @@ class _FakeBracketOrder:
             _FakeLeg("take_profit", limit_price=target, time_in_force=tif),
             _FakeLeg("stop_loss", stop_price=stop, time_in_force=tif),
         ]
+        for leg in self.legs:
+            leg.qty, leg.symbol = qty, symbol
+            leg.side = "sell" if side == "buy" else "buy"
 
 
 class _FakeSimpleOrder:
@@ -229,6 +230,7 @@ class FakeTradingClient:
     def __init__(self):
         self.orders: dict = {}        # id (parent OR leg OR close/oco order) -> object
         self._by_symbol: dict = {}    # symbol -> the CURRENT live bracket/OCO parent order
+        self._directions: dict = {}
         self._broker_qty: dict = {}   # symbol -> current broker qty (0/absent = flat)
         self.call_log: list = []      # [(op, id_or_symbol), ...] in call order
         self.raise_on_cancel_for: set = set()
@@ -249,6 +251,7 @@ class FakeTradingClient:
             self.orders[leg.id] = leg
         self._by_symbol[symbol] = o
         self._broker_qty[symbol] = qty
+        self._directions[symbol] = "short" if side == "sell" else "long"
         return o
 
     def set_broker_qty(self, symbol, qty):
@@ -262,6 +265,8 @@ class FakeTradingClient:
 
     def leg(self, symbol, role):
         o = self._by_symbol[symbol]
+        if o.order_class == "oco" and role == "take_profit":
+            return o
         want = "limit" if role == "take_profit" else "stop"
         return next(leg for leg in o.legs if leg.order_type == want)
 
@@ -288,6 +293,8 @@ class FakeTradingClient:
             price = parent.filled_avg_price
         filled_qty = self.close_fill_qty.get(symbol, requested_qty if price is not None else 0)
         order = _FakeSimpleOrder(symbol, requested_qty, filled_qty, filled_avg_price=price)
+        if price is not None and filled_qty < requested_qty:
+            order.status = "partially_filled"
         self.orders[order.id] = order
         if price is not None:
             # A real liquidation only reduces the broker's book once it
@@ -300,6 +307,25 @@ class FakeTradingClient:
             self.set_broker_qty(symbol, remaining)
         return order
 
+    def get_order_by_client_id(self, client_order_id):
+        self.call_log.append(("lookup_client_id", client_order_id))
+        for order in self.orders.values():
+            if getattr(order, "client_order_id", None) == client_order_id:
+                return order
+        error = RuntimeError("order not found")
+        error.status_code = 404
+        raise error
+
+    def submit_reduction(self, spec):
+        existing = next((o for o in self.orders.values()
+                         if getattr(o, "client_order_id", None) == spec["client_order_id"]), None)
+        if existing:
+            raise RuntimeError("duplicate client_order_id")
+        order = self.close_position(spec["symbol"])
+        order.client_order_id = spec["client_order_id"]
+        order.side = spec["side"]
+        return order
+
     def submit_oco(self, spec):
         self.call_log.append(("oco", spec["symbol"]))
         if spec["symbol"] in self.raise_on_oco_for:
@@ -307,6 +333,11 @@ class FakeTradingClient:
         order = _FakeBracketOrder(spec["symbol"], spec["qty"], spec["side"],
                                   entry=None, target=spec["target"], stop=spec["stop"], tif=spec["tif"])
         order.status, order.filled_qty, order.filled_avg_price = "accepted", 0, None
+        order.order_class, order.order_type = "oco", "limit"
+        order.limit_price = spec["target"]
+        order.client_order_id = spec.get("client_order_id") or order.client_order_id
+        order.legs = [leg for leg in order.legs if leg.order_type == "stop"]
+        order.legs[0].side = spec["side"]
         self.orders[order.id] = order
         for leg in order.legs:
             self.orders[leg.id] = leg
@@ -315,11 +346,21 @@ class FakeTradingClient:
         self._by_symbol[spec["symbol"]] = order
         return order
 
+    def get_calendar(self, request):
+        from types import SimpleNamespace
+        day = request.start
+        if not is_trading_day(day):
+            return []
+        return [SimpleNamespace(date=day, open=f"{day.isoformat()}T09:30:00", close=f"{day.isoformat()}T16:00:00")]
+
     def get_all_positions(self):
         self.call_log.append(("list_positions", None))
         if self.raise_on_list_positions:
             raise RuntimeError("list_positions failed")
-        return [_FakeBrokerPosition(sym, qty) for sym, qty in self._broker_qty.items() if qty]
+        positions = [_FakeBrokerPosition(sym, qty) for sym, qty in self._broker_qty.items() if qty]
+        for pos in positions:
+            pos.side = self._directions.get(pos.symbol, "long")
+        return positions
 
     def get_orders(self):
         return []
@@ -568,9 +609,10 @@ def test_cancel_unverified_means_no_close_is_submitted():
     assert row["status"] == "open"
     warn = journal.one(
         "SELECT * FROM system_events WHERE category = 'time_exit_enforcement' "
-        "AND message LIKE '%not fully verified%'"
+        "AND message LIKE '%protection may be absent%'"
     )
     assert warn is not None
+    assert protection_watchdog.has_blocking_incident(journal) is not None
 
 
 def test_cancel_raises_means_no_close_is_submitted():
@@ -876,9 +918,9 @@ def test_blocker1_retry_after_reprotect_cancels_the_new_legs_never_orphaned():
     assert old_tp.status == "canceled" and old_sl.status == "canceled"
 
     new_order = fake.orders[new_boid]
-    new_tp = next(leg for leg in new_order.legs if leg.order_type == "limit")
+    new_tp = new_order  # Real OCO API shape: TP is parent, SL is child.
     new_sl = next(leg for leg in new_order.legs if leg.order_type == "stop")
-    assert new_tp.status == "new" and new_sl.status == "new"  # untouched so far
+    assert new_tp.status in ("new", "accepted") and new_sl.status == "new"  # untouched so far
 
     # --- pass 2: close now succeeds; the retry MUST cancel the NEW legs ---
     fake.raise_on_close_for.discard("XLV")
@@ -925,25 +967,17 @@ def test_blocker2_deferred_close_fills_between_passes_never_submits_unhedged_oco
     row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
     assert row["status"] == "open"
 
-    # Between passes: the liquidation actually fills at the broker.
+    # Between passes: the broker reports the actual liquidation fill.
+    close_id = result1["deferred"][0]["pending_close_order"]
+    close = fake.orders[close_id]
+    close.status, close.filled_qty, close.filled_avg_price = "filled", 10, 104
     fake.set_broker_qty("XLV", 0)
-
-    # --- pass 2: broker is now FLAT -- must stand down entirely ---
     log_before = len(fake.call_log)
     result2 = om.enforce_time_exits(now=_NOW)
-    pass2_log = fake.call_log[log_before:]
-
-    assert not any(c[0] == "close" for c in pass2_log), (
-        "must never retry close() on a symbol the broker already reports flat"
-    )
-    assert not any(c[0] == "oco" for c in pass2_log), (
-        f"2nd-pass broker calls: {pass2_log} -- RECOVERY SUBMITTED A PROTECTIVE OCO "
-        f"FOR A SYMBOL THE BROKER IS FLAT IN"
-    )
-    assert result2["closed"] == []
-    stood_down = any(o.get("broker_flat") for o in result2["errors"]) or \
-        any(o.get("broker_flat") for o in result2["deferred"])
-    assert stood_down, f"expected a broker_flat stand-down outcome, got {result2}"
+    assert not any(c[0] in ("close", "oco") for c in fake.call_log[log_before:])
+    assert len(result2["closed"]) == 1
+    assert journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))["status"] == "closed"
+    assert len(journal.query("SELECT * FROM trade_outcomes")) == 1
 
 
 # ======================================================= audit fixup: HIGH-1
@@ -977,40 +1011,20 @@ def test_high1_partial_liquidation_fill_never_recorded_as_a_full_close():
 
 
 # ======================================================= audit fixup: HIGH-2
-def test_high2_kill_switch_blocks_the_oco_new_order_during_recovery():
-    """KillSwitch's own contract: presence means engaged, blocks ALL new
-    orders. submit_protective_oco is a new order -- it must never fire while
-    engaged, even though the cancel/close path above it is deliberately left
-    ungated (an explicit, not-yet-ruled operator question)."""
+def test_high2_kill_switch_allows_verified_existing_position_protection(tmp_path):
+    """CK's September repair authorization: a halt blocks new risk, not
+    fresh-state-verified protection of an existing position."""
     fake = FakeTradingClient()
-    tmp_dir = tempfile.mkdtemp(prefix="time2_killswitch_")
-    ks_path = os.path.join(tmp_dir, "KILL_SWITCH")
-    kill_switch = KillSwitch(path=ks_path)
-    try:
-        _, journal, om = _paper_om(fake, kill_switch=kill_switch)
-        opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
-        pos, _ = _open_broker_position(journal, fake, symbol="XLV", max_holding_days=5,
-                                       opened_market_date=opened)
-        fake.raise_on_close_for.add("XLV")
-        kill_switch.engage("audit fixup HIGH-2 test")
-
-        result = om.enforce_time_exits(now=_NOW)
-
-        assert not any(c[0] == "oco" for c in fake.call_log), (
-            "must never submit a NEW order while the kill switch is engaged"
-        )
-        assert result["closed"] == []
-        assert len(result["errors"]) == 1
-        assert result["errors"][0].get("critical") is True
-        assert "kill switch" in result["errors"][0].get("replace_error", "").lower()
-        row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
-        assert row["status"] == "open"
-    finally:
-        kill_switch.release()
-        try:
-            os.rmdir(tmp_dir)
-        except OSError:
-            pass
+    kill_switch = KillSwitch(path=str(tmp_path / "KILL_SWITCH"))
+    _, journal, om = _paper_om(fake, kill_switch=kill_switch)
+    pos, _ = _open_broker_position(journal, fake, symbol="XLV", max_holding_days=5,
+                                  opened_market_date=_opened_date_for(_NOW_DATE, 5))
+    fake.raise_on_close_for.add("XLV")
+    kill_switch.engage("halt new risk")
+    result = om.enforce_time_exits(now=_NOW)
+    assert any(c[0] == "oco" for c in fake.call_log)
+    assert result["deferred"][0]["reprotected"] is True
+    assert journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))["status"] == "open"
 
 
 # ======================================================= audit fixup: HIGH-3
@@ -1139,7 +1153,7 @@ def test_also_incident_coupling_uses_the_public_entry_point_not_private():
     was available)."""
     import pathlib
 
-    from alphaos.execution import order_manager as om_mod
+    from alphaos.execution import time_exit_lifecycle as om_mod
 
     text = pathlib.Path(str(om_mod.__file__)).read_text(encoding="utf-8")
     assert "_record_check" not in text
@@ -1203,7 +1217,7 @@ def test_r1_failed_local_persist_of_new_oco_id_never_reported_as_success():
     incident = protection_watchdog.has_blocking_incident(journal)
     assert incident is not None
     assert incident["symbol"] == "AAPL"
-    assert incident["protection_status"] == "unprotected"
+    assert incident["protection_status"] == "unverifiable"
     assert incident["severity"] == "critical"
     assert "broker_order_id=" in incident["detail"]
 
@@ -1235,7 +1249,7 @@ def test_r2_oco_submitted_with_no_broker_order_id_treated_as_replace_failure():
     assert not any(o.get("reprotected") for o in result["deferred"])
     assert len(result["errors"]) == 1
     assert result["errors"][0].get("critical") is True
-    assert "no broker_order_id" in result["errors"][0]["replace_error"]
+    assert "no broker_order_id" in result["errors"][0]["error"]
     row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
     assert row["broker_order_id"] == old_boid
     assert row["status"] == "open"

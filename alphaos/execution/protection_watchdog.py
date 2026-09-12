@@ -154,6 +154,14 @@ def check_position(journal, alpaca_client, position: dict,
         status, severity = ProtectionStatus.PROTECTED.value, Severity.INFO.value
         detail = f"{symbol}: stop and target both live at the broker."
 
+    if qty_match is False:
+        status, severity = ProtectionStatus.UNVERIFIABLE.value, Severity.CRITICAL.value
+        detail = f"{symbol}: broker/local quantities differ ({broker_qty}/{local_qty}); no verified exposure accounting."
+    elif (norm.get("order_class") == "bracket" and (norm.get("filled_qty") or 0) > 0
+          and norm.get("status") == "partially_filled"):
+        status, severity = ProtectionStatus.UNPROTECTED.value, Severity.CRITICAL.value
+        detail = f"{symbol}: entry is partially filled; bracket protection is not activated until the entry completes."
+
     return ProtectionCheckResult(
         position_id=position_id, symbol=symbol, protection_status=status, severity=severity, detail=detail,
         stop_live=stop_live, target_live=target_live, broker_position_exists=True,

@@ -14,6 +14,7 @@ MAE<=0 always; the final value at close is written onto
 
 from __future__ import annotations
 
+from copy import copy
 from datetime import date
 from typing import Optional
 
@@ -28,6 +29,7 @@ from alphaos.constants import (
 from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
+from alphaos.execution.ledger_ops import atomic
 from alphaos.execution.costs import CostModel
 from alphaos import lineage
 from alphaos.util import alerts, timeutils
@@ -85,8 +87,9 @@ class PositionManager:
                 "stop_price": order_row.get("stop_loss_price"),
                 "target_price": order_row.get("take_profit_price"),
                 "max_holding_days": proposal.get("max_holding_days"),
-                "opened_at": timeutils.now_utc().isoformat(),
-                "opened_market_date": timeutils.market_date().isoformat(),
+                "opened_at": order_row.get("filled_at") or timeutils.now_utc().isoformat(),
+                "opened_market_date": (timeutils.to_et(timeutils.parse_iso(order_row["filled_at"])).date().isoformat()
+                                       if order_row.get("filled_at") else timeutils.market_date().isoformat()),
                 "status": "open",
                 "current_price": fill_price,
                 "unrealized_pnl": 0.0,
@@ -492,7 +495,15 @@ class PositionManager:
         self.journal.conn.commit()
 
     # --------------------------------------------------------------- close
-    def close_position(
+    def close_position(self, *args, **kwargs):
+        # An exit and its outcome, fill/order and position state are one commit.
+        # A failed write must never leave half an exit for the retry to duplicate.
+        with atomic(self.journal) as journal:
+            scoped = copy(self)
+            scoped.journal = journal
+            return scoped._close_position(*args, **kwargs)
+
+    def _close_position(
         self,
         position_id: str,
         exit_price: float,
@@ -500,11 +511,16 @@ class PositionManager:
         triggered_by: str = "system",
         execution_source: Optional[str] = None,
         broker_order_id: Optional[str] = None,
+        closed_at: Optional[str] = None,
+        total_qty: Optional[float] = None,
+        recorded_exit_order_id: Optional[str] = None,
     ) -> Optional[dict]:
         pos = self.journal.one("SELECT * FROM positions WHERE position_id = ?", (position_id,))
         if not pos or pos["status"] != "open":
             return None
 
+        if total_qty is not None:
+            pos["qty"] = total_qty
         qty = float(pos["qty"] or 0)
         entry = float(pos["avg_entry_price"] or 0)
         direction = pos["direction"]
@@ -517,7 +533,7 @@ class PositionManager:
         realized_r = round(pnl_per_share / risk_per_share, 3) if risk_per_share else None
         return_pct = round((pnl_per_share / entry), 4) if entry else None
 
-        now_dt = timeutils.now_utc()
+        now_dt = timeutils.parse_iso(closed_at) if closed_at else timeutils.now_utc()
         opened = timeutils.parse_iso(pos.get("opened_at"))
         holding_days = (
             round((now_dt - opened).total_seconds() / 86400.0, 4) if opened else None
@@ -531,12 +547,12 @@ class PositionManager:
             trading_days_between(opened_et_date, timeutils.to_et(now_dt).date())
             if opened_et_date is not None else None
         )
-        same_day = exit_rules.is_same_day_exit(pos.get("opened_market_date"))
+        same_day = pos.get("opened_market_date") == timeutils.to_et(now_dt).date().isoformat()
         classification = exit_rules.classify_exit(exit_reason, net_pnl)
 
         # Record the exit order. For broker-reconciled (alpaca_paper) closes this
         # represents the real Alpaca leg fill; otherwise it's an internal sim exit.
-        exit_order_id = self._record_exit_order(
+        exit_order_id = recorded_exit_order_id or self._record_exit_order(
             pos, exit_price, exit_reason,
             execution_source=execution_source or ExecutionSource.INTERNAL_SIM.value,
             broker_order_id=broker_order_id,
@@ -547,6 +563,8 @@ class PositionManager:
             "exits",
             {
                 "exit_id": exit_id,
+                "created_at_utc": now_dt.isoformat(),
+                "created_at_sgt": timeutils.stamp(now_dt).local_sgt,
                 "position_id": position_id,
                 "order_id": pos.get("order_id"),
                 "exit_order_id": exit_order_id,
@@ -557,7 +575,7 @@ class PositionManager:
                 "classification": classification.value,
                 "is_same_day": 1 if same_day else 0,
                 "triggered_by": triggered_by,
-                "market_date": timeutils.market_date().isoformat(),
+                "market_date": timeutils.to_et(now_dt).date().isoformat(),
                 "target_profile": target_profile_bundle(pos)["target_profile"],
                 # --- Trade Packet v1 traceability ---
                 "trade_id": pos.get("trade_id"),
@@ -580,6 +598,8 @@ class PositionManager:
             "trade_outcomes",
             {
                 "outcome_id": new_id("out"),
+                "created_at_utc": now_dt.isoformat(),
+                "created_at_sgt": timeutils.stamp(now_dt).local_sgt,
                 "position_id": position_id,
                 "symbol": pos["symbol"],
                 "direction": direction,
@@ -622,8 +642,8 @@ class PositionManager:
         )
 
         self.journal.conn.execute(
-            "UPDATE positions SET status = 'closed', current_price = ?, unrealized_pnl = 0 WHERE position_id = ?",
-            (exit_price, position_id),
+            "UPDATE positions SET status = 'closed', qty = ?, current_price = ?, unrealized_pnl = 0 WHERE position_id = ?",
+            (qty, exit_price, position_id),
         )
         self.journal.conn.commit()
 
