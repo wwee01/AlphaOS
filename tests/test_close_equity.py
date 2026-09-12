@@ -1,11 +1,11 @@
-"""Broker-shaped close valuation evidence; never real network or credentials."""
-from datetime import datetime, timezone
+"""Broker-shaped provisional valuation evidence; no network or credentials."""
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from alphaos.journal.journal_store import JournalStore
-from alphaos.reports.close_equity import capture_close_equity, daily_close_evidence
-from alphaos.reports.relative_performance import build_relative_performance_report
+from alphaos.reports.close_equity import TIMING_STATUS, VALUATION_METHOD, capture_close_equity, daily_close_evidence
 from conftest import make_settings
 
 
@@ -13,54 +13,104 @@ def _epoch(value):
     return datetime.fromisoformat(value).timestamp()
 
 
-def _history():
-    return {"timeframe": "1D", "timestamp": [_epoch("2026-09-10T09:30:00-04:00"), _epoch("2026-09-11T09:30:00-04:00")],
-            "equity": [100000, 101000], "cashflow": {}}
-
-
 def _calendar():
     return [{"date": "2026-09-10", "open": "09:30", "close": "16:00"},
             {"date": "2026-09-11", "open": "09:30", "close": "2026-09-11T16:00:00"}]
 
 
-def test_premarket_capture_never_labels_current_equity_as_today_close():
-    # Broker includes a mutable current-day point; only yesterday can land.
-    rows = daily_close_evidence(_history(), _calendar(), datetime(2026, 9, 11, 14, tzinfo=timezone.utc))
+def _history(calendar=None, values=None, offset="-04:00"):
+    calendar = calendar or _calendar()
+    values = values or [100000, 101000]
+    stamps, equities = [], []
+    for day, value in zip(calendar, values):
+        start = datetime.fromisoformat(day['date'] + 'T' + day['open'] + offset)
+        end = datetime.fromisoformat(day['date'] + 'T' + day['close'].split('T')[-1] + offset)
+        for i in range(int((end - start).total_seconds() // 60) + 1):
+            stamps.append((start + timedelta(minutes=i)).timestamp())
+            equities.append(value)
+    return {"timeframe": "1Min", "timestamp": stamps, "equity": equities, "cashflow": {}}
+
+
+def test_exact_documented_closing_window_remains_provisional():
+    h = _history()
+    # Distinguish 15:58, 15:59 and 16:00; none can silently substitute another.
+    h['equity'][388:391] = [99998, 100000, 100002]
+    rows = daily_close_evidence(h, _calendar(), datetime(2026, 9, 11, 14, tzinfo=timezone.utc))
     assert [r["market_date"] for r in rows] == ["2026-09-10"]
+    assert rows[0]["equity"] == 100000
     assert rows[0]["valuation_at_utc"] == "2026-09-10T20:00:00+00:00"
-    assert rows[0]["source_timestamp_utc"] == "2026-09-10T13:30:00+00:00"
+    assert rows[0]["source_timestamp_utc"] == "2026-09-10T19:59:00+00:00"
+    assert rows[0]["comparison_eligible"] is False
+    raw = json.loads(rows[0]['raw_evidence_json'])
+    assert raw['timing_status'] == TIMING_STATUS
+    assert raw['comparison_eligible'] is False
+    assert raw['regular_session_minutes_complete'] is True
 
 
-def test_early_close_and_dst_use_calendar_time_not_fixed_utc_hour():
-    hist = {"timeframe": "1D", "timestamp": [_epoch("2026-11-27T09:30:00-05:00")], "equity": [100], "cashflow": {}}
-    calendar = [{"date": "2026-11-27", "close": "13:00"}]
+def test_early_close_and_dst_use_calendar_not_fixed_utc_hour():
+    calendar = [{"date": "2026-11-27", "open": "09:30", "close": "13:00"}]
+    hist = _history(calendar, [100], '-05:00')
     rows = daily_close_evidence(hist, calendar, datetime(2026, 11, 27, 18, 16, tzinfo=timezone.utc))
-    assert len(rows) == 1
     assert rows[0]["valuation_at_utc"] == "2026-11-27T18:00:00+00:00"
+    assert rows[0]["source_timestamp_utc"] == "2026-11-27T17:59:00+00:00"
     assert daily_close_evidence(hist, calendar, datetime(2026, 11, 27, 18, 2, tzinfo=timezone.utc)) == []
 
 
-def test_missing_and_offsetting_cashflows_are_never_verified_zero():
+def test_missing_and_offsetting_external_cashflows_never_become_verified_zero():
     h = _history()
     del h["cashflow"]
     now = datetime(2026, 9, 12, tzinfo=timezone.utc)
     rows = daily_close_evidence(h, _calendar(), now)
     assert all(r["cashflow_status"] == "unknown" and r["cashflow_net"] is None for r in rows)
-    h["cashflow"] = {"CSD": [100, 0], "CSW": [-100, 0]}
+    csd, csw = [0] * len(h['timestamp']), [0] * len(h['timestamp'])
+    csd[0], csw[100] = 100, -100
+    h["cashflow"] = {"CSD": csd, "CSW": csw}
     rows = daily_close_evidence(h, _calendar(), now)
     assert rows[0]["cashflow_status"] == "present"
     assert rows[0]["cashflow_net"] == 0
+    assert len(json.loads(rows[0]['raw_evidence_json'])['cashflow_events']) == 2
 
 
-def test_malformed_arrays_or_duplicate_dates_fail_before_writes():
+def test_internal_fees_and_unknown_activity_types_are_distinguished():
     h = _history()
-    h["equity"] = [100]
-    with pytest.raises(ValueError, match="lengths"):
-        daily_close_evidence(h, _calendar(), datetime.now(timezone.utc))
+    fees = [0] * len(h['timestamp'])
+    fees[0] = -.01
+    h['cashflow'] = {'FEE': fees}
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    row = daily_close_evidence(h, _calendar(), now)[0]
+    assert row['cashflow_status'] == 'internal_only'
+    assert row['cashflow_net'] == 0
+    assert row['equity'] == 100000  # never add a fee back to broker equity
+    assert row['comparison_eligible'] is False
+    h['cashflow']['UNFAMILIAR_ACTIVITY'] = fees
+    row = daily_close_evidence(h, _calendar(), now)[0]
+    assert row['cashflow_status'] == 'unknown'
+    assert row['cashflow_net'] is None
+    assert 'UNFAMILIAR_ACTIVITY' in json.loads(row['raw_evidence_json'])['unknown_nonzero_activity_types']
+
+
+@pytest.mark.parametrize('missing_index', [0, 100, 389])
+def test_partial_session_or_missing_closing_minute_has_no_fallback(missing_index):
     h = _history()
-    h["timestamp"][1] = h["timestamp"][0]
-    with pytest.raises(ValueError, match="duplicate"):
-        daily_close_evidence(h, _calendar(), datetime(2026, 9, 12, tzinfo=timezone.utc))
+    del h['timestamp'][missing_index]
+    del h['equity'][missing_index]
+    rows = daily_close_evidence(h, _calendar(), datetime(2026, 9, 12, tzinfo=timezone.utc))
+    assert [r['market_date'] for r in rows] == ['2026-09-11']
+
+
+def test_malformed_arrays_duplicate_timestamps_or_daily_values_fail_before_writes():
+    now = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    h = _history()
+    h['equity'] = [100]
+    with pytest.raises(ValueError, match='lengths'):
+        daily_close_evidence(h, _calendar(), now)
+    h = _history()
+    h['timestamp'][1] = h['timestamp'][0]
+    with pytest.raises(ValueError, match='duplicate'):
+        daily_close_evidence(h, _calendar(), now)
+    h = {'timeframe': '1D', 'timestamp': [_epoch('2026-09-11T00:00:00+00:00')], 'equity': [95474.08]}
+    with pytest.raises(ValueError, match='timeframe=1Min'):
+        daily_close_evidence(h, _calendar(), now)
 
 
 class _Broker:
@@ -68,54 +118,73 @@ class _Broker:
         return _calendar()
 
     def get_portfolio_history(self, **kwargs):
-        assert kwargs["timeframe"] == "1D"
-        assert kwargs["cashflow_types"] == "ALL"
+        assert kwargs['period'] == '7D'
+        assert kwargs['timeframe'] == '1Min'
+        assert kwargs['intraday_reporting'] == 'market_hours'
+        assert kwargs['cashflow_types'] == 'ALL'
         return _history()
 
 
-def test_capture_preserves_legacy_and_is_idempotent_without_static_fallback():
-    j = JournalStore(":memory:")
-    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s", EXECUTION_PROVIDER="simulated_internal")
-    j.insert("equity_snapshots", {"snapshot_id": "legacy", "market_date": "2026-09-10", "equity": 123,
-                                  "equity_source": "live_broker", "is_mock": 0})
+def test_capture_preserves_legacy_and_is_idempotent_with_zero_eligible_observations():
+    j = JournalStore(':memory:')
+    settings = make_settings(ALPHAOS_MODE='paper', ALPACA_API_KEY='k', ALPACA_SECRET_KEY='s', EXECUTION_PROVIDER='simulated_internal')
+    j.insert('equity_snapshots', {'snapshot_id': 'legacy', 'market_date': '2026-09-10', 'equity': 123,
+                                'equity_source': 'live_broker', 'is_mock': 0})
     now = datetime(2026, 9, 12, tzinfo=timezone.utc)
-    assert capture_close_equity(j, settings, now, _Broker())["written"] == 2
-    assert capture_close_equity(j, settings, now, _Broker())["written"] == 0
-    assert j.one("SELECT equity FROM equity_snapshots")["equity"] == 123
-    rep = build_relative_performance_report(j, settings)
-    assert rep["legacy_snapshot_count"] == 1
-    assert rep["equity_snapshot_count"] == 2
-    assert rep["legacy_equity_curve"][0]["cum_return_pct"] == 0
-    assert rep["equity_curve"][-1]["cum_return_pct"] == 1
+    result = capture_close_equity(j, settings, now, _Broker())
+    assert result['written'] == 2 and result['status'] == 'provisional'
+    assert result['eligible_observations'] == 0
+    assert result['valuation_method'] == VALUATION_METHOD
+    assert capture_close_equity(j, settings, now, _Broker())['written'] == 0
+    assert j.one('SELECT equity FROM equity_snapshots')['equity'] == 123
+    rows = j.query('SELECT * FROM equity_close_snapshots')
+    assert len(rows) == 2
+    assert all(json.loads(r['raw_evidence_json'])['comparison_eligible'] is False for r in rows)
     j.close()
 
 
-def test_revised_broker_value_is_visible_and_does_not_overwrite_recorded_evidence():
-    j = JournalStore(":memory:")
-    settings = make_settings(ALPHAOS_MODE="paper", ALPACA_API_KEY="k", ALPACA_SECRET_KEY="s", EXECUTION_PROVIDER="simulated_internal")
+def test_revised_evidence_is_visible_without_overwriting_original():
+    j = JournalStore(':memory:')
+    settings = make_settings(ALPHAOS_MODE='paper', ALPACA_API_KEY='k', ALPACA_SECRET_KEY='s', EXECUTION_PROVIDER='simulated_internal')
     now = datetime(2026, 9, 12, tzinfo=timezone.utc)
     capture_close_equity(j, settings, now, _Broker())
     class Revised(_Broker):
         def get_portfolio_history(self, **kwargs):
             h = _history()
-            h["equity"][0] = 99999
+            h['equity'][389] = 99999
             return h
-    with pytest.raises(ValueError, match="revised recorded"):
+    with pytest.raises(ValueError, match='revised recorded'):
         capture_close_equity(j, settings, now, Revised())
-    assert j.one("SELECT equity FROM equity_close_snapshots ORDER BY market_date")["equity"] == 100000
+    assert j.one('SELECT equity FROM equity_close_snapshots ORDER BY market_date')['equity'] == 100000
     j.close()
 
 
-def test_cashflow_on_missing_equity_point_cannot_become_excess_return():
-    from datetime import date
-    from alphaos.util.market_calendar import nth_trading_day_after
-    from alphaos.reports.relative_performance import compute_relative_performance
-    dates = [nth_trading_day_after(date(2026, 8, 2), n).isoformat() for n in range(1, 9)]
-    history = {"timeframe": "1D", "timestamp": [_epoch(d + "T09:30:00-04:00") for d in dates],
-               "equity": [100, 100, None, 200, 200, 200, 200, 200], "cashflow": {"CSD": [0, 0, 100, 0, 0, 0, 0, 0]}}
-    calendar = [{"date": d, "close": "16:00"} for d in dates]
-    rows = daily_close_evidence(history, calendar, datetime(2026, 9, 1, tzinfo=timezone.utc))
-    rep = compute_relative_performance(rows, [{"bar_date": d, "close": 100} for d in dates])
-    assert rep["excess_return_pct"] is None
-    assert rep["multi_session_intervals"] == 1
-    assert "cashflow continuity" in rep["relative_return_note"]
+def test_real_shaped_closing_window_is_not_relabeled_to_match_daily_eod():
+    # Sanitized observation values from the Sep12 read-only broker capture.
+    cal = [{'date': '2026-09-11', 'open': '09:30', 'close': '16:00'}]
+    h = _history(cal, [95629.17])
+    h['equity'][-1] = 95617.38
+    row = daily_close_evidence(h, cal, datetime(2026, 9, 12, tzinfo=timezone.utc))[0]
+    assert row['equity'] == 95629.17
+    assert row['equity'] != 95622.51  # separately observed daily EOD/account mark
+    assert row['comparison_eligible'] is False
+
+
+def test_deposit_on_missing_earlier_equity_is_retained_for_closing_window():
+    h = _history()
+    h['equity'][100] = None
+    deposits = [0] * len(h['timestamp'])
+    deposits[100] = 100
+    h['cashflow'] = {'CSD': deposits}
+    row = daily_close_evidence(h, _calendar(), datetime(2026, 9, 12, tzinfo=timezone.utc))[0]
+    assert row['cashflow_status'] == 'present'
+    assert row['cashflow_net'] == 100
+    assert row['comparison_eligible'] is False
+
+
+@pytest.mark.parametrize('value', [None, 0, float('nan'), float('inf')])
+def test_invalid_closing_value_is_not_replaced_by_nearby_observation(value):
+    h = _history()
+    h['equity'][389] = value
+    rows = daily_close_evidence(h, _calendar(), datetime(2026, 9, 12, tzinfo=timezone.utc))
+    assert [r['market_date'] for r in rows] == ['2026-09-11']
