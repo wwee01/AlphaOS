@@ -22,6 +22,7 @@ import { getLearning } from '../api.js';
 import { Block, DataTable, Badge, badgeTone } from '../components/ui.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { StatTile } from '../components/StatTile.jsx';
+import { ExperimentRegistry } from '../components/ResearchStatusPanels.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 import { formatAttributionRow, formatHypothesisProgress, formatHypothesisStatus } from '../learning.js';
 
@@ -176,6 +177,8 @@ function HypothesesPanel({ hypotheses, drafts }) {
             key: 'status', label: 'status', render: (r) => <Badge tone={badgeTone(r.status)}>{formatHypothesisStatus(r.status)}</Badge>,
           },
           { key: 'overdue_label', label: 'overdue' },
+          { key: 'last_verdict', label: 'verdict (read claim direction)' },
+          { key: 'last_q_value', label: 'family q', numeric: true },
           { key: 'progress_label', label: 'progress' },
           { key: 'analysis_not_before', label: 'not before' },
           { key: 'claim', label: 'claim' },
@@ -282,6 +285,7 @@ export default function Learning() {
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
           <div className="grid reveal-stagger">
+            <div className="col-12"><ExperimentRegistry report={data.experiment_registry} /></div>
             <div className="col-12"><TqsPanel tqs={data.tqs} /></div>
             <div className="col-12"><AttributionPanel attribution={data.attribution} /></div>
             <div className="col-12">

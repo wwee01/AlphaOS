@@ -887,7 +887,8 @@ MAX_SYMBOLS_IN_ONE_ACTION = 5
 
 
 def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dict,
-                backup_health: Optional[dict] = None, evaluator_health: Optional[dict] = None) -> str:
+                backup_health: Optional[dict] = None, evaluator_health: Optional[dict] = None,
+                collection_status: Optional[dict] = None) -> str:
     """Priority order per spec: incident > fused job > provider health >
     stale backup > expiring approval > EXIT_REVIEW position > positions past
     their time-exit window > hypothesis resolution > below-floor data note >
@@ -958,6 +959,14 @@ def _one_action(needs_you: dict, positions_health: list[dict], moonshot_gap: dic
             )
         noun = "hypothesis" if hyp_res["resolved_today_count"] == 1 else "hypotheses"
         return f"{hyp_res['resolved_today_count']} {noun} resolved today ({ids})."
+    if collection_status:
+        shadow = collection_status["shadow"]
+        if shadow["enabled"] and shadow["state"] != "awaiting next collection":
+            return f"Shadow research: {shadow['state']} -- review collection status; an enabled flag is not evidence accrual."
+        enrichment = collection_status["last30days"]
+        if enrichment["enabled"] and (enrichment.get("errors") or 0) > 0:
+            return (f"Recent-context enrichment: {enrichment['errors']}/{enrichment['attempts']} "
+                    "attempts failed in the last 7 days -- review source health.")
     if moonshot_gap.get("status") == "below_sample_floor":
         return f"Nothing actionable yet -- still below the data floor ({moonshot_gap['data_progress']})."
     return "Nothing needs you right now."
@@ -1073,7 +1082,10 @@ def build_daily_brief(
     # reasoning to provider health).
     backup_health = _backup_health()
     evaluator_health = _evaluator_health(journal, settings)
-    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health, evaluator_health)
+    from alphaos.reports.research_status import build_collection_status
+
+    collection_status = build_collection_status(journal, settings, kill_switch=kill_switch)
+    one_action = _one_action(needs_you, positions_health, moonshot_gap, backup_health, evaluator_health, collection_status)
     one_action_priority = _one_action_priority(needs_you, evaluator_health)
 
     # REG-1 acceptance criterion: the shadow arming-map scorer's first
@@ -1118,6 +1130,7 @@ def build_daily_brief(
         "hold1_health": hold1_health,
         "preflight_health": preflight_health,
         "evaluator_health": evaluator_health,
+        "collection_status": collection_status,
         "best_candidate": best_candidate,
         "what_learned": what_learned,
         "moonshot_gap": moonshot_gap,
@@ -1138,6 +1151,23 @@ def render_markdown(brief: dict) -> str:
 
     if not brief.get("is_trading_day_today", True):
         lines += ["📅 Not a trading day (weekend/NYSE holiday) — no live scanning occurred today.", ""]
+
+    collection = brief.get("collection_status")
+    if collection:
+        shadow = collection["shadow"]
+        enrichment = collection["last30days"]
+        lines += [
+            "## Research collection",
+            f"- Shadow AI: **{shadow['state']}**; {shadow['successful_labels']} successful real labels; "
+            f"last success {shadow['last_successful_label_at_utc'] or 'never'}.",
+            f"- Recent-context enrichment (7d): {enrichment.get('errors') or 0} errors / "
+            f"{enrichment.get('attempts') or 0} attempts; {enrichment.get('timeouts') or 0} timeouts.",
+            f"- Official text archive: {'enabled' if collection['text_archive']['enabled'] else 'disabled'}; "
+            f"{collection['text_archive']['documents']} documents.",
+            "",
+        ]
+        if shadow.get("suspended"):
+            lines += [f"- Persistent suspension: {shadow.get('suspension_reason')}", ""]
 
     regime = brief.get("regime")
     if regime:

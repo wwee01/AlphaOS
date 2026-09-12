@@ -20,6 +20,7 @@ import { CollapsedTable } from '../components/CollapsedTable.jsx';
 import { StatFooter } from '../components/StatFooter.jsx';
 import { StatTile } from '../components/StatTile.jsx';
 import { ProgressBar } from '../components/ProgressBar.jsx';
+import { CollectionStatus } from '../components/ResearchStatusPanels.jsx';
 import { describeUnreachable, formatClockUTC } from '../format.js';
 import { auditProgressPct, describeAuditReadiness } from '../research.js';
 
@@ -44,8 +45,9 @@ function HowToRead({ children }) {
 const CAPTURE_EXPLAINER = (
   <>
     <b>What this is:</b> a wider, unproven universe (500 small/mid-cap symbols, vs. the 38-name
-    live book) that gets scanned every day purely to collect evidence — it can never trade, and
-    the AI never even forms an opinion on it yet. The point: once enough real trading days have
+    live book) that gets scanned every day purely to collect evidence — it can never trade.
+    AI labeling runs only when enabled and its collection checks pass; its actual output is shown above.
+    The point: once enough real trading days have
     accumulated, a saturation audit turns today's guessed thresholds into ones measured from
     actual data, so any future decision to widen live trading into this band is evidence-based,
     not a guess.
@@ -249,6 +251,7 @@ export default function Research() {
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
           <div className="grid reveal-stagger">
+            <div className="col-12"><CollectionStatus collection={data.collection_status} /></div>
             <div className="col-12">
               <CaptureHealth
                 capture={data.capture}

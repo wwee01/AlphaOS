@@ -41,6 +41,7 @@ from alphaos.reports.hypothesis_report import build_hypothesis_report
 from alphaos.reports.journal_feed import build_journal_feed
 from alphaos.reports.metrics import compute_metrics
 from alphaos.reports.position_health import assess_positions
+from alphaos.reports.research_status import build_collection_status, build_experiment_registry_report
 from alphaos.reports.tqs_report import build_tqs_report
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.safety import KillSwitch
@@ -312,10 +313,12 @@ def learning(settings: Settings = Depends(get_settings), journal: JournalStore =
     exactly as `build_tqs_report()` already shapes them (score is never
     shown alone anywhere in this codebase; the frontend inherits that by
     rendering the same dict, not by recomputing it)."""
+    hypotheses = build_hypothesis_report(journal)
     return {
         "tqs": build_tqs_report(journal, limit=1000),
         "attribution": build_attribution_report(journal, settings, limit=1000),
-        "hypotheses": build_hypothesis_report(journal),
+        "hypotheses": hypotheses,
+        "experiment_registry": build_experiment_registry_report(journal, hypotheses),
         "hypothesis_drafts": list_drafts(journal, status="draft"),
         "journal_feed": build_journal_feed(journal, limit=50),
         "as_of": _as_of(),
@@ -349,6 +352,7 @@ def research(settings: Settings = Depends(get_settings), journal: JournalStore =
     return {
         "shadow_tier_enabled": settings.shadow_tier_enabled,
         "shadow_labelling_enabled": settings.shadow_labelling_enabled,
+        "collection_status": build_collection_status(journal, settings),
         "constants": {
             "interest_score_version": version,
             "provisional": version.endswith("_v1"),
