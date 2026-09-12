@@ -13,6 +13,8 @@ this codebase does not overclaim what a handful of trading days can support.
 from __future__ import annotations
 
 from typing import Optional
+from datetime import date
+from alphaos.util.market_calendar import trading_days_between
 
 from alphaos.util import timeutils
 
@@ -101,7 +103,8 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
             r_eq = eq / prev_eq - 1.0
             r_bench = bench_close_by_date[d] / bench_close_by_date[prev_d] - 1.0
             paired.append((d, r_eq, r_bench))
-            if benchmark_index[d] - benchmark_index[prev_d] > 1:
+            if (benchmark_index[d] - benchmark_index[prev_d] > 1
+                    or trading_days_between(date.fromisoformat(prev_d), date.fromisoformat(d)) > 1):
                 multi_session_intervals += 1
         prev_paired_row = row
 
@@ -111,7 +114,7 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
 
     # --- total/excess return over the full paired window ---
     invalid_valuations = sum(r.get("comparison_eligible", True) is False for r in equity_rows)
-    if n_paired >= MIN_PAIRED_DAYS_FOR_RELATIVE_RETURN and not invalid_valuations:
+    if n_paired >= MIN_PAIRED_DAYS_FOR_RELATIVE_RETURN and not invalid_valuations and not multi_session_intervals:
         cum_eq_total = 1.0
         cum_bench_total = 1.0
         for _, r_eq, r_bench in paired:
@@ -132,6 +135,9 @@ def compute_relative_performance(equity_rows: list[dict], benchmark_rows: list[d
 
     if invalid_valuations:
         relative_return_note = f"unavailable: {invalid_valuations} valuations have reported or unknown cashflows"
+
+    if multi_session_intervals:
+        relative_return_note = "unavailable: missing session valuations; cashflow continuity is unverified"
 
     # --- rolling beta over the trailing window ---
     if n_paired >= MIN_PAIRED_DAYS_FOR_BETA and not multi_session_intervals and not invalid_valuations:

@@ -104,3 +104,18 @@ def test_revised_broker_value_is_visible_and_does_not_overwrite_recorded_evidenc
         capture_close_equity(j, settings, now, Revised())
     assert j.one("SELECT equity FROM equity_close_snapshots ORDER BY market_date")["equity"] == 100000
     j.close()
+
+
+def test_cashflow_on_missing_equity_point_cannot_become_excess_return():
+    from datetime import date
+    from alphaos.util.market_calendar import nth_trading_day_after
+    from alphaos.reports.relative_performance import compute_relative_performance
+    dates = [nth_trading_day_after(date(2026, 8, 2), n).isoformat() for n in range(1, 9)]
+    history = {"timeframe": "1D", "timestamp": [_epoch(d + "T09:30:00-04:00") for d in dates],
+               "equity": [100, 100, None, 200, 200, 200, 200, 200], "cashflow": {"CSD": [0, 0, 100, 0, 0, 0, 0, 0]}}
+    calendar = [{"date": d, "close": "16:00"} for d in dates]
+    rows = daily_close_evidence(history, calendar, datetime(2026, 9, 1, tzinfo=timezone.utc))
+    rep = compute_relative_performance(rows, [{"bar_date": d, "close": 100} for d in dates])
+    assert rep["excess_return_pct"] is None
+    assert rep["multi_session_intervals"] == 1
+    assert "cashflow continuity" in rep["relative_return_note"]

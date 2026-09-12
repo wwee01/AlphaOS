@@ -260,14 +260,15 @@ def test_weekend_observations_do_not_erase_monday_return():
     assert rep["equity_curve"][-1]["cum_return_pct"] == 10
 
 
-def test_missing_equity_session_preserves_endpoint_total_but_suppresses_daily_beta():
+def test_missing_equity_session_suppresses_comparison_without_cashflow_continuity():
     from datetime import date, timedelta
     dates = [(date(2026, 8, 1) + timedelta(days=i)).isoformat() for i in range(25)]
     equity = [(d, 100 + i) for i, d in enumerate(dates) if i != 3]
     spy = [(d, 100 + i / 2) for i, d in enumerate(dates)]
     rep = compute_relative_performance(_eq_rows(equity), _bench_rows(spy))
-    assert rep["equity_total_return_pct"] == 24
-    assert rep["benchmark_total_return_pct"] == 12
+    assert rep["equity_total_return_pct"] is None
+    assert rep["benchmark_total_return_pct"] is None
+    assert "cashflow continuity" in rep["relative_return_note"]
     assert rep["multi_session_intervals"] == 1
     assert rep["rolling_beta"] is None
     assert "missing valuations" in rep["rolling_beta_note"]
@@ -280,3 +281,15 @@ def test_cashflow_cannot_appear_as_trading_return_or_be_dropped_silently():
     assert rep["equity_total_return_pct"] is None
     assert rep["excess_return_pct"] is None
     assert "cashflows" in rep["relative_return_note"]
+
+
+def test_session_missing_from_both_series_is_not_an_adjacent_daily_return():
+    from datetime import date
+    from alphaos.util.market_calendar import nth_trading_day_after
+    dates = [nth_trading_day_after(date(2026, 7, 31), n).isoformat() for n in range(1, 27)]
+    eq = [(d, 100 + i) for i, d in enumerate(dates) if i != 3]
+    spy = [(d, 100 + i / 2) for i, d in enumerate(dates) if i != 3]
+    rep = compute_relative_performance(_eq_rows(eq), _bench_rows(spy))
+    assert rep["multi_session_intervals"] == 1
+    assert rep["rolling_beta"] is None
+    assert rep["excess_return_pct"] is None
