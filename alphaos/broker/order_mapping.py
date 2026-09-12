@@ -37,11 +37,11 @@ _STATUS_MAP = {
     "filled": OrderState.FILLED,
     "done_for_day": OrderState.SUBMITTED,
     "canceled": OrderState.CANCELLED,
-    "pending_cancel": OrderState.CANCELLED,
+    "pending_cancel": OrderState.SUBMITTED,
     "rejected": OrderState.REJECTED,
     "expired": OrderState.EXPIRED,
     "replaced": OrderState.REPLACED,
-    "pending_replace": OrderState.REPLACED,
+    "pending_replace": OrderState.SUBMITTED,
 }
 
 
@@ -65,10 +65,14 @@ def normalize_leg(leg) -> dict:
     return {
         "broker_order_id": _s(getattr(leg, "id", None)),
         "role": _leg_role(leg),
+        "symbol": _s(getattr(leg, "symbol", None)),
+        "side": _s(getattr(leg, "side", None)),
         "status": _s(getattr(leg, "status", None)),
         "state": map_status(getattr(leg, "status", None)),
         "filled_qty": _f(getattr(leg, "filled_qty", None)),
         "filled_avg_price": _f(getattr(leg, "filled_avg_price", None)),
+        "filled_at": _s(getattr(leg, "filled_at", None)),
+        "qty": _f(getattr(leg, "qty", None)),
         "limit_price": _f(getattr(leg, "limit_price", None)),
         "stop_price": _f(getattr(leg, "stop_price", None)),
         "time_in_force": _s(getattr(leg, "time_in_force", None)),
@@ -76,7 +80,12 @@ def normalize_leg(leg) -> dict:
 
 
 def normalize_order(order) -> dict:
-    legs = getattr(order, "legs", None) or []
+    legs = [normalize_leg(leg) for leg in (getattr(order, "legs", None) or [])]
+    # Alpaca OCO: the limit take-profit is the parent, with the stop as child.
+    if _s(getattr(order, "order_class", None)) == "oco":
+        parent = normalize_leg(order)
+        parent["role"] = "take_profit"
+        legs = [parent] + [leg for leg in legs if leg["broker_order_id"] != parent["broker_order_id"]]
     return {
         "broker_order_id": _s(getattr(order, "id", None)),
         "client_order_id": _s(getattr(order, "client_order_id", None)),
@@ -93,7 +102,7 @@ def normalize_order(order) -> dict:
         "submitted_at": _s(getattr(order, "submitted_at", None)),
         "filled_at": _s(getattr(order, "filled_at", None)),
         "time_in_force": _s(getattr(order, "time_in_force", None)),
-        "legs": [normalize_leg(leg) for leg in legs],
+        "legs": legs,
     }
 
 

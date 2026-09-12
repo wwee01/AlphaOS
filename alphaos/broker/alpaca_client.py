@@ -161,7 +161,7 @@ class AlpacaClient:
     # direction 2: never leave a position naked). Guarded by the same
     # preflight() every other broker-mutating method on this class calls.
     def submit_protective_oco(self, symbol: str, qty: float, direction: str,
-                              stop: float, target: float, tif: str) -> dict:
+                              stop: float, target: float, tif: str, client_order_id: str | None = None) -> dict:
         """Submit a stop-loss/take-profit OCO pair against an already-open
         position. Returns a normalized order dict for the (take-profit leg
         of the) OCO pair."""
@@ -181,11 +181,12 @@ class AlpacaClient:
             "target": target_r,
             "stop": stop_r,
             "tif": tif,
+            "client_order_id": client_order_id,
         }
         if getattr(client, "FAKE", False):
             order = client.submit_oco(spec)
         else:  # pragma: no cover - exercised only with the live SDK + creds
-            from alpaca.trading.requests import LimitOrderRequest, StopLossRequest
+            from alpaca.trading.requests import LimitOrderRequest, StopLossRequest, TakeProfitRequest
             from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 
             side = OrderSide.SELL if side_str == "sell" else OrderSide.BUY
@@ -194,7 +195,9 @@ class AlpacaClient:
                 symbol=symbol, qty=int(qty), side=side,
                 time_in_force=tif_map.get(tif, TimeInForce.DAY),
                 limit_price=target_r, order_class=OrderClass.OCO,
+                take_profit=TakeProfitRequest(limit_price=target_r),
                 stop_loss=StopLossRequest(stop_price=stop_r),
+                client_order_id=client_order_id,
             )
             order = client.submit_order(request)
         normalized = order_mapping.normalize_order(order)
@@ -209,8 +212,62 @@ class AlpacaClient:
     # ----------------------------------------------------- reconciliation
     def get_order(self, broker_order_id: str) -> dict:
         client = self._trading_client()
-        order = client.get_order_by_id(broker_order_id)
+        if getattr(client, "FAKE", False):
+            order = client.get_order_by_id(broker_order_id)
+        else:
+            from alpaca.trading.requests import GetOrderByIdRequest
+            order = client.get_order_by_id(broker_order_id, GetOrderByIdRequest(nested=True))
         return order_mapping.normalize_order(order)
+
+    def get_order_by_client_id(self, client_order_id: str) -> dict | None:
+        """Only an explicit broker 404 means absent; other failures stay unknown."""
+        try:
+            order = self._trading_client().get_order_by_client_id(client_order_id)
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 404:
+                return None
+            raise
+        return order_mapping.normalize_order(order)
+
+    def submit_position_reduction(self, symbol: str, qty: float, direction: str,
+                                  client_order_id: str) -> dict:
+        """An exact-quantity paper reduction with a durable deduplication ID.
+
+        The caller must verify current position, direction and competing orders.
+        Unlike DELETE positions, this submission can be recovered by client ID.
+        """
+        self.preflight()
+        client = self._trading_client()
+        spec = {"symbol": symbol, "qty": qty,
+                "side": "buy" if direction == "short" else "sell",
+                "client_order_id": client_order_id}
+        if getattr(client, "FAKE", False):
+            order = client.submit_reduction(spec)
+        else:
+            from alpaca.trading.requests import MarketOrderRequest
+            from alpaca.trading.enums import OrderSide, TimeInForce
+            request = MarketOrderRequest(
+                symbol=symbol, qty=qty, client_order_id=client_order_id,
+                side=OrderSide.BUY if direction == "short" else OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+            )
+            order = client.submit_order(request)
+        return order_mapping.normalize_order(order)
+
+    def get_portfolio_history(self, **kwargs) -> dict:
+        from alpaca.trading.requests import GetPortfolioHistoryRequest
+        result = self._trading_client().get_portfolio_history(GetPortfolioHistoryRequest(**kwargs))
+        if isinstance(result, dict):
+            return result
+        return result.model_dump(mode="json", exclude_unset=True)
+
+    def get_calendar(self, start, end) -> list[dict]:
+        from alpaca.trading.requests import GetCalendarRequest
+        result = self._trading_client().get_calendar(GetCalendarRequest(start=start, end=end))
+        def iso(value):
+            return value.isoformat() if hasattr(value, "isoformat") else value
+        return [{key: iso(row.get(key) if isinstance(row, dict) else getattr(row, key, None))
+                 for key in ("date", "open", "close")} for row in result]
 
     def list_positions(self) -> list[dict]:
         client = self._trading_client()
@@ -218,7 +275,15 @@ class AlpacaClient:
 
     def list_open_orders(self) -> list[dict]:
         client = self._trading_client()
-        return [order_mapping.normalize_order(o) for o in client.get_orders()]
+        if getattr(client, "FAKE", False):
+            orders = client.get_orders()
+        else:
+            from alpaca.trading.requests import GetOrdersRequest
+            from alpaca.trading.enums import QueryOrderStatus
+            orders = client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500, nested=True))
+        if len(orders) >= 500:
+            raise AlpacaSafetyError("open-order snapshot reached API limit; completeness is unknown")
+        return [order_mapping.normalize_order(o) for o in orders]
 
     def cancel_order(self, broker_order_id: str) -> None:
         self._trading_client().cancel_order_by_id(broker_order_id)
@@ -280,14 +345,15 @@ class AlpacaClient:
     def get_account(self) -> dict:
         client = self._trading_client()
         acct = client.get_account()
+        value = lambda key: acct.get(key) if isinstance(acct, dict) else getattr(acct, key, None)
         return {
-            "account_number": getattr(acct, "account_number", None),
-            "status": order_mapping._s(getattr(acct, "status", None)),
-            "cash": order_mapping._f(getattr(acct, "cash", None)),
-            "equity": order_mapping._f(getattr(acct, "equity", None)),
-            "trading_blocked": getattr(acct, "trading_blocked", None),
-            # Confirm we're talking to a paper account, never live.
-            "pattern_day_trader": getattr(acct, "pattern_day_trader", None),
+            "account_number": value("account_number"),
+            "status": order_mapping._s(value("status")),
+            "cash": order_mapping._f(value("cash")),
+            "equity": order_mapping._f(value("equity")),
+            "last_equity": order_mapping._f(value("last_equity")),
+            "trading_blocked": value("trading_blocked"),
+            "pattern_day_trader": value("pattern_day_trader"),
         }
 
     # legacy stub name kept for the simulated path's guardrail probe
