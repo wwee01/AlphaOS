@@ -426,6 +426,9 @@ def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, 
     candidate_outcomes row -- the minimum shape build_baseline_report()'s
     own JOIN needs to count this as 'paired'."""
     from alphaos.util.ids import new_id
+    from alphaos.learning.outcomes_engine import REPLAY_METHOD_VERSION
+
+    window = 10 if rule_version.endswith("_hold10") else 3
 
     journal.insert("shadow_baseline_decisions", {
         "baseline_decision_id": new_id("basedec"), "candidate_id": candidate_id, "symbol": "AAPL",
@@ -433,6 +436,7 @@ def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, 
         "direction": "long", "entry": 100.0, "stop": 96.0, "target": 104.8,
         "max_holding_days": 3, "input_sha": "deadbeef", "decision_at_utc": decision_at_utc,
         "replay_status": "complete", "replay_result": "target_hit", "replay_r": baseline_r,
+        "replay_window_days": window,
     })
     journal.insert("candidate_outcomes", {
         "outcome_id": new_id("outc"), "candidate_id": candidate_id, "symbol": "AAPL",
@@ -441,6 +445,8 @@ def _seed_complete_paired_row(journal, *, candidate_id, rule_version, ai_r=1.0, 
         # not 'resolved' -- see constants.OUTCOME_STATUSES); this fixture
         # helper's whole point is a PAIRED row, so 'complete' is correct.
         "candidate_type": "candidate", "outcome_status": "complete", "replay_r": ai_r,
+        "replay_status": "complete", "replay_method_version": REPLAY_METHOD_VERSION,
+        "replay_window_days": window, "data_quality_status": "ok",
     })
 
 
@@ -477,6 +483,8 @@ def test_build_baseline_report_never_pairs_a_partial_outcome_row(journal, settin
         # exact shape that would slip through an accidental 'IN
         # (complete, partial)' filter).
         "candidate_type": "candidate", "outcome_status": "partial", "replay_r": 1.0,
+        "replay_status": "complete", "replay_method_version": "bracket_maturity_v2",
+        "replay_window_days": 3, "data_quality_status": "ok",
     })
     # A genuinely paired 'complete' row too, so the assertion below proves
     # the partial row is SPECIFICALLY excluded, not that pairing is broken

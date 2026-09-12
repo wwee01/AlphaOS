@@ -18,6 +18,13 @@ Two phases, both idempotent and both safe to call repeatedly / on a schedule:
 Both use SQL ``NOT EXISTS`` / status filters to only touch un-worked rows, so
 re-running converges rather than reprocessing.
 
+RESEARCH-REPAIR (2026-09-12): the five-day outcome family retains its own
+completion status. Newly seeded rows carry a separate versioned replay
+status; a ten-day replay still pending after day five continues in the main
+loop without rewriting completed forward statistics. Legacy complete
+replays remain unchanged/unverified. Explicit retrospective corrections
+are append-only sidecar evidence, never a scheduled rewrite.
+
 HOLD-1 (2026-07-24, ``docs/roadmap/alphaos-hold1-10day-shadow-horizon-spec.md``):
 ``update_pending_outcomes`` also drives a SEPARATE continuation pass
 (``_update_hold1_10d_family``) for the additive 10-trading-day shadow
@@ -45,7 +52,9 @@ from typing import Optional
 
 from alphaos.cards.registry import get_card_by_id
 from alphaos.constants import OUTCOME_STATUSES
-from alphaos.learning.outcomes_engine import forward_window_stats, replay_bracket
+from alphaos.learning.outcomes_engine import (
+    REPLAY_METHOD_VERSION, forward_window_stats, replay_bracket_with_maturity,
+)
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -274,6 +283,8 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
         "target_price": info.get("target_price"),
         "direction_hint": info.get("direction_hint"),
         "outcome_status": _STATUS_PENDING,
+        "replay_status": _STATUS_PENDING,
+        "replay_method_version": REPLAY_METHOD_VERSION,
         "lineage_id": info.get("lineage_id"),
     })
 
@@ -481,7 +492,8 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     candidate's next bar as a "1-day" return."""
     rows = journal.query(
         "SELECT * FROM candidate_outcomes WHERE outcome_status IN (?, ?) "
-        "ORDER BY id ASC LIMIT ?", (_STATUS_PENDING, _STATUS_PARTIAL, limit))
+        "OR (replay_method_version = ? AND replay_status = 'pending') "
+        "ORDER BY id ASC LIMIT ?", (_STATUS_PENDING, _STATUS_PARTIAL, REPLAY_METHOD_VERSION, limit))
     counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
               "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     if bars_provider is None:
@@ -509,7 +521,8 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
                 # signal matters more than the more-obvious no-bars reason.
                 dq = row.get("data_quality_status") or "no_bars_after_window"
                 _update_row(journal, row["outcome_id"], {
-                    "outcome_status": _STATUS_UNAVAILABLE, "data_quality_status": dq})
+                    "outcome_status": _STATUS_UNAVAILABLE, "replay_status": _STATUS_UNAVAILABLE,
+                    "data_quality_status": dq})
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -560,15 +573,28 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             # DEFAULT_REPLAY_WINDOW_DAYS (see outcomes_engine's own updated
             # docstring; this is now the one production call site that used
             # to omit max_days entirely).
-            window_days, used_fallback_window = resolve_ai_replay_window(journal, row.get("candidate_id"))
-            replay = replay_bracket(ref, stop, target, direction, forward_bars, max_days=window_days)
+            window_days = row.get("replay_window_days")
+            if window_days is None:
+                window_days, used_fallback_window = resolve_ai_replay_window(journal, row.get("candidate_id"))
+            replay = replay_bracket_with_maturity(
+                ref, stop, target, direction, forward_bars, max_days=window_days,
+            )
             update["replay_result"] = replay["result"]
             update["replay_r"] = replay["replay_r"]
             update["replay_exit_reason"] = replay["replay_exit_reason"]
             update["replay_window_days"] = window_days
+            update["replay_status"] = replay["replay_status"]
+            update["replay_bars_used"] = replay["replay_bars_used"]
+        else:
+            update["replay_status"] = _STATUS_UNAVAILABLE
 
         resolved = f5["bars_used"] >= 5
         update["outcome_status"] = _STATUS_COMPLETE if resolved else _STATUS_PARTIAL
+        # Five-day outcome semantics remain intact. Only the separately
+        # pending replay continues; already-complete forward values and
+        # legacy complete replay records are never automatically restated.
+        if row["outcome_status"] == _STATUS_COMPLETE:
+            update = {k: v for k, v in update.items() if k.startswith("replay_")}
         # Don't clobber an unrecoverable-decision_at_utc flag from repair just
         # because the forward-return math itself succeeded — the anchor being
         # a fallback (not the true decision time) is still worth knowing.
@@ -586,7 +612,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             update["data_quality_status"] = "ok"
         _update_row(journal, row["outcome_id"], update)
         counts["updated"] += 1
-        if resolved:
+        if resolved and row["outcome_status"] != _STATUS_COMPLETE:
             counts["completed"] += 1
 
     # HOLD-1: give already-'complete' rows (5d resolved) further passes to

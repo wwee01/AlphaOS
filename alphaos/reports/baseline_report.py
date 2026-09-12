@@ -26,9 +26,12 @@ silently forgotten.
 from __future__ import annotations
 
 from typing import Optional
+from collections import Counter
+import math
 
 from alphaos.baseline.rules import BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10
 from alphaos.stats.bootstrap import day_block_bootstrap
+from alphaos.learning.outcomes_engine import REPLAY_METHOD_VERSION
 from alphaos.util import timeutils
 
 # BASELINE's own pre-registration floors (spec item 6) -- reused here as the
@@ -67,6 +70,11 @@ HOLD10_REPORT_TITLE = (
 # gap-haircut re-statement, applied identically to every arm (never
 # BASELINE-specific), once that PR exists.
 BASELINE_CAVEAT = (
+    "This repaired cohort is a descriptive, same-horizon comparison; it does not "
+    "replace or evaluate the original preregistration. Legacy/unverified replay "
+    "rows, immature outcomes and mismatched horizons are explicitly excluded. "
+    "A recorded no-action rule contributes zero R over the AI horizon; "
+    "it is not dropped merely because no trading window was opened. "
     "BASELINE measures CONDITIONAL added-R: does the AI beat a frozen "
     "deterministic rule, GIVEN a candidate reached the AI evaluator? It "
     "does NOT claim the AI adds value vs. no scanning at all, and it never "
@@ -156,63 +164,99 @@ def build_baseline_report(
     journal, settings, limit: int = 5000, rule_versions: tuple = BASELINE_RULE_VERSIONS,
     analysis_not_before: str = ANALYSIS_NOT_BEFORE_DATE,
 ) -> dict:
-    """Journal-facing entry point. PURE READ. Joins shadow_baseline_decisions
-    (resolved) to the SAME candidate's real AI-path replay_r, taking the
-    MOST RECENT resolved candidate_outcomes row per candidate_id (mirrors
-    this codebase's established "most-recent-wins" convention, e.g. TASK-R's
-    _latest_label_for_packet) -- a candidate very rarely has more than one
-    resolved outcome row (PR8 audit LOW-1's own latent, unreachable-today
-    edge case), and taking the latest is the same safe default used there.
+    """Read-only, versioned same-horizon diagnostic with explicit quarantine.
 
-    Audit-fixup HOLD-2 (HIGH-4, both audits convergent / STATUS CORRECTION
-    item 4): ``rule_versions`` now filters the SQL query itself (``AND
-    sbd.rule_version IN (...)``) BEFORE the shared ``LIMIT``, not just in
-    the Python aggregation layer. Pre-fixup, the query read ALL rule
-    versions (v1 arms AND hold10 arms) before ``compute_baseline_report``'s
-    own Python-side filter dropped the ones it didn't recognize -- so the
-    hold10 rows this build adds would consume slots in the shared
-    ``LIMIT 5000``, silently dropping the OLDEST v1 rows first (measured:
-    n_paired 1600->1250 on a representative corpus), and the headline
-    ``n_shadow_resolved``/``n_paired_total`` counts (rendered into the daily
-    digest) would include hold10 rows, visibly doubling those numbers at
-    merge with zero actual change to the v1 evidence. Filtering at the SQL
-    layer means the v1 report's own ``LIMIT`` is never diluted by rows it
-    was never going to report on anyway -- default ``rule_versions``
-    reproduces the pre-fixup v1-only query exactly.
+    Keep original registrations and frozen verdicts untouched. Only mature
+    AI replays stamped by the repaired writer enter this descriptive cohort;
+    legacy values and retrospective correction rows never substitute for
+    prospective evidence. Match actual trading horizons; a recorded rule
+    abstention contributes its known zero R over the AI horizon.
 
-    Audit-fixup VOCAB-1 (seven-lens review P0-C, 2026-08-13): the inner
-    join's own ``co.outcome_status`` filter was the LITERAL 'resolved' --
-    a status ``alphaos/learning/outcomes_tracker.py`` (the only writer of
-    that column) has never once emitted (real vocabulary: 'pending' /
-    'partial' / 'complete' / 'unavailable' -- see ``constants.
-    OUTCOME_STATUSES``). Every existing test stayed green because the same
-    phantom literal was baked into the fixtures too. Now ``'complete'`` --
-    deliberately NOT ``'partial'``, whose 1/3/5-day columns are still on a
-    truncated bar window and get overwritten by a later pass; pairing on a
-    partial row would freeze a value the next tick silently changes
-    underneath it."""
+    Filter baseline rule versions before LIMIT, then choose the latest
+    non-override AI outcome before checking validity. Never fall back to an
+    older eligible AI row when a newer outcome is incomplete or unverified.
+    """
+    # Versioned diagnostic only: these eligibility rules do not amend the
+    # registered estimand or read any retrospective correction side table.
     placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
-        "SELECT sbd.rule_version, sbd.decision_at_utc, sbd.replay_r AS baseline_replay_r, "
-        "(SELECT co.replay_r FROM candidate_outcomes co "
-        " WHERE co.candidate_id = sbd.candidate_id AND co.outcome_status = 'complete' "
-        " AND co.replay_r IS NOT NULL ORDER BY co.id DESC LIMIT 1) AS ai_replay_r "
-        "FROM shadow_baseline_decisions sbd "
-        "WHERE sbd.replay_status = 'complete' AND sbd.replay_r IS NOT NULL "
-        f"AND sbd.rule_version IN ({placeholders}) "
-        "ORDER BY sbd.id DESC LIMIT ?",
-        (*rule_versions, limit),
+        "SELECT * FROM shadow_baseline_decisions WHERE replay_status='complete' "
+        f"AND replay_r IS NOT NULL AND rule_version IN ({placeholders}) "
+        "ORDER BY id DESC LIMIT ?", (*rule_versions, limit),
     )
-    paired_rows = [r for r in rows if r.get("ai_replay_r") is not None]
+    candidate_ids = sorted({r["candidate_id"] for r in rows})
+    latest_ai = {}
+    # Bounded chunks avoid SQLite parameter limits; SELECT * also lets a
+    # read-only pre-migration ledger expose legacy quarantine without DDL.
+    for start in range(0, len(candidate_ids), 500):
+        ids = candidate_ids[start:start + 500]
+        ai_rows = journal.query(
+            "SELECT * FROM candidate_outcomes WHERE candidate_type != 'user_override' "
+            f"AND candidate_id IN ({','.join('?' for _ in ids)}) ORDER BY id ASC", tuple(ids),
+        )
+        for ai in ai_rows:
+            latest_ai[ai["candidate_id"]] = ai
+    paired_rows = []
+    exclusions = Counter()
+    available_legacy_pairs = 0
+    for row in rows:
+        ai = latest_ai.get(row["candidate_id"])
+        if ai and ai.get("replay_r") is not None:
+            available_legacy_pairs += 1
+        reason = _pair_exclusion_reason(ai, row)
+        if reason:
+            exclusions[reason] += 1
+            continue
+        paired_rows.append({
+            "rule_version": row["rule_version"], "decision_at_utc": row["decision_at_utc"],
+            "baseline_replay_r": row["replay_r"], "ai_replay_r": ai["replay_r"],
+        })
 
     n_shadow_resolved = len(rows)
     rep = compute_baseline_report(paired_rows, rule_versions=rule_versions, analysis_not_before=analysis_not_before)
     rep["as_of"] = timeutils.market_date().isoformat()
     rep["n_shadow_resolved"] = n_shadow_resolved
     rep["n_paired_total"] = len(paired_rows)
+    rep["validity"] = {
+        "method_version": "same_horizon_maturity_v2_descriptive",
+        "eligible_pairs": len(paired_rows), "excluded_pairs": sum(exclusions.values()),
+        "exclusion_reasons": dict(sorted(exclusions.items())),
+        "available_raw_pairs": available_legacy_pairs,
+        "formal_evaluation_allowed": False,
+        "formal_block_reason": "repaired cohort requires a reviewed prospective registration",
+        "historical_corrections_used": False,
+    }
     today = timeutils.market_date().isoformat()
     rep["analysis_ready"] = today >= analysis_not_before
     return rep
+
+
+def _pair_exclusion_reason(ai: Optional[dict], baseline: dict) -> Optional[str]:
+    if ai is None:
+        return "missing_ai_outcome"
+    if ai.get("replay_method_version") != REPLAY_METHOD_VERSION:
+        return "legacy_or_unverified_ai_replay"
+    if ai.get("outcome_status") != "complete" or ai.get("replay_status") != "complete":
+        return "ai_outcome_or_replay_incomplete"
+    ai_window = ai.get("replay_window_days")
+    baseline_window = baseline.get("replay_window_days")
+    cash_baseline = baseline.get("decision") == "no_action"
+    if cash_baseline and (baseline.get("replay_result") != "no_action" or baseline.get("replay_r") != 0.0):
+        return "inconsistent_cash_baseline"
+    if not ai_window or (not cash_baseline and not baseline_window):
+        return "missing_recorded_horizon"
+    if not cash_baseline and ai_window != baseline_window:
+        return "horizon_mismatch"
+    if ai.get("data_quality_status") not in ("ok", "replay_window_fallback_pinned_v2"):
+        return "ai_data_quality_unverified"
+    for value in (ai.get("replay_r"), baseline.get("replay_r")):
+        try:
+            finite = value is not None and math.isfinite(float(value))
+        except (TypeError, ValueError):
+            finite = False
+        if not finite:
+            return "missing_or_nonfinite_replay"
+    return None
 
 
 def build_baseline_hold10_report(journal, settings, limit: int = 5000) -> dict:
@@ -243,6 +287,15 @@ def render_markdown(
         "resolved AI-path outcome",
         "",
     ]
+    validity = rep.get("validity")
+    if validity:
+        lines += [
+            "Repaired same-horizon descriptive cohort; original registration and frozen evidence unchanged.",
+            f"- Eligible pairs: {validity['eligible_pairs']}; excluded: {validity['excluded_pairs']}",
+            f"- Formal evaluation blocked: {validity['formal_block_reason']}",
+        ]
+        lines += [f"- Excluded {reason}: {count}" for reason, count in validity["exclusion_reasons"].items()]
+        lines.append("")
     for rule_version, r in rep["rules"].items():
         if r["status"] == "ok":
             lines.append(
