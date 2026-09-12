@@ -8,6 +8,10 @@ mismatch detection.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from alphaos.broker.alpaca_client import AlpacaClient
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
@@ -72,6 +76,7 @@ def _seed_sample(journal, *, symbol, expected, fill, submitted_at, filled_at,
         "submitted_limit_price": expected, "modeled_slippage_bps": slippage_bps_model,
         "modeled_cost_estimate": 0.1,
     })
+    return order_id
 
 
 def test_calibration_report_math():
@@ -101,6 +106,51 @@ def test_calibration_report_math():
     assert per["CCC"]["broker_managed"] is True
     assert per["AAA"]["order_status_sequence"] == ["submitted", "accepted", "filled"]
     assert isinstance(render_markdown(rep), str) and "Calibration" in render_markdown(rep)
+    j.close()
+
+
+@pytest.mark.parametrize("first_time,last_time,raw,expected_delay", [
+    ("13:00:01", "13:00:03", None, 3.0),
+    # Imported fills need not be inserted in broker execution-time order.
+    ("13:00:03", "13:00:01", None, 3.0),
+    ("13:00:01", "invalid", None, 1.0),
+    # Reconciliation may have used observation times for earlier partials.
+    ("13:00:10", "13:00:20", {
+        "fill_timestamp_source": "broker", "filled_at": "2026-06-23T13:00:03Z",
+    }, 3.0),
+    ("13:00:10", "13:00:20", {"fill_timestamp_source": "observed"}, None),
+    ("13:00:01", "13:00:03", {
+        "fill_timestamp_source": "broker", "filled_at": "invalid",
+    }, None),
+])
+def test_calibration_aggregates_partial_fills_and_uses_final_execution_time(
+    first_time, last_time, raw, expected_delay,
+):
+    j = JournalStore(":memory:")
+    first_stamp = f"2026-06-23T{first_time}Z"
+    last_stamp = f"2026-06-23T{last_time}Z"
+    order_id = _seed_sample(
+        j, symbol="AAA", expected=100, fill=100,
+        submitted_at="2026-06-23T13:00:00Z", filled_at=first_stamp, broker_managed=True,
+    )
+    j.conn.execute("UPDATE paper_fills SET qty=4 WHERE order_id=?", (order_id,))
+    j.insert("paper_fills", {
+        "fill_id": new_id("fill"), "order_id": order_id, "symbol": "AAA", "side": "buy",
+        "qty": 6, "price": 102, "filled_at": last_stamp, "execution_provider": "alpaca_paper",
+        "fill_source": "alpaca_paper",
+    })
+    j.conn.execute(
+        "UPDATE paper_orders SET filled_at=?,raw_response_json=? WHERE order_id=?",
+        (last_stamp, json.dumps(raw), order_id),
+    )
+    report = build_calibration_report(j, make_settings())
+    row = report["per_trade"][0]
+    assert row["actual_fill_price"] == 101.2  # (4 * 100 + 6 * 102) / 10
+    assert row["realized_slippage_per_share"] == 1.2
+    assert row["realized_slippage_bps"] == 120.0
+    assert row["fill_delay_seconds"] == expected_delay
+    assert report["summary"]["filled_samples"] == 1
+    assert report["observed"]["mean_fill_delay_seconds"] == expected_delay
     j.close()
 
 

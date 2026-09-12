@@ -20,6 +20,8 @@ until the sample is large enough.
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Optional
 
 from alphaos.constants import ExecutionSource
@@ -118,20 +120,43 @@ def _row_actuals(journal, cal: dict) -> dict:
     order = journal.order_by_id(order_id) if order_id else None
     fills = journal.fills_for_order(order_id) if order_id else []
     events = journal.order_events_for_order(order_id) if order_id else []
-    entry_fill = fills[0] if fills else None  # entry order carries only its entry fill
+    # Reconciliation appends incremental fills, so the first partial fill is
+    # neither the complete entry price nor the final execution timestamp.
+    entry_fills = [(_f(f.get("qty")), _f(f.get("price"))) for f in fills]
+    valid_fills = [(qty, price) for qty, price in entry_fills
+                   if qty is not None and price is not None
+                   and math.isfinite(qty) and math.isfinite(price) and qty > 0 and price > 0]
+    total_qty = sum(qty for qty, _ in valid_fills)
 
     expected = _f(cal.get("expected_entry"))
-    fill_price = _f(entry_fill["price"]) if entry_fill else None
+    fill_price = sum(qty * price for qty, price in valid_fills) / total_qty if total_qty else None
     slip_ps = _realized_slippage_per_share(cal.get("side"), expected, fill_price)
     slip_bps = (slip_ps / expected * 10_000.0) if (slip_ps is not None and expected) else None
 
     submitted_at = (order or {}).get("submitted_at")
-    filled_at = (entry_fill or {}).get("filled_at") or (order or {}).get("filled_at")
+    raw = (order or {}).get("raw_response_json") or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    filled_at = None
+    if raw.get("fill_timestamp_source") != "observed":
+        # The broker's cumulative final timestamp takes precedence over partial
+        # fills whose timestamp may have been an observation-time fallback.
+        filled_at = timeutils.parse_iso(raw.get("filled_at"))
+        if filled_at is None and raw.get("fill_timestamp_source") != "broker":
+            valid_times = [timeutils.parse_iso(f.get("filled_at")) for f in fills]
+            filled_at = max((t for t in valid_times if t is not None), default=None)
+            if filled_at is None:
+                filled_at = timeutils.parse_iso((order or {}).get("filled_at"))
     delay = None
     if submitted_at and filled_at:
-        a, b = timeutils.parse_iso(submitted_at), timeutils.parse_iso(filled_at)
-        if a and b:
-            delay = round((b - a).total_seconds(), 3)
+        submitted = timeutils.parse_iso(submitted_at)
+        if submitted and filled_at >= submitted:
+            delay = round((filled_at - submitted).total_seconds(), 3)
 
     return {
         "proposal_id": cal.get("proposal_id"),

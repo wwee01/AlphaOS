@@ -5,7 +5,9 @@ All of v1's hard "no" lives here so it is auditable in one file:
 * ``assert_no_real_trading`` — orders are impossible unless REAL_TRADING_ENABLED
   is exactly 'false'. There is no v1 path that flips this on.
 * ``KillSwitch`` — a file-backed, restart-surviving emergency stop. When engaged
-  no new orders may be placed.
+  new or increased exposure is blocked. Execution may still protect or reduce
+  an existing position after fresh broker quantity, side, and order-lineage
+  verification; uncertain or competing order state blocks those actions.
 
 These guards are intentionally independent of the order manager so that no
 single bug can quietly bypass them.
@@ -27,7 +29,7 @@ class RealTradingBlocked(Exception):
 
 
 class KillSwitchEngaged(Exception):
-    """Raised when an order is attempted while the kill switch is engaged."""
+    """Raised when a new-exposure action is attempted while halted."""
 
 
 @dataclass(frozen=True)
@@ -58,9 +60,11 @@ def assert_paper_or_mock(settings: Settings) -> None:
 class KillSwitch:
     """File-backed emergency stop.
 
-    The switch is a marker file. Its presence means 'engaged' (block all new
-    orders). Using a file makes the state survive restarts and lets the
-    dashboard, CLI, and any watchdog agree without a shared process.
+    The switch is a marker file. Its presence means 'engaged': block new or
+    increased exposure, while allowing the execution layer's verified existing-
+    position protection and reduction paths. Using a file makes the state
+    survive restarts and lets the dashboard, CLI, and watchdog agree without a
+    shared process. This marker alone does not verify a reducing order's safety.
     """
 
     def __init__(self, path: str = "data/KILL_SWITCH"):
