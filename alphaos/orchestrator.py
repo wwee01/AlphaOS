@@ -696,7 +696,7 @@ class Orchestrator:
         snapshot = cand.snapshot or {}
         card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
 
-        risk = self.risk.assess(
+        risk = self._assess_current_risk(
             direction=direction,
             entry=evaluation.entry,
             stop=evaluation.stop,
@@ -957,7 +957,7 @@ class Orchestrator:
             return False, f"price drift {drift_bps} bps exceeds limit since proposal"
 
         # Risk re-check.
-        risk = self.risk.assess(
+        risk = self._assess_current_risk(
             direction=proposal.direction,
             entry=proposal.entry,
             stop=proposal.stop,
@@ -1186,7 +1186,7 @@ class Orchestrator:
             return f"blocked: data not usable ({report.freshness_status})"
 
         # Risk re-check (sizing, spread, liquidity, exposure, daily cap, R:R...).
-        risk = self.risk.assess(
+        risk = self._assess_current_risk(
             direction=direction, entry=evaluation.entry, stop=evaluation.stop, snapshot=snap,
             open_positions=self.journal.count_open_positions(),
             trades_today=self.journal.count_paper_orders_today(),
@@ -1962,7 +1962,48 @@ class Orchestrator:
         return {"proposal_id": proposal.proposal_id, "approved": ok, "message": msg}
 
     # --------------------------------------------------------------- helpers
+    def _assess_current_risk(self, **kwargs):
+        state = None
+        if self.orders.real_paper:
+            from alphaos.risk.account_exposure import read_exposure
+            from alphaos.risk.risk_engine import RiskDecision
+            try:
+                state = read_exposure(self.orders.alpaca, self.journal)
+            except Exception as exc:
+                return RiskDecision(approved=False, block_reasons=[{
+                    "code": ReasonCode.UNVERIFIABLE_DATA.value,
+                    "detail": f"fresh broker exposure unavailable ({type(exc).__name__})",
+                }])
+            for key in ("equity", "gross_committed_notional", "open_positions", "account_pnl_today"):
+                kwargs[key] = state[key]
+        decision = self.risk.assess(**kwargs)
+        decision.account_context = state
+        return decision
+
     def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None):
+        if not self.orders.real_paper:
+            return self._execute_checked(proposal, fill_price)
+        from alphaos.risk.account_exposure import entry_submission_lock, ExposureUnavailable
+        try:
+            with entry_submission_lock(self.journal):
+                risk = self._assess_current_risk(
+                    direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
+                    requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,
+                    trades_today=self.journal.count_paper_orders_today(),
+                    realized_pnl_today=self.journal.realized_pnl_today(),
+                )
+                self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
+                if not risk.approved or not risk.sizing or proposal.qty > risk.sizing.shares:
+                    detail = risk.block_reasons or [{"code": ReasonCode.RISK_OVERSIZED.value,
+                                                    "detail": "approved size exceeds current account capacity"}]
+                    self.journal.log_system_event(Severity.WARNING, "risk", "Entry blocked by fresh account limits", {"proposal_id": proposal.proposal_id, "reasons": detail})
+                    return OrderResult(blocked=True, block_reason=detail[0]["code"], detail=str(detail), state=OrderState.REJECTED.value)
+                return self._execute_checked(proposal, fill_price)
+        except ExposureUnavailable as exc:
+            return OrderResult(blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
+                               detail=str(exc), state=OrderState.REJECTED.value)
+
+    def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None):
         # PR6 chokepoint: NO proposal may be submitted once its TTL has lapsed.
         # approve_proposal() already guards the manual path, but _execute is the
         # single funnel EVERY execution route passes through (manual, auto, and

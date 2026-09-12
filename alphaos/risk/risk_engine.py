@@ -40,6 +40,7 @@ class RiskDecision:
     block_reasons: list = field(default_factory=list)   # list of {code, detail}
     warnings: list = field(default_factory=list)
     sizing: Optional[PositionSizing] = None
+    account_context: Optional[dict] = None
 
     def as_dict(self) -> dict:
         return {
@@ -47,6 +48,7 @@ class RiskDecision:
             "block_reasons": self.block_reasons,
             "warnings": self.warnings,
             "sizing": self.sizing.as_dict() if self.sizing else None,
+            "account_context": self.account_context,
         }
 
     @property
@@ -58,14 +60,15 @@ class RiskEngine:
     def __init__(self, settings: Settings):
         self.s = settings
 
-    def size_position(self, entry: float, stop: float, equity: float) -> PositionSizing:
+    def size_position(self, entry: float, stop: float, equity: float, available_notional: Optional[float] = None) -> PositionSizing:
         risk_per_share = abs(float(entry) - float(stop))
         risk_budget = equity * self.s.max_risk_per_trade_pct
         raw_shares = (risk_budget / risk_per_share) if risk_per_share > 0 else 0
         shares = int(math.floor(raw_shares))
         capped = False
         # No leverage in v1: a paper position cannot exceed equity in notional.
-        max_affordable = int(math.floor(equity / entry)) if entry > 0 else 0
+        capacity = equity if available_notional is None else max(0.0, min(equity, available_notional))
+        max_affordable = int(math.floor(capacity / entry)) if entry > 0 else 0
         if shares > max_affordable:
             shares = max_affordable
             capped = True
@@ -93,15 +96,23 @@ class RiskEngine:
         requires_margin: bool = False,
         margin_approved: bool = False,
         equity: Optional[float] = None,
+        gross_committed_notional: float = 0.0,
+        account_pnl_today: Optional[float] = None,
     ) -> RiskDecision:
         equity = float(equity if equity is not None else self.s.paper_equity)
         blocks: list[dict] = []
         warnings: list[str] = []
         sizing: Optional[PositionSizing] = None
 
+        if (not math.isfinite(equity) or equity <= 0 or not math.isfinite(gross_committed_notional)
+                or gross_committed_notional < 0 or not math.isfinite(realized_pnl_today)
+                or (account_pnl_today is not None and not math.isfinite(account_pnl_today))):
+            return RiskDecision(approved=False, block_reasons=[{"code": ReasonCode.UNVERIFIABLE_DATA.value,
+                                "detail": "invalid equity or committed account exposure"}])
+
         # 1) Valid invalidation level (every trade needs a stop before entry).
         valid_stop = True
-        if entry is None or stop is None or entry <= 0 or stop <= 0 or entry == stop:
+        if entry is None or stop is None or not math.isfinite(entry) or not math.isfinite(stop) or entry <= 0 or stop <= 0 or entry == stop:
             valid_stop = False
             blocks.append({"code": ReasonCode.INVALID_STOP.value, "detail": "missing/invalid entry or stop"})
         else:
@@ -114,7 +125,7 @@ class RiskEngine:
 
         # 2) Risk-based sizing (only if the stop is valid).
         if valid_stop:
-            sizing = self.size_position(entry, stop, equity)
+            sizing = self.size_position(entry, stop, equity, equity - gross_committed_notional)
             if sizing.shares <= 0:
                 blocks.append(
                     {
@@ -148,13 +159,15 @@ class RiskEngine:
                 }
             )
 
-        # 4) Daily loss limit (realized).
+        # 4) Keep the existing loss percentage; current account loss includes
+        # unrealized changes when a fresh broker snapshot is available.
         max_loss = equity * self.s.max_daily_loss_pct
-        if realized_pnl_today <= -abs(max_loss):
+        daily_pnl = min(realized_pnl_today, account_pnl_today) if account_pnl_today is not None else realized_pnl_today
+        if daily_pnl <= -abs(max_loss):
             blocks.append(
                 {
                     "code": ReasonCode.DAILY_LOSS_LIMIT.value,
-                    "detail": f"realized {realized_pnl_today} breaches -{max_loss}",
+                    "detail": f"daily loss {daily_pnl} breaches -{max_loss}",
                 }
             )
 
