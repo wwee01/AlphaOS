@@ -24,6 +24,7 @@ def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure
     journal.insert("job_runs", {
         "job_run_id": "healthy", "job_type": "monitor", "lock_key": "initial",
         "status": "completed", "started_at_utc": start.isoformat(),
+        "started_at_sgt": timeutils.stamp(start).local_sgt,
         "finished_at_utc": start.isoformat(), "result_summary_json": {"worker_role": "monitor"},
     })
     token = RESEARCH_ENTRY_GUARD.set(True)
@@ -36,8 +37,10 @@ def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure
                 "job_run_id": "later", "job_type": "monitor", "lock_key": "later",
                 "status": "failed" if failure == "failed" else "started",
                 "started_at_utc": start.isoformat(), "finished_at_utc": start.isoformat(),
+                "started_at_sgt": timeutils.stamp(start).local_sgt,
             })
-        proposal = make_proposal(invalidation_reason="stop invalidates thesis")
+        proposal = make_proposal(invalidation_reason="stop invalidates thesis",
+                                 proposal_expires_at_utc=(start + timedelta(days=1)).isoformat())
         result = orch._execute_checked(proposal)
         assert result.blocked
         assert "monitor not ready" in result.detail
@@ -61,11 +64,13 @@ def test_ready_monitor_preserves_normal_paper_submission_path(monkeypatch):
     journal.insert("job_runs", {
         "job_run_id": "healthy", "job_type": "monitor", "lock_key": "initial",
         "status": "completed", "started_at_utc": now.isoformat(),
+        "started_at_sgt": timeutils.stamp(now).local_sgt,
         "finished_at_utc": now.isoformat(), "result_summary_json": {"worker_role": "monitor"},
     })
     token = RESEARCH_ENTRY_GUARD.set(True)
     try:
-        proposal = make_proposal(invalidation_reason="stop invalidates thesis")
+        proposal = make_proposal(invalidation_reason="stop invalidates thesis",
+                                 proposal_expires_at_utc=(now + timedelta(days=1)).isoformat())
         assert orch._execute_checked(proposal) == "fake-submitted"
         assert sent == [proposal.proposal_id]
     finally:
@@ -73,12 +78,12 @@ def test_ready_monitor_preserves_normal_paper_submission_path(monkeypatch):
         orch.close()
 
 
-def test_entry_cannot_submit_while_independent_monitor_owns_account(monkeypatch):
+def test_entry_cannot_submit_while_independent_monitor_owns_account(monkeypatch, tmp_path):
     import threading
 
     from alphaos.scheduler.ownership import monitor_ownership
 
-    journal = JournalStore(":memory:")
+    journal = JournalStore(str(tmp_path / "ledger.db"))
     orch = Orchestrator(settings=make_settings(), journal=journal)
     orch.orders = SimpleNamespace(real_paper=True)
     acquired, release = threading.Event(), threading.Event()
