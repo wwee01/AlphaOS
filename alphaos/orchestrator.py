@@ -1984,8 +1984,18 @@ class Orchestrator:
         if not self.orders.real_paper:
             return self._execute_checked(proposal, fill_price)
         from alphaos.risk.account_exposure import entry_submission_lock, ExposureUnavailable
+        from alphaos.scheduler.ownership import monitor_ownership
         try:
-            with entry_submission_lock(self.journal):
+            # Independent monitoring must not change the book between the
+            # final account check and entry submission. Keep this exclusive
+            # section short; the preceding AI scan holds no monitor lock.
+            with entry_submission_lock(self.journal), monitor_ownership(self.journal) as acquired:
+                if not acquired:
+                    return OrderResult(
+                        blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
+                        detail="Execution monitor owns the account; new entry deferred",
+                        state=OrderState.REJECTED.value,
+                    )
                 risk = self._assess_current_risk(
                     direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
                     requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,

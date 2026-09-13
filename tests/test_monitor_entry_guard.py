@@ -71,3 +71,32 @@ def test_ready_monitor_preserves_normal_paper_submission_path(monkeypatch):
     finally:
         RESEARCH_ENTRY_GUARD.reset(token)
         orch.close()
+
+
+def test_entry_cannot_submit_while_independent_monitor_owns_account(monkeypatch):
+    import threading
+
+    from alphaos.scheduler.ownership import monitor_ownership
+
+    journal = JournalStore(":memory:")
+    orch = Orchestrator(settings=make_settings(), journal=journal)
+    orch.orders = SimpleNamespace(real_paper=True)
+    acquired, release = threading.Event(), threading.Event()
+    def monitor_thread():
+        with monitor_ownership(journal) as owner:
+            assert owner
+            acquired.set()
+            assert release.wait(10)
+    monitor = threading.Thread(target=monitor_thread)
+    monitor.start()
+    try:
+        assert acquired.wait(5)
+        monkeypatch.setattr(orch, "_assess_current_risk", lambda **kw: pytest.fail("entry started during monitor ownership"))
+        monkeypatch.setattr(orch, "_execute_checked", lambda *a: pytest.fail("broker submission during monitoring"))
+        result = orch._execute(make_proposal())
+        assert result.blocked and "monitor owns" in result.detail
+        assert journal.count_rows("paper_orders") == 0
+    finally:
+        release.set()
+        monitor.join(5)
+        orch.close()
