@@ -51,10 +51,17 @@ def seed(j, *, legacy=False, candidate_id="candidate", outcome_id="outcome"):
     ("target", "target_hit", 2.0), ("stop", "stop_hit", -1.0),
     ("both", "ambiguous_same_bar", None),
 ])
-def test_ten_day_replay_survives_five_day_completion_and_observes_day_six(monkeypatch, barrier, expected, r_value):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_ten_day_replay_survives_five_day_completion_and_observes_day_six(
+    monkeypatch, barrier, expected, r_value, legacy,
+):
     j = JournalStore(":memory:")
     monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 2, 1, tzinfo=timezone.utc))
-    seed(j)
+    seed(j, legacy=legacy)
+    if legacy:
+        # A pre-repair partial row may contain the old truncated MTM replay.
+        j.conn.execute("UPDATE candidate_outcomes SET outcome_status='partial'")
+        j.conn.commit()
     source = Bars(bars(5))
     update_pending_outcomes(j, source)
     day5 = j.one("SELECT * FROM candidate_outcomes WHERE outcome_id='outcome'")
@@ -72,8 +79,93 @@ def test_ten_day_replay_survives_five_day_completion_and_observes_day_six(monkey
     assert after["replay_status"] == "complete"
     assert after["replay_result"] == expected and after["replay_r"] == r_value
     assert after["forward_5d_r"] == day5["forward_5d_r"]
+    assert after["replay_method_version"] == (None if legacy else REPLAY_METHOD_VERSION)
     assert result["completed"] == 0  # does not report completing the five-day family again
     assert update_pending_outcomes(j, source)["updated"] == 0
+    j.close()
+
+
+def stranded_legacy(j):
+    """State left by the deployed writer after the five-day family completed."""
+    seed(j, legacy=True)
+    j.conn.execute(
+        "UPDATE candidate_outcomes SET replay_status='pending', replay_result=NULL, replay_r=NULL,"
+        "replay_exit_reason='window_incomplete', replay_bars_used=5, forward_5d_r=0.1,"
+        "forward_5d_return_pct=0.01, outcome_status_10d='complete'"
+    )
+    j.conn.commit()
+
+
+def test_already_stranded_legacy_replay_reaches_day_ten_without_restating_five_day_family(monkeypatch):
+    j = JournalStore(":memory:")
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 2, 1, tzinfo=timezone.utc))
+    stranded_legacy(j)
+    original = j.one("SELECT * FROM candidate_outcomes")
+    source = Bars(bars(9))
+    assert update_pending_outcomes(j, source)["updated"] == 1
+    immature = j.one("SELECT * FROM candidate_outcomes")
+    assert immature["replay_status"] == "pending" and immature["replay_r"] is None
+    assert immature["replay_bars_used"] == 9
+
+    source.rows = bars(10)
+    source.rows[-1]["close"] = 102.0
+    result = update_pending_outcomes(j, source)
+    final = j.one("SELECT * FROM candidate_outcomes")
+    assert result["updated"] == 1 and result["completed"] == 0
+    assert final["replay_status"] == "complete" and final["replay_r"] == 0.2
+    assert final["replay_result"] == "neither" and final["replay_bars_used"] == 10
+    assert final["replay_method_version"] is None
+    for key in original:
+        if not key.startswith("replay_") and not key.startswith("updated_at_"):
+            assert final[key] == original[key], key
+    # Later revised bars cannot restate this now-final legacy replay.
+    source.rows[5]["high"] = 121.0
+    assert update_pending_outcomes(j, source)["updated"] == 0
+    assert j.one("SELECT * FROM candidate_outcomes") == final
+    j.close()
+
+
+@pytest.mark.parametrize("outcome_status,replay_status,replay_r,replay_result,method,window", [
+    ("complete", None, 0.1, "neither", None, 10),
+    ("complete", "complete", None, "ambiguous_same_bar", None, 10),
+    ("complete", "pending", 0.1, "neither", None, 10),
+    ("complete", "pending", None, "ambiguous_same_bar", None, 10),
+    ("unavailable", "pending", None, None, REPLAY_METHOD_VERSION, 10),
+    ("complete", "pending", None, None, "future_method", 10),
+    ("complete", "pending", None, None, None, None),
+    ("complete", "pending", None, None, None, 0),
+])
+def test_legacy_continuation_does_not_reopen_final_unknown_or_unavailable_evidence(
+    monkeypatch, outcome_status, replay_status, replay_r, replay_result, method, window,
+):
+    j = JournalStore(":memory:")
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 2, 1, tzinfo=timezone.utc))
+    seed(j, legacy=True)
+    j.conn.execute(
+        "UPDATE candidate_outcomes SET outcome_status=?,replay_status=?,replay_r=?,replay_result=?,"
+        "replay_method_version=?,replay_window_days=?,outcome_status_10d='complete'",
+        (outcome_status, replay_status, replay_r, replay_result, method, window),
+    )
+    j.conn.commit()
+    original = j.query("SELECT * FROM candidate_outcomes")
+    assert update_pending_outcomes(j, Bars(bars(10)))["updated"] == 0
+    assert j.query("SELECT * FROM candidate_outcomes") == original
+    j.close()
+
+
+def test_empty_continuation_marks_only_replay_unavailable_preserving_completed_family(monkeypatch):
+    j = JournalStore(":memory:")
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 2, 1, tzinfo=timezone.utc))
+    stranded_legacy(j)
+    original = j.one("SELECT * FROM candidate_outcomes")
+    assert update_pending_outcomes(j, Bars([]))["unavailable"] == 1
+    final = j.one("SELECT * FROM candidate_outcomes")
+    assert final["outcome_status"] == "complete"
+    assert final["forward_5d_r"] == original["forward_5d_r"]
+    assert final["replay_status"] == "unavailable" and final["replay_r"] is None
+    assert final["replay_method_version"] is None
+    assert update_pending_outcomes(j, Bars(bars(10)))["updated"] == 0
+    assert j.one("SELECT * FROM candidate_outcomes") == final
     j.close()
 
 
@@ -201,4 +293,30 @@ def test_baseline_exposes_quarantine_preserves_abstentions_and_ignores_override_
     }
     assert rep["validity"]["formal_evaluation_allowed"] is False
     assert rep["validity"]["historical_corrections_used"] is False
+    j.close()
+
+
+def test_continued_legacy_replay_stays_excluded_while_new_v2_pair_can_enter_report(monkeypatch):
+    j = JournalStore(":memory:")
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 2, 1, tzinfo=timezone.utc))
+    paired(j, "prospective")
+    paired(j, "legacy", method=None)
+    # Both reach the five-day completion with an unresolved ten-day replay.
+    j.conn.execute(
+        "UPDATE candidate_outcomes SET outcome_status='partial',replay_status='pending',"
+        "replay_result=NULL,replay_r=NULL"
+    )
+    j.conn.commit()
+    source = Bars(bars(5))
+    assert update_pending_outcomes(j, source)["completed"] == 2
+    source.rows = bars(10)
+    assert update_pending_outcomes(j, source)["updated"] == 2
+    rows = j.query("SELECT * FROM candidate_outcomes ORDER BY id")
+    assert [r["replay_status"] for r in rows] == ["complete", "complete"]
+    assert [r["replay_method_version"] for r in rows] == [REPLAY_METHOD_VERSION, None]
+    report = build_baseline_report(j, None, rule_versions=("threshold_v1_hold10",))
+    assert report["n_paired_total"] == 1
+    assert report["validity"]["exclusion_reasons"] == {"legacy_or_unverified_ai_replay": 1}
+    assert report["validity"]["formal_evaluation_allowed"] is False
+    assert report["validity"]["historical_corrections_used"] is False
     j.close()

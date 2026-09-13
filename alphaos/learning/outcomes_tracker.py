@@ -21,9 +21,11 @@ re-running converges rather than reprocessing.
 RESEARCH-REPAIR (2026-09-12): the five-day outcome family retains its own
 completion status. Newly seeded rows carry a separate versioned replay
 status; a ten-day replay still pending after day five continues in the main
-loop without rewriting completed forward statistics. Legacy complete
-replays remain unchanged/unverified. Explicit retrospective corrections
-are append-only sidecar evidence, never a scheduled rewrite.
+loop without rewriting completed forward statistics. This also continues
+explicitly pending legacy replays, without stamping those historical rows
+as prospective v2 evidence. Legacy complete replays remain unchanged/unverified.
+Explicit retrospective corrections are append-only sidecar evidence, never
+a scheduled rewrite.
 
 HOLD-1 (2026-07-24, ``docs/roadmap/alphaos-hold1-10day-shadow-horizon-spec.md``):
 ``update_pending_outcomes`` also drives a SEPARATE continuation pass
@@ -480,8 +482,11 @@ def _repair_missing_decision_at_utc(journal, rows: list[dict]) -> list[dict]:
 
 def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> dict:
     """Resolve pending/partial candidate_outcomes rows with forward 1/3/5-day
-    returns + bracket replay. Idempotent: only rows still pending/partial are
-    touched; ``complete``/``unavailable`` rows are never revisited. Missing
+    returns + bracket replay. A complete five-day family may still have an
+    explicitly pending bracket replay; continue that replay alone, including
+    legacy rows, without changing their evidence provenance. Completed
+    five-day rows with a final replay and unavailable outcome rows are never
+    revisited. Missing
     bars are handled safely — no provider or a transient empty fetch just
     leaves the row pending (retried next call); only after
     ``UNAVAILABLE_AFTER_DAYS`` with zero bars does a row convert to
@@ -492,8 +497,11 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     candidate's next bar as a "1-day" return."""
     rows = journal.query(
         "SELECT * FROM candidate_outcomes WHERE outcome_status IN (?, ?) "
-        "OR (replay_method_version = ? AND replay_status = 'pending') "
-        "ORDER BY id ASC LIMIT ?", (_STATUS_PENDING, _STATUS_PARTIAL, REPLAY_METHOD_VERSION, limit))
+        "OR (outcome_status = ? AND replay_status = 'pending' "
+        "AND replay_window_days > 0 AND replay_r IS NULL AND replay_result IS NULL "
+        "AND (replay_method_version IS NULL OR replay_method_version = ?)) "
+        "ORDER BY id ASC LIMIT ?",
+        (_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, REPLAY_METHOD_VERSION, limit))
     counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
               "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     if bars_provider is None:
@@ -520,9 +528,10 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
                 # (repair may have just set it this same pass) — that provenance
                 # signal matters more than the more-obvious no-bars reason.
                 dq = row.get("data_quality_status") or "no_bars_after_window"
-                _update_row(journal, row["outcome_id"], {
-                    "outcome_status": _STATUS_UNAVAILABLE, "replay_status": _STATUS_UNAVAILABLE,
-                    "data_quality_status": dq})
+                unavailable = {"replay_status": _STATUS_UNAVAILABLE, "data_quality_status": dq}
+                if row["outcome_status"] != _STATUS_COMPLETE:
+                    unavailable["outcome_status"] = _STATUS_UNAVAILABLE
+                _update_row(journal, row["outcome_id"], unavailable)
                 counts["unavailable"] += 1
             else:
                 counts["skipped"] += 1
@@ -585,6 +594,10 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             update["replay_window_days"] = window_days
             update["replay_status"] = replay["replay_status"]
             update["replay_bars_used"] = replay["replay_bars_used"]
+            # Deliberately retain the row's original method stamp. A legacy
+            # continuation uses this engine but did not enter the repaired
+            # prospective cohort at seeding; assigning v2 here would admit it
+            # to baseline_report's verified cohort. No backfill is needed.
         else:
             update["replay_status"] = _STATUS_UNAVAILABLE
 
