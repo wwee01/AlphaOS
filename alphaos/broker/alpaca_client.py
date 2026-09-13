@@ -18,6 +18,9 @@ normalized to SDK-agnostic dicts (see ``order_mapping``).
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any
 
 from alphaos.broker import order_mapping
 from alphaos.config.settings import PAPER_BASE_URL, Settings
@@ -30,6 +33,80 @@ class AlpacaSafetyError(Exception):
 
 class AlpacaNotConnected(Exception):
     """Raised when a real paper client cannot be constructed (e.g. SDK missing)."""
+
+
+class AlpacaSubmissionNotSent(RuntimeError):
+    """Structured, versioned proof from the first entry transport attempt.
+
+    No request URL, credentials, payload, or underlying exception text is
+    included. Generic caller exceptions must never be promoted to this type.
+    """
+
+    def __init__(self, reason: str):
+        if reason not in {"connect_timeout", "new_connection_failure"}:
+            raise ValueError("unknown no-dispatch proof reason")
+        self.proof = {"type": "alpaca_entry_transport_not_sent", "version": 1, "reason": reason}
+        super().__init__("First paper entry request could not establish a connection; no dispatch proved.")
+
+
+@dataclass
+class _EntryDispatch:
+    client_order_id: str
+    attempts: int = 0
+
+
+_entry_dispatch: ContextVar[_EntryDispatch | None] = ContextVar("alpaca_entry_dispatch", default=None)
+
+
+def _no_dispatch_reason(exc: Exception, session: Any, request: Any, args: tuple,
+                        kwargs: dict, scope: _EntryDispatch | None) -> str | None:
+    """Prove a narrow requests/urllib3 pre-connect failure, otherwise None.
+
+    The SDK may retry a 429 response. Once any transport attempt has happened,
+    a later connection failure says nothing about that earlier attempt. Custom
+    sessions/adapters, response hooks, redirects and enabled retries similarly
+    cannot establish this proof and therefore keep the original exception.
+    """
+    from requests import Session
+    from requests.adapters import HTTPAdapter
+    from requests.exceptions import ConnectionError, ConnectTimeout
+    from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, NewConnectionError
+
+    if scope is None or scope.attempts != 1 or not isinstance(session, Session) or type(session) is not Session:
+        return None
+    method = args[0] if args else kwargs.get("method")
+    url = args[1] if len(args) > 1 else kwargs.get("url")
+    if (str(method).upper() != "POST" or url != f"{PAPER_BASE_URL}/v2/orders"
+            or kwargs.get("allow_redirects") is not False
+            or not isinstance(kwargs.get("json"), dict)
+            or kwargs["json"].get("client_order_id") != scope.client_order_id):
+        return None
+    bound_session = getattr(request, "__self__", None)
+    if bound_session is None:
+        return None
+    if (bound_session is not session
+            or getattr(request, "__func__", None) is not Session.request
+            or session.auth is not None or kwargs.get("auth") is not None
+            or session.hooks.get("response") or kwargs.get("hooks")):
+        return None
+    adapter = session.get_adapter(url)
+    if type(adapter) is not HTTPAdapter:
+        return None
+    retry = adapter.max_retries
+    if (retry.total != 0 or any(getattr(retry, field, None) not in (None, 0, False)
+                              for field in ("connect", "read", "redirect", "status", "other"))):
+        return None
+    if (not isinstance(exc, (ConnectionError, ConnectTimeout))
+            or type(exc) not in {ConnectionError, ConnectTimeout} or exc.response is not None):
+        return None
+    wrapped = exc.args[0] if len(exc.args) == 1 else None
+    if not isinstance(wrapped, MaxRetryError):
+        return None
+    if isinstance(wrapped.reason, NewConnectionError):
+        return "new_connection_failure"
+    if type(wrapped.reason) is ConnectTimeoutError:
+        return "connect_timeout"
+    return None
 
 
 BROKER_HTTP_TIMEOUT = (5.0, 20.0)  # connection, socket-read inactivity seconds
@@ -51,7 +128,21 @@ def _bound_broker_transport(client) -> None:
 
     def bounded_request(*args, **kwargs):
         kwargs["timeout"] = BROKER_HTTP_TIMEOUT
-        return request(*args, **kwargs)
+        scope = _entry_dispatch.get()
+        if scope is not None:
+            scope.attempts += 1
+        try:
+            return request(*args, **kwargs)
+        except Exception as exc:
+            # A proof detector failure is itself uncertainty, never evidence
+            # that permits a caller to abandon an outstanding entry intent.
+            try:
+                reason = _no_dispatch_reason(exc, session, request, args, kwargs, scope)
+            except Exception:
+                reason = None
+            if reason:
+                raise AlpacaSubmissionNotSent(reason) from None
+            raise
 
     session.request = bounded_request
 
@@ -150,7 +241,11 @@ class AlpacaClient:
             "tif": self._resolve_tif(proposal),
             "client_order_id": proposal.proposal_id,
         }
-        order = self._submit(client, spec)
+        token = _entry_dispatch.set(_EntryDispatch(spec["client_order_id"]))
+        try:
+            order = self._submit(client, spec)
+        finally:
+            _entry_dispatch.reset(token)
         normalized = order_mapping.normalize_order(order)
         if self.journal is not None:
             self.journal.log_system_event(
