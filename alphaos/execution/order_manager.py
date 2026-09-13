@@ -372,13 +372,17 @@ class OrderManager:
         durable; the final outcome uses the full original quantity and weighted
         exit price, without manufacturing a second synthetic broker fill.
         """
-        pos = self.journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))
-        if not pos or pos["status"] != "open":
-            return None
-        boid = norm.get("broker_order_id")
-        if not boid:
-            raise ValueError("exit fill missing broker order ID")
+        position_id = pos["position_id"]
         with ledger_ops.atomic(self.journal) as journal:
+            # Read residual quantity and fill totals under the same write lock.
+            # Another pass may have booked this cumulative fill or closed the
+            # position after the caller fetched it but before BEGIN IMMEDIATE.
+            pos = journal.one("SELECT * FROM positions WHERE position_id=?", (position_id,))
+            if not pos or pos["status"] != "open":
+                return None
+            boid = norm.get("broker_order_id")
+            if not boid:
+                raise ValueError("exit fill missing broker order ID")
             old_exits = ledger_ops.exit_totals(journal, pos)
             total_qty = float(pos["qty"]) + float(old_exits["qty"])
             if order is None:
