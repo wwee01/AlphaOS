@@ -508,7 +508,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             counts["skipped"] += 1
             continue
         age_days = (now - decision_at).total_seconds() / 86400.0
-        decision_date = decision_at.date().isoformat()
+        decision_date = timeutils.market_date(decision_at).isoformat()
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         # Bars strictly AFTER the decision day — never let the decision's own
         # day count as "forward" (no lookahead leakage into the replay).
@@ -657,7 +657,7 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
         if decision_at is None:   # pragma: no cover -- defensive only; a row
             counts["skipped"] += 1  # can't reach outcome_status='complete'
             continue                # without decision_at_utc already set.
-        decision_date = decision_at.date().isoformat()
+        decision_date = timeutils.market_date(decision_at).isoformat()
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
         if not forward_bars:

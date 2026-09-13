@@ -523,36 +523,41 @@ def cmd_per_register_v2(orch: Orchestrator) -> int:
 
 
 def cmd_per_evaluate(orch: Orchestrator) -> int:
-    """SETUP-1 S1b: run the ONE atomic paired evaluation for H-PER-1P/
-    H-PER-1N, as of right now. Operator-invoked only -- never scheduled,
-    never run by any scan. Looks the pair up by its own registered
-    (hypothesis, metric) text (same convention as cmd_per_register) rather
-    than taking prereg_ids as arguments, so there is exactly one thing to
-    type to run this.
+    """Resolve the identity-frozen v2 pair without falling back to legacy IDs.
 
-    Population/floor failures print a 'deferred' result and touch nothing
-    (re-runnable later as more data accrues); a genuine success freezes
-    both rows plus the shared evidence snapshot in one transaction. See
-    alphaos.stats.preregistration.evaluate_two_arm_hypothesis_pair()'s own
-    docstring for the complete contract."""
+    The September chronology repair changes event membership. Existing v2
+    registrations therefore report quarantine until a reviewed successor
+    contract is registered; neither original nor v2 evidence is restated.
+    """
     from alphaos.stats.preregistration import (
         PreregistrationAlreadyEvaluatedError,
         evaluate_two_arm_hypothesis_pair,
     )
     from alphaos.util import timeutils
+    from alphaos.cards.per_evidence import (
+        PER_HYPOTHESIS_POS_V2, PER_HYPOTHESIS_NEG_V2, PER_METRIC_POS_V2, PER_METRIC_NEG_V2,
+    )
+    from alphaos.stats.research_validity import registration_validity
 
     pos_row = orch.journal.one(
-        "SELECT prereg_id FROM preregistrations WHERE hypothesis = ? AND metric = ?",
-        (_PER_HYPOTHESIS_POS, _PER_METRIC_POS),
+        "SELECT * FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_POS_V2, PER_METRIC_POS_V2),
     )
     neg_row = orch.journal.one(
-        "SELECT prereg_id FROM preregistrations WHERE hypothesis = ? AND metric = ?",
-        (_PER_HYPOTHESIS_NEG, _PER_METRIC_NEG),
+        "SELECT * FROM preregistrations WHERE hypothesis = ? AND metric = ?",
+        (PER_HYPOTHESIS_NEG_V2, PER_METRIC_NEG_V2),
     )
     if pos_row is None or neg_row is None:
-        print("H-PER-1P/H-PER-1N are not registered yet -- run per_register first.")
+        print("Corrected H-PER-1P-v2/H-PER-1N-v2 pair is absent; the original pair is not a substitute.")
         _print({"per_evaluate": {"status": "not_registered"}})
         return 1
+
+    validity = registration_validity(pos_row)
+    if validity["quarantined"]:
+        _print({"per_evaluate": {"outcome": "deferred", "reason": "research_contract_quarantined",
+                                "prereg_id_pos": pos_row["prereg_id"], "prereg_id_neg": neg_row["prereg_id"],
+                                "detail": validity}})
+        return 0
 
     as_of_utc = timeutils.now_utc().isoformat()
     try:

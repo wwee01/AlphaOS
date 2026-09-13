@@ -46,6 +46,7 @@ from typing import Optional
 from alphaos.cards.scoreboard import compute_card_scoreboard
 from alphaos.hypotheses.constants import HypothesisStatus, RiskClass
 from alphaos.stats.fdr import DEFAULT_FDR_Q
+from alphaos.stats.research_validity import registration_validity
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -114,6 +115,12 @@ def check_promotion_preconditions(
                 "detail": f"{hypothesis_id} does not gate any card promotion", "card_id": None, "card_version": None}
 
     card_id = h["card_id"]
+
+    prereg = journal.one("SELECT * FROM preregistrations WHERE prereg_id=?", (h.get("prereg_id"),))
+    validity = registration_validity(prereg or {}, h)
+    if validity["quarantined"]:
+        return {"eligible": False, "reason_code": "RESEARCH_CONTRACT_QUARANTINED",
+                "detail": validity["reason"], "card_id": card_id, "card_version": None}
 
     if h["status"] != HypothesisStatus.MET.value:
         return {"eligible": False, "reason_code": "HYPOTHESIS_NOT_MET",

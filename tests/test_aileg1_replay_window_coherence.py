@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import sqlite3
+import pytest
 
 
 from alphaos.baseline.rules import THRESHOLD_V1, THRESHOLD_V1_HOLD10
@@ -513,49 +514,28 @@ def test_6a_dry_run_writes_nothing():
     j.close()
 
 
-def test_6b_apply_writes_exactly_the_rows_dry_run_reported():
+def test_6b_legacy_apply_is_retired_and_preserves_original_evidence():
     j = JournalStore(":memory:")
     ai_row = _seed_legacy_ai_leg_row(j)
     _seed_legacy_baseline_row(j)
-    bars = {"AAPL": _bars_for_decision(ai_row["decision_at_utc"], 10)}
-    provider = _FakeBars(bars)
-
-    dry = run_replay_recompute(j, provider, apply=False)
-    applied = run_replay_recompute(j, provider, apply=True)
-
-    # Same row set, same computed new_* values -- only "apply" differs.
-    assert dry["candidate_outcomes"]["changes"] == applied["candidate_outcomes"]["changes"]
-    assert (dry["shadow_baseline_decisions"]["changes"]
-            == applied["shadow_baseline_decisions"]["changes"])
-
-    ai_change = applied["candidate_outcomes"]["changes"][0]
-    written = j.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (ai_change["row_id"],))
-    assert written["replay_window_days"] == ai_change["new_replay_window_days"]
-    assert written["replay_result"] == ai_change["new_replay_result"]
-    assert written["replay_r"] == ai_change["new_replay_r"]
-
-    base_change = applied["shadow_baseline_decisions"]["changes"][0]
-    written_base = j.one(
-        "SELECT * FROM shadow_baseline_decisions WHERE baseline_decision_id = ?", (base_change["row_id"],))
-    assert written_base["replay_window_days"] == base_change["new_replay_window_days"]
+    provider = _FakeBars({"AAPL": _bars_for_decision(ai_row["decision_at_utc"], 10)})
+    before = j.query("SELECT * FROM candidate_outcomes")
+    before_base = j.query("SELECT * FROM shadow_baseline_decisions")
+    for _ in range(2):
+        with pytest.raises(ValueError, match="retired.*rewrites original evidence"):
+            run_replay_recompute(j, provider, apply=True)
+    assert j.query("SELECT * FROM candidate_outcomes") == before
+    assert j.query("SELECT * FROM shadow_baseline_decisions") == before_base
     j.close()
 
 
-def test_6c_apply_is_idempotent_second_run_finds_nothing_left():
-    j = JournalStore(":memory:")
-    ai_row = _seed_legacy_ai_leg_row(j)
-    _seed_legacy_baseline_row(j)
-    bars = {"AAPL": _bars_for_decision(ai_row["decision_at_utc"], 10)}
-    provider = _FakeBars(bars)
-
-    run_replay_recompute(j, provider, apply=True)
-    second = run_replay_recompute(j, provider, apply=True)
-
-    assert second["candidate_outcomes"]["eligible"] == 0
-    assert second["candidate_outcomes"]["recomputed"] == 0
-    assert second["shadow_baseline_decisions"]["eligible"] == 0
-    assert second["shadow_baseline_decisions"]["recomputed"] == 0
-    j.close()
+def test_6c_retired_cli_apply_does_not_open_a_database(tmp_path):
+    from scripts.replay_recompute import main
+    missing = tmp_path / "must-not-create.db"
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(missing), "--apply"])
+    assert exc.value.code == 2
+    assert not missing.exists()
 
 
 def test_6d_dry_run_is_idempotent_repeated_calls_never_accumulate_state():
@@ -576,7 +556,7 @@ def test_6e_rows_missing_forward_bars_are_skipped_not_guessed():
     j = JournalStore(":memory:")
     _seed_legacy_ai_leg_row(j)   # no bars injected for this symbol at all
     provider = _FakeBars({})
-    report = run_replay_recompute(j, provider, apply=True)
+    report = run_replay_recompute(j, provider, apply=False)
     assert report["candidate_outcomes"]["eligible"] == 1
     assert report["candidate_outcomes"]["recomputed"] == 0
     assert report["candidate_outcomes"]["skipped_no_forward_bars"] == 1

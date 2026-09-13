@@ -33,17 +33,13 @@ other way. See ``tests/test_s1b_per_evidence.py::
 test_changing_placebo_definition_leaves_primary_byte_identical`` for the
 regression proof.
 
-MARKET-DATE CONVENTION: every observation's "market date" is its own
-``candidate_outcomes.decision_at_utc`` truncated to a calendar date -- the
-SAME convention every existing PR12/EVID-1/scoreboard query already uses
-(``(r["decision_at_utc"] or "")[:10]``). This is deliberately NOT the
-earnings event's own ``report_date``/window-open date: a PER candidate can
-be created on any of its 3 eligible trading days (S1a's own
-``K_TRADING_DAYS``), and the 5-trading-day OUTCOME window measured by
-``outcomes_tracker.py`` runs forward from the candidate's own decision date,
-not from the report date. ``report_date``/``timing`` (joined from
-``earnings_calendar_cache`` via ``candidates.card_assignment_ref``) are used
-ONLY to anchor the placebo's shifted reference point.
+MARKET-DATE CONVENTION (September repair, descriptive only): use the
+candidate decision's America/New_York date and select the first event
+candidate by its exact timestamp, with candidate_id breaking exact ties.
+This corrects the old UTC-date/ID ordering and changes row membership;
+existing PER registrations are quarantined from formal finalization.
+Report date/timing only anchor the placebo reference point.
+
 """
 
 from __future__ import annotations
@@ -56,6 +52,7 @@ from typing import Any, Optional
 
 from alphaos.cards.selector import PER_CARD_ID, SELECTOR_VERSION, EarningsTimingClass
 from alphaos.stats.two_arm import build_trading_day_clusters
+from alphaos.util import timeutils
 from alphaos.util.market_calendar import is_trading_day, trading_days_between
 
 # --------------------------------------------------------------- constants
@@ -96,9 +93,8 @@ def _tier_of(shadow_tier: Any) -> str:
 
 
 def _market_date(decision_at_utc: Optional[str]) -> Optional[str]:
-    if not decision_at_utc:
-        return None
-    return str(decision_at_utc)[:10]
+    decision = timeutils.parse_iso(decision_at_utc or "")
+    return timeutils.market_date(decision).isoformat() if decision else None
 
 
 def _event_key(symbol: str, fiscal_date_ending: Optional[str], report_date: Optional[str]) -> str:
@@ -214,7 +210,7 @@ def _dedupe_to_one_per_event(rows: list[dict]) -> list[dict]:
         if market_date is None:
             continue
         key = _event_key(r["symbol"], r.get("fiscal_date_ending"), r.get("report_date"))
-        sort_key = (market_date, r["candidate_id"])
+        sort_key = (timeutils.parse_iso(r["decision_at_utc"]), r["candidate_id"])
         current = groups.get(key)
         if current is None or sort_key < current["_sort_key"]:
             groups[key] = {**r, "_event_key": key, "_market_date": market_date, "_sort_key": sort_key}

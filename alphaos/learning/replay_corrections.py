@@ -46,14 +46,14 @@ def build_replay_corrections(conn, *, as_of_date: str, limit: int = 5000) -> dic
         if not isinstance(window, int) or window <= 0:
             skipped["missing_window"] += 1
             continue
-        decision = timeutils.parse_iso(row.get("decision_at_utc"))
+        decision = timeutils.parse_iso(row.get("decision_at_utc") or "")
         if decision is None:
             skipped["missing_decision_date"] += 1
             continue
         bars = [dict(b) for b in conn.execute(
             "SELECT market_date AS date, open, high, low, close, volume, source_feed "
             "FROM daily_bars WHERE symbol=? AND market_date>? AND market_date<=? "
-            "ORDER BY market_date ASC", (row["symbol"], decision.date().isoformat(), as_of_date),
+            "ORDER BY market_date ASC", (row["symbol"], timeutils.market_date(decision).isoformat(), as_of_date),
         )]
         bars = [b for b in bars if b["high"] is not None and b["low"] is not None][:window]
         if not bars:

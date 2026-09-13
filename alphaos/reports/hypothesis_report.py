@@ -26,6 +26,7 @@ from typing import Optional
 
 from alphaos.hypotheses.queries import METRIC_FUNCTIONS
 from alphaos.stats.effective_n import effective_n
+from alphaos.stats.research_validity import registration_validity
 from alphaos.util import timeutils
 
 
@@ -53,7 +54,7 @@ def _progress_for_row(journal, row: dict) -> Optional[dict]:
     if metric_fn is None or not row.get("prereg_id"):
         return None
     prereg = journal.one(
-        "SELECT floor_effective_n, floor_span_days FROM preregistrations WHERE prereg_id = ?",
+        "SELECT * FROM preregistrations WHERE prereg_id = ?",
         (row["prereg_id"],),
     )
     if prereg is None:
@@ -86,14 +87,16 @@ def _progress_for_row(journal, row: dict) -> Optional[dict]:
 
     anb = row.get("analysis_not_before") or ""
     calendar_floor_reached = bool(anb) and timeutils.stamp().local_sgt[:10] >= str(anb)
+    validity = registration_validity(prereg, row)
     return {
+        "research_validity": validity,
         "effective_n": en["effective_n"],
         "floor_effective_n": prereg["floor_effective_n"],
         "span_days": en["span_days"],
         "floor_span_days": prereg["floor_span_days"],
         "clears_floor": clears_floor,
         "calendar_floor_reached": calendar_floor_reached,
-        "resolver_ready": clears_floor and calendar_floor_reached,
+        "resolver_ready": clears_floor and calendar_floor_reached and not validity["quarantined"],
     }
 
 

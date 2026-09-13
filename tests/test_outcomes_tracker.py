@@ -639,7 +639,7 @@ def test_bars_fetch_start_uses_decision_date_not_seed_date():
             return []
 
     update_pending_outcomes(o.journal, bars_provider=_SpyBars())
-    assert captured["start"] == "2026-05-01"   # decision date, not today's seed date
+    assert captured["start"] == "2026-04-30"   # midnight UTC is the prior US market date
     o.close()
 
 

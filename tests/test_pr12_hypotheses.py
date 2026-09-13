@@ -390,6 +390,15 @@ def _clustered_rows(n: int, start="2026-01-01", value=0.3, values=None):
     ]
 
 
+def _historical_evidence(journal, prereg_id, *, p=0.41):
+    """Fixture a pre-repair frozen result; never bypass a production writer."""
+    journal.conn.execute(
+        "UPDATE preregistrations SET evaluated_at_utc='2026-08-01',effective_n=35,"
+        "n_raw=35,span_days=60,point_estimate=0.1,ci_low=-0.1,ci_high=0.3,"
+        "one_sided_p_below_zero=?,evidence_status='ok' WHERE prereg_id=?", (p, prereg_id))
+    journal.conn.commit()
+
+
 def test_resolver_leaves_hypothesis_alone_before_analysis_not_before(journal, monkeypatch):
     row = _seed_one(journal, "H-WIN-1", days_ago=-10)  # analysis_not_before is 10 days in the FUTURE
     monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows", _fake_metric_fn_factory(_clustered_rows(50)))
@@ -407,23 +416,21 @@ def test_resolver_leaves_hypothesis_testing_when_sample_too_small(journal, monke
 
     summary = hyp_resolver.resolve_due_hypotheses(journal)
 
-    assert "H-WIN-1" in summary["not_yet_sufficient"]
+    assert any(q["hypothesis_id"] == "H-WIN-1" for q in summary["quarantined"])
     refreshed = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
     assert refreshed["status"] == HypothesisStatus.TESTING.value
     prereg = journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id = ?", (row["prereg_id"],))
     assert prereg["evaluated_at_utc"] is None  # the one-shot must NOT have been consumed
 
 
-def test_resolver_evaluates_once_floor_is_cleared(journal, monkeypatch):
+def test_resolver_quarantines_invalid_contract_even_after_floor_clears(journal, monkeypatch):
     row = _seed_one(journal, "H-WIN-1", days_ago=40)
     monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows", _fake_metric_fn_factory(_clustered_rows(35)))
-
+    before = journal.one("SELECT * FROM preregistrations WHERE prereg_id=?", (row["prereg_id"],))
     summary = hyp_resolver.resolve_due_hypotheses(journal)
-
-    assert "H-WIN-1" in summary["evaluated"]
-    refreshed = journal.one("SELECT * FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
-    assert refreshed["status"] == HypothesisStatus.RESOLVED.value
-    assert refreshed["last_verdict"] in ("rejected", "forward-test-candidate", "inconclusive")
+    assert any(q["hypothesis_id"] == "H-WIN-1" for q in summary["quarantined"])
+    assert summary["evaluated"] == []
+    assert journal.one("SELECT * FROM preregistrations WHERE prereg_id=?", (row["prereg_id"],)) == before
 
 
 def test_resolver_leaves_hypothesis_testing_when_reference_arm_is_thin(journal, monkeypatch):
@@ -440,7 +447,7 @@ def test_resolver_leaves_hypothesis_testing_when_reference_arm_is_thin(journal, 
 
     summary = hyp_resolver.resolve_due_hypotheses(journal)
 
-    assert "H-WIN-1" in summary["not_yet_sufficient"]
+    assert any(q["hypothesis_id"] == "H-WIN-1" for q in summary["quarantined"])
     assert "H-WIN-1" not in summary["evaluated"]
     refreshed = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
     assert refreshed["status"] == HypothesisStatus.TESTING.value
@@ -448,23 +455,13 @@ def test_resolver_leaves_hypothesis_testing_when_reference_arm_is_thin(journal, 
     assert prereg["evaluated_at_utc"] is None  # the one-shot must NOT have been consumed
 
 
-def test_resolver_evaluates_once_both_centered_and_reference_arm_clear_floor(journal, monkeypatch):
-    """The positive case paired with the test above: once the reference arm
-    ALSO clears the same floor the centered arm already had to clear,
-    evaluation proceeds exactly as before this fix."""
+def test_resolver_quarantines_even_when_both_arms_clear_floor(journal, monkeypatch):
     row = _seed_one(journal, "H-WIN-1", days_ago=40)
-    monkeypatch.setitem(
-        hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows",
-        _fake_metric_fn_factory(_clustered_rows(35), reference_arm_rows=_clustered_rows(35)),
-    )
-
+    monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows",
+        _fake_metric_fn_factory(_clustered_rows(35), reference_arm_rows=_clustered_rows(35)))
     summary = hyp_resolver.resolve_due_hypotheses(journal)
-
-    assert "H-WIN-1" in summary["evaluated"]
-    refreshed = journal.one("SELECT status FROM hypothesis_proposals WHERE hypothesis_id = ?", (row["hypothesis_id"],))
-    assert refreshed["status"] == HypothesisStatus.RESOLVED.value
-    prereg = journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id = ?", (row["prereg_id"],))
-    assert prereg["evaluated_at_utc"] is not None
+    assert any(q["hypothesis_id"] == "H-WIN-1" for q in summary["quarantined"])
+    assert journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id=?", (row["prereg_id"],))["evaluated_at_utc"] is None
 
 
 def test_resolver_never_sets_a_semantic_verdict_as_status(journal, monkeypatch):
@@ -484,6 +481,7 @@ def test_resolver_never_sets_a_semantic_verdict_as_status(journal, monkeypatch):
 def test_resolver_rerun_after_evaluation_does_not_reevaluate_or_error(journal, monkeypatch):
     row = _seed_one(journal, "H-WIN-1", days_ago=40)
     monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows", _fake_metric_fn_factory(_clustered_rows(35)))
+    _historical_evidence(journal, row["prereg_id"])
     hyp_resolver.resolve_due_hypotheses(journal)
     prereg_before = journal.one("SELECT evaluated_at_utc FROM preregistrations WHERE prereg_id = ?", (row["prereg_id"],))
 
@@ -524,8 +522,7 @@ def test_resolver_syncs_h_ai_1_once_baseline_evaluates_it_independently(journal)
         floor_effective_n=1, floor_span_days=0.0, analysis_not_before="2020-01-01",
     )
     _seed_one(journal, "H-AI-1", days_ago=9999)
-    from alphaos.stats.preregistration import evaluate_hypothesis
-    evaluate_hypothesis(journal, baseline_prereg_id, _clustered_rows(5, value=0.1), "centered_delta")
+    _historical_evidence(journal, baseline_prereg_id)
 
     summary = hyp_resolver.resolve_due_hypotheses(journal)
 
@@ -535,38 +532,18 @@ def test_resolver_syncs_h_ai_1_once_baseline_evaluates_it_independently(journal)
     assert row["last_verdict"] is not None
 
 
-def test_family_wide_refresh_updates_an_already_evaluated_hypothesis_q_value(journal, monkeypatch):
-    """BH-FDR correction is family-wide (schema.py's own documented
-    convention) -- evaluating a SECOND hypothesis can shift the FIRST
-    hypothesis's own cached q-value even though its own data never changed.
-    Both hypotheses need REAL variance (not one constant value repeated,
-    which collapses to a point-mass p of exactly 0.0/1.0 that BH-FDR cannot
-    move) -- these two mixed-sign patterns are empirically pinned to
-    p ~= 0.41 and p ~= 0.78 under DEFAULT_SEED, chosen so the two-hypothesis
-    family's BH correction provably reorders/rescales H-WIN-1's own q away
-    from its solo-family value."""
-    monkeypatch.setitem(
-        hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows",
-        _fake_metric_fn_factory(_clustered_rows(35, values=[0.1, 0.1, 0.1, -0.3])),
-    )
-    monkeypatch.setitem(
-        hyp_queries.METRIC_FUNCTIONS, "h_int_1_rows",
-        _fake_metric_fn_factory(_clustered_rows(45, values=[0.2, 0.2, -0.5])),
-    )
-
-    _seed_one(journal, "H-WIN-1", days_ago=40)
+def test_family_wide_refresh_updates_frozen_historical_q_without_rewriting_evidence(journal):
+    first = _seed_one(journal, "H-WIN-1", days_ago=40)
+    _historical_evidence(journal, first["prereg_id"], p=0.41)
     hyp_resolver.resolve_due_hypotheses(journal)
-    q_after_first = journal.one(
-        "SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-WIN-1",)
-    )["last_q_value"]
-
-    _seed_one(journal, "H-INT-1", days_ago=42)  # class B floor, also long past
+    q_first = journal.one("SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id='H-WIN-1'")["last_q_value"]
+    frozen = journal.one("SELECT * FROM preregistrations WHERE prereg_id=?", (first["prereg_id"],))
+    second = _seed_one(journal, "H-INT-1", days_ago=42)
+    _historical_evidence(journal, second["prereg_id"], p=0.78)
     hyp_resolver.resolve_due_hypotheses(journal)
-    q_after_second = journal.one(
-        "SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-WIN-1",)
-    )["last_q_value"]
-
-    assert q_after_first != q_after_second
+    q_second = journal.one("SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id='H-WIN-1'")["last_q_value"]
+    assert q_first != q_second
+    assert journal.one("SELECT * FROM preregistrations WHERE prereg_id=?", (first["prereg_id"],)) == frozen
 
 
 # -------------------------------------------------------------------- report
@@ -603,7 +580,8 @@ def test_hypothesis_report_marks_overdue(journal):
 def test_hypothesis_report_renders_resolved_row_without_crashing(journal, monkeypatch):
     from alphaos.reports.hypothesis_report import build_hypothesis_report, render_markdown
 
-    _seed_one(journal, "H-WIN-1", days_ago=40)
+    row = _seed_one(journal, "H-WIN-1", days_ago=40)
+    _historical_evidence(journal, row["prereg_id"])
     monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows", _fake_metric_fn_factory(_clustered_rows(35)))
     hyp_resolver.resolve_due_hypotheses(journal)
 

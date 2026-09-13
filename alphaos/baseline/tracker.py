@@ -415,7 +415,7 @@ def _resolve_pending_rows_for_arm_set(
             counts["skipped"] += 1
             continue
         age_days = (now - decision_at).total_seconds() / 86400.0
-        decision_date = decision_at.date().isoformat()
+        decision_date = timeutils.market_date(decision_at).isoformat()
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
         forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
         # HOLD-2 (STATUS CORRECTION item 3): hold10 rows get a wider

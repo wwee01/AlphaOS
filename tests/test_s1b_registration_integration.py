@@ -142,32 +142,15 @@ AS_OF = "2027-01-01T00:00:00+00:00"
 
 
 # --------------------------------------------------------------- atomic eval
-def test_atomic_evaluation_succeeds_on_a_clean_positive_population(journal):
+def test_clean_positive_population_cannot_freeze_changed_per_contract(journal):
     _seed_population(journal, n_events=30, effect=2.0)
     pos, neg = _register_pair(journal)
+    before = journal.query("SELECT * FROM preregistrations ORDER BY id")
     result = evaluate_two_arm_hypothesis_pair(journal, pos, neg, AS_OF, n_resamples=500, seed=1)
-    assert result["outcome"] == "evaluated"
-    assert result["pos"]["p_value"] < 0.05
-    assert result["neg"]["p_value"] > 0.5
-    assert result["pos"]["point_estimate"] == pytest.approx(-result["neg"]["point_estimate"])
-
-    pos_row = journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (pos,))
-    neg_row = journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (neg,))
-    assert pos_row["evaluated_at_utc"] is not None
-    assert neg_row["evaluated_at_utc"] is not None
-    assert pos_row["evidence_status"] == "ok" == neg_row["evidence_status"]
-    # Directional frame mapping (spec Section 7): H-PER-1N stores the
-    # negated estimate and swapped+negated CI.
-    assert neg_row["point_estimate"] == pytest.approx(-pos_row["point_estimate"])
-    assert neg_row["ci_low"] == pytest.approx(-pos_row["ci_high"])
-    assert neg_row["ci_high"] == pytest.approx(-pos_row["ci_low"])
-
-    snapshot_rows = journal.query(
-        "SELECT * FROM per_evidence_snapshots WHERE snapshot_id = ?", (result["snapshot_id"],),
-    )
-    assert len(snapshot_rows) > 0
-    assert any(r["arm"] == "per_event" for r in snapshot_rows)
-    assert any(r["arm"] == "control" for r in snapshot_rows)
+    assert result["outcome"] == "deferred"
+    assert result["reason"] == "research_contract_quarantined"
+    assert journal.query("SELECT * FROM preregistrations ORDER BY id") == before
+    assert journal.count_rows("per_evidence_snapshots") == 0
 
 
 def test_evaluation_defers_below_registered_floor_and_writes_nothing(journal):
@@ -193,7 +176,8 @@ def test_evaluation_defers_below_population_gate_and_one_shot_survives(journal):
 
     _seed_population(journal, n_events=30, symbol_offset=100)  # more events accrue, no collision
     result2 = evaluate_two_arm_hypothesis_pair(journal, pos, neg, AS_OF, n_resamples=500, seed=1)
-    assert result2["outcome"] == "evaluated", "the one-shot must still be available after a deferred attempt"
+    assert result2["reason"] == "research_contract_quarantined"
+    assert all(r["evaluated_at_utc"] is None for r in journal.query("SELECT * FROM preregistrations"))
 
 
 def test_config_mismatch_between_paired_floors_raises(journal):
@@ -209,7 +193,9 @@ def test_config_mismatch_between_paired_floors_raises(journal):
 def test_one_shot_refusal_after_successful_evaluation(journal):
     _seed_population(journal, n_events=30, effect=1.0)
     pos, neg = _register_pair(journal)
-    evaluate_two_arm_hypothesis_pair(journal, pos, neg, AS_OF, n_resamples=300, seed=1)
+    # Simulate preserved pre-repair evidence, not a new evaluation.
+    journal.conn.execute("UPDATE preregistrations SET evaluated_at_utc='2026-08-01'")
+    journal.conn.commit()
     with pytest.raises(PreregistrationAlreadyEvaluatedError):
         evaluate_two_arm_hypothesis_pair(journal, pos, neg, AS_OF, n_resamples=300, seed=2)
 
@@ -246,29 +232,27 @@ def test_evaluation_reproducible_given_fixed_seed_across_independent_journals():
         pos2, neg2 = _register_pair(j2)
         r1 = evaluate_two_arm_hypothesis_pair(j1, pos1, neg1, AS_OF, n_resamples=500, seed=7)
         r2 = evaluate_two_arm_hypothesis_pair(j2, pos2, neg2, AS_OF, n_resamples=500, seed=7)
-        assert r1["pos"]["point_estimate"] == r2["pos"]["point_estimate"]
-        assert r1["pos"]["p_value"] == r2["pos"]["p_value"]
-        assert r1["pos"]["ci_low"] == r2["pos"]["ci_low"]
-        assert r1["pos"]["ci_high"] == r2["pos"]["ci_high"]
+        assert r1 == r2
+        assert r1["reason"] == "research_contract_quarantined"
+        assert j1.count_rows("per_evidence_snapshots") == j2.count_rows("per_evidence_snapshots") == 0
     finally:
         j1.close()
         j2.close()
 
 
 # ----------------------------------------------------------------- PR12/BH-FDR
-def test_evaluated_pair_integrates_with_existing_compute_verdicts_unmodified(journal):
-    """Reuses PR12 rather than a parallel verdict framework: the SAME
-    compute_verdicts() every other hypothesis uses reads these two rows
-    correctly, with ZERO changes to fdr.py."""
-    _seed_population(journal, n_events=30, effect=3.0)
+def test_historical_pair_keeps_raw_verdict_but_is_not_forward_test_eligible(journal):
     pos, neg = _register_pair(journal)
-    evaluate_two_arm_hypothesis_pair(journal, pos, neg, AS_OF, n_resamples=1000, seed=1)
-
-    rows = journal.query("SELECT * FROM preregistrations WHERE evaluated_at_utc IS NOT NULL")
-    verdicts = compute_verdicts(rows)
-    by_id = {v["prereg_id"]: v for v in verdicts}
-    assert by_id[pos]["verdict"] in ("forward-test-candidate", "inconclusive", "rejected")
-    assert by_id[neg]["verdict"] == "rejected", "a strongly positive true effect must hard-reject H-PER-1N"
+    for pid, low, high, p in ((pos, 1.0, 2.0, 0.001), (neg, -2.0, -1.0, 0.99)):
+        journal.conn.execute("UPDATE preregistrations SET evaluated_at_utc='2026-08-01',"
+            "ci_low=?,ci_high=?,one_sided_p_below_zero=?,evidence_status='ok' WHERE prereg_id=?", (low, high, p, pid))
+    journal.conn.commit()
+    before = journal.query("SELECT * FROM preregistrations ORDER BY id")
+    by_id = {v["prereg_id"]: v for v in compute_verdicts(before)}
+    assert by_id[pos]["verdict"] == "forward-test-candidate"
+    assert by_id[neg]["verdict"] == "rejected"
+    assert all(not v["forward_test_eligible"] for v in by_id.values())
+    assert journal.query("SELECT * FROM preregistrations ORDER BY id") == before
 
 
 # ------------------------------------------------------------------- isolation
@@ -318,49 +302,10 @@ def test_per_evaluate_cli_before_registration_returns_1(orchestrator):
     assert cmd_per_evaluate(orchestrator) == 1
 
 
-def test_per_evaluate_cli_on_the_original_v1_pair_permanently_defers(orchestrator, capsys):
-    """S1b-integrity: ``cmd_per_evaluate()`` is hardwired to the ORIGINAL
-    H-PER-1P/H-PER-1N pair registered by ``cmd_per_register()`` -- which
-    (per Section 5's decision to leave that command and the original
-    production rows untouched) never freezes identity fields. The identity
-    gate added to ``evaluate_two_arm_hypothesis_pair()`` (Section 3) means
-    this specific, real-world CLI pathway can now NEVER reach evaluation --
-    exactly the "the currently registered incomplete pair is not
-    accidentally used as the formal verdict pair" guarantee this follow-up
-    exists to provide. Proven with a full clean population (this would have
-    evaluated successfully before this follow-up) and the real, unmodified
-    CLI commands -- not a synthetic fixture. Asserts the SPECIFIC deferral
-    reason (via captured stdout), not just exit code 0 -- otherwise this
-    test would stay green even if the deferral fired for some unrelated
-    cause (architecture-audit finding)."""
-    from alphaos.__main__ import cmd_per_evaluate, cmd_per_register
-
-    _seed_population(orchestrator.journal, n_events=30, effect=2.0)
+def test_per_evaluate_cli_never_substitutes_original_pair(orchestrator, capsys):
+    from alphaos.__main__ import cmd_per_register, cmd_per_evaluate
     assert cmd_per_register(orchestrator) == 0
-    assert cmd_per_evaluate(orchestrator) == 0  # a clean "deferred" is still exit 0
-    assert '"reason": "identity_fields_missing"' in capsys.readouterr().out
-    rows = orchestrator.journal.query(
-        "SELECT evaluated_at_utc FROM preregistrations WHERE hypothesis LIKE 'H-PER-1%'"
-    )
-    assert len(rows) == 2
-    assert all(r["evaluated_at_utc"] is None for r in rows), (
-        "the original v1 pair must never reach evaluation now that identity freezing is required"
-    )
-    assert orchestrator.journal.count_rows("per_evidence_snapshots") == 0
-    # Re-running is safe and produces the identical deferred outcome -- this
-    # pathway is durably, not just once, blocked; nothing ever accumulates.
-    assert cmd_per_evaluate(orchestrator) == 0
-    rows_again = orchestrator.journal.query(
-        "SELECT evaluated_at_utc FROM preregistrations WHERE hypothesis LIKE 'H-PER-1%'"
-    )
-    assert all(r["evaluated_at_utc"] is None for r in rows_again)
-
-
-# test_production_scan_produces_zero_per_assignments moved to
-# tests/test_s1c_activation.py as
-# test_production_scan_can_produce_a_per_assignment_when_eligible_never_
-# otherwise -- S1c wires select_card() in, so "select_card() is never
-# called" is no longer the reason a fresh orchestrator fixture (no
-# corrected pair registered) still produces zero PER assignments; the new
-# test proves the SAME zero-assignment behavior for the current reason
-# (the activation preflight fails) alongside the positive case.
+    before = orchestrator.journal.query("SELECT * FROM preregistrations ORDER BY id")
+    assert cmd_per_evaluate(orchestrator) == 1
+    assert "not_registered" in capsys.readouterr().out
+    assert orchestrator.journal.query("SELECT * FROM preregistrations ORDER BY id") == before

@@ -202,14 +202,13 @@ def replay_bracket_with_maturity(entry, stop, target, direction, bars, *, max_da
     usable = [b for b in (bars or []) if b.get("high") is not None and b.get("low") is not None]
     replay = replay_bracket(entry, stop, target, direction, usable, max_days=max_days)
     bars_used = min(len(usable), max_days)
+    metadata = {"replay_bars_used": bars_used, "replay_window_days": max_days,
+                "replay_method_version": REPLAY_METHOD_VERSION}
     if replay["result"] == "unavailable":
-        status = "unavailable"
-    elif replay["result"] == "neither" and (
+        return {**replay, **metadata, "replay_status": "unavailable"}
+    if replay["result"] == "neither" and (
         bars_used < max_days or usable[max_days - 1].get("close") is None
     ):
-        status = "pending"
-        replay = {"result": None, "replay_r": None, "replay_exit_reason": "window_incomplete"}
-    else:
-        status = "complete"
-    return {**replay, "replay_status": status, "replay_bars_used": bars_used,
-            "replay_window_days": max_days, "replay_method_version": REPLAY_METHOD_VERSION}
+        return {"result": None, "replay_r": None, "replay_exit_reason": "window_incomplete",
+                **metadata, "replay_status": "pending"}
+    return {**replay, **metadata, "replay_status": "complete"}

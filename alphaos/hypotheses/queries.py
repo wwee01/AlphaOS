@@ -69,6 +69,7 @@ rendered caveat for the reader-facing version of this note.
 from __future__ import annotations
 
 from typing import Optional
+from alphaos.constants import DirectionAlignment
 
 # "Most recent, non-user_override candidate_outcomes row for this
 # candidate_id" -- see module docstring. `{ref}` is always a fixed internal
@@ -356,22 +357,24 @@ def h_rej_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
 
 
 def h_pol_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
-    """Polarity divergence vs alignment, on replay_r. 'aligned' is the
-    frozen reference; each 'divergent' row's replay_r is centered against
-    it. NULL/unknown alignment rows are excluded (not the same as
-    divergent)."""
+    """Descriptive conflicting-vs-aligned query using producer vocabulary.
+
+    The original H-POL contract is quarantined; repairing this query does
+    not authorize freezing a new population under its old registration.
+    """
     rows = journal.query(
         "SELECT p.symbol, p.candidate_id, p.direction_alignment, co.replay_r, "
         "co.decision_at_utc, tp.max_holding_days "
         "FROM last30days_polarity p "
         "JOIN candidate_outcomes co ON " + _LATEST_OUTCOME.format(ref="p.candidate_id") + " "
         "LEFT JOIN trade_proposals tp ON " + _LATEST_PROPOSAL.format(ref="p.candidate_id") + " "
-        "WHERE p.direction_alignment IN ('aligned', 'divergent') "
+        "WHERE p.direction_alignment IN (?, ?) "
         "AND co.replay_r IS NOT NULL "
         "AND p.id = (SELECT p2.id FROM last30days_polarity p2 "
-        "WHERE p2.candidate_id = p.candidate_id ORDER BY p2.id DESC LIMIT 1)"
+        "WHERE p2.candidate_id = p.candidate_id ORDER BY p2.id DESC LIMIT 1)",
+        (DirectionAlignment.ALIGNED.value, DirectionAlignment.CONFLICTING.value),
     )
-    aligned_rows = [r for r in rows if r["direction_alignment"] == "aligned"]
+    aligned_rows = [r for r in rows if r["direction_alignment"] == DirectionAlignment.ALIGNED.value]
     aligned_mean = _mean([r["replay_r"] for r in aligned_rows])
     if aligned_mean is None:
         return [], "centered_delta", None
@@ -382,7 +385,7 @@ def h_pol_1_rows(journal) -> tuple[list[dict], str, Optional[list[dict]]]:
             "max_holding_days": r["max_holding_days"],
             "centered_delta": r["replay_r"] - aligned_mean,
         }
-        for r in rows if r["direction_alignment"] == "divergent"
+        for r in rows if r["direction_alignment"] == DirectionAlignment.CONFLICTING.value
     ]
     return out, "centered_delta", _reference_rows(aligned_rows)
 

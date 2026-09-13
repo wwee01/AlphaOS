@@ -197,7 +197,7 @@ def build_baseline_report(
         for ai in ai_rows:
             latest_ai[ai["candidate_id"]] = ai
     paired_rows = []
-    exclusions = Counter()
+    exclusions: Counter[str] = Counter()
     available_legacy_pairs = 0
     for row in rows:
         ai = latest_ai.get(row["candidate_id"])

@@ -287,7 +287,7 @@ def test_evaluation_refuses_before_analysis_not_before_with_zero_writes(journal)
     later = evaluate_two_arm_hypothesis_pair(
         journal, pos, neg, as_of_utc="2030-06-01T00:00:00+00:00", n_resamples=300, seed=1,
     )
-    assert later["outcome"] == "evaluated"
+    assert later["reason"] == "research_contract_quarantined"
 
 
 def test_evaluation_proceeds_past_date_gate_with_controlled_future_clock(journal):
@@ -301,10 +301,9 @@ def test_evaluation_proceeds_past_date_gate_with_controlled_future_clock(journal
     result = evaluate_two_arm_hypothesis_pair(
         journal, pos, neg, as_of_utc="2030-01-02T00:00:00+00:00", n_resamples=500, seed=1,
     )
-    assert result["outcome"] == "evaluated"
-    assert result["pos"]["p_value"] < 0.05
+    assert result["reason"] == "research_contract_quarantined"
     pos_row = journal.one("SELECT * FROM preregistrations WHERE prereg_id = ?", (pos,))
-    assert pos_row["evaluated_at_utc"] is not None
+    assert pos_row["evaluated_at_utc"] is None
     frozen = json.loads(pos_row["params_json"])
     assert {k: frozen.get(k) for k in identity} == identity
 
@@ -463,13 +462,11 @@ def test_s1c_preflight_ready_true_for_a_correctly_registered_pair(journal):
     assert result["detail"]["identity"] == identity
 
 
-def test_s1c_preflight_false_once_evaluated(journal):
-    _seed_population(journal, n_events=30, effect=2.0)
-    pos, neg, _ = _register_valid_v2_pair(journal, analysis_not_before="2026-01-01")
-    result = evaluate_two_arm_hypothesis_pair(
-        journal, pos, neg, as_of_utc="2027-01-01T00:00:00+00:00", n_resamples=300, seed=1,
-    )
-    assert result["outcome"] == "evaluated"
+def test_s1c_preflight_false_once_historical_evidence_exists(journal):
+    _register_valid_v2_pair(journal, analysis_not_before="2026-01-01")
+    # Preserved historical fixture, not permission to freeze a repaired cohort.
+    journal.conn.execute("UPDATE preregistrations SET evaluated_at_utc='2026-08-01'")
+    journal.conn.commit()
     preflight = per_evidence.s1c_activation_preflight(journal)
     assert preflight["ready"] is False
     assert preflight["reason"] == "already_evaluated"

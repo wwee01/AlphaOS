@@ -27,6 +27,7 @@ one-shot guard, not by anything in this module.
 from __future__ import annotations
 
 from typing import Any
+from alphaos.stats.research_validity import registration_validity
 
 DEFAULT_FDR_Q = 0.10
 DEFAULT_BONFERRONI_ALPHA = 0.05
@@ -162,6 +163,8 @@ def compute_verdicts(
             "q_value": q_values[i],
             "bonferroni_significant": bonf[i],
             "reason": reason,
+            "research_validity": (validity := registration_validity(row)),
+            "forward_test_eligible": verdict == "forward-test-candidate" and not validity["quarantined"],
         })
     return out
 

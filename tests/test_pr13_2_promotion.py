@@ -93,23 +93,23 @@ def test_precondition_no_card_id(journal):
 
 
 def test_precondition_hypothesis_not_met(journal):
-    _insert_hypothesis(journal, "H-CAT-1", card_id="catalyst_continuation_pullback_v1", status="resolved")
-    check = promotion.check_promotion_preconditions(journal, "H-CAT-1")
+    _insert_hypothesis(journal, "H-FIXTURE-1", card_id="catalyst_continuation_pullback_v1", status="resolved")
+    check = promotion.check_promotion_preconditions(journal, "H-FIXTURE-1")
     assert check["eligible"] is False
     assert check["reason_code"] == "HYPOTHESIS_NOT_MET"
 
 
 def test_precondition_card_not_registered(journal):
-    _insert_hypothesis(journal, "H-CAT-1", card_id="catalyst_continuation_pullback_v1", status="met")
-    check = promotion.check_promotion_preconditions(journal, "H-CAT-1")
+    _insert_hypothesis(journal, "H-FIXTURE-1", card_id="catalyst_continuation_pullback_v1", status="met")
+    check = promotion.check_promotion_preconditions(journal, "H-FIXTURE-1")
     assert check["eligible"] is False
     assert check["reason_code"] == "CARD_NOT_REGISTERED"
 
 
 def test_precondition_card_not_shadow(journal):
     _insert_card(journal, "catalyst_continuation_pullback_v1", 3, state="live_eligible")
-    _insert_hypothesis(journal, "H-CAT-1", card_id="catalyst_continuation_pullback_v1", status="met")
-    check = promotion.check_promotion_preconditions(journal, "H-CAT-1")
+    _insert_hypothesis(journal, "H-FIXTURE-1", card_id="catalyst_continuation_pullback_v1", status="met")
+    check = promotion.check_promotion_preconditions(journal, "H-FIXTURE-1")
     assert check["eligible"] is False
     assert check["reason_code"] == "CARD_NOT_SHADOW"
 

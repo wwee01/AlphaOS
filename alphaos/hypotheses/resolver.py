@@ -34,6 +34,7 @@ from alphaos.hypotheses.constants import HypothesisStatus
 from alphaos.hypotheses.queries import METRIC_FUNCTIONS
 from alphaos.stats.effective_n import effective_n
 from alphaos.stats.fdr import compute_verdicts
+from alphaos.stats.research_validity import finalization_validity
 from alphaos.stats.preregistration import (
     PreregistrationAlreadyEvaluatedError,
     evaluate_hypothesis,
@@ -55,6 +56,7 @@ def resolve_due_hypotheses(journal, now: Optional[datetime] = None) -> dict:
     summary: dict = {
         "evaluated": [], "not_yet_sufficient": [], "skipped_no_prereg": [],
         "synced": [], "refreshed": [], "errors": [],
+        "quarantined": [],
     }
 
     testing_rows = journal.query(
@@ -105,6 +107,10 @@ def _resolve_one(journal, row: dict, today: date, summary: dict) -> None:
         summary["synced"].append(hid)
         return
 
+    validity = finalization_validity(journal, prereg)
+    if validity["quarantined"]:
+        summary["quarantined"].append({"hypothesis_id": hid, **validity})
+        return
     if row["metric_fn_name"] is None:
         return  # H-AI-1-shaped row, nothing to compute here; wait for BASELINE's own path
 

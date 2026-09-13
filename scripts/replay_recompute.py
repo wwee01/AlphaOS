@@ -1,54 +1,17 @@
 #!/usr/bin/env python3
-"""AILEG-1 (2026-08-16, docs/roadmap/alphaos-aileg1-replay-window-coherence-
-spec.md, spec section 4) -- THE OPERATOR DECISION.
+"""Legacy AILEG-1 replay diagnostic (write path retired September 2026).
 
-Re-runs ``alphaos.learning.outcomes_engine.replay_bracket`` for every EXISTING
-``candidate_outcomes``/``shadow_baseline_decisions`` row that was resolved
-BEFORE this ticket's fix landed (identified structurally by
-``replay_window_days IS NULL`` -- every row this build's fixed code writes
-going forward always stamps that column, so NULL is exactly "resolved under
-the old, incoherent-window logic"), using each row's now-correct, card-derived
-window (the SAME section-2 rule the live pipeline now applies to every NEW
-row -- ``alphaos.learning.outcomes_tracker.resolve_ai_replay_window`` for the
-AI leg, ``alphaos.baseline.tracker.resolve_baseline_arm_windows`` for the
-baseline leg -- reused here verbatim, never a second resolution
-implementation).
+This diagnostic describes unstamped historical windows using today's card
+and provider data. It is not a formal evaluation or an approved restatement
+of history. Both the CLI and direct run_replay_recompute API reject apply.
+For reproducible historical evidence use scripts/replay_corrections.py with
+an explicit copied DB and as-of date: preview first, then append-only apply.
+The sidecar preserves original outcomes and every frozen verdict.
 
-WHY THIS IS A LEGITIMATE REPAIR, NOT A RE-ROLL (spec section 4): ``replay_r``
-is a DETERMINISTIC function of (entry, stop, target, direction, bars,
-window). Every row already holds entry/stop/target/direction; ``bars`` are
-historical daily OHLCV, immutable once a trading day closes; only ``window``
-was ever wrong. Recomputing with the correct window is a repair, not a
-re-roll: it cannot be influenced by knowing the result, and running it twice
-against an unchanged ledger/bars source gives the same answer (see
-``run_replay_recompute``'s own idempotency).
-
-DARK BY DEFAULT (spec section 4's own "the merge must not recompute
-anything" law): dry-run unless ``--apply`` is passed. This script is NEVER
-invoked by any scheduler job, startup path, or migration -- grep this
-codebase's own scheduler/orchestrator wiring and you will not find it
-imported anywhere outside this file and its own tests
-(tests/test_aileg1_replay_window_coherence.py pins this with an AST/import
-guard). The operator runs this as its own, separate, explicit decision, with
-the printed report going into a §9 log entry BEFORE ``--apply`` ever runs.
-
-USAGE
------
-    .venv/bin/python scripts/replay_recompute.py [--db data/alphaos.db] [--apply] [--limit N]
-
-``--apply`` writes ONLY the exact rows the immediately-preceding dry-run
-would have reported (both are computed by the SAME function, over the SAME
-NULL-replay_window_days row set) -- never a superset, never a sample. Every
-write is an UPDATE of existing replay_result/replay_r/replay_exit_reason/
-replay_window_days columns; this script never INSERTs or DELETEs a row.
-
-Bars come from the real historical bars provider
-(``alphaos.data.providers.alpaca_bars.make_bars_provider`` -- the same one
-``update_pending_outcomes``/``resolve_pending_baseline_decisions`` already
-use in production) unless a caller injects a different one (tests / an
-operator measurement pass against a read-only DB copy with a cached bars
-adapter -- see this script's own ``run_replay_recompute`` for the injection
-point)."""
+This legacy dry-run can initialize JournalStore/provider state; use the new
+correction CLI when byte-preserving, fully offline read-only inspection is
+required. No scheduler invokes this legacy script.
+"""
 
 from __future__ import annotations
 
@@ -164,40 +127,19 @@ def _recompute_baseline_row(journal, bars_provider, row: dict, arm_windows: dict
     }
 
 
-def _apply_ai_leg_change(journal, change: dict) -> None:
-    journal.conn.execute(
-        "UPDATE candidate_outcomes SET replay_result = ?, replay_r = ?, replay_exit_reason = ?, "
-        "replay_window_days = ? WHERE outcome_id = ?",
-        (change["new_replay_result"], change["new_replay_r"], change["new_replay_exit_reason"],
-         change["new_replay_window_days"], change["row_id"]),
-    )
-
-
-def _apply_baseline_change(journal, change: dict) -> None:
-    journal.conn.execute(
-        "UPDATE shadow_baseline_decisions SET replay_result = ?, replay_r = ?, replay_exit_reason = ?, "
-        "replay_window_days = ? WHERE baseline_decision_id = ?",
-        (change["new_replay_result"], change["new_replay_r"], change["new_replay_exit_reason"],
-         change["new_replay_window_days"], change["row_id"]),
-    )
-
-
 def run_replay_recompute(journal, bars_provider, apply: bool = False, limit: int = 5000) -> dict:
-    """The recompute pass, over BOTH tables. Pure with respect to the DB
-    when ``apply=False`` (issues zero UPDATE statements -- SELECT-only);
-    when ``apply=True``, writes EXACTLY the rows this same call computed
-    (never a superset -- there is only one code path from "computed" to
-    "written", no separate re-query in between).
+    """Describe legacy unstamped windows; reject any request to write.
 
-    Idempotent by construction: every written row's replay_window_days
-    becomes non-NULL, so it drops out of ``_AI_LEG_ELIGIBLE_SQL``/
-    ``_BASELINE_ELIGIBLE_SQL``'s own ``WHERE ... IS NULL`` on the next call
-    -- a second ``--apply`` run against the same ledger finds zero eligible
-    rows and writes nothing. Deterministic given an unchanged bars source:
-    calling this twice with ``apply=False`` (or any number of times before
-    the first ``apply=True``) must return byte-identical change records,
-    since replay_r is a pure function of (entry, stop, target, direction,
-    bars, window) and none of those five inputs are mutated by a dry run."""
+    Deterministic for an unchanged injected bars source. The new correction
+    path freezes source inputs and appends diagnostics without rewriting
+    either outcomes table. See the module docstring for provider caveats.
+    """
+    if apply:
+        raise ValueError(
+            "Legacy replay_recompute --apply is retired: it rewrites original evidence. "
+            "Use scripts/replay_corrections.py --db /path/to/copied.db --as-of-date YYYY-MM-DD "
+            "to preview append-only versioned corrections; --apply there inserts sidecar evidence only."
+        )
     arm_windows = resolve_baseline_arm_windows()
 
     ai_leg_rows = journal.query(_AI_LEG_ELIGIBLE_SQL, (limit,))
@@ -209,8 +151,6 @@ def run_replay_recompute(journal, bars_provider, apply: bool = False, limit: int
             ai_leg_skipped_no_bars += 1
             continue
         ai_leg_changes.append(change)
-        if apply:
-            _apply_ai_leg_change(journal, change)
 
     baseline_rows = journal.query(_BASELINE_ELIGIBLE_SQL, (limit,))
     baseline_changes = []
@@ -221,11 +161,6 @@ def run_replay_recompute(journal, bars_provider, apply: bool = False, limit: int
             baseline_skipped_no_bars += 1
             continue
         baseline_changes.append(change)
-        if apply:
-            _apply_baseline_change(journal, change)
-
-    if apply and (ai_leg_changes or baseline_changes):
-        journal.conn.commit()
 
     return {
         "apply": apply,
@@ -273,10 +208,14 @@ def print_report(report: dict) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--db", default="data/alphaos.db", help="journal DB path")
-    parser.add_argument("--apply", action="store_true", help="write the recomputed rows (default: dry-run only)")
+    parser.add_argument("--apply", action="store_true", help="retired: use the append-only replay_corrections path")
     parser.add_argument("--limit", type=int, default=5000, help="max rows to recompute per table")
     args = parser.parse_args(argv)
 
+    if args.apply:
+        parser.error("--apply is retired because it rewrites original evidence; use "
+                     "scripts/replay_corrections.py --db COPIED_DB --as-of-date YYYY-MM-DD "
+                     "for dry-run review, then append-only --apply on the copy")
     settings = load_settings()
     journal = JournalStore(args.db)
     try:

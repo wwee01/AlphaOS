@@ -27,6 +27,7 @@ from alphaos.stats.bootstrap import (
     clustered_bootstrap,
 )
 from alphaos.stats.effective_n import effective_n as _effective_n
+from alphaos.stats.research_validity import finalization_validity, require_finalization_allowed
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -119,6 +120,7 @@ def evaluate_hypothesis(
             "Register a NEW hypothesis row instead of re-evaluating this one."
         )
 
+    require_finalization_allowed(journal, existing)
     en = _effective_n(
         rows, symbol_key=symbol_key, date_key=date_key, holding_days_key=holding_days_key,
     )
@@ -337,6 +339,13 @@ def evaluate_two_arm_hypothesis_pair(
             },
         }
 
+    # Identity/calendar/population gates above still diagnose their own
+    # failures. Even a full clean sample cannot freeze an audited contract
+    # whose event selection has changed. No caller bypass via this API.
+    for registered in (pos_row, neg_row):
+        validity = finalization_validity(journal, registered)
+        if validity["quarantined"]:
+            return {"outcome": "deferred", "reason": "research_contract_quarantined", "detail": validity}
     boot = two_arm.two_arm_bootstrap(
         primary.per_clusters, primary.control_clusters, n_resamples=n_resamples, seed=seed,
     )
