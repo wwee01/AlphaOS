@@ -765,8 +765,8 @@ def test_reconcile_and_staleness_pass_reach_no_broker_mutation_other_than_cancel
     style): scans OrderManager.reconcile() plus every ENTRY-TTL-1 helper it
     calls (_cancel_stale_entries, _cancel_order_row, _alert_partial_fill_once,
     _staleness_price_snapshot) for ``self.alpaca.<method>(`` call sites. The
-    ONLY ones allowed are the pre-existing ``get_order`` (state sync) and the
-    new ``cancel_order`` -- never submit_bracket/flatten_paper/submit_order,
+    Allowed reads are ``get_order`` and ``list_positions`` (fresh state sync);
+    the only allowed mutation is ``cancel_order`` -- never submit_bracket/flatten_paper/submit_order,
     which would violate run_monitor_job's amended-but-still-narrow law."""
     import inspect
     import re
@@ -784,7 +784,7 @@ def test_reconcile_and_staleness_pass_reach_no_broker_mutation_other_than_cancel
     )
     combined = "\n".join(inspect.getsource(fn) for fn in methods)
     broker_calls = set(re.findall(r"self\.alpaca\.(\w+)\(", combined))
-    assert broker_calls <= {"get_order", "cancel_order"}, broker_calls
+    assert broker_calls <= {"get_order", "list_positions", "cancel_order"}, broker_calls
     # Audit F4/F5 hardening: banned list widened, plus an aliasing guard --
     # `broker = self.alpaca` would let calls dodge the regex above entirely.
     # (`close_position(` is deliberately NOT banned here: reconcile()'s own
