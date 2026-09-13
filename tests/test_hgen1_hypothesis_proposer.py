@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 import pathlib
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -55,29 +55,25 @@ def _valid_candidate(**over) -> dict:
     return base
 
 
-def _clustered_rows(n: int, start="2026-01-01", values=None):
-    from datetime import date as _date
-    base = _date.fromisoformat(start)
-    vals = values if values is not None else [0.1, 0.1, 0.1, -0.3]
-    return [
-        {"symbol": f"SYM{i}", "decision_date": (base + timedelta(days=i)).isoformat(),
-         "max_holding_days": 1, "centered_delta": vals[i % len(vals)]}
-        for i in range(n)
-    ]
+def _refresh_historical_win1(journal):
+    """Seed pre-repair frozen evidence and exercise the real FDR refresh.
 
-
-def _fake_metric_fn(rows):
-    return lambda journal: (rows, "centered_delta", None)
-
-
-def _resolve_win1(journal, monkeypatch, n=35):
-    """Seed + resolve H-WIN-1 with a fake metric fn -- the same idiom
-    test_pr12_hypotheses.py already uses."""
+    The audited WIN contract cannot be newly evaluated. These explicit
+    fixture values represent immutable historical evidence, not a bypass
+    of the production evaluator's quarantine.
+    """
     spec = next(h for h in SEEDED_HYPOTHESES if h["hypothesis_id"] == "H-WIN-1")
-    now = datetime.now(timezone.utc) + timedelta(days=-40)
-    hyp_registry.propose_hypothesis(journal, spec, now=now)
-    monkeypatch.setitem(hyp_queries.METRIC_FUNCTIONS, "h_win_1_rows", _fake_metric_fn(_clustered_rows(n)))
-    return hyp_resolver.resolve_due_hypotheses(journal)
+    row = hyp_registry.propose_hypothesis(journal, spec, now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    journal.conn.execute(
+        "UPDATE preregistrations SET evaluated_at_utc='2026-02-15',effective_n=35,"
+        "n_raw=35,span_days=34,point_estimate=0.1,ci_low=-0.1,ci_high=0.3,"
+        "one_sided_p_below_zero=0.41,evidence_status='ok' WHERE prereg_id=?", (row["prereg_id"],))
+    journal.conn.commit()
+    frozen = journal.query("SELECT * FROM preregistrations")
+    summary = hyp_resolver.resolve_due_hypotheses(journal)
+    assert summary["evaluated"] == []
+    assert journal.query("SELECT * FROM preregistrations") == frozen
+    return summary
 
 
 def _mark_resolved_with_verdict(journal, hypothesis_id="H-FAKE-1"):
@@ -103,17 +99,17 @@ def test_intake_draft_never_writes_to_hypothesis_proposals_or_preregistrations(j
     assert journal.count_rows("preregistrations") == 0
 
 
-def test_draft_presence_does_not_alter_a_resolved_hypothesis_q_value(monkeypatch):
+def test_draft_presence_does_not_alter_a_resolved_hypothesis_q_value():
     """The load-bearing safety property: a hypothesis_drafts row must never
     shift the seeded family's BH-FDR q-value, because compute_verdicts()'s
     family is 'every EVALUATED preregistration' -- a quarantined draft
-    touches none of that. Proven by running the SAME resolution twice, once
-    with several hypothesis_drafts rows present (various statuses,
+    touches none of that. Proven by refreshing the SAME historical frozen
+    evidence twice, once with several hypothesis_drafts rows present (various statuses,
     including 'accepted'-with-a-decoy-link) and once without, and asserting
     identical preregistration family membership + identical q-value."""
     j_without = JournalStore(":memory:")
-    summary_without = _resolve_win1(j_without, monkeypatch)
-    assert "H-WIN-1" in summary_without["evaluated"]
+    summary_without = _refresh_historical_win1(j_without)
+    assert "H-WIN-1" in summary_without["synced"]
     q_without = j_without.one(
         "SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-WIN-1",)
     )["last_q_value"]
@@ -135,8 +131,8 @@ def test_draft_presence_does_not_alter_a_resolved_hypothesis_q_value(monkeypatch
             "status": status, "source": "generated" if i else "manual",
             "accepted_hypothesis_id": "H-DECOY-NOT-REAL" if status == "accepted" else None,
         })
-    summary_with = _resolve_win1(j_with, monkeypatch)
-    assert "H-WIN-1" in summary_with["evaluated"]
+    summary_with = _refresh_historical_win1(j_with)
+    assert "H-WIN-1" in summary_with["synced"]
     q_with = j_with.one(
         "SELECT last_q_value FROM hypothesis_proposals WHERE hypothesis_id = ?", ("H-WIN-1",)
     )["last_q_value"]
@@ -145,7 +141,7 @@ def test_draft_presence_does_not_alter_a_resolved_hypothesis_q_value(monkeypatch
     j_with.close()
 
     assert n_family_with == n_family_without == 1  # exactly one evaluated preregistration, both runs
-    assert q_with == q_without  # identical q-value despite the drafts table's own content
+    assert q_with == q_without == 0.41  # drafts never join the evaluated family
 
 
 # =================================================================== schema

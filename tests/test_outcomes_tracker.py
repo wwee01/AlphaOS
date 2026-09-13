@@ -325,19 +325,31 @@ def _insert_benchmark_bar(o, bar_date, close, symbol="SPY"):
     })
 
 
-def test_update_computes_market_adjusted_return_against_benchmark_bars():
+def _seeded_row_at_explicit_us_date(o, monkeypatch):
+    from datetime import datetime, timezone
+    from alphaos.util import timeutils
+
+    # This instant is Jan 5 in New York but Jan 6 in UTC. Bar dates are US
+    # sessions, independent of when this test (or the outcome seeder) runs.
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 6, 0, 30, tzinfo=timezone.utc))
+    row = _seeded_row(o)
+    assert row["decision_at_utc"] == "2026-01-06T00:30:00+00:00"
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 15, 22, tzinfo=timezone.utc))
+    return row, "2026-01-05"
+
+
+def test_update_computes_market_adjusted_return_against_benchmark_bars(monkeypatch):
     """market_adjusted_return_1d_pct = candidate's own 1-day return minus
     SPY's own 1-day return over the identical forward window, both anchored
     on the same decision-date reference close."""
     o = _orch()
-    row = _seeded_row(o)   # entry=100, long
-    created_date = row["created_at_utc"][:10]
+    row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
-    d0 = datetime.date.fromisoformat(created_date)
+    d0 = datetime.date.fromisoformat(decision_date)
     day1 = (d0 + datetime.timedelta(days=1)).isoformat()
 
     bars = [{"date": day1, "open": 100, "high": 103, "low": 99, "close": 102}]   # AAPL: +2%
-    _insert_benchmark_bar(o, created_date, 400.0)   # SPY reference
+    _insert_benchmark_bar(o, decision_date, 400.0)   # SPY reference
     _insert_benchmark_bar(o, day1, 404.0)            # SPY: +1%
 
     res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
@@ -365,7 +377,7 @@ def test_update_market_adjusted_return_none_without_benchmark_bars():
     o.close()
 
 
-def test_update_market_adjusted_return_none_when_benchmark_window_lags():
+def test_update_market_adjusted_return_none_when_benchmark_window_lags(monkeypatch):
     """The candidate's own 5-day window fully resolves (row goes 'complete'
     and will never be revisited again), but only 3 SPY forward bars exist --
     market_adjusted_return_5d_pct must stay None rather than silently
@@ -373,13 +385,12 @@ def test_update_market_adjusted_return_none_when_benchmark_window_lags():
     benchmark return under the '5d' name. The 3d figure, which the
     benchmark DOES fully cover, is unaffected."""
     o = _orch()
-    row = _seeded_row(o)
-    created_date = row["created_at_utc"][:10]
+    row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
-    d0 = datetime.date.fromisoformat(created_date)
+    d0 = datetime.date.fromisoformat(decision_date)
     bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
             "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 6)]
-    _insert_benchmark_bar(o, created_date, 400.0)
+    _insert_benchmark_bar(o, decision_date, 400.0)
     for i in range(1, 4):   # only 3 of the 5 forward SPY bars
         _insert_benchmark_bar(o, (d0 + datetime.timedelta(days=i)).isoformat(), 400.0 + i)
 
@@ -414,7 +425,7 @@ def test_update_stores_bars_to_favorable_and_adverse():
 
 
 # ---------------------------------------------- audit-fixup regressions (MED)
-def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_position():
+def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_position(monkeypatch):
     """Audit-fixup regression (correctness MED): the candidate's own bar
     series has a gap on day 2 (simulating e.g. a halt) while SPY's series is
     continuous. The benchmark leg must be aligned to the candidate's OWN
@@ -423,10 +434,9 @@ def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_positio
     in SPY's own d2 (a date the candidate has no bar for at all), silently
     comparing spans that don't actually match."""
     o = _orch()
-    row = _seeded_row(o)   # entry=100.0, long
-    created_date = row["created_at_utc"][:10]
+    row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
-    d0 = datetime.date.fromisoformat(created_date)
+    d0 = datetime.date.fromisoformat(decision_date)
     d1 = (d0 + datetime.timedelta(days=1)).isoformat()
     d2 = (d0 + datetime.timedelta(days=2)).isoformat()
     d3 = (d0 + datetime.timedelta(days=3)).isoformat()
@@ -440,7 +450,7 @@ def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_positio
     ]
     # SPY is continuous across all 4 days -- d2 exists for SPY even though
     # the candidate has no matching bar.
-    _insert_benchmark_bar(o, created_date, 400.0)
+    _insert_benchmark_bar(o, decision_date, 400.0)
     _insert_benchmark_bar(o, d1, 402.0)
     _insert_benchmark_bar(o, d2, 403.0)
     _insert_benchmark_bar(o, d3, 404.0)
@@ -548,14 +558,13 @@ def test_update_is_idempotent_once_complete():
     o.close()
 
 
-def test_update_excludes_decision_day_bar_no_lookahead():
+def test_update_excludes_decision_day_bar_no_lookahead(monkeypatch):
     """A bar dated the SAME day as the decision must never count as 'forward' —
     that would leak information the decision was made without."""
     o = _orch()
-    row = _seeded_row(o)
-    created_date = row["created_at_utc"][:10]
+    row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     # Only a same-day bar exists; nothing strictly after it.
-    bars = [{"date": created_date, "open": 100, "high": 200, "low": 50, "close": 199}]
+    bars = [{"date": decision_date, "open": 100, "high": 200, "low": 50, "close": 199}]
     res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     assert res["skipped"] == 1   # correctly finds zero usable forward bars
     still = o.journal.one("SELECT outcome_status FROM candidate_outcomes WHERE outcome_id = ?",
