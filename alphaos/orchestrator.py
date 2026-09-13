@@ -2701,6 +2701,17 @@ class Orchestrator:
         records a decision; it never gates or executes anything."""
         reason = (f"{adjustment} (label={classification.label_decision} vs eval={base})"
                   + (f" — driver: {driver_str}" if driver_str else ""))
+        # WATCH-1 records an alternative before outcomes exist. Its result is
+        # evidence only: `final`, proposal creation, risk and orders still use
+        # the current combination policy. Existing rows are never backfilled.
+        from alphaos.research.watch_advisory import decision_diagnostic
+
+        evidence = self._evidence_snapshot(catalyst, last30)
+        evidence["watch_advisory_diagnostic"] = decision_diagnostic(
+            evaluation, classification, final,
+            confidence_floor=self.settings.label_min_confidence_to_propose,
+            min_reward_risk=self.settings.min_reward_risk,
+        )
         self.journal.insert("decision_adjustments", {
             "adjustment_id": new_id("dadj"),
             "candidate_id": cand["candidate_id"],
@@ -2716,7 +2727,7 @@ class Orchestrator:
             "driver": driver_str or None,
             "driver_source": self._driver_source(driver_detail),
             "driver_detail_json": driver_detail,
-            "evidence_json": self._evidence_snapshot(catalyst, last30),
+            "evidence_json": evidence,
             # --- catalyst evidence ---
             "catalyst_status": getattr(catalyst, "catalyst_status", None),
             "catalyst_type": getattr(catalyst, "catalyst_type", None),
