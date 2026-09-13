@@ -42,6 +42,13 @@ def decision_diagnostic(evaluation, classification, current_decision: str, *,
     stop = _finite(getattr(evaluation, "stop", None))
     target = _finite(getattr(evaluation, "target", None))
     confidence = _finite(getattr(classification, "confidence", None))
+    raw = getattr(classification, "raw", None)
+    raw_confidence = raw.get("confidence") if isinstance(raw, dict) else None
+    # The old validator rounds/clamps WATCH confidence and can turn True,
+    # NaN or >1 into 1.0 with status passed. Do not let this new diagnostic
+    # mistake that coercion (or .4999 rounded to .500) for valid evidence.
+    original_confidence = (_finite(raw_confidence)
+                           if isinstance(raw_confidence, (int, float)) else None)
     floor = _finite(confidence_floor)
     rr_floor = _finite(min_reward_risk)
     hold = getattr(evaluation, "max_holding_days", None)
@@ -70,6 +77,9 @@ def decision_diagnostic(evaluation, classification, current_decision: str, *,
     if (confidence is None or floor is None or not 0 <= floor <= 1
             or not floor <= confidence <= 1):
         reasons.append("classifier_confidence_below_floor_or_unknown")
+    if (original_confidence is None or floor is None or not 0 <= floor <= 1
+            or not floor <= original_confidence <= 1):
+        reasons.append("raw_classifier_confidence_invalid_below_floor_or_missing")
 
     changed = not reasons
     return {
@@ -78,8 +88,8 @@ def decision_diagnostic(evaluation, classification, current_decision: str, *,
         "mode": "decision_diagnostic_only",
         "eval_id": getattr(evaluation, "eval_id", None),
         "label_id": getattr(classification, "label_id", None),
-        "is_mock": bool(getattr(evaluation, "is_mock", True)
-                        or getattr(classification, "is_mock", True)),
+        "is_mock": not (getattr(evaluation, "is_mock", None) is False
+                        and getattr(classification, "is_mock", None) is False),
         "primary_decision": base,
         "classifier_decision": label,
         "current_decision": current_decision,
@@ -87,9 +97,11 @@ def decision_diagnostic(evaluation, classification, current_decision: str, *,
         "changed": changed,
         "exclusion_reasons": reasons,
         "entry": entry, "stop": stop, "target": target,
-        "max_holding_days": hold,
+        "max_holding_days": (hold if isinstance(hold, int) and not isinstance(hold, bool)
+                             and hold > 0 else None),
         "direction": getattr(evaluation, "direction", None),
         "classifier_confidence": confidence,
+        "raw_classifier_confidence": original_confidence,
         "confidence_floor": floor,
         "min_reward_risk": rr_floor,
         "downstream_gates": "not_evaluated",

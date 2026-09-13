@@ -16,6 +16,28 @@ import sqlite3
 from alphaos.research.watch_advisory import POLICY_VERSION, PROTOCOL_ID
 
 
+def _valid_record(diag, row) -> bool:
+    decisions = {"propose", "watch", "reject"}
+    reasons = diag.get("exclusion_reasons")
+    if (type(diag.get("changed")) is not bool or not isinstance(reasons, list)
+            or not all(isinstance(reason, str) for reason in reasons)):
+        return False
+    if not all(isinstance(diag.get(key), str) and diag[key] for key in ("eval_id", "label_id")):
+        return False
+    for inner, outer in (("primary_decision", "eval_decision"),
+                         ("classifier_decision", "label_decision"),
+                         ("current_decision", "final_decision")):
+        value = diag.get(inner)
+        if not isinstance(value, str) or value not in decisions or value != row[outer]:
+            return False
+    if diag["changed"]:
+        return (diag["primary_decision"] == "propose" and diag["classifier_decision"] == "watch"
+                and diag["current_decision"] == "watch"
+                and diag.get("challenger_decision_before_risk") == "propose"
+                and diag.get("direction") == "long" and not reasons)
+    return diag.get("challenger_decision_before_risk") == diag["current_decision"]
+
+
 def report(db_path: str) -> dict:
     counts: Counter = Counter()
     exclusions: Counter = Counter()
@@ -26,7 +48,8 @@ def report(db_path: str) -> dict:
     try:
         for row in conn.execute(
             "SELECT adjustment_id, candidate_id, symbol, scan_batch_id, created_at_utc, "
-            "evidence_json FROM decision_adjustments ORDER BY id"
+            "eval_decision, label_decision, final_decision, evidence_json "
+            "FROM decision_adjustments ORDER BY id"
         ):
             counts["source_adjustment_rows"] += 1
             try:
@@ -45,6 +68,9 @@ def report(db_path: str) -> dict:
                 continue
             if diag.get("is_mock") is not False:
                 counts["mock_or_unknown_provenance"] += 1
+                continue
+            if not _valid_record(diag, row):
+                counts["malformed_diagnostic"] += 1
                 continue
             counts["recorded_nonmock_diagnostics"] += 1
             transition = (f"{diag.get('current_decision')}->"
