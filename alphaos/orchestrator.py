@@ -2084,22 +2084,22 @@ class Orchestrator:
 
         # A scan can take minutes. Dedicated monitor readiness at scan start
         # is not sufficient proof immediately before this new exposure.
+        # Manual approvals must obey the same approved halt policy.
         if self.orders.real_paper:
-            from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD, monitor_health
+            from alphaos.scheduler.monitor_health import monitor_health
 
-            if RESEARCH_ENTRY_GUARD.get():
-                health = monitor_health(self.journal, self.settings)
-                if not health.get("entry_ready", False):
-                    detail = "Entry blocked: execution monitor not ready at submission"
-                    self.journal.log_system_event(
-                        Severity.WARNING, "risk", detail,
-                        {"proposal_id": proposal.proposal_id, "monitor_health": health},
-                    )
-                    return OrderResult(
-                        blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
-                        detail=detail + ": " + health.get("detail", "health unavailable"),
-                        state=OrderState.REJECTED.value,
-                    )
+            health = monitor_health(self.journal, self.settings)
+            if not health.get("entry_ready", False):
+                detail = "Entry blocked: execution monitor not ready at submission"
+                self.journal.log_system_event(
+                    Severity.WARNING, "risk", detail,
+                    {"proposal_id": proposal.proposal_id, "monitor_health": health},
+                )
+                return OrderResult(
+                    blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
+                    detail=detail + ": " + health.get("detail", "health unavailable"),
+                    state=OrderState.REJECTED.value,
+                )
         self._set_proposal_status(proposal.proposal_id, "approved")
         return self.orders.execute_proposal(proposal, fill_price=fill_price)
 

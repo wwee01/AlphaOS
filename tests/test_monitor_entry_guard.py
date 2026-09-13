@@ -7,7 +7,7 @@ import pytest
 
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
-from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD, monitor_health
+from alphaos.scheduler.monitor_health import monitor_health
 from alphaos.util import timeutils
 from conftest import make_proposal, make_settings
 
@@ -27,7 +27,6 @@ def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure
         "started_at_sgt": timeutils.stamp(start).local_sgt,
         "finished_at_utc": start.isoformat(), "result_summary_json": {"worker_role": "monitor"},
     })
-    token = RESEARCH_ENTRY_GUARD.set(True)
     try:
         assert monitor_health(journal, orch.settings)["entry_ready"]
         if failure == "stale":
@@ -47,7 +46,6 @@ def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure
         assert submitted == []
         assert journal.count_rows("paper_orders") == 0
     finally:
-        RESEARCH_ENTRY_GUARD.reset(token)
         orch.close()
 
 
@@ -67,14 +65,12 @@ def test_ready_monitor_preserves_normal_paper_submission_path(monkeypatch):
         "started_at_sgt": timeutils.stamp(now).local_sgt,
         "finished_at_utc": now.isoformat(), "result_summary_json": {"worker_role": "monitor"},
     })
-    token = RESEARCH_ENTRY_GUARD.set(True)
     try:
         proposal = make_proposal(invalidation_reason="stop invalidates thesis")
         proposal.proposal_expires_at_utc = (now + timedelta(days=1)).isoformat()
         assert orch._execute_checked(proposal) == "fake-submitted"
         assert sent == [proposal.proposal_id]
     finally:
-        RESEARCH_ENTRY_GUARD.reset(token)
         orch.close()
 
 
