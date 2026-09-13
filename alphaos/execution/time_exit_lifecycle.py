@@ -6,8 +6,9 @@ second order. No broker request is made while holding a database transaction.
 """
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from hashlib import sha256
+from time import monotonic, sleep
 from zoneinfo import ZoneInfo
 
 from alphaos.constants import ProtectionStatus, Severity
@@ -18,6 +19,8 @@ from alphaos.util.ids import new_id
 
 TERMINAL = {"canceled", "cancelled", "expired", "rejected", "filled"}
 ACTIVE_PHASES = {"canceling", "submitting", "working", "unknown"}
+CANCEL_VERIFY_ATTEMPTS = 5
+CANCEL_VERIFY_DELAY_SECONDS = 0.5
 
 
 class TimeExitLifecycle:
@@ -38,12 +41,20 @@ class TimeExitLifecycle:
         return [row for row in self.orders(pos["position_id"])
                 if ledger_ops.metadata(row).get("phase") in ACTIVE_PHASES]
 
-    def _set(self, row, phase, norm=None):
+    def _set(self, row, phase, norm=None, *, qty=None, expected_phase=None):
         values = {"raw_request_json": {**ledger_ops.metadata(row), "phase": phase}}
         if norm:
             values.update({"broker_order_id": norm.get("broker_order_id"),
                            "state": norm.get("state"), "raw_response_json": norm})
+        if qty is not None:
+            values["qty"] = qty
         with ledger_ops.atomic(self.journal) as journal:
+            if expected_phase is not None:
+                current = journal.order_by_id(row["order_id"])
+                if current is None or ledger_ops.metadata(current).get("phase") != expected_phase:
+                    raise ValueError("closing intent progressed concurrently; do not submit again")
+                if qty is not None and (qty <= 0 or qty > float(current["qty"]) + 1e-6):
+                    raise ValueError("closing intent may only shrink to a verified positive residual")
             ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], values)
             if ledger_ops.metadata(row).get("phase") != phase or row.get("state") != values.get("state", row.get("state")):
                 journal.insert("order_events", {
@@ -55,20 +66,129 @@ class TimeExitLifecycle:
         row.update(values)
         return row
 
-    def incident(self, pos, detail, *, unknown=False, flat=False, deferred=True):
+    def incident(self, pos, detail, *, unknown=False, flat=False, deferred=False):
         status = (ProtectionStatus.CLOSED_MISMATCH.value if flat else
                   ProtectionStatus.UNVERIFIABLE.value if unknown else ProtectionStatus.UNPROTECTED.value)
+        if unknown and not flat:
+            known_unprotected = self.journal.one(
+                "SELECT 1 FROM protection_checks WHERE position_id=? "
+                "AND protection_status='unprotected' AND resolved_at_utc IS NULL LIMIT 1",
+                (pos["position_id"],),
+            )
+            if known_unprotected:
+                # The watchdog may have confirmed missing protection after our
+                # uncertain cancellation read. Further uncertainty does not
+                # clear that fact or open a new incident every monitor pass.
+                status = ProtectionStatus.UNPROTECTED.value
         detail = f"{pos['symbol']}: {detail}"
-        protection_watchdog.open_protection_incident(
+        incident_id = protection_watchdog.open_protection_incident(
             self.journal, pos, protection_status=status, severity=Severity.CRITICAL.value,
             detail=detail, broker_position_exists=False if flat else None,
         )
-        self.journal.log_system_event(Severity.CRITICAL, "time_exit_enforcement", detail,
-                                      {"position_id": pos["position_id"]})
-        alerts.send_alert(self.om.settings, "AlphaOS: execution needs review", detail,
-                          priority="high", journal=self.journal)
+        # Every check remains in protection_checks. Alert only on an incident
+        # transition; an unchanged pending request must not page every pass.
+        if incident_id:
+            self.journal.log_system_event(Severity.CRITICAL, "time_exit_enforcement", detail,
+                                          {"position_id": pos["position_id"], "incident_id": incident_id})
+            alerts.send_alert(self.om.settings, "AlphaOS: execution needs review", detail,
+                              priority="high", journal=self.journal)
         return {"ok": False, "deferred": deferred, "critical": True, "position_id": pos["position_id"],
-                "symbol": pos["symbol"], "error": detail, "closed_mismatch": flat, "broker_flat": flat}
+                "symbol": pos["symbol"], "error": detail, "closed_mismatch": flat, "broker_flat": flat,
+                "incident_id": incident_id}
+
+    def _book_protective_fills(self, pos, legs):
+        """Book cumulative deltas, then return the current residual and any exit.
+
+        A broker keeps filled_qty on canceled and partially-filled orders. An
+        already-booked quantity is historical evidence, not a reason to defer
+        forever. _record_broker_exit checks totals atomically and closes only
+        after independently confirming broker flatness.
+        """
+        outcome = None
+        for leg in legs:
+            if (leg.get("filled_qty") or 0) > 0:
+                outcome = self.om._record_broker_exit(
+                    pos, leg, "target" if leg["role"] == "take_profit" else "stop",
+                ) or outcome
+        current = self.journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))
+        return current, outcome
+
+    @staticmethod
+    def _validate_leg(pos, checked, expected_id, role):
+        expected_side = "buy" if pos["direction"] == "short" else "sell"
+        if (not expected_id or checked.get("broker_order_id") != expected_id
+                or checked.get("symbol") != pos["symbol"] or checked.get("side") != expected_side):
+            raise ValueError("protective leg read returned mismatched order identity")
+        if role == "stop_loss":
+            valid_role = checked.get("stop_price") is not None
+        elif role == "take_profit":
+            valid_role = checked.get("limit_price") is not None and checked.get("stop_price") is None
+        else:
+            valid_role = False
+        if not valid_role:
+            raise ValueError("protective leg read does not match its stop/target role")
+
+    def _read_protection(self, pos):
+        """Verify parent and each leg before fills can affect local accounting."""
+        parent_id = pos.get("broker_order_id")
+        norm = self.broker.get_order(parent_id)
+        expected_entry = "sell" if pos["direction"] == "short" else "buy"
+        expected_exit = "buy" if pos["direction"] == "short" else "sell"
+        order_class = norm.get("order_class")
+        if (not parent_id or norm.get("broker_order_id") != parent_id
+                or norm.get("symbol") != pos["symbol"] or order_class not in {"bracket", "oco"}
+                or norm.get("side") != (expected_entry if order_class == "bracket" else expected_exit)):
+            raise ValueError("protection read returned mismatched parent identity")
+        legs = norm.get("legs") or []
+        if len(legs) != 2 or {leg.get("role") for leg in legs} != {"stop_loss", "take_profit"}:
+            raise ValueError("cannot verify complete protective stop/target lineage")
+        ids = [leg.get("broker_order_id") for leg in legs]
+        if len(set(ids)) != 2 or not all(ids):
+            raise ValueError("protective lineage has missing/duplicate order IDs")
+        checked_legs = []
+        for leg in legs:
+            leg_id, role = leg["broker_order_id"], leg["role"]
+            if (leg_id == parent_id) != (order_class == "oco" and role == "take_profit"):
+                raise ValueError("protective parent/child lineage does not match broker order class")
+            self._validate_leg(pos, leg, leg_id, role)
+            checked = self.broker.get_order(leg_id)
+            self._validate_leg(pos, checked, leg_id, role)
+            checked_legs.append({**checked, "role": role})
+        return {**norm, "legs": checked_legs}
+
+    @staticmethod
+    def _closed_result(pos, outcome):
+        if outcome:
+            return {"ok": True, "position_id": pos["position_id"], "symbol": pos["symbol"], "exit": outcome}
+        return {"ok": False, "deferred": True, "position_id": pos["position_id"],
+                "symbol": pos["symbol"], "position_closed": True}
+
+    def _verify_cancellation(self, pos, legs):
+        """Bounded broker reads; terminal status and residual accounting both matter.
+
+        Never treat pending_cancel as canceled, and never interpret historical
+        cumulative fills as a fresh race. Any read/accounting failure prevents
+        a close or replacement; the durable canceling intent survives retries.
+        """
+        for attempt in range(CANCEL_VERIFY_ATTEMPTS):
+            verified = True
+            for leg in legs:
+                try:
+                    checked = self.broker.get_order(leg["broker_order_id"])
+                    self._validate_leg(pos, checked, leg["broker_order_id"], leg["role"])
+                    current, outcome = self._book_protective_fills(pos, [{**checked, "role": leg["role"]}])
+                    if current is None or current["status"] != "open":
+                        return current, self._closed_result(pos, outcome), False
+                    pos = current
+                    if (checked.get("status") or "").lower() not in TERMINAL:
+                        verified = False
+                except Exception:
+                    verified = False
+            if verified:
+                return pos, None, True
+            if attempt + 1 < CANCEL_VERIFY_ATTEMPTS:
+                sleep(CANCEL_VERIFY_DELAY_SECONDS)
+        return pos, None, False
 
     def _fresh(self, pos, allowed_ids=()):
         """Verify quantity, direction, unique local ownership and competing orders."""
@@ -192,6 +312,7 @@ class TimeExitLifecycle:
 
     def advance(self, pos, now=None):
         now = now or timeutils.now_utc()
+        started = monotonic()
         pending = self.pending(pos)
         protection = next((r for r in pending if ledger_ops.metadata(r)["purpose"] == "reprotect"), None)
         if protection:
@@ -218,29 +339,33 @@ class TimeExitLifecycle:
             # may recover verified protection, but must not queue a market close.
             if row:
                 recovered = self.recover(pos, "regular session ended during protective cancellation")
-                if recovered.get("reprotected"):
+                if recovered.get("reprotected") or recovered.get("ok") or recovered.get("position_closed"):
                     self._set(row, "terminal")
                 return recovered
             return {"ok": False, "deferred": True, "position_id": pos["position_id"],
                     "symbol": pos["symbol"], "session_closed": True}
 
         try:
-            norm = self.broker.get_order(pos.get("broker_order_id"))
+            norm = self._read_protection(pos)
             legs = norm.get("legs") or []
             if norm.get("order_class") == "bracket" and norm.get("status") == "partially_filled":
                 raise ValueError("entry remains partially filled; unfilled remainder needs review")
             if not legs:
                 raise ValueError("cannot verify protective order lineage/legs")
+            current, outcome = self._book_protective_fills(pos, legs)
+            if current is None or current["status"] != "open":
+                if row:
+                    self._set(row, "terminal")
+                return self._closed_result(pos, outcome)
+            pos = current
             allowed = [norm.get("broker_order_id")] + [leg.get("broker_order_id") for leg in legs]
             self._fresh(pos, allowed)
         except Exception as exc:
             return self.incident(pos, f"time exit cannot establish fresh position/order ownership ({exc})",
                                  unknown=True, flat="broker is flat" in str(exc))
-        if any((leg.get("filled_qty") or 0) > 0 for leg in legs):
-            for leg in legs:
-                if (leg.get("filled_qty") or 0) > 0:
-                    self.om._record_broker_exit(pos, leg, "target" if leg["role"] == "take_profit" else "stop")
-            return {"ok": False, "deferred": True, "position_id": pos["position_id"], "symbol": pos["symbol"], "stale_view": True}
+        if row is None and any((leg.get("filled_qty") or 0) > 0 for leg in legs) and all(
+                (leg.get("status") or "").lower() in TERMINAL for leg in legs):
+            return self.recover(pos, "terminal partial protective fills left a residual position")
         if row is None:
             row, owner = self._new(pos, "time_exit", "canceling")
             if not owner:
@@ -248,26 +373,17 @@ class TimeExitLifecycle:
 
         cancel_errors = []
         for leg in legs:
-            if (leg.get("status") or "").lower() in TERMINAL:
+            if (leg.get("status") or "").lower() in TERMINAL | {"pending_cancel"}:
                 continue
             try:
                 self.broker.cancel_order(leg["broker_order_id"])
             except Exception as exc:
                 cancel_errors.append(str(exc))
-        verified = True
-        # Re-read EVERY leg, including ones whose earlier normalized state looked
-        # canceled. A pending_cancel is a live request, not terminal proof.
-        for leg in legs:
-            try:
-                checked = self.broker.get_order(leg["broker_order_id"])
-                if checked.get("filled_qty"):
-                    self.om._record_broker_exit(pos, {**checked, "role": leg["role"]},
-                                                "target" if leg["role"] == "take_profit" else "stop")
-                    verified = False
-                elif (checked.get("status") or "").lower() not in TERMINAL:
-                    verified = False
-            except Exception:
-                verified = False
+        current, outcome, verified = self._verify_cancellation(pos, legs)
+        if outcome:
+            self._set(row, "terminal")
+            return outcome
+        pos = current
         if not verified:
             result = self.incident(pos, "protective cancellation is incomplete/unknown; protection may be absent", unknown=True)
             result["cancel_errors"] = cancel_errors
@@ -278,9 +394,24 @@ class TimeExitLifecycle:
             qty = self._fresh(pos)
         except Exception as exc:
             return self.incident(pos, f"post-cancel broker state is not safe for liquidation ({exc})", unknown=True)
-        if abs(qty - float(row["qty"])) > 1e-6:
-            return self.incident(pos, "position quantity changed during cancellation", unknown=True)
-        self._set(row, "submitting")  # committed before the network side effect
+        # Cancellation can straddle an early/session close. Account for elapsed
+        # broker/poll time even when the caller supplies an injected clock.
+        try:
+            still_regular = self._regular_session(now + timedelta(seconds=monotonic() - started))
+        except Exception as exc:
+            return self.incident(pos, f"post-cancel broker session cannot be verified ({exc})", unknown=True)
+        if not still_regular:
+            recovered = self.recover(pos, "regular session ended while verifying cancellation")
+            if recovered.get("reprotected") or recovered.get("ok") or recovered.get("position_closed"):
+                self._set(row, "terminal")
+            return recovered
+        # A verified fill during cancellation can legitimately shrink the
+        # residual. Persist that exact quantity with the pre-submit phase; never
+        # resize an already-submitted/ambiguous intent or allow an increase.
+        try:
+            self._set(row, "submitting", qty=qty, expected_phase="canceling")
+        except Exception as exc:
+            return self.incident(pos, f"closing intent could not claim verified residual ({exc})", unknown=True)
         try:
             close = self.broker.submit_position_reduction(pos["symbol"], qty, pos["direction"], row["client_order_id"])
         except Exception as exc:
@@ -312,10 +443,16 @@ class TimeExitLifecycle:
                              if ledger_ops.metadata(r)["purpose"] == "reprotect"), None)
             if existing:
                 return self.recover(pos, reason, existing)
-            old_protection = self.broker.get_order(pos.get("broker_order_id"))
+            old_protection = self._read_protection(pos)
+            if not old_protection.get("legs"):
+                raise ValueError("prior protective lineage is missing; cannot overlay another OCO")
             if any((leg.get("status") or "").lower() not in TERMINAL
                    for leg in old_protection.get("legs", [])):
                 raise ValueError("prior protective orders are not verified terminal; cannot overlay another OCO")
+            current, outcome = self._book_protective_fills(pos, old_protection["legs"])
+            if current is None or current["status"] != "open":
+                return self._closed_result(pos, outcome)
+            pos = current
             qty = self._fresh(pos)
         except Exception as exc:
             return self.incident(pos, f"cannot safely restore protection ({reason}; {exc})", unknown=True)

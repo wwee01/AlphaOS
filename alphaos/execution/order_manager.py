@@ -427,7 +427,7 @@ class OrderManager:
         """Reconcile open Alpaca paper orders against the broker: open positions
         on entry fills, close them when a bracket leg (TP/SL) fills. Exits are
         managed by Alpaca's OCO, not the local watchdog."""
-        results = {"reconciled": 0, "opened": [], "exits": []}
+        results = {"reconciled": 0, "opened": [], "exits": [], "errors": []}
         if not (self.real_paper and self.broker_connected and self.alpaca):
             return results
         terminal_no_fill = {OrderState.REJECTED.value, OrderState.CANCELLED.value,
@@ -456,6 +456,7 @@ class OrderManager:
                 self.journal.log_system_event(
                     Severity.WARNING, "reconcile", f"get_order failed for {boid}.", {"error": str(exc)}
                 )
+                results["errors"].append({"order_id": order_id, "error": f"get_order failed: {exc}"})
                 continue
             results["reconciled"] += 1
             synced_this_pass.add(order_id)
@@ -475,12 +476,13 @@ class OrderManager:
                     pid = self._open_real_position(row, norm)
                 except Exception as exc:
                     if pos:
-                        TimeExitLifecycle(self).incident(pos, f"entry fill reconciliation failed ({exc})", unknown=True)
+                        incident = TimeExitLifecycle(self).incident(pos, f"entry fill reconciliation failed ({exc})", unknown=True)
                     else:
-                        TimeExitLifecycle(self).incident(
+                        incident = TimeExitLifecycle(self).incident(
                             {"position_id": f"unreconciled_{order_id}", "symbol": row["symbol"],
                              "qty": norm.get("filled_qty"), "trade_id": row.get("trade_id")},
                             f"entry fill could not be recorded ({exc})", unknown=True)
+                    results["errors"].append(incident)
                     continue
                 if was_missing:
                     results["opened"].append(pid)
@@ -504,7 +506,8 @@ class OrderManager:
                     try:
                         protection = self.alpaca.get_order(pos["broker_order_id"])
                     except Exception as exc:
-                        TimeExitLifecycle(self).incident(pos, f"current protection lookup failed ({exc})", unknown=True)
+                        results["errors"].append(TimeExitLifecycle(self).incident(
+                            pos, f"current protection lookup failed ({exc})", unknown=True))
                         continue
                 for leg in protection.get("legs", []):
                     if leg.get("role") in ("take_profit", "stop_loss") and (leg.get("filled_qty") or 0) > 0:
@@ -512,7 +515,8 @@ class OrderManager:
                         try:
                             ex = self._record_broker_exit(pos, leg, reason)
                         except Exception as exc:
-                            TimeExitLifecycle(self).incident(pos, f"exit fill reconciliation failed ({exc})", unknown=True)
+                            results["errors"].append(TimeExitLifecycle(self).incident(
+                                pos, f"exit fill reconciliation failed ({exc})", unknown=True))
                             break
                         if ex:
                             results["exits"].append(ex)
@@ -967,6 +971,8 @@ class OrderManager:
                 continue
             if outcome.get("ok"):
                 result["closed"].append(outcome)
+            elif outcome.get("critical"):
+                result["errors"].append(outcome)
             elif outcome.get("deferred"):
                 result["deferred"].append(outcome)
             else:

@@ -1411,11 +1411,13 @@ class Orchestrator:
         # observability; no ledger/behavior change.
         time_exit_records = [c["exit"] for c in recon.get("time_exits_closed", []) if c.get("exit")]
         all_exits = list(recon.get("exits", [])) + time_exit_records + exits
+        execution_errors = (list(recon.get("errors", [])) + list(recon.get("stale_errors", []))
+                            + list(recon.get("time_exits_errors", [])))
         done = timeutils.stamp()
         self.journal.conn.execute(
             "UPDATE scheduler_runs SET status = ?, completed_at_utc = ?, completed_at_sgt = ?, "
             "positions_touched = ?, error_count = ? WHERE scheduler_run_id = ?",
-            (RunStatus.COMPLETED.value, done.utc, done.local_sgt, positions_seen, 0, scheduler_run_id),
+            (RunStatus.COMPLETED.value, done.utc, done.local_sgt, positions_seen, len(execution_errors), scheduler_run_id),
         )
         self.journal.conn.commit()
         self.journal.log_system_event(
@@ -1433,6 +1435,10 @@ class Orchestrator:
             "protection": protection,
             "open_positions": self.journal.count_open_positions(),
             "scheduler_run_id": scheduler_run_id,
+            "errors": execution_errors,
+            "time_exits_closed": recon.get("time_exits_closed", []),
+            "time_exits_deferred": recon.get("time_exits_deferred", []),
+            "time_exits_errors": recon.get("time_exits_errors", []),
         }
 
     # --------------------------------------------------------------- report

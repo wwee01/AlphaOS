@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from alphaos.constants import ExecutionSource, ProtectionStatus, Severity
+from alphaos.execution import ledger_ops
 from alphaos.execution.protection_contract import verified_live_roles
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
@@ -224,6 +225,13 @@ def _apply_check_error_escalation(journal, position: dict, result: ProtectionChe
 
 
 def _record_check(journal, position: dict, result: ProtectionCheckResult, scheduler_run_id: Optional[str]) -> None:
+    # Selection, observation insertion and incident resolution are one write
+    # transaction, so concurrent callers cannot create two canonical owners.
+    with ledger_ops.atomic(journal) as scoped:
+        _record_check_atomic(scoped, position, result, scheduler_run_id)
+
+
+def _record_check_atomic(journal, position: dict, result: ProtectionCheckResult, scheduler_run_id: Optional[str]) -> None:
     """Insert this pass's audit row, update positions.protection_status, and
     open/supersede/auto-resolve incidents as needed.
 
@@ -250,13 +258,14 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
         (position["position_id"],),
     )
     is_incident_type = result.protection_status in _INCIDENT_STATUSES
-    existing_open = None
+    open_incidents = []
     if is_incident_type:
-        existing_open = journal.one(
+        open_incidents = journal.query(
             "SELECT check_id, protection_status FROM protection_checks WHERE position_id = ? "
-            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC LIMIT 1",
+            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC",
             (position["position_id"], *_INCIDENT_STATUSES),
         )
+    existing_open = open_incidents[0] if open_incidents else None
     same_ongoing_incident = (
         is_incident_type and existing_open is not None
         and existing_open["protection_status"] == result.protection_status
@@ -269,7 +278,7 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
     is_new_qty_mismatch = result.qty_match is False and not prior_qty_mismatch
 
     check_id = new_id("pcheck")
-    journal.insert("protection_checks", {
+    check_row = {
         "check_id": check_id,
         "position_id": result.position_id,
         "symbol": result.symbol,
@@ -287,12 +296,29 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
         "severity": result.severity,
         "detail": result.detail,
         "scheduler_run_id": scheduler_run_id,
-    })
+    }
+    if same_ongoing_incident:
+        # Preserve each observation without creating another unresolved owner
+        # of the same incident. Otherwise every repeat leaves an extra blocking
+        # row that a later healthy pass would have to rediscover and clear.
+        check_row.update({
+            "resolved_at_utc": timeutils.stamp().utc,
+            "resolved_by": "watchdog_observation",
+            "resolution_note": f"continuing observation of open incident {existing_open['check_id']}",
+        })
+    journal.insert("protection_checks", check_row)
+
+    if same_ongoing_incident:
+        # Consolidate duplicates left by older versions without deleting their
+        # observations or changing the current incident's original identity.
+        for old in open_incidents[1:]:
+            _mark_resolved(journal, old["check_id"], resolved_by="watchdog_superseded",
+                           note=f"duplicate observation consolidated into open incident {existing_open['check_id']}")
 
     if is_incident_type and not same_ongoing_incident:
-        if existing_open is not None:
+        for existing in open_incidents:
             _mark_resolved(
-                journal, existing_open["check_id"], resolved_by="watchdog_superseded",
+                journal, existing["check_id"], resolved_by="watchdog_superseded",
                 note=f"superseded by a new '{result.protection_status}' check this pass",
             )
         result.incident_id = check_id
@@ -324,12 +350,12 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
     # (not "not unprotected/closed_mismatch/unverifiable") so a transient
     # check_error can never accidentally auto-clear a real incident.
     if result.protection_status in (ProtectionStatus.PROTECTED.value, ProtectionStatus.DEGRADED.value):
-        row = journal.one(
+        rows = journal.query(
             "SELECT check_id FROM protection_checks WHERE position_id = ? "
-            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC LIMIT 1",
+            "AND protection_status IN (?, ?, ?) AND resolved_at_utc IS NULL ORDER BY id DESC",
             (position["position_id"], *_INCIDENT_STATUSES),
         )
-        if row:
+        for row in rows:
             _mark_resolved(journal, row["check_id"], resolved_by="watchdog_reconfirmed",
                           note="protection confirmed restored on a later watchdog pass")
 

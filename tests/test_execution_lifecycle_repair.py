@@ -117,7 +117,7 @@ def test_async_close_persists_across_restart_and_disabled_flag(tmp_path):
     fake, settings, journal, manager, pos, _ = setup(tmp_path, persistent=True)
     fake.close_fill_price["XLV"] = None
     first = manager.enforce_time_exits(now=_NOW)
-    close_id = first["deferred"][0]["pending_close_order"]
+    close_id = first["errors"][0]["pending_close_order"]
     journal, manager = restart(fake, settings, journal, tmp_path)
     object.__setattr__(settings, "time_exit_enforcement_enabled", False)
     complete(fake, close_id)
@@ -136,7 +136,7 @@ def test_partial_liquidation_accumulates_after_restart_without_duplicate_order(t
     fake, settings, journal, manager, pos, _ = setup(tmp_path, persistent=True)
     fake.close_fill_qty["XLV"], fake.close_fill_price["XLV"] = 6, 105
     first = manager.enforce_time_exits(now=_NOW)
-    close_id = first["deferred"][0]["pending_close_order"]
+    close_id = first["errors"][0]["pending_close_order"]
     assert journal.one("SELECT * FROM positions")["qty"] == 4
     manager.enforce_time_exits(now=_NOW)
     assert len(journal.query("SELECT * FROM paper_fills")) == 1
@@ -153,7 +153,7 @@ def test_canceled_partial_close_restores_only_verified_residual(tmp_path):
     fake, _, journal, manager, _, _ = setup(tmp_path)
     fake.close_fill_qty["XLV"], fake.close_fill_price["XLV"] = 6, 105
     first = manager.enforce_time_exits(now=_NOW)
-    fake.orders[first["deferred"][0]["pending_close_order"]].status = "canceled"
+    fake.orders[first["errors"][0]["pending_close_order"]].status = "canceled"
     result = manager.enforce_time_exits(now=_NOW)
     assert result["deferred"][0]["reprotected"] is True
     assert fake._by_symbol["XLV"].qty == 4
@@ -211,7 +211,7 @@ def test_asymmetric_cancel_is_blocking_and_retries_without_false_protection(tmp_
     tp = fake.leg("XLV", "take_profit")
     fake.cancel_result_status[tp.id] = "pending_cancel"
     first = manager.enforce_time_exits(now=_NOW)
-    assert first["deferred"][0]["critical"]
+    assert first["errors"][0]["critical"]
     assert fake.leg("XLV", "stop_loss").status == "canceled"
     assert not any(op == "close" for op, _ in fake.call_log)
     assert protection_watchdog.has_blocking_incident(journal)

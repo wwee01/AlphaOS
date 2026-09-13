@@ -472,7 +472,8 @@ def test_enforced_exit_calls_cancel_then_verify_then_close_in_order():
     assert len(result["closed"]) == 1 and result["closed"][0]["symbol"] == "XLV"
     log = fake.call_log
     cancel_indices = [i for i, c in enumerate(log) if c[0] == "cancel" and c[1] in (tp_id, sl_id)]
-    verify_indices = [i for i, c in enumerate(log) if c[0] == "get_order" and c[1] in (tp_id, sl_id)]
+    verify_indices = [i for i, c in enumerate(log)
+                      if c[0] == "get_order" and c[1] in (tp_id, sl_id) and i > max(cancel_indices)]
     close_indices = [i for i, c in enumerate(log) if c[0] == "close" and c[1] == "XLV"]
     assert len(cancel_indices) == 2, "both legs must be cancelled"
     assert len(verify_indices) == 2, "both legs must be re-read to verify the cancel"
@@ -591,7 +592,7 @@ def test_cancel_unverified_means_no_close_is_submitted():
     raise, but the broker's post-cancel state is still non-terminal
     (pending_cancel, still processing) -- a non-raising cancel is not proof.
     NO close may ever be submitted in this state; the position stays open
-    and protected."""
+    with a blocking protection error."""
     fake = FakeTradingClient()
     _, journal, om = _paper_om(fake)
     opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
@@ -603,7 +604,7 @@ def test_cancel_unverified_means_no_close_is_submitted():
     result = om.enforce_time_exits(now=_NOW)
 
     assert result["closed"] == []
-    assert len(result["deferred"]) == 1
+    assert len(result["errors"]) == 1 and result["errors"][0]["critical"]
     assert all(c[0] != "close" for c in fake.call_log)
     row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
     assert row["status"] == "open"
@@ -945,9 +946,9 @@ def test_blocker1_retry_after_reprotect_cancels_the_new_legs_never_orphaned():
 
 
 # ======================================================= audit fixup: BLOCKER-2
-def test_blocker2_deferred_close_fills_between_passes_never_submits_unhedged_oco():
+def test_blocker2_pending_close_fills_between_passes_never_submits_unhedged_oco():
     """Two-pass probe: pass 1's liquidation is accepted but not yet filled
-    (deferred, nothing recorded). Between passes it actually fills at the
+    (a blocking protection error, no fill recorded). Between passes it fills at the
     broker. Pass 2 must recognize the broker now reports this symbol FLAT
     and stand down completely -- never retry close() (which would 404/error
     on a flat symbol) and, critically, never fall into recovery and submit
@@ -958,17 +959,17 @@ def test_blocker2_deferred_close_fills_between_passes_never_submits_unhedged_oco
     pos, boid = _open_broker_position(journal, fake, symbol="XLV", qty=10.0,
                                       max_holding_days=5, opened_market_date=opened)
 
-    # --- pass 1: close accepted, not yet filled -> deferred, nothing recorded ---
+    # Pass 1: accepted close without a protective stop is an error, never benign.
     fake.close_fill_price["XLV"] = None
     result1 = om.enforce_time_exits(now=_NOW)
     assert result1["closed"] == []
-    assert len(result1["deferred"]) == 1
-    assert result1["deferred"][0].get("pending_close_order")
+    assert len(result1["errors"]) == 1
+    assert result1["errors"][0].get("pending_close_order")
     row = journal.one("SELECT * FROM positions WHERE position_id = ?", (pos["position_id"],))
     assert row["status"] == "open"
 
     # Between passes: the broker reports the actual liquidation fill.
-    close_id = result1["deferred"][0]["pending_close_order"]
+    close_id = result1["errors"][0]["pending_close_order"]
     close = fake.orders[close_id]
     close.status, close.filled_qty, close.filled_avg_price = "filled", 10, 104
     fake.set_broker_qty("XLV", 0)
@@ -993,9 +994,9 @@ def test_high1_partial_liquidation_fill_never_recorded_as_a_full_close():
     result = om.enforce_time_exits(now=_NOW)
 
     assert result["closed"] == []
-    assert len(result["deferred"]) == 1
-    assert result["deferred"][0].get("partial_fill") is True
-    assert result["deferred"][0]["filled_qty"] == 6.0
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].get("partial_fill") is True
+    assert result["errors"][0]["filled_qty"] == 6.0
 
     # Never a full close recorded.
     assert journal.one("SELECT * FROM exits WHERE position_id = ?", (pos["position_id"],)) is None
@@ -1259,11 +1260,9 @@ def test_r2_oco_submitted_with_no_broker_order_id_treated_as_replace_failure():
 
 
 # ======================================================= round 2 fixup: R3
-def test_r3_broker_flat_standdown_classified_as_deferred_not_error():
-    """A correct, intended stand-down (spec eligibility: never act on a
-    stale broker view) must land in "deferred", not "errors" -- it was
-    previously miscounted as an error, inflating the count an operator
-    reads off enforce_time_exits()'s summary."""
+def test_broker_flat_local_open_mismatch_is_a_critical_error():
+    """Standing down is correct, but an unexplained missing broker position
+    remains a blocking accounting error, not a benign session deferral."""
     fake = FakeTradingClient()
     _, journal, om = _paper_om(fake)
     opened = _opened_date_for(_NOW_DATE, trading_days_ago=5)
@@ -1272,9 +1271,10 @@ def test_r3_broker_flat_standdown_classified_as_deferred_not_error():
 
     result = om.enforce_time_exits(now=_NOW)
 
-    assert result["errors"] == [], "a correct stand-down must not inflate the error count"
-    assert len(result["deferred"]) == 1
-    assert result["deferred"][0].get("broker_flat") is True
+    assert result["deferred"] == []
+    assert len(result["errors"]) == 1
+    assert result["errors"][0].get("broker_flat") is True
+    assert result["errors"][0]["critical"] is True
 
 
 # ======================================================= round 2 fixup: M4
