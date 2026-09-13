@@ -20,7 +20,8 @@ from typing import Optional
 from alphaos.constants import Severity
 from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cadence, cost_guard, jobs
-from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD, monitor_health
+from alphaos.scheduler.monitor_health import monitor_health
+from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import monitor_ownership
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
@@ -361,14 +362,7 @@ class JobRunner:
                 results.append({"job_type": job_type, "status": "fused", "reason": fuse_reason})
                 continue
 
-            token = None
-            if self.role == "research" and job_type == cadence.JobType.SCAN:
-                token = RESEARCH_ENTRY_GUARD.set(True)
-            try:
-                results.append(self.run_job(job_type, allow_monitor_recovery=False))
-            finally:
-                if token is not None:
-                    RESEARCH_ENTRY_GUARD.reset(token)
+            results.append(self.run_job(job_type, allow_monitor_recovery=False))
         return results
 
     def _handle_fuse(self, job_type: str, reason: str, streak: int) -> None:
@@ -488,12 +482,8 @@ class JobRunner:
     def heartbeat_check(self, now: Optional[datetime] = None) -> dict:
         """Dedicated monitor heartbeat; unrelated jobs cannot certify execution."""
         result = monitor_health(self.journal, self.orch.settings, now)
-        if not result["ok"]:
-            try:
-                alerts.send_alert(
-                    self.orch.settings, title="AlphaOS execution monitor unhealthy",
-                    message=result["detail"], priority="high", journal=self.journal,
-                )
-            except Exception:
-                pass
+        result["notification"] = notify_monitor_transition(self.journal, self.orch.settings, result, now)
+        if result["notification"].get("state_error"):
+            result["monitor_ok"] = result["ok"]
+            result["ok"] = False
         return result

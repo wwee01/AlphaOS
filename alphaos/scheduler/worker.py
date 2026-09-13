@@ -15,8 +15,8 @@ from alphaos.config.settings import load_settings
 from alphaos.journal.journal_store import JournalStore
 from alphaos.scheduler.job_runner import JobRunner
 from alphaos.scheduler.monitor_health import monitor_health
+from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import worker_ownership
-from alphaos.util import alerts
 
 
 def run_role(role: str, settings) -> tuple[dict, int]:
@@ -34,12 +34,9 @@ def run_role(role: str, settings) -> tuple[dict, int]:
                 )
                 return {"role": role, "ready": not active and not passes, "active_jobs": active,
                         "active_monitor_passes": passes, "monitor_health": health}, 0 if not active and not passes else 1
-            if role == "health" and not health["ok"]:
-                # Alert without a writable JournalStore: health must never
-                # migrate state or acknowledge/clear an execution incident.
-                alerts.send_alert(settings, title="AlphaOS execution monitor unhealthy",
-                                  message=health["detail"], priority="high")
-            ready = health["ok"]
+            if role == "health":
+                health["notification"] = notify_monitor_transition(journal, settings, health)
+            ready = health["ok"] and not health.get("notification", {}).get("state_error")
             if role == "readiness":
                 ready = health.get("entry_ready", False) and health.get("last_success_role") == "monitor"
             return {"role": role, "monitor_health": health, "ready": ready}, 0 if ready else 1

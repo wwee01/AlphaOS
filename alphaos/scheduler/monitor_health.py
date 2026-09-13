@@ -8,14 +8,12 @@ No broker, alert, ownership acquisition, fuse reset or ledger writes occur here.
 from __future__ import annotations
 
 import json
-from contextvars import ContextVar
 
 from alphaos.constants import MarketSession
 from alphaos.execution import protection_watchdog
 from alphaos.util import timeutils
 
 TRIGGER_MINUTES = 5
-RESEARCH_ENTRY_GUARD: ContextVar[bool] = ContextVar("alphaos_research_entry_guard", default=False)
 
 
 def monitor_health(journal, settings, now=None) -> dict:
@@ -64,28 +62,32 @@ def monitor_health(journal, settings, now=None) -> dict:
                 manual_running.append((row, pass_age))
         result["unfinished_monitor_passes"] = len(manual_running)
         problems = []
+        issue_codes = set()
+        def problem(code: str, detail: str) -> None:
+            issue_codes.add(code)
+            problems.append(detail)
         if len(manual_running) > 1:
-            problems.append("multiple unfinished monitor passes; ownership requires review")
+            problem("ownership_ambiguous", "multiple unfinished monitor passes; ownership requires review")
         if any(a is None or a < 0 or a > stale_minutes * 60 for _, a in manual_running):
-            problems.append("unfinished monitor pass stale or invalid; explicit recovery required")
+            problem("monitor_stalled", "unfinished monitor pass stale or invalid; explicit recovery required")
         if fused:
-            problems.append("monitor fused; explicit reviewed recovery required")
+            problem("monitor_fused", "monitor fused; explicit reviewed recovery required")
         elif rows and rows[0]["status"] == "failed":
-            problems.append("latest monitor attempt failed")
+            problem("monitor_failed", "latest monitor attempt failed")
         if len(running) > 1:
-            problems.append("multiple started monitor rows; ownership requires review")
+            problem("ownership_ambiguous", "multiple started monitor rows; ownership requires review")
         for row in running:
             run_age = timeutils.age_seconds(row["started_at_utc"], now)
             if run_age is None or run_age < 0 or run_age > stale_minutes * 60:
-                problems.append("monitor in-flight state stale or invalid; explicit recovery required")
+                problem("monitor_stalled", "monitor in-flight state stale or invalid; explicit recovery required")
         if not last:
-            problems.append("no completed job_runs row found for monitor")
+            problem("monitor_missing", "no completed job_runs row found for monitor")
         elif age is None:
-            problems.append("last completed monitor has an unparseable timestamp")
+            problem("invalid_monitor_timestamp", "last completed monitor has an unparseable timestamp")
         elif age < 0:
-            problems.append("last completed monitor timestamp is in the future")
+            problem("invalid_monitor_timestamp", "last completed monitor timestamp is in the future")
         elif age > stale_minutes * 60:
-            problems.append(f"last completed monitor {age / 60:.1f}m ago (> {stale_minutes}m)")
+            problem("monitor_stale", f"last completed monitor {age / 60:.1f}m ago (> {stale_minutes}m)")
         if last:
             summary = json.loads(last.get("result_summary_json") or "{}")
             if not isinstance(summary, dict):
@@ -93,14 +95,26 @@ def monitor_health(journal, settings, now=None) -> dict:
             inner = summary.get("monitor_result") or {}
             if (summary.get("protection_blocking") or inner.get("errors")
                     or inner.get("time_exits_errors") or inner.get("error_count")):
-                problems.append("latest monitor reported execution/protection errors")
+                problem("execution_incident", "latest monitor reported execution/protection errors")
         blocking = protection_watchdog.has_blocking_incident(journal)
         result["protection_blocking"] = blocking is not None
         if blocking:
-            problems.append("unresolved protection incident")
+            problem("protection_blocking", "unresolved protection incident")
+        # Stable semantic identity, not per-pass row IDs or timestamps, so
+        # audit observations of one unresolved incident do not become pages.
+        result["protection_issues"] = [
+            f"{r.get('position_id') or r.get('symbol') or 'unknown'}:{r['protection_status']}"
+            for r in journal.query(
+                "SELECT DISTINCT position_id, symbol, protection_status FROM protection_checks "
+                "WHERE protection_status IN ('unprotected','closed_mismatch','unverifiable') "
+                "AND resolved_at_utc IS NULL ORDER BY position_id, symbol, protection_status"
+            )
+        ] if blocking else []
+        result["issue_codes"] = sorted(issue_codes)
         result["ok"] = not problems
         result["entry_ready"] = not problems and not running and not manual_running
         result["detail"] = "; ".join(problems) if problems else f"monitor completed {(age or 0) / 60:.1f}m ago"
     except Exception as exc:
-        result.update(ok=False, detail=f"monitor health unavailable ({type(exc).__name__})")
+        result.update(ok=False, entry_ready=False, issue_codes=["health_unavailable"],
+                      detail=f"monitor health unavailable ({type(exc).__name__})")
     return result

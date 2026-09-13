@@ -268,24 +268,6 @@ def test_preflight_refuses_unfinished_manual_monitor_pass(tmp_path):
     assert result['active_monitor_passes'][0]['scheduler_run_id'] == 'legacy-pass'
 
 
-def test_research_entry_context_covers_only_scan_and_resets_on_failure(journal, monkeypatch):
-    from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD
-    _row(journal, 'completed', when=timeutils.now_utc())
-    observed = []
-    def scan(*args):
-        observed.append(('scan', RESEARCH_ENTRY_GUARD.get()))
-        raise RuntimeError('simulated scan failure')
-    def outcomes(*args):
-        observed.append(('outcomes', RESEARCH_ENTRY_GUARD.get()))
-        return {'status': 'completed'}
-    monkeypatch.setattr(alerts, 'send_alert', lambda *a, **k: True)
-    monkeypatch.setattr(cadence, 'is_due', lambda kind, *a: (kind in ('scan', 'outcomes_update'), 'test'))
-    monkeypatch.setitem(_JOB_FUNCS, 'scan', scan)
-    monkeypatch.setitem(_JOB_FUNCS, 'outcomes_update', outcomes)
-    JobRunner(_orch(journal), role='research').run_due_jobs()
-    assert observed == [('scan', True), ('outcomes', False)]
-    assert RESEARCH_ENTRY_GUARD.get() is False
-
 
 def test_manual_monitor_uses_same_owner_without_startup_or_broker_calls(tmp_path):
     from alphaos.orchestrator import Orchestrator
