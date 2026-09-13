@@ -1,0 +1,73 @@
+"""A long scan may not rely on an earlier healthy execution monitor."""
+
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from alphaos.journal.journal_store import JournalStore
+from alphaos.orchestrator import Orchestrator
+from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD, monitor_health
+from alphaos.util import timeutils
+from conftest import make_proposal, make_settings
+
+
+@pytest.mark.parametrize("failure", ["stale", "failed", "inflight"])
+def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure, monkeypatch):
+    start = datetime(2026, 9, 14, 14, 0, tzinfo=timezone.utc)
+    now = [start]
+    monkeypatch.setattr(timeutils, "now_utc", lambda: now[0])
+    journal = JournalStore(":memory:")
+    orch = Orchestrator(settings=make_settings(), journal=journal)
+    submitted = []
+    orch.orders = SimpleNamespace(real_paper=True, execute_proposal=lambda *a, **kw: submitted.append(a))
+    journal.insert("job_runs", {
+        "job_run_id": "healthy", "job_type": "monitor", "lock_key": "initial",
+        "status": "completed", "started_at_utc": start.isoformat(),
+        "finished_at_utc": start.isoformat(), "result_summary_json": {"worker_role": "monitor"},
+    })
+    token = RESEARCH_ENTRY_GUARD.set(True)
+    try:
+        assert monitor_health(journal, orch.settings)["entry_ready"]
+        if failure == "stale":
+            now[0] += timedelta(hours=1)
+        else:
+            journal.insert("job_runs", {
+                "job_run_id": "later", "job_type": "monitor", "lock_key": "later",
+                "status": "failed" if failure == "failed" else "started",
+                "started_at_utc": start.isoformat(), "finished_at_utc": start.isoformat(),
+            })
+        proposal = make_proposal(invalidation_reason="stop invalidates thesis")
+        result = orch._execute_checked(proposal)
+        assert result.blocked
+        assert "monitor not ready" in result.detail
+        assert submitted == []
+        assert journal.count_rows("paper_orders") == 0
+    finally:
+        RESEARCH_ENTRY_GUARD.reset(token)
+        orch.close()
+
+
+def test_ready_monitor_preserves_normal_paper_submission_path(monkeypatch):
+    now = datetime(2026, 9, 14, 14, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(timeutils, "now_utc", lambda: now)
+    journal = JournalStore(":memory:")
+    orch = Orchestrator(settings=make_settings(), journal=journal)
+    sent = []
+    def submit(proposal, **kwargs):
+        sent.append(proposal.proposal_id)
+        return "fake-submitted"
+    orch.orders = SimpleNamespace(real_paper=True, execute_proposal=submit)
+    journal.insert("job_runs", {
+        "job_run_id": "healthy", "job_type": "monitor", "lock_key": "initial",
+        "status": "completed", "started_at_utc": now.isoformat(),
+        "finished_at_utc": now.isoformat(), "result_summary_json": {"worker_role": "monitor"},
+    })
+    token = RESEARCH_ENTRY_GUARD.set(True)
+    try:
+        proposal = make_proposal(invalidation_reason="stop invalidates thesis")
+        assert orch._execute_checked(proposal) == "fake-submitted"
+        assert sent == [proposal.proposal_id]
+    finally:
+        RESEARCH_ENTRY_GUARD.reset(token)
+        orch.close()
