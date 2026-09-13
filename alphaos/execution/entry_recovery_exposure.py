@@ -47,7 +47,7 @@ def _snapshot(journal, scope):
     """Include the symbol and linked rows, even if a linked row has a bad symbol."""
     rows = {table: journal.query(f"SELECT * FROM {table} ORDER BY id") for table in _TABLES}
     ids = {key: set(scope.get(key, [])) for key in _IDENTIFIERS}
-    chosen = {table: {} for table in _TABLES}
+    chosen: dict[str, dict[int, dict]] = {table: {} for table in _TABLES}
     changed = True
     while changed:
         changed = False
@@ -183,7 +183,7 @@ def verify_entry_absence(journal, broker, row, *, terminal_order=None):
                 or not order.get("client_order_id") or order["client_order_id"] != norm.get("client_order_id")):
             raise ValueError("held order has unverifiable broker/client identity")
 
-    allowed = {}
+    allowed: dict[str, dict] = {}
     required_open = set()
     attributed = []
     used_entries, used_protection = set(), set()
@@ -221,7 +221,7 @@ def verify_entry_absence(journal, broker, row, *, terminal_order=None):
         fills = [fill for fill in local["paper_fills"]
                  if fill.get("order_id") == entry["order_id"] or fill.get("position_id") == pos["position_id"]]
         entry_filled, exit_filled = 0.0, 0.0
-        exits = defaultdict(float)
+        exits: dict[str, float] = defaultdict(float)
         for fill in fills:
             amount = _number(fill.get("qty"), positive=True)
             if (fill.get("execution_source") != "alpaca_paper" or fill.get("symbol") != target["symbol"]

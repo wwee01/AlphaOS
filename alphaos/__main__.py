@@ -1340,7 +1340,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
     sub.add_parser("protection_status",
                    help="broker protection watchdog status: unprotected/mismatched positions, open incidents")
-    er = sub.add_parser("entry_intent_resolve", help="preview recovery of a provably unsent paper entry")
+    er = sub.add_parser("entry_intent_resolve", help="preview recovery of a provably unsent or broker-rejected paper entry")
     er.add_argument("identifier", help="durable order ID, client ID or proposal ID")
     er.add_argument("--apply", action="store_true", help="abandon the unsent intent after fresh verification; never resubmit")
     er.add_argument("--note", default="", help="required operator audit reason when applying")

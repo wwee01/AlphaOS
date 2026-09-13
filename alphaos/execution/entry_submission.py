@@ -114,6 +114,28 @@ class EntrySubmission:
             "message": f"durable paper entry phase: {previous} -> {phase}",
         })
 
+    def rejected(self, row, proof):
+        """Keep a verified POST rejection gated until audited operator recovery."""
+        from alphaos.execution.entry_rejection import validate_rejection_proof
+
+        with ledger_ops.atomic(self.journal) as journal:
+            current = journal.order_by_id(row["order_id"])
+            meta = ledger_ops.metadata(current)
+            if (meta.get("phase") != "submitting" or meta.get("dispatch_version") != 1
+                    or not meta.get("dispatch_started_at") or current.get("broker_order_id")):
+                raise ValueError("cannot attach rejection proof to a changed entry")
+            validate_rejection_proof(current, proof)
+            ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
+                "raw_request_json": {**meta, "phase": "unknown",
+                                     "last_verification_error": "broker rejected entry; audited recovery required",
+                                     "broker_rejection_proof": {"version": 1, "kind": "broker_confirmed_rejection",
+                                                                "rejection": proof,
+                                                                "observed_at_utc": timeutils.stamp().utc}},
+            })
+            self._event(journal, current, "submitting", "unknown")
+        self.incident(row, "broker rejected entry; review entry_intent_resolve before releasing its gate")
+        return self.journal.order_by_id(row["order_id"])
+
     @staticmethod
     def validate(row, norm, *, nested=False):
         side = "sell" if row["direction"] == "short" else "buy"
@@ -212,15 +234,21 @@ class EntrySubmission:
 
     def _verify_recovery(self, row, norm):
         if norm.get("status") in TERMINAL_ZERO and norm.get("filled_qty") == 0:
-            from alphaos.execution.entry_intent_resolution import _flat_positions, _no_local_exposure, _no_orders
+            from alphaos.execution.entry_recovery_exposure import verify_entry_absence
 
+            self.validate(row, norm, nested=True)
             if any(leg.get("filled_qty") != 0 for leg in norm.get("legs", [])):
                 raise ValueError("terminal zero-fill entry has contradictory protective fill evidence")
-            _no_local_exposure(self.journal, row)
-            _flat_positions(self.broker.list_positions(), row["symbol"])
-            _no_orders(self.broker.list_open_orders(), row)
-            _flat_positions(self.broker.list_positions(), row["symbol"])
-            return
+            evidence = verify_entry_absence(self.journal, self.broker, row, terminal_order=norm)
+            # Attribution does not establish non-acceptance. Re-read the exact
+            # failed entry after the exposure checks, independently of holdings.
+            fresh = self.lookup(row)
+            if (fresh.get("status") not in TERMINAL_ZERO or fresh.get("filled_qty") != 0
+                    or any(leg.get("filled_qty") != 0 for leg in fresh.get("legs", []))
+                    or {leg["broker_order_id"] for leg in fresh.get("legs", [])}
+                    != {leg["broker_order_id"] for leg in norm.get("legs", [])}):
+                raise ValueError("terminal zero-fill entry changed during recovery")
+            return evidence
         pos = self.journal.one("SELECT * FROM positions WHERE order_id=?", (row["order_id"],))
         if pos and pos["status"] == "open":
             broker_positions = {p["symbol"]: p for p in self.broker.list_positions()}
@@ -246,15 +274,24 @@ class EntrySubmission:
 
     def finish(self, row, norm, *, verify_recovery=False):
         terminal_zero = norm.get("status") in TERMINAL_ZERO and norm.get("filled_qty") == 0
+        expected = self.journal.order_by_id(row["order_id"])
+        evidence = None
         if verify_recovery or terminal_zero:
-            self._verify_recovery(row, norm)
+            evidence = self._verify_recovery(row, norm)
         with ledger_ops.atomic(self.journal) as journal:
             current = journal.order_by_id(row["order_id"])
+            if evidence is not None:
+                from alphaos.execution.entry_recovery_exposure import recheck_entry_absence
+
+                if current != expected:
+                    raise ValueError("entry changed during terminal recovery")
+                recheck_entry_absence(journal, row, evidence)
             meta = ledger_ops.metadata(current)
             if meta.get("phase") != "acknowledged":
                 self._event(journal, current, meta.get("phase"), "acknowledged")
             ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
-                "raw_request_json": {**meta, "phase": "acknowledged"},
+                "raw_request_json": {**meta, "phase": "acknowledged",
+                                     **({"recovery_evidence": evidence} if evidence is not None else {})},
             })
             journal.conn.execute(
                 "UPDATE protection_checks SET resolved_at_utc=?, resolved_by='entry_reconciled', "

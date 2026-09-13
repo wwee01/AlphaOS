@@ -23,7 +23,7 @@ from copy import copy
 from dataclasses import dataclass, field
 from typing import Optional
 
-from alphaos.broker.alpaca_client import AlpacaClient, AlpacaSafetyError, AlpacaSubmissionNotSent
+from alphaos.broker.alpaca_client import AlpacaClient, AlpacaSafetyError, AlpacaSubmissionNotSent, AlpacaSubmissionRejected
 from alphaos.constants import (
     ExecutionProvider,
     ExecutionSource,
@@ -323,6 +323,9 @@ class OrderManager:
         except AlpacaSubmissionNotSent as exc:
             row = entry.not_sent(row, str(exc), exc.proof)
             return self._entry_result(row, detail="Entry was not sent; review entry_intent_resolve before releasing its gate")
+        except AlpacaSubmissionRejected as exc:
+            row = entry.rejected(row, exc.proof)
+            return self._entry_result(row, detail="Broker rejected entry; review entry_intent_resolve before releasing its gate")
         except Exception as exc:
             recovering = True
             row = entry.uncertain(row, f"submission response unavailable ({exc})")
