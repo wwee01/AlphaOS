@@ -15,11 +15,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from alphaos.ai.claude_reviewer import ClaudeReviewer, ClaudeUnavailable
 from alphaos.ai.openai_client import OpenAIClient, OpenAIEvaluation
-from alphaos.approval import ApprovalEngine
+from alphaos.approval import ApprovalEngine, ApprovalOutcome
 from alphaos.config.settings import Settings, load_settings
 from alphaos.constants import (
     ArmedWatchReason,
@@ -96,6 +96,7 @@ from alphaos.strategy.daytrade_experiment import DaytradeExperiment
 from alphaos.util.ids import new_id
 
 # Price-drift is gated by MAX_PRICE_DRIFT_BPS_SINCE_PROPOSAL via the freshness guard.
+ENTRY_MONITOR_WAIT_SECONDS = 10.0
 
 
 @dataclass
@@ -107,6 +108,7 @@ class ScanSummary:
     rejected: int = 0
     risk_blocked: int = 0
     auto_submitted: int = 0
+    entry_deferred: int = 0
     pending_manual: int = 0
     labelled: int = 0
     shortlisted: int = 0
@@ -790,11 +792,17 @@ class Orchestrator:
             self._mark_proposal_expired(proposal.proposal_id, ReasonCode.PROPOSAL_EXPIRED.value)
             return True
 
-        outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True, unattended=unattended)
+        outcome = self.approvals.consider(proposal, risk_ok=True, freshness_ok=True,
+                                          unattended=unattended, record=False)
         if outcome.approved:
-            result = self._execute(proposal)
-            if result.blocked:
-                self._set_proposal_status(proposal.proposal_id, ProposalStatus.BLOCKED.value)
+            result = self._execute(proposal, approval=lambda: self.approvals.consider(
+                proposal, risk_ok=True, freshness_ok=True, unattended=unattended))
+            if result.deferred:
+                summary.entry_deferred += 1
+                summary.pending_manual += 1
+                summary.notes.append(f"{proposal.symbol}: {result.detail}")
+            elif result.blocked:
+                self._record_execution_block(proposal.proposal_id, result)
             else:
                 status = ProposalStatus.FILLED.value if result.state == OrderState.FILLED.value else "submitted"
                 self._set_proposal_status(proposal.proposal_id, status)
@@ -990,10 +998,12 @@ class Orchestrator:
             self._set_proposal_status(proposal_id, "blocked")
             return False, f"risk blocked: {risk.primary_reason}"
 
-        self.approvals.approve_manually(proposal, approver=approver, freshness_ok=True, risk_ok=True)
-        result = self._execute(proposal, fill_price=cur)
+        result = self._execute(proposal, fill_price=cur, approval=lambda: self.approvals.approve_manually(
+            proposal, approver=approver, freshness_ok=True, risk_ok=True))
+        if result.deferred:
+            return False, f"execution deferred; proposal remains pending for a fresh approval retry: {result.detail}"
         if result.blocked:
-            self._set_proposal_status(proposal_id, "blocked")
+            self._record_execution_block(proposal_id, result)
             return False, f"execution blocked: {result.block_reason}"
         # Status lifecycle: a real broker order may be ACCEPTED but not yet filled
         # (it fills later via reconcile). Only mark 'filled' once the fill is
@@ -2007,47 +2017,109 @@ class Orchestrator:
         decision.account_context = state
         return decision
 
-    def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None):
+    def _record_execution_block(self, proposal_id: str, result: OrderResult) -> None:
+        # A proposal can be rejected/superseded while an entry waits. Never
+        # overwrite that decision, or turn a discovered expiry into BLOCKED.
+        current = self.journal.proposal_by_id(proposal_id)
+        if not current or current["status"] not in (*ProposalStatus.approvable(), ProposalStatus.APPROVED.value):
+            return
+        if result.block_reason == ReasonCode.PROPOSAL_EXPIRED.value:
+            self._mark_proposal_expired(proposal_id, result.block_reason)
+        else:
+            self._set_proposal_status(proposal_id, ProposalStatus.BLOCKED.value)
+
+    def _defer_entry(self, proposal: TradeProposal, detail: str,
+                     reason: str = ReasonCode.UNVERIFIABLE_DATA.value) -> OrderResult:
+        current = self.journal.proposal_by_id(proposal.proposal_id)
+        if current and current["status"] not in ProposalStatus.approvable():
+            return OrderResult(blocked=True, block_reason=ReasonCode.APPROVAL_REQUIRED.value,
+                               detail="proposal no longer approvable after entry wait",
+                               state=OrderState.REJECTED.value)
+        if proposal_ttl.is_expired(proposal.proposal_expires_at_utc):
+            return OrderResult(blocked=True, block_reason=ReasonCode.PROPOSAL_EXPIRED.value,
+                               detail="proposal TTL exceeded while waiting for entry ownership",
+                               state=OrderState.REJECTED.value)
+        self.journal.log_system_event(
+            Severity.INFO, "entry_deferred", detail,
+            {"proposal_id": proposal.proposal_id, "reason_code": reason,
+             "retryable": True, "broker_attempted": False},
+        )
+        return OrderResult(blocked=False, deferred=True, block_reason=reason, detail=detail)
+
+    def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None,
+                 approval: Optional[Callable[[], ApprovalOutcome]] = None):
         if not self.orders.real_paper:
-            return self._execute_checked(proposal, fill_price)
+            return self._execute_checked(proposal, fill_price, approval)
         from alphaos.execution.entry_submission import existing_entry_intent
         existing = existing_entry_intent(self.journal, proposal.proposal_id)
         if existing:
-            # Observing a durable attempt performs no new broker action. A
-            # repeated approval must not relabel an uncertain real order as a
-            # rejected attempt merely because its own entry gate is blocking.
+            # Observing an existing attempt performs no broker action and
+            # consumes no second approval, including uncertain submissions.
             return self.orders._entry_result(existing)
-        from alphaos.risk.account_exposure import entry_submission_lock, ExposureUnavailable
+        from alphaos.risk.account_exposure import entry_submission_lock, EntrySubmissionBusy, ExposureUnavailable
         from alphaos.scheduler.ownership import monitor_ownership
         try:
-            # Independent monitoring must not change the book between the
-            # final account check and entry submission. Keep this exclusive
-            # section short; the preceding AI scan holds no monitor lock.
-            with entry_submission_lock(self.journal), monitor_ownership(self.journal) as acquired:
-                if not acquired:
-                    return OrderResult(
-                        blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
-                        detail="Execution monitor owns the account; new entry deferred",
-                        state=OrderState.REJECTED.value,
-                    )
-                risk = self._assess_current_risk(
-                    direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
-                    requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,
-                    trades_today=self.journal.count_paper_orders_today(),
-                    realized_pnl_today=self.journal.realized_pnl_today(),
-                )
-                self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
-                if not risk.approved or not risk.sizing or proposal.qty > risk.sizing.shares:
-                    detail = risk.block_reasons or [{"code": ReasonCode.RISK_OVERSIZED.value,
-                                                    "detail": "approved size exceeds current account capacity"}]
-                    self.journal.log_system_event(Severity.WARNING, "risk", "Entry blocked by fresh account limits", {"proposal_id": proposal.proposal_id, "reasons": detail})
-                    return OrderResult(blocked=True, block_reason=detail[0]["code"], detail=str(detail), state=OrderState.REJECTED.value)
-                return self._execute_checked(proposal, fill_price)
+            # Keep the same lock order as every real-paper submission. No
+            # monitor/exit needs the entry lock, so monitoring can complete
+            # while this entry waits; no SQLite write transaction is held.
+            with entry_submission_lock(self.journal):
+                with monitor_ownership(self.journal) as acquired:
+                    if acquired:
+                        return self._execute_owned(proposal, fill_price, approval)
+                with monitor_ownership(self.journal, timeout_seconds=ENTRY_MONITOR_WAIT_SECONDS) as acquired:
+                    if not acquired:
+                        return self._defer_entry(
+                            proposal, "Execution monitor owns the account; bounded wait ended without a broker attempt. Retry while the proposal is valid.")
+                    return self._execute_owned(proposal, fill_price, approval, refresh_market=True)
+        except EntrySubmissionBusy:
+            return self._defer_entry(proposal, "Another entry submission owns the account; no broker attempt made. Retry while the proposal is valid.")
         except ExposureUnavailable as exc:
             return OrderResult(blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
                                detail=str(exc), state=OrderState.REJECTED.value)
 
-    def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None):
+    def _execute_owned(self, proposal: TradeProposal, fill_price: Optional[float],
+                       approval: Optional[Callable[[], ApprovalOutcome]], *, refresh_market=False):
+        if proposal_ttl.is_expired(proposal.proposal_expires_at_utc):
+            return self._execute_checked(proposal, fill_price, approval)
+        snapshot = None
+        if refresh_market:
+            # The pre-wait manual/scan quote cannot certify a delayed entry.
+            try:
+                snapshot = self.market.get_snapshot(proposal.symbol)
+                fresh = self.freshness.assess(snapshot)
+            except Exception as exc:
+                return self._defer_entry(proposal, f"Fresh market data after monitor wait unavailable ({type(exc).__name__}); retry while valid.")
+            if not fresh.is_usable:
+                return self._defer_entry(proposal, "Market data after monitor wait is not usable; retry while valid.",
+                                         ReasonCode.STALE_DATA.value)
+            current_price = snapshot.get("last_price")
+            drift_ok, _ = self.freshness.check_price_drift(proposal.entry, current_price)
+            if not drift_ok:
+                return self._defer_entry(proposal, "Price moved beyond the approved entry limit during monitor wait; retry requires fresh checks.",
+                                         ReasonCode.PRICE_DRIFT.value)
+            fill_price = current_price
+        risk = self._assess_current_risk(
+            direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
+            snapshot=snapshot,
+            requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,
+            trades_today=self.journal.count_paper_orders_today(),
+            realized_pnl_today=self.journal.realized_pnl_today(),
+        )
+        self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
+        if not risk.approved or not risk.sizing or proposal.qty > risk.sizing.shares:
+            detail = risk.block_reasons or [{"code": ReasonCode.RISK_OVERSIZED.value,
+                                            "detail": "approved size exceeds current account capacity"}]
+            self.journal.log_system_event(Severity.WARNING, "risk", "Entry blocked by fresh account limits", {"proposal_id": proposal.proposal_id, "reasons": detail})
+            return OrderResult(blocked=True, block_reason=detail[0]["code"], detail=str(detail), state=OrderState.REJECTED.value)
+        return self._execute_checked(proposal, fill_price, approval)
+
+    def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None,
+                         approval: Optional[Callable[[], ApprovalOutcome]] = None):
+        current = self.journal.proposal_by_id(proposal.proposal_id)
+        if current and current["status"] not in ProposalStatus.approvable():
+            return OrderResult(blocked=True, block_reason=ReasonCode.APPROVAL_REQUIRED.value,
+                               detail="proposal no longer approvable after entry wait",
+                               state=OrderState.REJECTED.value)
         # PR6 chokepoint: NO proposal may be submitted once its TTL has lapsed.
         # approve_proposal() already guards the manual path, but _execute is the
         # single funnel EVERY execution route passes through (manual, auto, and
@@ -2115,6 +2187,14 @@ class Orchestrator:
                     detail=detail + ": " + health.get("detail", "health unavailable"),
                     state=OrderState.REJECTED.value,
                 )
+        if approval is not None:
+            outcome = approval()
+            if not outcome.approved:
+                return self._defer_entry(proposal, "Approval is no longer available; proposal remains pending for review.",
+                                         outcome.reason or ReasonCode.APPROVAL_REQUIRED.value)
+        # Receipt and cap consumption now follow ownership, TTL and final
+        # checks. They remain durable if the subsequent broker attempt fails
+        # or its response is uncertain; no post-attempt rollback is allowed.
         self._set_proposal_status(proposal.proposal_id, "approved")
         return self.orders.execute_proposal(proposal, fill_price=fill_price)
 

@@ -42,7 +42,8 @@ class ApprovalEngine:
         self.journal = journal
 
     # ------------------------------------------------------------- pipeline
-    def consider(self, proposal, risk_ok: bool, freshness_ok: bool, unattended: bool = False) -> ApprovalOutcome:
+    def consider(self, proposal, risk_ok: bool, freshness_ok: bool, unattended: bool = False,
+                 *, record: bool = True) -> ApprovalOutcome:
         """Called by the scan pipeline after risk + freshness are known.
 
         Auto applies when EITHER APPROVAL_MODE=auto AND REQUIRE_MANUAL_APPROVAL
@@ -59,6 +60,10 @@ class ApprovalEngine:
         below -- risk/freshness/daytrade/margin checks apply identically
         either way, and the unattended door additionally passes its OWN cap
         before the shared cap both doors share.
+
+        ``record=False`` checks eligibility without consuming an approval. The
+        execution caller must call again with recording enabled after obtaining
+        account ownership and passing final checks; the preview grants nothing.
         """
         if self.settings.effective_approval_mode != ApprovalMode.AUTO and not unattended:
             # Manual mode, no unattended window active: never auto-submit.
@@ -103,6 +108,8 @@ class ApprovalEngine:
             "passed risk+freshness within the unattended-window + shared auto cap"
             if unattended else "passed risk+freshness within auto cap"
         )
+        if not record:
+            return ApprovalOutcome(True, "auto_eligible", label.value, reason)
         approval_id = self._record(
             proposal, label, approved=True, approver=approver, reason=reason,
             freshness_ok=freshness_ok, risk_ok=risk_ok,

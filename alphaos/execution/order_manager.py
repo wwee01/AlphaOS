@@ -73,6 +73,8 @@ class OrderResult:
     block_reason: Optional[str] = None
     detail: Optional[str] = None
     submission_uncertain: bool = False
+    # No broker attempt: caller must keep the proposal pending and may retry.
+    deferred: bool = False
 
 
 class OrderManager:

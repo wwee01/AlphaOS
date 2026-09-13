@@ -13,6 +13,10 @@ class ExposureUnavailable(ValueError):
     pass
 
 
+class EntrySubmissionBusy(ExposureUnavailable):
+    """Another local entry owns submission; no broker attempt was made."""
+
+
 def _number(value, label, *, positive=False):
     try:
         value = float(value)
@@ -151,7 +155,7 @@ def entry_submission_lock(journal):
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ExposureUnavailable("another entry submission is in progress") from None
+            raise EntrySubmissionBusy("another entry submission is in progress") from None
         try:
             yield
         finally:

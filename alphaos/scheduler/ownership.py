@@ -10,6 +10,7 @@ from __future__ import annotations
 import fcntl
 import os
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -81,5 +82,17 @@ def worker_ownership(journal, role: str):
                         os.close(current[3])
 
 
-def monitor_ownership(journal):
-    return worker_ownership(journal, "monitor")
+@contextmanager
+def monitor_ownership(journal, *, timeout_seconds: float = 0.0):
+    """Optional bounded entry wait; scheduled/manual monitors stay nonblocking.
+
+    Sleep outside the registry mutex and never hold a SQLite transaction while
+    waiting. Successful ownership still covers the caller's entire context.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        with worker_ownership(journal, "monitor") as acquired:
+            if acquired or time.monotonic() >= deadline:
+                yield acquired
+                return
+        time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))

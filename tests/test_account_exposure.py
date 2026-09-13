@@ -105,7 +105,11 @@ def test_final_execution_blocks_stale_approved_quantity_before_any_broker_submis
     })
     submitted = []
     monkeypatch.setattr(orch, "_execute_checked", lambda *a: submitted.append(a))
-    result = orch._execute(make_proposal(qty=10))
+    proposal = make_proposal(qty=10)
+    from datetime import timedelta
+    from alphaos.util import timeutils
+    proposal.proposal_expires_at_utc = (timeutils.now_utc() + timedelta(minutes=5)).isoformat()
+    result = orch._execute(proposal)
     assert result.blocked
     assert submitted == []
     assert j.one("SELECT category FROM system_events WHERE category='entry_risk_snapshot'")

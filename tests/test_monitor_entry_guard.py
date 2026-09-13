@@ -78,6 +78,7 @@ def test_entry_cannot_submit_while_independent_monitor_owns_account(monkeypatch,
     import threading
 
     from alphaos.scheduler.ownership import monitor_ownership
+    monkeypatch.setattr("alphaos.orchestrator.ENTRY_MONITOR_WAIT_SECONDS", 0.1)
 
     journal = JournalStore(str(tmp_path / "ledger.db"))
     orch = Orchestrator(settings=make_settings(), journal=journal)
@@ -94,8 +95,11 @@ def test_entry_cannot_submit_while_independent_monitor_owns_account(monkeypatch,
         assert acquired.wait(5)
         monkeypatch.setattr(orch, "_assess_current_risk", lambda **kw: pytest.fail("entry started during monitor ownership"))
         monkeypatch.setattr(orch, "_execute_checked", lambda *a: pytest.fail("broker submission during monitoring"))
-        result = orch._execute(make_proposal())
-        assert result.blocked and "monitor owns" in result.detail
+        proposal = make_proposal()
+        proposal.proposal_expires_at_utc = (timeutils.now_utc() + timedelta(minutes=5)).isoformat()
+        result = orch._execute(proposal)
+        assert result.deferred and not result.blocked and "monitor owns" in result.detail
+        assert result.state is None
         assert journal.count_rows("paper_orders") == 0
     finally:
         release.set()
