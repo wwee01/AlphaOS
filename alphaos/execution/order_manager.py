@@ -302,6 +302,10 @@ class OrderManager:
             return self._blocked(proposal, ReasonCode.UNVERIFIABLE_DATA.value, str(exc), Severity.CRITICAL)
         if not owned:
             return self._entry_result(row)
+        try:
+            row = entry.claim_dispatch(row)
+        except ValueError as exc:
+            return self._entry_result(self.journal.order_by_id(row["order_id"]), detail=str(exc))
         recovering = False
         try:
             norm = self.alpaca.submit_bracket(proposal)

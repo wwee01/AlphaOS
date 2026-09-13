@@ -1115,6 +1115,12 @@ def cmd_protection_status(orch: Orchestrator) -> int:
     return 0
 
 
+def cmd_entry_intent_resolve(orch: Orchestrator, identifier: str, apply: bool, note: str) -> int:
+    res = orch.entry_intent_resolve(identifier, apply=apply, note=note, resolved_by="cli")
+    _print({"entry_intent_resolve": res})
+    return 0 if res.get("ok") else 1
+
+
 def cmd_protection_resolve(orch: Orchestrator, incident_id: str, exit_price: float, note: str) -> int:
     """Human-confirmed resolution of a local-open/broker-closed protection
     incident: calls close_position() with a confirmed exit price -- never raw SQL."""
@@ -1334,6 +1340,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reconcile_report", help="broker-vs-ledger reconciliation (detect orphans/mismatches)")
     sub.add_parser("protection_status",
                    help="broker protection watchdog status: unprotected/mismatched positions, open incidents")
+    er = sub.add_parser("entry_intent_resolve", help="preview recovery of a provably unsent paper entry")
+    er.add_argument("identifier", help="durable order ID, client ID or proposal ID")
+    er.add_argument("--apply", action="store_true", help="abandon the unsent intent after fresh verification; never resubmit")
+    er.add_argument("--note", default="", help="required operator audit reason when applying")
     pr = sub.add_parser("protection_resolve",
                         help="human-confirmed resolution of a local-open/broker-closed protection incident "
                              "(calls close_position with a confirmed exit price; never raw SQL)")
@@ -1641,6 +1651,8 @@ def main(argv=None) -> int:
             return cmd_reconcile_report(orch)
         if args.command == "protection_status":
             return cmd_protection_status(orch)
+        if args.command == "entry_intent_resolve":
+            return cmd_entry_intent_resolve(orch, args.identifier, args.apply, args.note)
         if args.command == "protection_resolve":
             return cmd_protection_resolve(orch, args.incident_id, args.exit_price, args.note)
         if args.command == "protection_ack":

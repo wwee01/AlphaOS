@@ -1914,6 +1914,11 @@ class Orchestrator:
         """Read-only: current per-position protection status + open incidents."""
         return protection_watchdog.status_report(self.journal)
 
+    def entry_intent_resolve(self, identifier: str, *, apply: bool = False, note: str = "",
+                             resolved_by: str = "user") -> dict:
+        from alphaos.execution.entry_intent_resolution import resolve_entry_intent
+        return resolve_entry_intent(self.orders, identifier, apply=apply, note=note, resolved_by=resolved_by)
+
     def protection_resolve(self, incident_id: str, exit_price: float, note: str,
                            resolved_by: str = "user") -> dict:
         """Human-confirmed resolution of a local-open/broker-closed incident: calls

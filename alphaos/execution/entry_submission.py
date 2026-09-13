@@ -15,7 +15,7 @@ from alphaos.execution.protection_contract import verified_live_roles
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
-PENDING_PHASES = {"submitting", "unknown", "reconciling"}
+PENDING_PHASES = {"prepared", "submitting", "unknown", "reconciling"}
 TERMINAL_ZERO = {"rejected", "canceled", "cancelled", "expired"}
 
 
@@ -55,7 +55,8 @@ class EntrySubmission:
             state=OrderState.SUBMITTED.value, qty=proposal.qty, entry_price=proposal.entry,
             take_profit_price=proposal.target, stop_loss_price=proposal.stop, limit_price=proposal.entry,
             time_in_force=self.broker._resolve_tif(proposal), client_order_id=proposal.proposal_id,
-            raw_request={"purpose": "paper_entry", "proposal_id": proposal.proposal_id, "phase": "submitting"},
+            raw_request={"purpose": "paper_entry", "proposal_id": proposal.proposal_id,
+                         "phase": "prepared", "dispatch_version": 1, "dispatch_started_at": None},
             submitted_at=timeutils.stamp().utc,
         )
         with ledger_ops.atomic(self.journal) as journal:
@@ -65,8 +66,43 @@ class EntrySubmission:
             if pending_entry_intent(journal):
                 raise ValueError("another paper entry submission remains unverified")
             journal.insert("paper_orders", row, mirror=True)
-            self._event(journal, row, "approved", "submitting")
+            self._event(journal, row, "approved", "prepared")
         return self.journal.order_by_id(order_id), True
+
+    def claim_dispatch(self, row):
+        """Consume the send right atomically; an abandoned intent can never POST.
+
+        A crash after this claim is ambiguous even if the HTTP call has not yet
+        started. Only the prepared state proves that no sender crossed this gate.
+        """
+        with ledger_ops.atomic(self.journal) as journal:
+            current = journal.order_by_id(row["order_id"])
+            meta = ledger_ops.metadata(current)
+            if (meta.get("phase") != "prepared" or meta.get("dispatch_version") != 1
+                    or meta.get("dispatch_started_at") is not None or current.get("broker_order_id")):
+                raise ValueError("entry dispatch right is no longer available")
+            ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
+                "raw_request_json": {**meta, "phase": "submitting", "dispatch_started_at": timeutils.stamp().utc},
+            })
+            self._event(journal, current, "prepared", "submitting")
+        return self.journal.order_by_id(row["order_id"])
+
+    def not_sent(self, row, detail):
+        """Retain a typed transport proof for an explicit operator resolution."""
+        with ledger_ops.atomic(self.journal) as journal:
+            current = journal.order_by_id(row["order_id"])
+            meta = ledger_ops.metadata(current)
+            if (meta.get("phase") != "submitting" or meta.get("dispatch_version") != 1
+                    or not meta.get("dispatch_started_at") or current.get("broker_order_id")):
+                raise ValueError("cannot attach no-send proof to a changed entry")
+            ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
+                "raw_request_json": {**meta, "phase": "unknown", "last_verification_error": detail,
+                                     "no_dispatch_proof": {"version": 1, "kind": "transport_never_sent",
+                                                           "observed_at_utc": timeutils.stamp().utc}},
+            })
+            self._event(journal, current, "submitting", "unknown")
+        self.incident(row, detail)
+        return self.journal.order_by_id(row["order_id"])
 
     @staticmethod
     def _event(journal, row, previous, phase):
@@ -146,10 +182,11 @@ class EntrySubmission:
             # A different reconciler may already have recovered this POST.
             if meta.get("phase") == "acknowledged" and not force:
                 return current
-            if meta.get("phase") != "unknown":
-                self._event(journal, current, meta.get("phase"), "unknown")
+            phase = "prepared" if meta.get("phase") == "prepared" else "unknown"
+            if meta.get("phase") != phase:
+                self._event(journal, current, meta.get("phase"), phase)
             ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
-                "raw_request_json": {**meta, "phase": "unknown", "last_verification_error": detail},
+                "raw_request_json": {**meta, "phase": phase, "last_verification_error": detail},
             })
         self.incident(row, detail)
         return self.journal.order_by_id(row["order_id"])
