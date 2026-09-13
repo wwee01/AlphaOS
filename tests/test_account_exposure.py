@@ -149,3 +149,32 @@ def test_final_exposure_requires_remaining_protection_and_explicit_working_statu
     journal = SimpleNamespace(open_positions=lambda: [{**position, "broker_order_id": "parent"}])
     with pytest.raises(ExposureUnavailable, match="protection is not verified"):
         read_exposure(Broker(), journal)
+
+
+@pytest.mark.parametrize("parent_status,target_status,stop_qty,allowed", [
+    ("filled", "new", 100, True),
+    ("partially_filled", "new", 100, False),
+    ("filled", "held", 100, False),
+    ("filled", "pending_cancel", 100, False),
+    ("filled", "new", 90, False),
+])
+def test_real_broker_held_stop_requires_activated_parent_and_working_target(parent_status, target_status, stop_qty, allowed):
+    from alphaos.risk.account_exposure import read_exposure
+    position = _position()
+    class Broker:
+        def get_account(self): return _account()
+        def list_positions(self): return [position]
+        def list_open_orders(self): return []
+        def get_order(self, parent_id):
+            return {"broker_order_id": parent_id, "order_class": "bracket", "status": parent_status,
+                    "qty": 100, "filled_qty": 100 if parent_status == "filled" else 50, "legs": [
+                {"broker_order_id": "tp", "role": "take_profit", "side": "sell", "qty": 100, "filled_qty": 0, "status": target_status},
+                {"broker_order_id": "sl", "role": "stop_loss", "side": "sell", "qty": stop_qty, "filled_qty": 0, "status": "held", "stop_price": 95},
+            ]}
+    journal = SimpleNamespace(open_positions=lambda: [{**position, "broker_order_id": "parent"}],
+                              query=lambda *args: [], count_open_positions=lambda: 1)
+    if allowed:
+        assert read_exposure(Broker(), journal)["gross_committed_notional"] == 10000
+    else:
+        with pytest.raises(ExposureUnavailable, match="protection is not verified"):
+            read_exposure(Broker(), journal)
