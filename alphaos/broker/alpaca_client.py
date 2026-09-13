@@ -20,6 +20,9 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from hashlib import sha256
+import json
+import re
 from typing import Any
 
 from alphaos.broker import order_mapping
@@ -49,52 +52,73 @@ class AlpacaSubmissionNotSent(RuntimeError):
         super().__init__("First paper entry request could not establish a connection; no dispatch proved.")
 
 
+class AlpacaSubmissionRejected(RuntimeError):
+    """A verified first paper POST rejection; operators must still reconcile.
+
+    Persist only the structured proof, never response messages or credentials.
+    A caller-created APIError does not establish this transport evidence.
+    """
+
+    def __init__(self, proof: dict):
+        self.proof = proof
+        super().__init__("The first paper entry request received a verified broker rejection; operator review required.")
+
+
 @dataclass
 class _EntryDispatch:
     client_order_id: str
     attempts: int = 0
+    expected_request: dict | None = None
+    rejection_response: Any = None
+    rejection_proof: dict | None = None
 
 
 _entry_dispatch: ContextVar[_EntryDispatch | None] = ContextVar("alpaca_entry_dispatch", default=None)
 
 
-def _no_dispatch_reason(exc: Exception, session: Any, request: Any, args: tuple,
-                        kwargs: dict, scope: _EntryDispatch | None) -> str | None:
-    """Prove a narrow requests/urllib3 pre-connect failure, otherwise None.
-
-    The SDK may retry a 429 response. Once any transport attempt has happened,
-    a later connection failure says nothing about that earlier attempt. Custom
-    sessions/adapters, response hooks, redirects and enabled retries similarly
-    cannot establish this proof and therefore keep the original exception.
-    """
+def _first_standard_entry_request(session: Any, request: Any, args: tuple,
+                                  kwargs: dict, scope: _EntryDispatch | None) -> bool:
+    """Only a first entry request with no hidden retry/redirect/hook path."""
     from requests import Session
     from requests.adapters import HTTPAdapter
-    from requests.exceptions import ConnectionError, ConnectTimeout
-    from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, NewConnectionError
 
     if scope is None or scope.attempts != 1 or not isinstance(session, Session) or type(session) is not Session:
-        return None
+        return False
     method = args[0] if args else kwargs.get("method")
     url = args[1] if len(args) > 1 else kwargs.get("url")
     if (str(method).upper() != "POST" or url != f"{PAPER_BASE_URL}/v2/orders"
             or kwargs.get("allow_redirects") is not False
             or not isinstance(kwargs.get("json"), dict)
             or kwargs["json"].get("client_order_id") != scope.client_order_id):
-        return None
+        return False
     bound_session = getattr(request, "__self__", None)
     if bound_session is None:
-        return None
+        return False
     if (bound_session is not session
             or getattr(request, "__func__", None) is not Session.request
             or session.auth is not None or kwargs.get("auth") is not None
             or session.hooks.get("response") or kwargs.get("hooks")):
-        return None
+        return False
     adapter = session.get_adapter(url)
     if type(adapter) is not HTTPAdapter:
-        return None
+        return False
     retry = adapter.max_retries
     if (retry.total != 0 or any(getattr(retry, field, None) not in (None, 0, False)
                               for field in ("connect", "read", "redirect", "status", "other"))):
+        return False
+    return True
+
+
+def _no_dispatch_reason(exc: Exception, session: Any, request: Any, args: tuple,
+                        kwargs: dict, scope: _EntryDispatch | None) -> str | None:
+    """Prove a narrow requests/urllib3 pre-connect failure, otherwise None.
+
+    Any prior SDK attempt or nonstandard transport preserves uncertainty.
+    """
+    from requests.exceptions import ConnectionError, ConnectTimeout
+    from urllib3.exceptions import ConnectTimeoutError, MaxRetryError, NewConnectionError
+
+    if not _first_standard_entry_request(session, request, args, kwargs, scope):
         return None
     if (not isinstance(exc, (ConnectionError, ConnectTimeout))
             or type(exc) not in {ConnectionError, ConnectTimeout} or exc.response is not None):
@@ -107,6 +131,96 @@ def _no_dispatch_reason(exc: Exception, session: Any, request: Any, args: tuple,
     if type(wrapped.reason) is ConnectTimeoutError:
         return "connect_timeout"
     return None
+
+
+def _parsed_json(raw):
+    def invalid_constant(value):
+        raise ValueError("non-finite JSON constant")
+
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _rejection_classification(status, code, message):
+    """Fail closed on unknown text: error 42210000 also covers duplicate IDs.
+
+    Alpaca's documented numeric codes are shared between many reasons. New
+    messages require review, not a guess that an earlier order cannot exist.
+    """
+    if not isinstance(message, str):
+        return None
+    msg = message.strip().lower()
+    if (status, code) == (400, 40010000) and msg == "request body format is invalid":
+        return "invalid_request"
+    if (status, code) == (403, 40310000):
+        if msg in {"potential wash trade detected", "potential wash trade detected. use complex orders"}:
+            return "wash_trade"
+        if re.fullmatch(r"insufficient buying power(?: \(required: [0-9.]+, available: [0-9.]+\))?", msg):
+            return "insufficient_buying_power"
+    if (status, code) == (422, 42210000) and msg in {
+            "invalid input", "invalid limit price", "invalid time in force", "qty must be > 0",
+            "limit price is required for limit orders", "stop price must be > 0"}:
+        return "invalid_order_terms"
+    return None
+
+
+def _capture_rejection(response, session, request, args, kwargs, scope):
+    """Bind a candidate proof to the actual first prepared request/response."""
+    from requests import PreparedRequest, Response
+
+    if (scope is None or not _first_standard_entry_request(session, request, args, kwargs, scope)
+            or scope.expected_request is None or type(response) is not Response
+            or response.status_code not in {400, 403, 422} or response.history
+            or session.verify is not True or kwargs.get("verify", True) is not True):
+        return
+    actual = response.request
+    if (type(actual) is not PreparedRequest or actual.method != "POST"
+            or actual.url != f"{PAPER_BASE_URL}/v2/orders" or response.url != actual.url
+            or actual.hooks.get("response")
+            or response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json"):
+        return
+    intended = _canonical_json(scope.expected_request)
+    if (_canonical_json(kwargs["json"]) != intended
+            or _canonical_json(_parsed_json(actual.body)) != intended):
+        return
+    body = _parsed_json(response.content)
+    if not isinstance(body, dict) or type(body.get("code")) is not int:
+        return
+    classification = _rejection_classification(response.status_code, body["code"], body.get("message"))
+    if not classification:
+        return
+    scope.rejection_response = response
+    scope.rejection_proof = {
+        "type": "alpaca_entry_broker_rejected", "version": 1, "http_status": response.status_code,
+        "error_code": body["code"], "classification": classification,
+        "response_body_sha256": sha256(response.content).hexdigest(),
+        "client_order_id": scope.client_order_id, "symbol": scope.expected_request["symbol"],
+        "request": _parsed_json(intended),
+    }
+
+
+def _confirmed_rejection(exc, scope):
+    from alpaca.common.exceptions import APIError
+    from requests import HTTPError
+
+    if (type(exc) is not APIError or scope.attempts != 1 or scope.rejection_proof is None
+            or type(exc._http_error) is not HTTPError or exc.response is not scope.rejection_response
+            or exc.request is not scope.rejection_response.request
+            or exc.status_code != scope.rejection_proof["http_status"]
+            or exc._error != scope.rejection_response.text
+            or sha256(scope.rejection_response.content).hexdigest() != scope.rejection_proof["response_body_sha256"]):
+        return None
+    return scope.rejection_proof
 
 
 BROKER_HTTP_TIMEOUT = (5.0, 20.0)  # connection, socket-read inactivity seconds
@@ -132,7 +246,7 @@ def _bound_broker_transport(client) -> None:
         if scope is not None:
             scope.attempts += 1
         try:
-            return request(*args, **kwargs)
+            response = request(*args, **kwargs)
         except Exception as exc:
             # A proof detector failure is itself uncertainty, never evidence
             # that permits a caller to abandon an outstanding entry intent.
@@ -143,6 +257,11 @@ def _bound_broker_transport(client) -> None:
             if reason:
                 raise AlpacaSubmissionNotSent(reason) from None
             raise
+        try:
+            _capture_rejection(response, session, request, args, kwargs, scope)
+        except Exception:
+            pass  # Incomplete proof never changes the original SDK outcome.
+        return response
 
     session.request = bounded_request
 
@@ -241,9 +360,23 @@ class AlpacaClient:
             "tif": self._resolve_tif(proposal),
             "client_order_id": proposal.proposal_id,
         }
-        token = _entry_dispatch.set(_EntryDispatch(spec["client_order_id"]))
+        scope = _EntryDispatch(spec["client_order_id"], expected_request={
+            "client_order_id": spec["client_order_id"], "symbol": spec["symbol"], "side": spec["side"],
+            "qty": float(spec["qty"]), "type": "limit", "order_class": "bracket", "time_in_force": spec["tif"],
+            "limit_price": spec["entry"], "take_profit": {"limit_price": spec["target"]},
+            "stop_loss": {"stop_price": spec["stop"]},
+        })
+        token = _entry_dispatch.set(scope)
         try:
             order = self._submit(client, spec)
+        except Exception as exc:
+            try:
+                proof = _confirmed_rejection(exc, scope)
+            except Exception:
+                proof = None
+            if proof:
+                raise AlpacaSubmissionRejected(proof) from None
+            raise
         finally:
             _entry_dispatch.reset(token)
         normalized = order_mapping.normalize_order(order)
