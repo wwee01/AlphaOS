@@ -11,6 +11,8 @@ from alphaos.constants import ProtectionPath
 from alphaos.execution import ledger_ops, protection_watchdog
 from alphaos.execution.entry_intent_resolution import resolve_entry_intent
 from alphaos.execution.entry_submission import EntrySubmission, pending_entry_intent
+from alphaos.journal.journal_store import JournalStore
+from alphaos.risk.account_exposure import entry_submission_lock
 from alphaos.scheduler.ownership import monitor_ownership
 from test_entry_submission_recovery import NotFound, restart, setup
 
@@ -151,3 +153,38 @@ def test_cli_defaults_to_preview_and_propagates_refusal(capsys):
     assert cmd_entry_intent_resolve(SimpleNamespace(entry_intent_resolve=resolve), args.identifier, args.apply, args.note) == 1
     assert calls == [("proposal_1", {"apply": False, "note": "", "resolved_by": "cli"})]
     assert "ambiguous" in capsys.readouterr().out
+
+
+def test_entry_owner_and_mid_snapshot_dispatch_claim_cannot_be_overridden(tmp_path, monkeypatch):
+    fake, _, journal, manager, proposal = setup(tmp_path, monkeypatch)
+    row = prepared(manager, proposal)
+    with entry_submission_lock(journal):
+        result = resolve_entry_intent(manager, row["order_id"], apply=True, note="busy sender")
+        assert not result["ok"] and "submission is in progress" in result["reason"]
+    calls = 0
+    def claim_during_snapshot(client_id):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            EntrySubmission(manager).claim_dispatch(row)
+        return None
+    monkeypatch.setattr(manager.alpaca, "get_order_by_client_id", claim_during_snapshot)
+    result = resolve_entry_intent(manager, row["order_id"], apply=True, note="racing sender")
+    assert not result["ok"] and "changed during recovery" in result["reason"]
+    assert pending_entry_intent(journal) and fake.submits == 0
+
+
+def test_audit_failure_rolls_back_abandonment_and_incident_resolution(tmp_path, monkeypatch):
+    _, _, journal, manager, proposal = setup(tmp_path, monkeypatch)
+    row = prepared(manager, proposal)
+    EntrySubmission(manager).incident(row, "process stopped before dispatch")
+    before = journal.order_by_id(row["order_id"])
+    events = journal.query("SELECT * FROM order_events")
+    def failed_audit(*args, **kwargs):
+        raise OSError("audit unavailable")
+    monkeypatch.setattr(JournalStore, "log_system_event", failed_audit)
+    result = resolve_entry_intent(manager, row["order_id"], apply=True, note="recovery")
+    assert not result["ok"] and "audit unavailable" in result["reason"]
+    assert journal.order_by_id(row["order_id"]) == before
+    assert journal.query("SELECT * FROM order_events") == events
+    assert protection_watchdog.has_blocking_incident(journal)

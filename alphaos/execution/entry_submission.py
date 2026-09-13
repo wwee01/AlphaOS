@@ -87,7 +87,7 @@ class EntrySubmission:
             self._event(journal, current, "prepared", "submitting")
         return self.journal.order_by_id(row["order_id"])
 
-    def not_sent(self, row, detail):
+    def not_sent(self, row, detail, transport_proof):
         """Retain a typed transport proof for an explicit operator resolution."""
         with ledger_ops.atomic(self.journal) as journal:
             current = journal.order_by_id(row["order_id"])
@@ -98,6 +98,7 @@ class EntrySubmission:
             ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
                 "raw_request_json": {**meta, "phase": "unknown", "last_verification_error": detail,
                                      "no_dispatch_proof": {"version": 1, "kind": "transport_never_sent",
+                                                           "transport": transport_proof,
                                                            "observed_at_utc": timeutils.stamp().utc}},
             })
             self._event(journal, current, "submitting", "unknown")

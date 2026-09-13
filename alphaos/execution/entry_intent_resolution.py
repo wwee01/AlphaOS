@@ -23,8 +23,11 @@ def _proof(row):
     if meta.get("phase") == "prepared" and meta.get("dispatch_started_at") is None:
         return {"kind": "dispatch_not_claimed", "version": 1}
     proof = meta.get("no_dispatch_proof") or {}
+    transport = proof.get("transport") or {}
     if (meta.get("phase") == "unknown" and proof.get("version") == 1
-            and proof.get("kind") == "transport_never_sent" and proof.get("observed_at_utc")):
+            and proof.get("kind") == "transport_never_sent" and proof.get("observed_at_utc")
+            and transport.get("type") == "alpaca_entry_transport_not_sent" and transport.get("version") == 1
+            and transport.get("reason") in {"connect_timeout", "new_connection_failure"}):
         return proof
     raise ValueError("submission is ambiguous; a 404, elapsed time or operator note cannot release it")
 
