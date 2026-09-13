@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from alphaos.constants import ProtectionStatus, Severity
 from alphaos.execution import ledger_ops, protection_watchdog
+from alphaos.execution.protection_contract import verified_live_roles
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
@@ -350,17 +351,9 @@ class TimeExitLifecycle:
             expected_side = "buy" if pos["direction"] == "short" else "sell"
             if checked.get("symbol") != pos["symbol"] or checked.get("side") != expected_side:
                 raise ValueError("protective order identity/side mismatch")
-            for leg in legs:
-                if leg.get("side") != expected_side or leg.get("symbol") != pos["symbol"]:
-                    raise ValueError("protective leg symbol/side mismatch or missing")
-                if abs(float(leg.get("qty") or 0) - float(pos["qty"])) > 1e-6:
-                    raise ValueError("protective leg quantity mismatch or missing")
-            live = {leg["role"] for leg in legs if (leg.get("status") or "").lower() in
-                    {"new", "accepted", "held", "pending_new"}}
+            live = verified_live_roles(checked, pos["qty"], pos["symbol"], expected_side)
             if not {"stop_loss", "take_profit"} <= live:
-                raise ValueError("both protective legs are not verified live")
-            if abs(float(checked.get("qty") or 0) - float(pos["qty"])) > 1e-6:
-                raise ValueError("protective quantity mismatch")
+                raise ValueError("both protective legs are not verified live with matching remaining quantity")
             with ledger_ops.atomic(self.journal) as journal:
                 ledger_ops.update(journal, "positions", "position_id", pos["position_id"],
                                   {"broker_order_id": checked["broker_order_id"]})

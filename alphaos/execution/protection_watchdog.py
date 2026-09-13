@@ -28,11 +28,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from alphaos.constants import ExecutionSource, OrderState, ProtectionStatus, Severity
+from alphaos.constants import ExecutionSource, ProtectionStatus, Severity
+from alphaos.execution.protection_contract import verified_live_roles
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
-_LIVE_LEG_STATES = {OrderState.ACCEPTED.value, OrderState.SUBMITTED.value, OrderState.PARTIALLY_FILLED.value}
 # Statuses that open a blocking incident (has_blocking_incident() keys off this).
 _INCIDENT_STATUSES = (
     ProtectionStatus.UNPROTECTED.value, ProtectionStatus.CLOSED_MISMATCH.value, ProtectionStatus.UNVERIFIABLE.value,
@@ -116,8 +116,10 @@ def check_position(journal, alpaca_client, position: dict,
     legs = norm.get("legs") or []
     stop_leg = next((leg for leg in legs if leg.get("role") == "stop_loss"), None)
     target_leg = next((leg for leg in legs if leg.get("role") == "take_profit"), None)
-    stop_live = bool(stop_leg) and stop_leg.get("state") in _LIVE_LEG_STATES
-    target_live = bool(target_leg) and target_leg.get("state") in _LIVE_LEG_STATES
+    expected_side = "buy" if position.get("direction") == "short" else "sell"
+    live_roles = verified_live_roles(norm, broker_qty or 0, symbol, expected_side)
+    stop_live = "stop_loss" in live_roles
+    target_live = "take_profit" in live_roles
 
     observed_tif = (
         norm.get("time_in_force")
@@ -142,13 +144,13 @@ def check_position(journal, alpaca_client, position: dict,
 
     if not stop_live:
         status, severity = ProtectionStatus.UNPROTECTED.value, Severity.CRITICAL.value
-        detail = (f"{symbol}: stop-loss protective order is MISSING at the broker "
-                  f"(state={stop_leg.get('state') if stop_leg else 'no leg found'}) -- "
-                  f"position has NO downside protection.")
+        detail = (f"{symbol}: stop-loss protective order is NOT VERIFIED at the broker "
+                  f"(raw status={stop_leg.get('status') if stop_leg else 'no leg found'}) -- "
+                  f"downside protection is not proved.")
     elif not target_live:
         status, severity = ProtectionStatus.DEGRADED.value, Severity.WARNING.value
         detail = (f"{symbol}: take-profit protective order is missing at the broker "
-                  f"(state={target_leg.get('state') if target_leg else 'no leg found'}); "
+                  f"(raw status={target_leg.get('status') if target_leg else 'no leg found'}); "
                   f"stop is still live, downside remains protected.")
     else:
         status, severity = ProtectionStatus.PROTECTED.value, Severity.INFO.value

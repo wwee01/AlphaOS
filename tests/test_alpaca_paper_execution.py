@@ -50,6 +50,9 @@ class _FakeOrder:
             _FakeLeg("take_profit", limit_price=spec["target"], time_in_force=self.time_in_force),
             _FakeLeg("stop_loss", stop_price=spec["stop"], time_in_force=self.time_in_force),
         ]
+        for leg in self.legs:
+            leg.qty, leg.symbol = self.qty, self.symbol
+            leg.side = "sell" if self.side == "buy" else "buy"
 
 
 class _FakePosition:
