@@ -166,10 +166,10 @@ def test_real_broker_held_stop_requires_activated_parent_and_working_target(pare
         def list_positions(self): return [position]
         def list_open_orders(self): return []
         def get_order(self, parent_id):
-            return {"broker_order_id": parent_id, "order_class": "bracket", "status": parent_status,
+            return {"broker_order_id": parent_id, "symbol": "AAPL", "side": "buy", "order_class": "bracket", "status": parent_status,
                     "qty": 100, "filled_qty": 100 if parent_status == "filled" else 50, "legs": [
-                {"broker_order_id": "tp", "role": "take_profit", "side": "sell", "qty": 100, "filled_qty": 0, "status": target_status},
-                {"broker_order_id": "sl", "role": "stop_loss", "side": "sell", "qty": stop_qty, "filled_qty": 0, "status": "held", "stop_price": 95},
+                {"broker_order_id": "tp", "symbol": "AAPL", "role": "take_profit", "side": "sell", "qty": 100, "filled_qty": 0, "status": target_status, "limit_price": 110},
+                {"broker_order_id": "sl", "symbol": "AAPL", "role": "stop_loss", "side": "sell", "qty": stop_qty, "filled_qty": 0, "status": "held", "stop_price": 95},
             ]}
     journal = SimpleNamespace(open_positions=lambda: [{**position, "broker_order_id": "parent"}],
                               query=lambda *args: [], count_open_positions=lambda: 1)

@@ -5,6 +5,7 @@ import math
 from contextlib import contextmanager
 from pathlib import Path
 
+from alphaos.execution.protection_contract import verified_live_roles
 from alphaos.util import timeutils
 
 
@@ -111,30 +112,7 @@ def read_exposure(client, journal) -> dict:
         for leg in parent.get("legs", []):
             if leg.get("role") in {"stop_loss", "take_profit"}:
                 known_reductions.add(leg["broker_order_id"])
-        live_roles = set()
-        # Alpaca retains an untriggered conditional stop as `held` after
-        # entry fills. This is valid only within a fully activated group;
-        # held entry/target orders or an incompletely filled bracket are not.
-        activated_group = (
-            parent.get("order_class") == "bracket" and parent.get("status") == "filled"
-            and _number(parent.get("filled_qty"), "parent filled quantity")
-            == _number(parent.get("qty"), "parent quantity", positive=True)
-        ) or (parent.get("order_class") == "oco"
-              and parent.get("status") in {"new", "accepted", "partially_filled"})
-        for leg in parent.get("legs", []):
-            # Normalization maps unfamiliar/pending-cancel statuses for display;
-            # only explicitly working raw states authorize new exposure.
-            held_stop = (leg.get("status") == "held" and leg.get("role") == "stop_loss"
-                         and activated_group and leg.get("stop_price"))
-            if leg.get("status") not in {"new", "accepted", "partially_filled"} and not held_stop:
-                continue
-            leg_qty = _number(leg.get("qty"), "protective order quantity", positive=True)
-            filled_qty = _number(leg.get("filled_qty"), "protective filled quantity")
-            if not 0 <= filled_qty <= leg_qty:
-                raise ExposureUnavailable("invalid protective cumulative fill quantity")
-            if (leg.get("side") == expected_side
-                    and abs((leg_qty - filled_qty) - abs(float(held["qty"]))) < 1e-6):
-                live_roles.add(leg.get("role"))
+        live_roles = verified_live_roles(parent, abs(float(held["qty"])), held["symbol"], expected_side)
         if not {"stop_loss", "take_profit"} <= live_roles:
             raise ExposureUnavailable("current matching stop and target protection is not verified")
     known = {r["broker_order_id"]: r for r in journal.query(
