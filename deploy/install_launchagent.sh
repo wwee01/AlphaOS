@@ -27,6 +27,7 @@ DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/alphaos"
 TARGET="${1:-all}"
+if (( $# )); then shift; fi
 
 install_agent() {
   local label="$1"
@@ -66,11 +67,11 @@ install_agent() {
 
 case "$TARGET" in
   all)
-    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate
+    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate "$@"
     install_agent "com.ck.alphaos.backup"
     ;;
   scheduler)
-    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate
+    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate "$@"
     ;;
   heartbeat)
     install_agent "com.ck.alphaos.heartbeat"
@@ -82,7 +83,7 @@ case "$TARGET" in
     install_agent "com.ck.alphaos.console"
     ;;
   *)
-    echo "Usage: $0 [all|scheduler|heartbeat|backup|console]" >&2
+    echo "Usage: $0 [all|scheduler|heartbeat|backup|console] [--expected-head SHA --expected-env-sha256 HASH]" >&2
     exit 1
     ;;
 esac
