@@ -7,6 +7,7 @@ import pytest
 from requests import ConnectionError, ReadTimeout
 
 from alphaos.__main__ import build_parser, cmd_entry_intent_resolve
+from alphaos.broker.alpaca_client import AlpacaClient
 from alphaos.constants import ProtectionPath
 from alphaos.execution import ledger_ops, protection_watchdog
 from alphaos.execution.entry_intent_resolution import resolve_entry_intent
@@ -188,3 +189,26 @@ def test_audit_failure_rolls_back_abandonment_and_incident_resolution(tmp_path, 
     assert journal.order_by_id(row["order_id"]) == before
     assert journal.query("SELECT * FROM order_events") == events
     assert protection_watchdog.has_blocking_incident(journal)
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_real_sdk_no_send_proof_survives_restart_and_operator_releases_gate(tmp_path, monkeypatch, timeout):
+    pytest.importorskip("alpaca")
+    from test_entry_transport_proof import fail_connect
+    fake, settings, journal, manager, proposal = setup(tmp_path, monkeypatch)
+    client = AlpacaClient(settings, journal)
+    client._trading_client()._session.trust_env = False
+    manager.alpaca = client
+    outbound = fail_connect(monkeypatch, timeout=timeout)
+    result = manager.execute_proposal(proposal)
+    assert result.submission_uncertain and outbound == [1]
+    proof = ledger_ops.metadata(result.order)["no_dispatch_proof"]
+    assert proof["transport"]["reason"] == ("connect_timeout" if timeout else "new_connection_failure")
+    assert pending_entry_intent(journal) and protection_watchdog.has_blocking_incident(journal)
+    # Restart against an empty deterministic broker for the fresh read-only
+    # corroboration. The durable proof came from the actual SDK transport above.
+    journal, manager = restart(fake, settings, journal)
+    recovered = resolve_entry_intent(manager, proposal.proposal_id, apply=True, note="verified first connection failed")
+    assert recovered["ok"] and recovered["applied"]
+    assert not pending_entry_intent(journal) and not protection_watchdog.has_blocking_incident(journal)
+    assert manager.execute_proposal(proposal).blocked and fake.submits == 0 and outbound == [1]
