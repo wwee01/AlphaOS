@@ -130,7 +130,7 @@ def test_a_fill_between_account_reads_blocks_instead_of_losing_reserved_exposure
         def list_open_orders(self):
             return []  # entry just filled, no longer appears as pending
     with pytest.raises(ExposureUnavailable, match="changed during"):
-        read_exposure(RacingBroker(), SimpleNamespace())
+        read_exposure(RacingBroker(), SimpleNamespace(query=lambda *args: []))
 
 
 @pytest.mark.parametrize("status,filled", [("new", 40), ("pending_cancel", 0), ("unknown_broker_state", 0)])
@@ -146,7 +146,8 @@ def test_final_exposure_requires_remaining_protection_and_explicit_working_statu
                 {"broker_order_id": "tp", "role": "take_profit", "side": "sell", "qty": 100, "filled_qty": 0, "status": "new", "state": "accepted"},
                 {"broker_order_id": "sl", "role": "stop_loss", "side": "sell", "qty": 100, "filled_qty": filled, "status": status, "state": "submitted"},
             ]}
-    journal = SimpleNamespace(open_positions=lambda: [{**position, "broker_order_id": "parent"}])
+    journal = SimpleNamespace(open_positions=lambda: [{**position, "broker_order_id": "parent"}],
+                              query=lambda *args: [])
     with pytest.raises(ExposureUnavailable, match="protection is not verified"):
         read_exposure(Broker(), journal)
 

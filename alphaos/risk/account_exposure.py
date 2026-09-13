@@ -87,6 +87,16 @@ def summarize_exposure(account: dict, positions: list[dict], orders: list[dict],
 def read_exposure(client, journal) -> dict:
     if client is None:
         raise ExposureUnavailable("paper broker is unavailable")
+    # The process may have died after writing its intent but before writing
+    # an incident or receiving the POST response. Absence of a broker order
+    # from a subsequent open-order list cannot prove it was never accepted.
+    from alphaos.execution.entry_submission import pending_entry_intent
+    try:
+        unresolved = pending_entry_intent(journal)
+    except Exception as exc:
+        raise ExposureUnavailable("paper entry intent state cannot be verified") from exc
+    if unresolved:
+        raise ExposureUnavailable("paper entry submission remains unresolved; reconcile its client ID first")
     account = client.get_account()
     positions = client.list_positions()
     orders = client.list_open_orders()
