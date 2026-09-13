@@ -134,6 +134,11 @@ class EntrySubmission:
             raise ValueError("entry response changed the authorized limit price or time in force")
         if nested:
             legs = norm.get("legs") or []
+            # A broker rejection/cancellation before any fill may never create
+            # child orders. Parent identity and intended terms above remain
+            # mandatory; finish separately proves flatness before releasing it.
+            if not legs and norm.get("status") in TERMINAL_ZERO and filled == 0:
+                return
             ids = {leg.get("broker_order_id") for leg in legs}
             if (len(legs) != 2 or len(ids) != 2 or None in ids or "" in ids
                     or norm["broker_order_id"] in ids
@@ -206,6 +211,16 @@ class EntrySubmission:
         return {"critical": True, "order_id": row["order_id"], "error": detail}
 
     def _verify_recovery(self, row, norm):
+        if norm.get("status") in TERMINAL_ZERO and norm.get("filled_qty") == 0:
+            from alphaos.execution.entry_intent_resolution import _flat_positions, _no_local_exposure, _no_orders
+
+            if any(leg.get("filled_qty") != 0 for leg in norm.get("legs", [])):
+                raise ValueError("terminal zero-fill entry has contradictory protective fill evidence")
+            _no_local_exposure(self.journal, row)
+            _flat_positions(self.broker.list_positions(), row["symbol"])
+            _no_orders(self.broker.list_open_orders(), row)
+            _flat_positions(self.broker.list_positions(), row["symbol"])
+            return
         pos = self.journal.one("SELECT * FROM positions WHERE order_id=?", (row["order_id"],))
         if pos and pos["status"] == "open":
             broker_positions = {p["symbol"]: p for p in self.broker.list_positions()}
@@ -230,7 +245,8 @@ class EntrySubmission:
                 raise ValueError("terminal entry recovery still has unexplained broker exposure")
 
     def finish(self, row, norm, *, verify_recovery=False):
-        if verify_recovery:
+        terminal_zero = norm.get("status") in TERMINAL_ZERO and norm.get("filled_qty") == 0
+        if verify_recovery or terminal_zero:
             self._verify_recovery(row, norm)
         with ledger_ops.atomic(self.journal) as journal:
             current = journal.order_by_id(row["order_id"])
