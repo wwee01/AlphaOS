@@ -36,6 +36,7 @@ from alphaos.constants import (
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import entry_staleness, order_schema, protection_watchdog
 from alphaos.execution.position_manager import PositionManager
+from alphaos.execution.entry_submission import EntrySubmission, PENDING_PHASES, is_entry_intent, pending_entry_intent
 from alphaos.execution import ledger_ops
 from alphaos.execution.time_exit_lifecycle import TimeExitLifecycle
 from alphaos.safety import KillSwitch, real_trading_guard
@@ -71,6 +72,7 @@ class OrderResult:
     position_id: Optional[str] = None
     block_reason: Optional[str] = None
     detail: Optional[str] = None
+    submission_uncertain: bool = False
 
 
 class OrderManager:
@@ -105,6 +107,17 @@ class OrderManager:
     # ----------------------------------------------------------- public API
     def execute_proposal(self, proposal, fill_price: Optional[float] = None) -> OrderResult:
         """Run safety preflight, choose protection, execute, and open a position."""
+        if self.real_paper:
+            existing = EntrySubmission(self).existing(proposal.proposal_id)
+            if existing:
+                # Repeat invocation observes the same durable attempt. It never
+                # creates a second order, including after a process restart.
+                return self._entry_result(existing)
+            pending = pending_entry_intent(self.journal)
+            if pending:
+                EntrySubmission(self).incident(pending, "another entry requested before reconciliation")
+                return self._blocked(proposal, ReasonCode.UNVERIFIABLE_DATA.value,
+                                     "a prior paper entry remains unverified", Severity.CRITICAL)
         # --- Safety preflight (defense in depth) -----------------------------
         guard = real_trading_guard(self.settings)
         if not guard.allowed:
@@ -270,73 +283,58 @@ class OrderManager:
         )
 
     # ------------------------------------------------- real Alpaca paper path
+    def _entry_result(self, row, *, detail=None) -> OrderResult:
+        pos = self.journal.one("SELECT position_id FROM positions WHERE order_id=?", (row["order_id"],))
+        uncertain = ledger_ops.metadata(row).get("phase") in PENDING_PHASES
+        rejected = not uncertain and row["state"] in {"rejected", "cancelled", "expired", "failed"}
+        return OrderResult(blocked=rejected, order=row, state=row["state"],
+                           position_id=pos["position_id"] if pos else None,
+                           protection_path=row.get("protection_path"), submission_uncertain=uncertain,
+                           block_reason=ReasonCode.ALPACA_SUBMIT_FAILED.value if rejected else None,
+                           detail=detail or ("broker confirmation pending; no automatic resubmission" if uncertain else None))
+
     def _submit_alpaca_paper(self, proposal, protection: ProtectionPath) -> OrderResult:
-        """Submit a real broker-native bracket to the Alpaca PAPER API."""
+        """Persist one PAPER bracket attempt before its first and only POST."""
+        entry = EntrySubmission(self)
+        try:
+            row, owned = entry.create(proposal, protection)
+        except ValueError as exc:
+            return self._blocked(proposal, ReasonCode.UNVERIFIABLE_DATA.value, str(exc), Severity.CRITICAL)
+        if not owned:
+            return self._entry_result(row)
+        recovering = False
         try:
             norm = self.alpaca.submit_bracket(proposal)
         except AlpacaSafetyError as exc:
-            return self._blocked(proposal, ReasonCode.PAPER_SAFETY_FAILED.value, str(exc),
-                                 Severity.CRITICAL, protection_path=protection.value)
-        except Exception as exc:  # pragma: no cover - network/SDK failure
-            self.journal.log_system_event(
-                Severity.ERROR, "execution", f"Alpaca paper submit failed for {proposal.symbol}.",
-                {"error": str(exc)},
-            )
-            return self._blocked(proposal, ReasonCode.ALPACA_SUBMIT_FAILED.value, str(exc),
-                                 Severity.ERROR, protection_path=protection.value)
-
-        order_id = new_id("ord")
-        side = order_schema.side_for_entry(proposal.direction)
-        state = norm.get("state") or OrderState.SUBMITTED.value
-        filled_price = norm.get("filled_avg_price")
-        data_provider, data_feed = self._data_labels()
-        src = ExecutionSource.ALPACA_PAPER.value
-
-        # Prefer the broker's own echoed TIF (the ground truth of what was actually
-        # accepted) over our outgoing intent; fall back to the intent only if the
-        # broker didn't echo one back (e.g. a minimal fake in tests).
-        time_in_force = norm.get("time_in_force") or self.alpaca._resolve_tif(proposal)
-        row = order_schema.build_order_row(
-            order_id=order_id, proposal=proposal, side=side, order_type="bracket",
-            execution_source=src, execution_provider=ExecutionProvider.ALPACA_PAPER.value,
-            execution_mode="alpaca_paper", data_provider=data_provider, data_feed=data_feed,
-            fill_price_basis="alpaca_fill", protection_path=protection.value, state=state,
-            qty=proposal.qty, entry_price=(filled_price if filled_price is not None else proposal.entry),
-            take_profit_price=proposal.target, stop_loss_price=proposal.stop, limit_price=proposal.entry,
-            time_in_force=time_in_force,
-            broker_order_id=norm.get("broker_order_id"), client_order_id=norm.get("client_order_id"),
-            raw_request={"proposal_id": proposal.proposal_id},
-            # Audit F8: fall back to our own clock if the broker didn't echo
-            # submitted_at -- ENTRY-TTL-1's TTL leg fails TOWARD cancellation
-            # on a missing submission time, so an SDK field-shape change here
-            # would otherwise silently become "cancel every unfilled entry at
-            # age 0". The broker echo stays preferred (ground truth).
-            raw_response=norm, submitted_at=norm.get("submitted_at") or timeutils.stamp().utc,
-            filled_at=norm.get("filled_at"),
+            # This exception is raised by the client's local preflight before
+            # any broker request; retain the actual paper attempt and identity.
+            with ledger_ops.atomic(self.journal) as journal:
+                ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], {
+                    "state": "rejected", "raw_request_json": {**ledger_ops.metadata(row), "phase": "acknowledged"},
+                    "raw_response_json": {"local_preflight_rejected": True, "detail": str(exc)},
+                })
+            return self._entry_result(self.journal.order_by_id(row["order_id"]), detail=str(exc))
+        except Exception as exc:
+            recovering = True
+            row = entry.uncertain(row, f"submission response unavailable ({exc})")
+            try:
+                norm = entry.lookup(row)
+            except Exception as lookup_exc:
+                row = entry.uncertain(row, f"submission response unavailable ({exc}); lookup failed ({lookup_exc})")
+                return self._entry_result(row)
+        try:
+            row = entry.observe(row, norm)
+            if (norm.get("filled_qty") or 0) > 0:
+                self._open_real_position(row, norm)
+            row = entry.finish(row, norm, verify_recovery=recovering)
+        except Exception as exc:
+            row = entry.uncertain(row, f"entry response could not be reconciled ({exc})")
+            return self._entry_result(row)
+        self.journal.log_system_event(
+            Severity.INFO, "execution", f"Alpaca PAPER bracket {row['state']} for {proposal.symbol}.",
+            {"order_id": row["order_id"], "broker_order_id": row["broker_order_id"]},
         )
-        self.journal.insert("paper_orders", row, mirror=True)
-        self._event(order_id, norm.get("broker_order_id"), OrderState.APPROVED, OrderState.SUBMITTED, src)
-        if state != OrderState.SUBMITTED.value:
-            self._event(order_id, norm.get("broker_order_id"), OrderState.SUBMITTED, OrderState(state), src,
-                        {"alpaca_status": norm.get("status")})
-
-        position_id = None
-        if state == OrderState.FILLED.value and (norm.get("filled_qty") or 0) > 0:
-            position_id = self._open_real_position(row, norm)
-            self.journal.log_system_event(
-                Severity.INFO, "execution",
-                f"Alpaca PAPER bracket FILLED {proposal.symbol} @ {filled_price} (real paper order).",
-                {"order_id": order_id, "position_id": position_id, "broker_order_id": norm.get("broker_order_id")},
-            )
-        else:
-            self.journal.log_system_event(
-                Severity.INFO, "execution",
-                f"Alpaca PAPER bracket submitted {proposal.symbol} (status={norm.get('status')}); "
-                f"awaiting fill — will reconcile.",
-                {"order_id": order_id, "broker_order_id": norm.get("broker_order_id")},
-            )
-        return OrderResult(blocked=False, order=row, protection_path=protection.value,
-                           state=state, position_id=position_id)
+        return self._entry_result(row)
 
     def _open_real_position(self, row: dict, norm: dict) -> str:
         """Atomically reconcile cumulative entry fills and the residual position."""
@@ -446,13 +444,23 @@ class OrderManager:
         for row in rows:
             order_id, boid = row["order_id"], row.get("broker_order_id")
             pos = self.journal.one("SELECT * FROM positions WHERE order_id = ?", (order_id,))
-            if pos and pos["status"] == "closed":
+            if (pos and pos["status"] == "closed"
+                    and ledger_ops.metadata(row).get("phase") not in PENDING_PHASES):
                 continue
-            if pos is None and row["state"] in terminal_no_fill:
+            if (pos is None and row["state"] in terminal_no_fill
+                    and ledger_ops.metadata(row).get("phase") not in PENDING_PHASES):
                 continue
+            entry = EntrySubmission(self)
+            managed_entry = is_entry_intent(row)
+            pending_entry = managed_entry and ledger_ops.metadata(row).get("phase") in PENDING_PHASES
             try:
-                norm = self.alpaca.get_order(boid)
+                norm = entry.lookup(row) if pending_entry else self.alpaca.get_order(boid)
+                if managed_entry:
+                    row = entry.observe(row, norm)
+                    boid = row["broker_order_id"]
             except Exception as exc:  # pragma: no cover - network
+                if managed_entry:
+                    row = entry.uncertain(row, f"entry reconciliation lookup failed ({exc})")
                 self.journal.log_system_event(
                     Severity.WARNING, "reconcile", f"get_order failed for {boid}.", {"error": str(exc)}
                 )
@@ -475,7 +483,10 @@ class OrderManager:
                 try:
                     pid = self._open_real_position(row, norm)
                 except Exception as exc:
-                    if pos:
+                    if managed_entry:
+                        row = entry.uncertain(row, f"entry fill could not be recorded ({exc})", force=True)
+                        incident = {"order_id": order_id, "error": str(exc), "critical": True}
+                    elif pos:
                         incident = TimeExitLifecycle(self).incident(pos, f"entry fill reconciliation failed ({exc})", unknown=True)
                     else:
                         incident = TimeExitLifecycle(self).incident(
@@ -521,6 +532,13 @@ class OrderManager:
                         if ex:
                             results["exits"].append(ex)
                         pos = self.journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))
+
+            if pending_entry:
+                try:
+                    entry.finish(row, norm, verify_recovery=True)
+                except Exception as exc:
+                    entry.uncertain(row, f"recovered entry still needs review ({exc})")
+                    results["errors"].append({"order_id": order_id, "error": str(exc), "critical": True})
 
         # ENTRY-TTL-1: staleness pass runs AFTER the state-sync loop above,
         # so a fill that happened THIS pass is already reflected in

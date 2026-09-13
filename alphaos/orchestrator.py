@@ -796,7 +796,8 @@ class Orchestrator:
             if result.blocked:
                 self._set_proposal_status(proposal.proposal_id, ProposalStatus.BLOCKED.value)
             else:
-                self._set_proposal_status(proposal.proposal_id, ProposalStatus.FILLED.value)
+                status = ProposalStatus.FILLED.value if result.state == OrderState.FILLED.value else "submitted"
+                self._set_proposal_status(proposal.proposal_id, status)
                 summary.auto_submitted += 1
         else:
             summary.pending_manual += 1
@@ -1006,6 +1007,8 @@ class Orchestrator:
         # Cost-model calibration capture (best-effort, AFTER the order — never gates
         # execution). Records the approval-time market context + modeled assumptions.
         self._record_execution_calibration(proposal, snap, result)
+        if result.submission_uncertain:
+            return True, "approval recorded; broker confirmation pending, automatic resubmission blocked"
         return True, f"approved + {verb} ({result.protection_path})"
 
     def reject_proposal(self, proposal_id: str, approver: str = "user", reason: str = "user rejected"):
@@ -2002,6 +2005,13 @@ class Orchestrator:
     def _execute(self, proposal: TradeProposal, fill_price: Optional[float] = None):
         if not self.orders.real_paper:
             return self._execute_checked(proposal, fill_price)
+        from alphaos.execution.entry_submission import existing_entry_intent
+        existing = existing_entry_intent(self.journal, proposal.proposal_id)
+        if existing:
+            # Observing a durable attempt performs no new broker action. A
+            # repeated approval must not relabel an uncertain real order as a
+            # rejected attempt merely because its own entry gate is blocking.
+            return self.orders._entry_result(existing)
         from alphaos.risk.account_exposure import entry_submission_lock, ExposureUnavailable
         from alphaos.scheduler.ownership import monitor_ownership
         try:
