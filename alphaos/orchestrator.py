@@ -1360,6 +1360,19 @@ class Orchestrator:
         self, price_overrides: Optional[dict] = None,
         trigger_source: str = TriggerSource.MANUAL_CLI.value,
     ) -> dict:
+        from alphaos.scheduler.ownership import monitor_ownership
+
+        with monitor_ownership(self.journal) as acquired:
+            if not acquired:
+                return {"status": "skipped", "reason": "monitor_owner_busy", "exits": [],
+                        "reconciled": 0, "opened": [], "protection": {},
+                        "open_positions": self.journal.count_open_positions(), "scheduler_run_id": None}
+            return self._run_monitor_owned(price_overrides, trigger_source)
+
+    def _run_monitor_owned(
+        self, price_overrides: Optional[dict] = None,
+        trigger_source: str = TriggerSource.MANUAL_CLI.value,
+    ) -> dict:
         self._ensure_startup()
         # Record a scheduler run for this monitor pass (records exist even though
         # v1 has no real scheduler). Keep the monitor behavior itself unchanged.

@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- AlphaOS dead-man's-switch heartbeat (PR9) -- runs `scheduler_health`
-       every 30 minutes. Deliberately a SEPARATE LaunchAgent from
+  <!-- AlphaOS dead-man's-switch heartbeat (PR9) — checks the execution monitor ONLY
+       every five minutes, including weekends. Deliberately a SEPARATE LaunchAgent from
        com.ck.alphaos.scheduler so this check's failure modes are never
        shared with the scheduler tick it is watching over. -->
   <key>Label</key>
@@ -13,8 +13,9 @@
   <array>
     <string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
     <string>-m</string>
-    <string>alphaos</string>
-    <string>scheduler_health</string>
+    <string>alphaos.scheduler.worker</string>
+    <string>--role</string>
+    <string>health</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -27,7 +28,7 @@
   </dict>
 
   <key>StartInterval</key>
-  <integer>1800</integer>
+  <integer>300</integer>
 
   <key>RunAtLoad</key>
   <true/>

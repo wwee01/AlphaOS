@@ -36,10 +36,14 @@ remove_agent() {
 case "$TARGET" in
   all)
     remove_agent "com.ck.alphaos.scheduler"
+    remove_agent "com.ck.alphaos.monitor"
     remove_agent "com.ck.alphaos.heartbeat"
     ;;
   scheduler)
     remove_agent "com.ck.alphaos.scheduler"
+    ;;
+  monitor)
+    remove_agent "com.ck.alphaos.monitor"
     ;;
   heartbeat)
     remove_agent "com.ck.alphaos.heartbeat"
@@ -48,7 +52,7 @@ case "$TARGET" in
     remove_agent "com.ck.alphaos.backup"
     ;;
   *)
-    echo "Usage: $0 [all|scheduler|heartbeat|backup]" >&2
+    echo "Usage: $0 [all|scheduler|monitor|heartbeat|backup]" >&2
     exit 1
     ;;
 esac

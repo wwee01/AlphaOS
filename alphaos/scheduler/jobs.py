@@ -190,8 +190,14 @@ def run_monitor_job(orch, runner) -> dict:
     """
     monitor_result = orch.run_monitor_once(trigger_source=TriggerSource.SCHEDULER.value)
     blocking = protection_watchdog.has_blocking_incident(orch.journal)
+    incidents = bool(monitor_result.get("errors") or monitor_result.get("time_exits_errors")
+                     or monitor_result.get("error_count") or blocking is not None)
+    # A normal pass can observe unresolved broker state. Keep reconciling it:
+    # domain incidents block readiness/entries, never fuse the recovery worker.
+    # Raised job exceptions still become failed runs in JobRunner.
     return {
-        "status": "completed",
+        "status": monitor_result.get("status", "completed"),
+        "completed_with_incidents": incidents,
         "protection_blocking": bool(blocking is not None),
         "monitor_result": monitor_result,
     }

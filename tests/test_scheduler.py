@@ -804,7 +804,7 @@ def test_reap_reclaims_a_stale_started_row_to_failed(orchestrator):
 
     row = orchestrator.journal.one("SELECT * FROM job_runs WHERE lock_key = ?", (lock_key,))
     assert row["status"] == "failed"
-    assert "reclaimed by scheduler" in row["error"]
+    assert "exclusive ownership by explicit request" in row["error"]
     assert row["finished_at_utc"] is not None
 
 
@@ -836,31 +836,16 @@ def test_reap_alerts_once_per_reclaimed_job(orchestrator, monkeypatch):
     assert titles == {"AlphaOS job failed: monitor", "AlphaOS job failed: atr_update"}
 
 
-def test_reap_frees_the_lock_so_a_still_due_job_can_run_again_the_same_tick(orchestrator, monkeypatch):
-    """The end-to-end point of the reaper: a wedged lock_key must not survive
-    to block the very tick that discovers it -- freed and re-runnable
-    immediately, not just cleaned up for next time."""
-    monkeypatch.setattr(
-        cadence, "is_due",
-        lambda job_type, settings, journal, now=None: (
-            (True, "forced for test") if job_type == cadence.JobType.MONITOR.value else (False, "not due")
-        ),
-    )
-    lock_key = cadence.default_lock_key(cadence.JobType.MONITOR.value, orchestrator.settings)
-    _insert_job_run(
-        orchestrator.journal, "monitor", "started", lock_key=lock_key,
-        started_at_utc=_stale_started_at(orchestrator.settings),
-    )
-
+def test_scheduled_monitor_does_not_reclaim_an_interrupted_pass(orchestrator, monkeypatch):
+    """A monitor may have stopped after broker submission; review before retry."""
+    monkeypatch.setattr(cadence, "is_due", lambda kind, *a: (kind == "monitor", "test"))
+    _insert_job_run(orchestrator.journal, "monitor", "started", lock_key="orphan-monitor",
+                    started_at_utc=_stale_started_at(orchestrator.settings))
     results = JobRunner(orchestrator).run_due_jobs()
-    by_type = {r["job_type"]: r for r in results}
-    assert by_type["monitor"]["status"] not in ("skipped", "not_due")
-
-    rows = orchestrator.journal.query(
-        "SELECT status FROM job_runs WHERE lock_key = ? ORDER BY id ASC", (lock_key,),
-    )
-    assert rows[0]["status"] == "failed"  # the reclaimed zombie
-    assert rows[1]["status"] in ("completed", "failed")  # the fresh attempt that followed
+    result = next(r for r in results if r["job_type"] == "monitor")
+    assert result["status"] == "blocked"
+    assert result["reason"] == "monitor_inflight_requires_review"
+    assert orchestrator.journal.one("SELECT status FROM job_runs WHERE lock_key='orphan-monitor'")["status"] == "started"
 
 
 def test_reap_frees_the_manual_cli_recovery_path_too(orchestrator):
@@ -1078,18 +1063,13 @@ def test_heartbeat_unparseable_timestamp_is_not_ok(orchestrator, monkeypatch):
     assert "unparseable timestamp" in result["detail"]
 
 
-def test_heartbeat_outside_market_hours_is_always_ok_and_never_alerts(orchestrator, monkeypatch):
-    def fail_if_called(*args, **kwargs):
-        raise AssertionError("must not alert outside market hours")
-
-    monkeypatch.setattr(alerts, "send_alert", fail_if_called)
-    # No completed rows at all -- would be "not ok" during market hours, but
-    # must be unconditionally healthy on a weekend.
-
+def test_heartbeat_missing_weekend_monitor_is_unhealthy(orchestrator, monkeypatch):
+    calls = []
+    monkeypatch.setattr(alerts, "send_alert", lambda *a, **k: calls.append(k) or True)
     result = JobRunner(orchestrator).heartbeat_check(now=_WEEKEND_NOW)
-
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["market_hours"] is False
+    assert len(calls) == 1
 
 
 def test_heartbeat_never_raises_even_if_alert_send_crashes(orchestrator, monkeypatch):

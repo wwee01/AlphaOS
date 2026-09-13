@@ -13,12 +13,15 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from typing import Optional
 
-from alphaos.constants import MarketSession, Severity
+from alphaos.constants import Severity
 from alphaos.execution import protection_watchdog
 from alphaos.scheduler import cadence, cost_guard, jobs
+from alphaos.scheduler.monitor_health import RESEARCH_ENTRY_GUARD, monitor_health
+from alphaos.scheduler.ownership import monitor_ownership
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
@@ -42,9 +45,16 @@ _JOB_FUNCS = {
 class JobRunner:
     """Drives scheduled job execution against one ``Orchestrator`` instance."""
 
-    def __init__(self, orch):
+    def __init__(self, orch, role: str = "all"):
+        if role not in ("all", "research", "monitor"):
+            raise ValueError("unknown scheduler role")
         self.orch = orch
         self.journal = orch.journal
+        self.role = role
+
+    def _role_jobs(self) -> list[str]:
+        return [job for job in _JOB_FUNCS if (self.role == "all" or
+                (job == cadence.JobType.MONITOR) == (self.role == "monitor"))]
 
     # -------------------------------------------------------------- locking
     def acquire(self, job_type: str, lock_key: str) -> Optional[int]:
@@ -103,7 +113,25 @@ class JobRunner:
         return row_id
 
     # ---------------------------------------------------------------- run
-    def run_job(self, job_type: str, lock_key: Optional[str] = None) -> dict:
+    def run_job(self, job_type: str, lock_key: Optional[str] = None,
+                *, allow_monitor_recovery: bool = True) -> dict:
+        """Manual calls may recover stale monitor rows only under ownership.
+
+        Scheduled calls never recover an ambiguous, interrupted monitor pass.
+        The OS lock covers the complete pass across different interval keys;
+        the SQLite lock still prevents a second completed run in one interval.
+        """
+        try:
+            ownership = monitor_ownership(self.journal) if job_type == cadence.JobType.MONITOR else nullcontext(True)
+            with ownership as acquired:
+                if not acquired:
+                    return {"job_type": job_type, "status": "skipped", "reason": "monitor_owner_busy"}
+                return self._run_job_owned(job_type, lock_key, allow_monitor_recovery)
+        except Exception as exc:
+            self._alert_job_failure(job_type, f"worker ownership/state failure ({type(exc).__name__})")
+            return {"job_type": job_type, "status": "failed", "error": f"ownership/state failure ({type(exc).__name__})"}
+
+    def _run_job_owned(self, job_type: str, lock_key: Optional[str], allow_monitor_recovery: bool) -> dict:
         """Run ``job_type`` now, enforcing the idempotency lock. Never raises --
         genuinely unexpected exceptions from the dispatched job are caught here
         and recorded as a 'failed' job_runs row instead of propagating.
@@ -119,11 +147,16 @@ class JobRunner:
         `acquire()` lock, so both must be able to self-heal it. Idempotent:
         called again moments later from within run_due_jobs()'s loop, it
         simply finds nothing left to reclaim."""
-        self._reap_stale_started_jobs()
+        self._reap_stale_started_jobs(job_types=[job_type], recover_monitor=allow_monitor_recovery)
         if job_type not in _JOB_FUNCS:
             # Validate before acquire() -- an unknown job_type must never claim
             # a lock row it can then never resolve to completed/failed.
             return {"job_type": job_type, "status": "failed", "error": f"unknown job_type: {job_type!r}"}
+
+        if job_type == cadence.JobType.MONITOR and self.journal.one(
+            "SELECT id FROM job_runs WHERE job_type = 'monitor' AND status = 'started' LIMIT 1"
+        ):
+            return {"job_type": job_type, "status": "blocked", "reason": "monitor_inflight_requires_review"}
 
         if lock_key is None:
             lock_key = cadence.default_lock_key(job_type, self.orch.settings)
@@ -160,6 +193,10 @@ class JobRunner:
             self._alert_job_failure(job_type, str(exc))
             return {"job_type": job_type, "status": "failed", "error": str(exc), "lock_key": lock_key}
 
+        if self.role != "all":
+            result = {**result, "worker_role": self.role}
+        if result.get("status") == "failed":
+            self._alert_job_failure(job_type, "monitor/job returned failure; inspect recorded result")
         duration_ms = int((time.monotonic() - started) * 1000)
         done = timeutils.stamp()
         # id-keyed -- see the failure-path UPDATE's comment above, same reason.
@@ -212,40 +249,15 @@ class JobRunner:
             pass
 
     # ------------------------------------------------------------- reaping
-    def _reap_stale_started_jobs(self) -> list[dict]:
-        """2026-07-17 audit fix (MED-HIGH): reclaim ``job_runs`` rows stuck at
-        ``status='started'`` for longer than ``scheduler_stale_job_minutes``.
+    def _reap_stale_started_jobs(self, job_types=None, *, recover_monitor: bool = True) -> list[dict]:
+        """Reclaim interrupted research jobs; monitor recovery is explicit.
 
-        Before this existed, a hard-killed run (crash/OOM/laptop-sleep mid-job
-        -- the same class of interruption that stranded the backup script's
-        temp file, see deploy/backup_ledger.sh's mktemp fix the same day)
-        left a permanent ``started`` row. ``acquire()``'s idempotency guard
-        treats ANY ``started`` or ``completed`` row as "already claimed", so
-        that one interruption silently blocked every future attempt to run
-        that exact ``lock_key`` for the rest of its window/day -- and because
-        the row was never ``failed``, ``is_fused``'s streak-of-'failed' never
-        saw it either, so no fuse tripped and no page ever went out. The
-        `stale_running_jobs` query already existed (status_report()/digest.py)
-        but was READ-ONLY -- visible in a report nobody necessarily reads,
-        never actually freeing the lock.
-
-        Reclaiming to 'failed' (not deleting the row -- job_runs is
-        additive-only, same law as trade_proposals/protection_checks) does
-        two things at once: (1) clears `idx_jobruns_lock_key_active`'s
-        predicate so the SAME tick's `acquire()` below can succeed again if
-        the job type is still due, and (2) feeds `is_fused`'s existing
-        streak-of-'failed' counter, so a job that reliably crashes every run
-        now correctly fuses and pages via the existing mechanism instead of
-        silently re-wedging forever. Runs at the top of every tick (this is
-        the scheduler's own single chokepoint for lock acquisition -- same
-        "one place, not N" discipline as this codebase's other reaped-state
-        fixes) -- a short-lived LaunchAgent process (StartInterval, not a
-        daemon) means the very next invocation always re-enters here fresh,
-        even if the process that stranded the row is long gone.
-
-        Alerts (priority=high) on every reclaim -- a wedge is exactly as
-        page-worthy as an ordinary job failure, arguably more so (it means
-        something crashed hard enough to bypass the job's own try/except)."""
+        Role filters prevent one worker from reclaiming another worker's jobs.
+        Scheduled callers always pass recover_monitor=False. A manual recovery
+        may mark a stale monitor row failed only while holding its OS ownership
+        lock. Never delete historical rows or infer an active process is dead
+        merely because the job timestamp is old.
+        """
         stale_before = timeutils.to_iso(
             timeutils.now_utc() - timedelta(minutes=int(self.orch.settings.scheduler_stale_job_minutes))
         )
@@ -255,6 +267,15 @@ class JobRunner:
         )
         reclaimed = []
         for row in stale:
+            if job_types is not None and row["job_type"] not in job_types:
+                continue
+            if row["job_type"] == cadence.JobType.MONITOR:
+                if not recover_monitor:
+                    continue
+                with monitor_ownership(self.journal) as acquired:
+                    if acquired:
+                        reclaimed.extend(self._reap_monitor_row(row))
+                continue
             done = timeutils.stamp()
             error = (
                 f"reclaimed by scheduler: exceeded scheduler_stale_job_minutes "
@@ -272,31 +293,31 @@ class JobRunner:
             reclaimed.append({"job_type": row["job_type"], "lock_key": row["lock_key"], "error": error})
         return reclaimed
 
+    def _reap_monitor_row(self, row: dict) -> list[dict]:
+        """Explicit/manual recovery only; an active owner can never be reaped."""
+        done = timeutils.stamp()
+        error = "stale monitor recovered under exclusive ownership by explicit request; prior broker state requires reconciliation"
+        cur = self.journal.conn.execute(
+            "UPDATE job_runs SET status = 'failed', error = ?, finished_at_utc = ?, finished_at_sgt = ? "
+            "WHERE id = ? AND status = 'started'", (error, done.utc, done.local_sgt, row["id"]),
+        )
+        self.journal.conn.commit()
+        if not cur.rowcount:
+            return []
+        self._log_failure_best_effort("monitor", row["lock_key"], error)
+        self._alert_job_failure("monitor", error)
+        return [{"job_type": "monitor", "lock_key": row["lock_key"], "error": error}]
+
     # ------------------------------------------------------------- cadence
     def run_due_jobs(self) -> list:
-        """Run every job type that is currently due, in a fixed order (scan,
-        monitor, outcomes_update, daily_digest, benchmark_spine,
-        text_archive_pull, atr_update, hypothesis_resolve). Job types that
-        are not due get a ``not_due`` entry WITHOUT any job_runs row being
-        inserted.
+        """Dispatch due jobs belonging to this worker role.
 
-        PR9: a due job type that is currently FUSED (too many consecutive
-        failures -- see ``cadence.is_fused``) is also skipped, with no
-        job_runs row inserted (same "not dispatched, nothing recorded"
-        contract as not_due) -- the fuse's own alert/log happens once per
-        fused state via ``_handle_fuse``, not per tick.
-
-        2026-07-17: reaps stale 'started' rows FIRST, before any is_due/
-        acquire check below -- see `_reap_stale_started_jobs()`. This one
-        specifically matters here (not just via run_job()'s own reap) because
-        scan/shadow_label's own `is_due()` (cadence._scan_due) independently
-        checks for a 'started' row and would report "not due" -- skipping
-        run_job() entirely -- before run_job()'s reap ever got a chance to
-        run. A lock_key wedged by a crash is freed in the same tick that
-        discovers it, so a job type that's still due can run again
-        immediately rather than waiting for the next window/day boundary.
+        Research excludes monitoring and gates scans on monitor readiness.
+        Monitor runs independently at the existing cadence. Fuses remain
+        explicit-recovery states; scheduled calls never reclaim interrupted
+        monitor rows or consume AI budget to diagnose them.
         """
-        self._reap_stale_started_jobs()
+        self._reap_stale_started_jobs(job_types=self._role_jobs(), recover_monitor=False)
         results = []
         for job_type in (
             cadence.JobType.SCAN,
@@ -319,6 +340,14 @@ class JobRunner:
             # never the live book; core SCAN/MONITOR are never delayed.
             cadence.JobType.SHADOW_LABEL,
         ):
+            if job_type not in self._role_jobs():
+                continue
+            if self.role == "research" and job_type == cadence.JobType.SCAN:
+                health = monitor_health(self.journal, self.orch.settings)
+                if not health.get("entry_ready", health["ok"]):
+                    results.append({"job_type": job_type, "status": "blocked",
+                                    "reason": "monitor_not_ready", "monitor_health": health})
+                    continue
             due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
             if not due:
                 results.append({"job_type": job_type, "status": "not_due", "reason": reason})
@@ -332,7 +361,14 @@ class JobRunner:
                 results.append({"job_type": job_type, "status": "fused", "reason": fuse_reason})
                 continue
 
-            results.append(self.run_job(job_type))
+            token = None
+            if self.role == "research" and job_type == cadence.JobType.SCAN:
+                token = RESEARCH_ENTRY_GUARD.set(True)
+            try:
+                results.append(self.run_job(job_type, allow_monitor_recovery=False))
+            finally:
+                if token is not None:
+                    RESEARCH_ENTRY_GUARD.reset(token)
         return results
 
     def _handle_fuse(self, job_type: str, reason: str, streak: int) -> None:
@@ -436,6 +472,7 @@ class JobRunner:
         )
 
         return {
+            "monitor_health": monitor_health(self.journal, self.orch.settings),
             "recent_by_job_type": recent_by_job_type,
             "stale_running_jobs": stale_running_jobs,
             "kill_switch_engaged": self.orch.kill_switch.is_engaged(),
@@ -449,72 +486,14 @@ class JobRunner:
 
     # ---------------------------------------------------------- heartbeat
     def heartbeat_check(self, now: Optional[datetime] = None) -> dict:
-        """Dead-man's-switch check for the ``scheduler_health`` CLI command,
-        driven by its OWN separate LaunchAgent (PR9) so its failure modes are
-        never shared with the scheduler tick itself.
-
-        Outside market hours (``MarketSession.CLOSED`` -- nights/weekends)
-        this always reports healthy WITHOUT checking staleness or alerting:
-        there is no expectation of a fresh completed job during a period the
-        scheduler isn't expected to be doing anything. During any other
-        session (premarket/regular/afterhours), monitor/outcomes jobs run on
-        their own interval around the clock regardless of scan windows, so a
-        live scheduler should always have a recently-completed job_runs row;
-        a stale/missing one pages once per invocation (the heartbeat
-        LaunchAgent's own tick interval is the natural repeat -- unlike the
-        scheduler fuse, there is no separate dedupe here by design).
-
-        Never raises.
-        """
-        session = timeutils.market_session(now)
-        if session == MarketSession.CLOSED:
-            return {
-                "ok": True,
-                "market_hours": False,
-                "detail": "market closed; heartbeat staleness not enforced",
-            }
-
-        stale_minutes = self.orch.settings.scheduler_heartbeat_stale_minutes
-        last_completed = self.journal.one(
-            "SELECT job_type, finished_at_utc FROM job_runs WHERE status = 'completed' "
-            "ORDER BY finished_at_utc DESC LIMIT 1"
-        )
-
-        age_seconds = None
-        if last_completed:
-            age_seconds = timeutils.age_seconds(last_completed["finished_at_utc"], now)
-
-        if last_completed and age_seconds is not None and age_seconds <= stale_minutes * 60:
-            return {
-                "ok": True,
-                "market_hours": True,
-                "detail": (
-                    f"last completed job ({last_completed['job_type']}) "
-                    f"{age_seconds / 60:.1f}m ago (<= {stale_minutes}m)"
-                ),
-                "last_job_type": last_completed["job_type"],
-                "age_minutes": age_seconds / 60.0,
-            }
-
-        if not last_completed:
-            detail = "no completed job_runs row found"
-        elif age_seconds is None:
-            detail = f"last completed job ({last_completed['job_type']}) has an unparseable timestamp"
-        else:
-            detail = (
-                f"last completed job ({last_completed['job_type']}) "
-                f"{age_seconds / 60:.1f}m ago (> {stale_minutes}m)"
-            )
-
-        try:
-            alerts.send_alert(
-                self.orch.settings,
-                title="AlphaOS scheduler heartbeat stale",
-                message=detail,
-                priority="high",
-                journal=self.journal,
-            )
-        except Exception:  # noqa: BLE001 - suspenders: must never crash the CLI command
-            pass
-
-        return {"ok": False, "market_hours": True, "detail": detail}
+        """Dedicated monitor heartbeat; unrelated jobs cannot certify execution."""
+        result = monitor_health(self.journal, self.orch.settings, now)
+        if not result["ok"]:
+            try:
+                alerts.send_alert(
+                    self.orch.settings, title="AlphaOS execution monitor unhealthy",
+                    message=result["detail"], priority="high", journal=self.journal,
+                )
+            except Exception:
+                pass
+        return result

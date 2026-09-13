@@ -66,12 +66,11 @@ install_agent() {
 
 case "$TARGET" in
   all)
-    install_agent "com.ck.alphaos.scheduler"
-    install_agent "com.ck.alphaos.heartbeat"
+    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate
     install_agent "com.ck.alphaos.backup"
     ;;
   scheduler)
-    install_agent "com.ck.alphaos.scheduler"
+    "$DEPLOY_DIR/install_monitor_isolation.sh" --activate
     ;;
   heartbeat)
     install_agent "com.ck.alphaos.heartbeat"

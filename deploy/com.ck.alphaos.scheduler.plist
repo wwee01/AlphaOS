@@ -2,12 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- AlphaOS scheduler cadence (PR9) -- ticks `scheduler_run_once` every
-       5 minutes. Keeps launchd dumb on purpose: this LaunchAgent only
-       decides WHEN to invoke the process; JobRunner.run_due_jobs() decides
-       which jobs are actually due, respecting scan windows / kill switch /
-       cost cap / self-halt fuses / idempotency locking. Never a daemon --
-       each tick is a short-lived, idempotent process. -->
+  <!-- Research/scan worker only. Monitoring belongs to a separate service.
+       Five-minute trigger; existing job windows, caps and fuses still apply.
+       Scan admission requires dedicated monitor readiness. -->
   <key>Label</key>
   <string>com.ck.alphaos.scheduler</string>
 
@@ -15,8 +12,9 @@
   <array>
     <string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
     <string>-m</string>
-    <string>alphaos</string>
-    <string>scheduler_run_once</string>
+    <string>alphaos.scheduler.worker</string>
+    <string>--role</string>
+    <string>research</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -28,7 +26,7 @@
     <string>/Users/ck</string>
   </dict>
 
-  <!-- Fire every 300 seconds, always -- the idempotent tick. cadence.py's
+  <!-- Fire every 300 seconds, always — the idempotent tick. cadence.py's
        is_due()/is_fused() checks decide what actually runs on any given
        tick; a tick outside every scan window or between monitor/outcomes
        intervals is a cheap, fast no-op (all job types report not_due). -->
@@ -38,7 +36,7 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- PR9.5: persistent logs, not /tmp -- macOS purges /tmp on reboot and
+  <!-- PR9.5: persistent logs, not /tmp — macOS purges /tmp on reboot and
        periodically, which made the scheduler's own log history disposable.
        ~/Library/Logs/ is the standard macOS location for app logs (visible
        in Console.app) and is included in Time Machine / most backup tools. -->
