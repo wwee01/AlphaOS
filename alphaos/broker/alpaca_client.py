@@ -32,6 +32,30 @@ class AlpacaNotConnected(Exception):
     """Raised when a real paper client cannot be constructed (e.g. SDK missing)."""
 
 
+BROKER_HTTP_TIMEOUT = (5.0, 20.0)  # connection, socket-read inactivity seconds
+
+
+def _bound_broker_transport(client) -> None:
+    """The installed alpaca-py transport omits requests' timeout by default.
+
+    Bound individual HTTP waits so a stalled provider cannot indefinitely
+    hold account ownership. This is not a total job deadline: existing SDK
+    rate-limit retries and multi-request reconciliation still take longer.
+    Transport timeouts propagate as unknown broker outcomes; never retry a
+    submission here. Apply before publishing the lazy client to other calls.
+    """
+    session = getattr(client, "_session", None)
+    request = getattr(session, "request", None)
+    if session is None or not callable(request):
+        raise AlpacaNotConnected("Alpaca transport cannot establish bounded HTTP waits")
+
+    def bounded_request(*args, **kwargs):
+        kwargs["timeout"] = BROKER_HTTP_TIMEOUT
+        return request(*args, **kwargs)
+
+    session.request = bounded_request
+
+
 class AlpacaClient:
     def __init__(self, settings: Settings, journal=None, trading_client=None):
         self.settings = settings
@@ -99,11 +123,13 @@ class AlpacaClient:
         try:  # pragma: no cover - exercised only with the live SDK + creds
             from alpaca.trading.client import TradingClient
 
-            self._client = TradingClient(
+            client = TradingClient(
                 api_key=self.settings.alpaca_api_key,
                 secret_key=self.settings.alpaca_secret_key,
                 paper=True,  # hard-wired: paper only
             )
+            _bound_broker_transport(client)
+            self._client = client
             return self._client
         except ImportError as exc:  # pragma: no cover
             raise AlpacaNotConnected(f"alpaca-py not installed: {exc}")
