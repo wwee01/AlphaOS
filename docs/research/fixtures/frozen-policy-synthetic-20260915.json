@@ -1,0 +1,1142 @@
+{
+  "synthetic_only": true,
+  "contract": {
+    "method": "frozen_two_arm_interval_components_percentile_v1",
+    "status": "draft",
+    "protocol_id": "SYNTHETIC-TEST-ONLY",
+    "provenance": "synthetic",
+    "design": "paired",
+    "direction": "greater",
+    "effect_target": 0.05,
+    "confidence_level": 0.95,
+    "seed": 20260915,
+    "resamples": 999,
+    "min_components_per_arm": 10,
+    "max_component_share": 0.2,
+    "dependence_buffer_seconds": 0,
+    "frozen_at_utc": "2026-01-01T00:00:00Z",
+    "enrollment_start_utc": "2026-01-02T00:00:00Z",
+    "enrollment_end_utc": "2026-12-31T00:00:00Z",
+    "analysis_at_utc": "2027-01-01T00:00:00Z",
+    "independence_assumption": "Independent synthetic portfolio episodes; never inferred for actual market data.",
+    "control_policy": {
+      "name": "frozen-current",
+      "version": 1
+    },
+    "challenger_policy": {
+      "name": "watch-advisory",
+      "version": 1
+    },
+    "measurement": {
+      "metric": "net_portfolio_return_fraction",
+      "starting_capital": 100.0,
+      "window_seconds": 3600,
+      "basis": "fixed_window_mark_to_market",
+      "cost_method": "synthetic-observed-v1",
+      "fill_method": "synthetic-v1",
+      "mark_method": "synthetic-v1",
+      "opportunity_membership_method": "all-synthetic-episodes-v1"
+    }
+  },
+  "members": [
+    {
+      "member_id": "control-000",
+      "arm": "control",
+      "pair_id": "pair-0",
+      "opportunity_id": "episode-0",
+      "capital_path_id": "control-000",
+      "dependence_keys": [
+        "market-episode-0"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-02T00:00:00+00:00",
+      "decision_at_utc": "2026-01-02T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-02T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-01T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-02T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-02T01:00:00+00:00",
+      "input": {
+        "episode": 0,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "8a202cb0d36363843f0dcfbb3ee16f2f782a859c81e07869dc5e5129ca7ff0f3"
+    },
+    {
+      "member_id": "control-001",
+      "arm": "control",
+      "pair_id": "pair-1",
+      "opportunity_id": "episode-1",
+      "capital_path_id": "control-001",
+      "dependence_keys": [
+        "market-episode-2"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-04T00:00:00+00:00",
+      "decision_at_utc": "2026-01-04T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-04T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-03T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-04T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-04T01:00:00+00:00",
+      "input": {
+        "episode": 1,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "8a0ba67360714c88c9e5b41e917ff50814d0e3478e8db5652812911d2afbe2c8"
+    },
+    {
+      "member_id": "control-002",
+      "arm": "control",
+      "pair_id": "pair-2",
+      "opportunity_id": "episode-2",
+      "capital_path_id": "control-002",
+      "dependence_keys": [
+        "market-episode-4"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-06T00:00:00+00:00",
+      "decision_at_utc": "2026-01-06T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-06T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-05T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-06T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-06T01:00:00+00:00",
+      "input": {
+        "episode": 2,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "dc798212e1281ac84b66da1ef647441fd9fc1e3ee1affd6c09cde5d9c8954ea1"
+    },
+    {
+      "member_id": "control-003",
+      "arm": "control",
+      "pair_id": "pair-3",
+      "opportunity_id": "episode-3",
+      "capital_path_id": "control-003",
+      "dependence_keys": [
+        "market-episode-6"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-08T00:00:00+00:00",
+      "decision_at_utc": "2026-01-08T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-08T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-07T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-08T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-08T01:00:00+00:00",
+      "input": {
+        "episode": 3,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "cd618f1c6cded0289a058f68b58808ecd99314455b558576bb6444842617e3d1"
+    },
+    {
+      "member_id": "control-004",
+      "arm": "control",
+      "pair_id": "pair-4",
+      "opportunity_id": "episode-4",
+      "capital_path_id": "control-004",
+      "dependence_keys": [
+        "market-episode-8"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-10T00:00:00+00:00",
+      "decision_at_utc": "2026-01-10T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-10T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-09T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-10T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-10T01:00:00+00:00",
+      "input": {
+        "episode": 4,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "cfa5fe998c4c96cf19b2a889062e50d6a9cd71843ab834f05b76c4a45e9de38f"
+    },
+    {
+      "member_id": "control-005",
+      "arm": "control",
+      "pair_id": "pair-5",
+      "opportunity_id": "episode-5",
+      "capital_path_id": "control-005",
+      "dependence_keys": [
+        "market-episode-10"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-12T00:00:00+00:00",
+      "decision_at_utc": "2026-01-12T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-12T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-11T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-12T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-12T01:00:00+00:00",
+      "input": {
+        "episode": 5,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "9789fa97be1c7ed64dc00fe24b6c347779c160809eb96a75276bf771e69b732a"
+    },
+    {
+      "member_id": "control-006",
+      "arm": "control",
+      "pair_id": "pair-6",
+      "opportunity_id": "episode-6",
+      "capital_path_id": "control-006",
+      "dependence_keys": [
+        "market-episode-12"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-14T00:00:00+00:00",
+      "decision_at_utc": "2026-01-14T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-14T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-13T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-14T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-14T01:00:00+00:00",
+      "input": {
+        "episode": 6,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "5bba85d6f19be05e675b20304d10ed7255713574808d52bde6352e416e9c4302"
+    },
+    {
+      "member_id": "control-007",
+      "arm": "control",
+      "pair_id": "pair-7",
+      "opportunity_id": "episode-7",
+      "capital_path_id": "control-007",
+      "dependence_keys": [
+        "market-episode-14"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-16T00:00:00+00:00",
+      "decision_at_utc": "2026-01-16T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-16T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-15T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-16T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-16T01:00:00+00:00",
+      "input": {
+        "episode": 7,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "fa10e7171aca8afe10712ba9b2f4f47c4366b3c344fcd218a9d181e64058007e"
+    },
+    {
+      "member_id": "control-008",
+      "arm": "control",
+      "pair_id": "pair-8",
+      "opportunity_id": "episode-8",
+      "capital_path_id": "control-008",
+      "dependence_keys": [
+        "market-episode-16"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-18T00:00:00+00:00",
+      "decision_at_utc": "2026-01-18T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-18T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-17T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-18T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-18T01:00:00+00:00",
+      "input": {
+        "episode": 8,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "78978a1e8937c7dc9fd71ddc2b371bc10af25c99b3f9f98577092844f30acf92"
+    },
+    {
+      "member_id": "control-009",
+      "arm": "control",
+      "pair_id": "pair-9",
+      "opportunity_id": "episode-9",
+      "capital_path_id": "control-009",
+      "dependence_keys": [
+        "market-episode-18"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-20T00:00:00+00:00",
+      "decision_at_utc": "2026-01-20T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-20T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-19T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-20T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-20T01:00:00+00:00",
+      "input": {
+        "episode": 9,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "4a5a37eb30ee5421334c9e23ceffd71ae5422ff70843b2e6d0be084147748b56"
+    },
+    {
+      "member_id": "control-010",
+      "arm": "control",
+      "pair_id": "pair-10",
+      "opportunity_id": "episode-10",
+      "capital_path_id": "control-010",
+      "dependence_keys": [
+        "market-episode-20"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-22T00:00:00+00:00",
+      "decision_at_utc": "2026-01-22T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-22T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-21T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-22T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-22T01:00:00+00:00",
+      "input": {
+        "episode": 10,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "5593b4b33e096e1f8afd87129a1efae83d9aee753f4f710abd0605d4ea8d7426"
+    },
+    {
+      "member_id": "control-011",
+      "arm": "control",
+      "pair_id": "pair-11",
+      "opportunity_id": "episode-11",
+      "capital_path_id": "control-011",
+      "dependence_keys": [
+        "market-episode-22"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-24T00:00:00+00:00",
+      "decision_at_utc": "2026-01-24T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-24T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-23T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-24T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-24T01:00:00+00:00",
+      "input": {
+        "episode": 11,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "9aa5ed566717e25ed9c120f069f1fed1a519b22dbb0c350d6d24cc04e072fdab",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "a8a02d90f5f43e16305a7f205b48b2ad139c2b36de142c71dede5db2f6d56a49"
+    },
+    {
+      "member_id": "challenger-000",
+      "arm": "challenger",
+      "pair_id": "pair-0",
+      "opportunity_id": "episode-0",
+      "capital_path_id": "challenger-000",
+      "dependence_keys": [
+        "market-episode-0"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-02T00:00:00+00:00",
+      "decision_at_utc": "2026-01-02T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-02T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-01T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-02T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-02T01:00:00+00:00",
+      "input": {
+        "episode": 0,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "8a202cb0d36363843f0dcfbb3ee16f2f782a859c81e07869dc5e5129ca7ff0f3"
+    },
+    {
+      "member_id": "challenger-001",
+      "arm": "challenger",
+      "pair_id": "pair-1",
+      "opportunity_id": "episode-1",
+      "capital_path_id": "challenger-001",
+      "dependence_keys": [
+        "market-episode-2"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-04T00:00:00+00:00",
+      "decision_at_utc": "2026-01-04T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-04T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-03T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-04T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-04T01:00:00+00:00",
+      "input": {
+        "episode": 1,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "8a0ba67360714c88c9e5b41e917ff50814d0e3478e8db5652812911d2afbe2c8"
+    },
+    {
+      "member_id": "challenger-002",
+      "arm": "challenger",
+      "pair_id": "pair-2",
+      "opportunity_id": "episode-2",
+      "capital_path_id": "challenger-002",
+      "dependence_keys": [
+        "market-episode-4"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-06T00:00:00+00:00",
+      "decision_at_utc": "2026-01-06T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-06T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-05T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-06T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-06T01:00:00+00:00",
+      "input": {
+        "episode": 2,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "dc798212e1281ac84b66da1ef647441fd9fc1e3ee1affd6c09cde5d9c8954ea1"
+    },
+    {
+      "member_id": "challenger-003",
+      "arm": "challenger",
+      "pair_id": "pair-3",
+      "opportunity_id": "episode-3",
+      "capital_path_id": "challenger-003",
+      "dependence_keys": [
+        "market-episode-6"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-08T00:00:00+00:00",
+      "decision_at_utc": "2026-01-08T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-08T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-07T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-08T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-08T01:00:00+00:00",
+      "input": {
+        "episode": 3,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "cd618f1c6cded0289a058f68b58808ecd99314455b558576bb6444842617e3d1"
+    },
+    {
+      "member_id": "challenger-004",
+      "arm": "challenger",
+      "pair_id": "pair-4",
+      "opportunity_id": "episode-4",
+      "capital_path_id": "challenger-004",
+      "dependence_keys": [
+        "market-episode-8"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-10T00:00:00+00:00",
+      "decision_at_utc": "2026-01-10T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-10T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-09T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-10T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-10T01:00:00+00:00",
+      "input": {
+        "episode": 4,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "cfa5fe998c4c96cf19b2a889062e50d6a9cd71843ab834f05b76c4a45e9de38f"
+    },
+    {
+      "member_id": "challenger-005",
+      "arm": "challenger",
+      "pair_id": "pair-5",
+      "opportunity_id": "episode-5",
+      "capital_path_id": "challenger-005",
+      "dependence_keys": [
+        "market-episode-10"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-12T00:00:00+00:00",
+      "decision_at_utc": "2026-01-12T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-12T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-11T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-12T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-12T01:00:00+00:00",
+      "input": {
+        "episode": 5,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "9789fa97be1c7ed64dc00fe24b6c347779c160809eb96a75276bf771e69b732a"
+    },
+    {
+      "member_id": "challenger-006",
+      "arm": "challenger",
+      "pair_id": "pair-6",
+      "opportunity_id": "episode-6",
+      "capital_path_id": "challenger-006",
+      "dependence_keys": [
+        "market-episode-12"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-14T00:00:00+00:00",
+      "decision_at_utc": "2026-01-14T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-14T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-13T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-14T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-14T01:00:00+00:00",
+      "input": {
+        "episode": 6,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "5bba85d6f19be05e675b20304d10ed7255713574808d52bde6352e416e9c4302"
+    },
+    {
+      "member_id": "challenger-007",
+      "arm": "challenger",
+      "pair_id": "pair-7",
+      "opportunity_id": "episode-7",
+      "capital_path_id": "challenger-007",
+      "dependence_keys": [
+        "market-episode-14"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-16T00:00:00+00:00",
+      "decision_at_utc": "2026-01-16T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-16T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-15T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-16T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-16T01:00:00+00:00",
+      "input": {
+        "episode": 7,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "fa10e7171aca8afe10712ba9b2f4f47c4366b3c344fcd218a9d181e64058007e"
+    },
+    {
+      "member_id": "challenger-008",
+      "arm": "challenger",
+      "pair_id": "pair-8",
+      "opportunity_id": "episode-8",
+      "capital_path_id": "challenger-008",
+      "dependence_keys": [
+        "market-episode-16"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-18T00:00:00+00:00",
+      "decision_at_utc": "2026-01-18T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-18T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-17T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-18T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-18T01:00:00+00:00",
+      "input": {
+        "episode": 8,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "78978a1e8937c7dc9fd71ddc2b371bc10af25c99b3f9f98577092844f30acf92"
+    },
+    {
+      "member_id": "challenger-009",
+      "arm": "challenger",
+      "pair_id": "pair-9",
+      "opportunity_id": "episode-9",
+      "capital_path_id": "challenger-009",
+      "dependence_keys": [
+        "market-episode-18"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-20T00:00:00+00:00",
+      "decision_at_utc": "2026-01-20T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-20T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-19T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-20T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-20T01:00:00+00:00",
+      "input": {
+        "episode": 9,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "4a5a37eb30ee5421334c9e23ceffd71ae5422ff70843b2e6d0be084147748b56"
+    },
+    {
+      "member_id": "challenger-010",
+      "arm": "challenger",
+      "pair_id": "pair-10",
+      "opportunity_id": "episode-10",
+      "capital_path_id": "challenger-010",
+      "dependence_keys": [
+        "market-episode-20"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-22T00:00:00+00:00",
+      "decision_at_utc": "2026-01-22T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-22T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-21T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-22T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-22T01:00:00+00:00",
+      "input": {
+        "episode": 10,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "5593b4b33e096e1f8afd87129a1efae83d9aee753f4f710abd0605d4ea8d7426"
+    },
+    {
+      "member_id": "challenger-011",
+      "arm": "challenger",
+      "pair_id": "pair-11",
+      "opportunity_id": "episode-11",
+      "capital_path_id": "challenger-011",
+      "dependence_keys": [
+        "market-episode-22"
+      ],
+      "provenance": "synthetic",
+      "enrolled_at_utc": "2026-01-24T00:00:00+00:00",
+      "decision_at_utc": "2026-01-24T00:00:00+00:00",
+      "recorded_at_utc": "2026-01-24T00:00:00+00:00",
+      "input_available_at_utc": "2026-01-23T23:59:59+00:00",
+      "measurement_start_utc": "2026-01-24T00:00:00+00:00",
+      "measurement_end_utc": "2026-01-24T01:00:00+00:00",
+      "input": {
+        "episode": 11,
+        "available_information": "synthetic"
+      },
+      "policy_sha256": "7b6d9dd59c210a06efa9de21f5824d6c7e0ddd148580547b977d99ba82b01cc6",
+      "measurement_sha256": "a4f50a5ee638d114c2e15843ede03c44735f767992fc2f457e696d79c5e3cdfb",
+      "input_sha256": "a8a02d90f5f43e16305a7f205b48b2ad139c2b36de142c71dede5db2f6d56a49"
+    }
+  ],
+  "outcomes": [
+    {
+      "member_id": "control-000",
+      "status": "complete",
+      "value": 0.0,
+      "dependence_start_utc": "2026-01-02T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-02T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-02T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.0,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-02T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-02T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "52e1c9b7694612de888b088334f3cdc1cdce6bb4e0ea246f00fa772c4b53cf68"
+    },
+    {
+      "member_id": "control-001",
+      "status": "complete",
+      "value": 0.001,
+      "dependence_start_utc": "2026-01-04T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-04T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-04T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.1,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-04T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-04T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "e214f6a9c26ad9e77d2bb37ffae5d52618f81813b067f439291b21d487e77aaf"
+    },
+    {
+      "member_id": "control-002",
+      "status": "complete",
+      "value": 0.002,
+      "dependence_start_utc": "2026-01-06T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-06T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-06T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.2,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-06T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-06T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "391543e39d191c81bf7e0b6549c6464d3481e571bd25dc892c2d748e26205af5"
+    },
+    {
+      "member_id": "control-003",
+      "status": "complete",
+      "value": 0.003,
+      "dependence_start_utc": "2026-01-08T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-08T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-08T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.3,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-08T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-08T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "30aacfbffa9f2e43474d16aa7473c2930a24191e56fdc4f86b448cc63c554b9c"
+    },
+    {
+      "member_id": "control-004",
+      "status": "complete",
+      "value": 0.004,
+      "dependence_start_utc": "2026-01-10T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-10T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-10T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.4,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-10T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-10T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "f949ff52f6d8436afaa9b33281aaed0ef306b914ca8b9da717c76b82a07b52b7"
+    },
+    {
+      "member_id": "control-005",
+      "status": "complete",
+      "value": 0.005,
+      "dependence_start_utc": "2026-01-12T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-12T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-12T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.5,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-12T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-12T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "b0ce12d62dc996e4bbbd47925bff6df012c1d1013c9fcf69f216441237747f9e"
+    },
+    {
+      "member_id": "control-006",
+      "status": "complete",
+      "value": 0.006,
+      "dependence_start_utc": "2026-01-14T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-14T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-14T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.6,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-14T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-14T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "5f19f67b6910aadae04d013f01f36b38d11902de7e7801e5c2e64014dfbe0fd4"
+    },
+    {
+      "member_id": "control-007",
+      "status": "complete",
+      "value": 0.007,
+      "dependence_start_utc": "2026-01-16T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-16T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-16T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.7,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-16T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-16T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "ff70bccecb1b7e6e8784202f6f7c892cc2461449f2c902b63412d01aca16582c"
+    },
+    {
+      "member_id": "control-008",
+      "status": "complete",
+      "value": 0.008,
+      "dependence_start_utc": "2026-01-18T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-18T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-18T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.8,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-18T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-18T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "cc7dc1c416fde0e784cb7c8c2094a619fd1a8e4866fd348b49cc5d9a9ebcb50b"
+    },
+    {
+      "member_id": "control-009",
+      "status": "complete",
+      "value": 0.009,
+      "dependence_start_utc": "2026-01-20T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-20T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-20T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 100.9,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-20T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-20T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "3f6a50fc8f1237253de62522039c2606fe6a0259df241ea5c83224d49201e599"
+    },
+    {
+      "member_id": "control-010",
+      "status": "complete",
+      "value": 0.01,
+      "dependence_start_utc": "2026-01-22T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-22T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-22T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 101.0,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-22T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-22T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "cc6386addd460c1c3fc41bb787887591b27a224007f3160f1f66a12e4191577e"
+    },
+    {
+      "member_id": "control-011",
+      "status": "complete",
+      "value": 0.011,
+      "dependence_start_utc": "2026-01-24T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-24T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-24T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 101.1,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-24T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-24T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "bf38ed951480573298a4482977d55e040c07c4ccd5f0d1be3b6e0d167de2360e"
+    },
+    {
+      "member_id": "challenger-000",
+      "status": "complete",
+      "value": 0.1,
+      "dependence_start_utc": "2026-01-02T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-02T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-02T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 110.0,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-02T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-02T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "98b364e8f787bc5992af6c895e30bf9bbb50d6029d6e66a9faf8538bf919ec4a"
+    },
+    {
+      "member_id": "challenger-001",
+      "status": "complete",
+      "value": 0.111,
+      "dependence_start_utc": "2026-01-04T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-04T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-04T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 111.1,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-04T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-04T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "eb49532b171607596fdbf074288031eeb59b1711dbd89d04bcb07470f3c3de7f"
+    },
+    {
+      "member_id": "challenger-002",
+      "status": "complete",
+      "value": 0.12200000000000001,
+      "dependence_start_utc": "2026-01-06T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-06T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-06T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 112.2,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-06T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-06T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "839aca6f7c2b3ca29b0d6c9c1645cb442ad720756ca2b07c228e597fe9c13c87"
+    },
+    {
+      "member_id": "challenger-003",
+      "status": "complete",
+      "value": 0.10300000000000001,
+      "dependence_start_utc": "2026-01-08T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-08T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-08T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 110.3,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-08T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-08T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "a1c9540e874d763d771772e798e1d032c9eac53368b81d2727f742577ba4f6be"
+    },
+    {
+      "member_id": "challenger-004",
+      "status": "complete",
+      "value": 0.114,
+      "dependence_start_utc": "2026-01-10T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-10T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-10T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 111.4,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-10T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-10T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "69146c24e0e34ced012f52ed1555bbbefc93d82459d6ac36abb6099d274a2312"
+    },
+    {
+      "member_id": "challenger-005",
+      "status": "complete",
+      "value": 0.125,
+      "dependence_start_utc": "2026-01-12T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-12T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-12T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 112.5,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-12T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-12T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "b6a1075896a185c68335661332e7de5da69cfe4d4ee0d2db4b4e1a06c5d8d8c9"
+    },
+    {
+      "member_id": "challenger-006",
+      "status": "complete",
+      "value": 0.10600000000000001,
+      "dependence_start_utc": "2026-01-14T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-14T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-14T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 110.6,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-14T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-14T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "faf64a1f4ca55b9a841270d6c490d4a5597237698608d931ace0da0309278a6e"
+    },
+    {
+      "member_id": "challenger-007",
+      "status": "complete",
+      "value": 0.117,
+      "dependence_start_utc": "2026-01-16T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-16T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-16T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 111.7,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-16T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-16T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "001ea9c6b24c417abb789d26c75d38ea13861b76c699146515cde9b1315b456d"
+    },
+    {
+      "member_id": "challenger-008",
+      "status": "complete",
+      "value": 0.128,
+      "dependence_start_utc": "2026-01-18T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-18T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-18T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 112.8,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-18T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-18T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "0b22e610c00a6e8195c42a175d64b739b3cd0aa3edcb4c2145652c4b60fca899"
+    },
+    {
+      "member_id": "challenger-009",
+      "status": "complete",
+      "value": 0.109,
+      "dependence_start_utc": "2026-01-20T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-20T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-20T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 110.9,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-20T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-20T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "bf1c2281ac04489a0fbfbad510580ec76f1d0d903a4f650d53d680cafcbb9450"
+    },
+    {
+      "member_id": "challenger-010",
+      "status": "complete",
+      "value": 0.12,
+      "dependence_start_utc": "2026-01-22T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-22T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-22T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 112.0,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-22T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-22T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "05eb506b938e09fc028ac2e3b93420689d385dcdad65e1eb8452adae222216c9"
+    },
+    {
+      "member_id": "challenger-011",
+      "status": "complete",
+      "value": 0.131,
+      "dependence_start_utc": "2026-01-24T00:00:00+00:00",
+      "dependence_end_utc": "2026-01-24T01:00:00+00:00",
+      "recorded_at_utc": "2026-01-24T01:00:01+00:00",
+      "evidence": {
+        "start_equity": 100.0,
+        "end_equity": 113.1,
+        "external_net_inflow": 0.0,
+        "costs_not_in_equity": 0.0,
+        "return_denominator": 100.0,
+        "cashflow_coverage": "complete",
+        "cost_coverage": "complete",
+        "start_mark_at_utc": "2026-01-24T00:00:00+00:00",
+        "end_mark_at_utc": "2026-01-24T01:00:00+00:00",
+        "source": "synthetic accounting fixture"
+      },
+      "evidence_sha256": "b460b6cc8f8fd4d859dbd5bcaa9c2707475d37f97bc71a82414032ecebee48f1"
+    }
+  ],
+  "receipts": {
+    "expected_contract_sha256": "437faa80c83dcc1c3c31a377c3d326caaeae82592b1c2318d86adfb4b8055f0b",
+    "expected_membership_sha256": "9bb4599eb068de16d8ffbd8048f00cf476264ce6245d54e0211db84382fecf22",
+    "expected_outcomes_sha256": "c52245ad2ca18a2fb2fac7a655172955adc361c31a98325bfd0e941092c7f76d"
+  },
+  "expected": {
+    "status": "draft_interval",
+    "point_estimate": 0.11,
+    "ci_low": 0.10583333333333333,
+    "ci_high": 0.115,
+    "n_components": 12,
+    "n_pairs": 12,
+    "target_relation": "interval_supports_stated_direction_beyond_target",
+    "bootstrap_distribution_sha256": "5acd794555948c4bf6b237d236a8be9e3932cdd72393718ff55e3773f93bf67e",
+    "formal_evaluation_allowed": false,
+    "promotion_allowed": false
+  }
+}
