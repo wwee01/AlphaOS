@@ -12,6 +12,8 @@ this codebase does not overclaim what a handful of trading days can support.
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Optional
 from datetime import date
 from alphaos.util.market_calendar import trading_days_between
@@ -227,7 +229,8 @@ def build_relative_performance_report(journal, settings, limit: int = 3650) -> d
     rep = compute_relative_performance(equity_rows, benchmark_rows)
     rep["provisional_account_value_curve"] = [
         {"date": r["market_date"], "equity": r["equity"],
-         "valuation_at_utc": r["valuation_at_utc"], "cashflow_status": r["cashflow_status"]}
+         "valuation_at_utc": None, "source_timestamp_utc": r["source_timestamp_utc"],
+         "recorded_documented_window_end_utc": r["valuation_at_utc"], "cashflow_status": r["cashflow_status"]}
         for r in equity_rows
     ]
     # Raw account values may include external flows; do not present their
@@ -254,6 +257,37 @@ def build_relative_performance_report(journal, settings, limit: int = 3650) -> d
     rep["mode"] = settings.mode.value
     rep["equity_snapshot_count"] = len(equity_rows)
     rep["benchmark_bar_count"] = len(benchmark_rows)
+    # Manual reconstructed NAV diagnostics are separate from broker equity.
+    # The mere presence of a candidate never enables comparison or a gate.
+    from alphaos.reports.common_valuation import CATEGORY, METHOD, SOURCE_LIMITATION
+    latest = journal.one("SELECT detail_json FROM system_events WHERE category=? ORDER BY id DESC LIMIT 1", (CATEGORY,))
+    rep["common_valuation"] = {"status": "not_collected", "comparison_eligible": False,
+                               "source_limitations": [SOURCE_LIMITATION]}
+    if latest:
+        try:
+            detail = json.loads(latest["detail_json"])
+            if (not isinstance(detail, dict) or detail.get("method") != METHOD
+                    or detail.get("status") not in {"reconstructed_candidate", "blocked"}):
+                raise ValueError("unknown common valuation evidence schema")
+            for key in ("blockers", "strict_comparison_blockers", "source_limitations"):
+                if not isinstance(detail.get(key), list) or any(not isinstance(item, str) for item in detail[key]):
+                    raise ValueError("invalid common valuation diagnostic list")
+            if detail["status"] == "reconstructed_candidate":
+                for key in ("reconstructed_nav", "benchmark_price"):
+                    if (isinstance(detail.get(key), bool) or not isinstance(detail.get(key), (int, float))
+                            or not math.isfinite(detail[key]) or detail[key] <= 0):
+                        raise ValueError("invalid common valuation numeric evidence")
+                if (detail.get("feed") not in {"iex", "sip"} or detail.get("adjustment") != "raw"
+                        or not isinstance(detail.get("market_date"), str)):
+                    raise ValueError("invalid common valuation provenance")
+                date.fromisoformat(detail["market_date"])
+            rep["common_valuation"] = {key: detail.get(key) for key in (
+                "method", "status", "market_date", "reconstructed_nav", "benchmark_price", "feed", "adjustment",
+                "valuation_cutoff_utc", "source_interval_start_utc", "source_interval_end_exclusive_utc",
+                "blockers", "strict_comparison_blockers", "source_limitations", "input_sha256")}
+            rep["common_valuation"]["comparison_eligible"] = False
+        except (TypeError, ValueError, AttributeError, OverflowError):
+            rep["common_valuation"] = {"status": "evidence_unreadable", "comparison_eligible": False}
     return rep
 
 
@@ -281,6 +315,13 @@ def render_markdown(rep: dict) -> str:
         latest = rep["provisional_account_value_curve"][-1]
         lines.append(f"- Provisional account value ({latest['date']}): **{latest['equity']:,.2f}**; "
                      "closing-window timing is unverified, so no investment return or SPY comparison is claimed.")
+    common = rep.get("common_valuation", {})
+    if common.get("status") == "reconstructed_candidate":
+        lines.append(f"- Separate reconstructed NAV candidate ({common.get('market_date')}): "
+                     f"**{common['reconstructed_nav']:,.2f}**, using {common.get('feed')} final-minute marks; "
+                     "economic activity completeness is unverified, so this does not enable performance comparisons.")
+    elif common.get("status") == "blocked":
+        lines.append("- Common valuation capture blocked: " + "; ".join(common.get("blockers") or ["evidence incomplete"]))
     lines.append(
         f"- Rolling beta: **{rep['rolling_beta']}**" if rep["rolling_beta"] is not None
         else f"- Rolling beta: _{rep['rolling_beta_note']}_"
