@@ -43,11 +43,10 @@ class AlpacaDataProvider(MarketDataProvider):
         self.feed = settings.market_data_feed
 
     def get_snapshot(self, symbol: str) -> dict:
-        received = timeutils.stamp().utc
         if not self.settings.has_alpaca_keys:
             # No silent fallback — return unusable data so the guard blocks it.
             self._log(Severity.ERROR, f"No Alpaca creds; market data unavailable for {symbol}.")
-            return self._empty(symbol, received)
+            return self._empty(symbol, timeutils.stamp().utc)
         try:  # pragma: no cover - live network path (gated test only)
             url = f"{ALPACA_DATA_BASE_URL}/v2/stocks/{symbol}/snapshot?feed={self.feed}"
             req = urllib.request.Request(
@@ -59,11 +58,15 @@ class AlpacaDataProvider(MarketDataProvider):
                 },
             )
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+                body = resp.read()
+                # Receipt follows the response body, not the request start.
+                # Provider timestamps remain untouched and still gate freshness.
+                received = timeutils.stamp().utc
+                payload = json.loads(body.decode("utf-8"))
             return self._map(symbol, payload, received)
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
             self._log(Severity.ERROR, f"Alpaca data fetch failed for {symbol}: {exc}")
-            return self._empty(symbol, received)
+            return self._empty(symbol, timeutils.stamp().utc)
 
     def get_snapshots(self, symbols: list[str]) -> list[dict]:
         """EXP-0: batch snapshot fetch for the shadow tier (~300 names would be
@@ -77,9 +80,9 @@ class AlpacaDataProvider(MarketDataProvider):
         a single failed ``get_snapshot`` call -- every requested symbol always
         gets an entry back, never a silently-missing one. Order of the
         returned list matches the order of ``symbols``."""
-        received = timeutils.stamp().utc
         if not self.settings.has_alpaca_keys:
             self._log(Severity.ERROR, "No Alpaca creds; batch market data unavailable.")
+            received = timeutils.stamp().utc
             return [self._empty(s, received) for s in symbols]
 
         by_symbol: dict[str, dict] = {}
@@ -99,13 +102,18 @@ class AlpacaDataProvider(MarketDataProvider):
                     },
                 )
                 with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-                    payload = json.loads(resp.read().decode("utf-8"))
+                    body = resp.read()
+                    # Each HTTP chunk has its own receipt instant. A later
+                    # response must not inherit the first request's timestamp.
+                    received = timeutils.stamp().utc
+                    payload = json.loads(body.decode("utf-8"))
                 for sym in chunk:
                     entry = payload.get(sym)
                     by_symbol[sym] = self._map(sym, entry, received) if entry else self._empty(sym, received)
             except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
                 self._log(Severity.ERROR, f"Alpaca batch snapshot fetch failed for chunk starting "
                           f"{chunk[0] if chunk else '?'}: {exc}")
+                received = timeutils.stamp().utc
                 for sym in chunk:
                     by_symbol[sym] = self._empty(sym, received)
 
