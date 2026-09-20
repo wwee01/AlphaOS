@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from datetime import datetime
 from typing import Any
 
 VERSION = "trade_accounting_v1"
@@ -27,6 +28,18 @@ def _json(value):
 def source_sha256(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
                                     allow_nan=False).encode()).hexdigest()
+
+
+def _valid_cumulative_times(receipt):
+    """A matching raw string is not proof of a usable broker timestamp."""
+    try:
+        values = [receipt.get(key) for key in ("broker_reported_filled_at", "observed_at_utc")]
+        if any(not isinstance(value, str) or not value for value in values):
+            return False
+        executed, observed = [datetime.fromisoformat(value.replace("Z", "+00:00")) for value in values]
+        return executed.utcoffset() is not None and observed.utcoffset() is not None and executed <= observed
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def corrected_attribution_basis(row):
@@ -54,7 +67,8 @@ def build_trade_accounting(outcome, position, orders, fills):
               "risk_dollars": None, "blockers": [], "source_sha256": None,
               "modeled_costs": (outcome or {}).get("costs"),
               "cost_basis": "ledger_modeled_trade_costs", "broker_fees_verified": False,
-              "fill_timestamps": [], "lessons_generated": False}
+              "fill_timestamps": [], "lessons_generated": False,
+              "identity_limitations": [], "order_fill_lineage_complete": False}
     if not outcome or not position:
         result["blockers"] = ["closed_outcome_and_position_required"]
         return result
@@ -83,6 +97,21 @@ def build_trade_accounting(outcome, position, orders, fills):
             raise ValueError("gross_cost_net_mismatch")
         if not math.isclose(_number(outcome, "realized_r"), round(expected_gross / risk, 3), abs_tol=1e-8):
             raise ValueError("stored_gross_r_risk_mismatch")
+        order_ids = [row.get("order_id") for row in orders]
+        fill_ids = [row.get("fill_id") for row in fills]
+        if not all(order_ids) or len(set(order_ids)) != len(order_ids):
+            raise ValueError("missing_or_duplicate_order_id")
+        if not all(fill_ids) or len(set(fill_ids)) != len(fill_ids):
+            raise ValueError("missing_or_duplicate_fill_id")
+        for key in ("proposal_id", "candidate_id", "trade_id"):
+            values = {row[key] for row in (outcome, position, *orders, *fills) if row.get(key)}
+            if len(values) > 1:
+                raise ValueError(f"contradictory_{key}_lineage")
+            # Fills link transitively through order_id; their schema stores
+            # trade_id but has no proposal_id or candidate_id columns.
+            required_nodes = (outcome, position, *orders, *fills) if key == "trade_id" else (outcome, position, *orders)
+            if any(not row.get(key) for row in required_nodes):
+                result["identity_limitations"].append(f"incomplete_{key}_lineage")
         by_order = {row["order_id"]: row for row in orders}
         entry_id = position.get("order_id")
         entry_side = "sell" if outcome["direction"] == "short" else "buy"
@@ -99,6 +128,19 @@ def build_trade_accounting(outcome, position, orders, fills):
                 exits.append(fill)
             else:
                 raise ValueError("fill_direction_or_role_mismatch")
+            expected_side = entry_side if fill.get("order_id") == entry_id else exit_side
+            # Local broker-backed exit orders use buy_to_cover, while some
+            # older broker-shaped rows retain buy. Both mean the same cover.
+            allowed_sides = {expected_side} | ({"buy"} if expected_side == "buy_to_cover" else set())
+            if order.get("side") and order["side"] not in allowed_sides:
+                raise ValueError("order_fill_side_mismatch")
+            if order.get("direction") and order["direction"] != outcome["direction"]:
+                raise ValueError("order_position_direction_mismatch")
+            broker_ids = (order.get("broker_order_id"), fill.get("broker_order_id"))
+            if all(broker_ids) and broker_ids[0] != broker_ids[1]:
+                raise ValueError("order_fill_broker_identity_mismatch")
+            if not all(broker_ids) or not order.get("side") or not order.get("direction"):
+                result["identity_limitations"].append(f"incomplete_order_fill_identity:{fill['fill_id']}")
             receipt = _json(fill.get("raw_broker_fill_reference"))
             matching_receipt = False
             if receipt.get("version") == "broker_cumulative_fill_v1":
@@ -109,6 +151,7 @@ def build_trade_accounting(outcome, position, orders, fills):
                         receipt.get("broker_reported_filled_at") == fill.get("filled_at") and
                         receipt.get("observed_at_utc") == fill.get("created_at_utc") and
                         receipt.get("timestamp_source") == "broker" and
+                        _valid_cumulative_times(receipt) and
                         math.isclose(_number(receipt, "incremental_qty"), _number(fill, "qty"), rel_tol=1e-12, abs_tol=1e-8) and
                         math.isclose(_number(receipt, "incremental_price"), _number(fill, "price"), rel_tol=1e-12, abs_tol=1e-8))
                 except ValueError:
@@ -128,6 +171,7 @@ def build_trade_accounting(outcome, position, orders, fills):
             if not math.isclose(group_qty, qty, abs_tol=1e-8) or not math.isclose(vwap, expected_price, abs_tol=1e-8):
                 raise ValueError("cumulative_fills_disagree_with_outcome")
         result.update(status="verified_ledger_arithmetic", risk_dollars=risk,
+                      order_fill_lineage_complete=not result["identity_limitations"],
                       gross_r=expected_gross/risk, net_r=net/risk,
                       gross_pnl=gross, net_pnl=net, entry_qty=qty, exit_qty=qty,
                       risk_basis="absolute_actual_entry_minus_original_order_stop_times_total_qty",

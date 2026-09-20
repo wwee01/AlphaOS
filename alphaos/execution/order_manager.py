@@ -413,7 +413,7 @@ class OrderManager:
                     "limit_price": norm.get("limit_price"), "stop_loss_price": norm.get("stop_price"),
                     "execution_mode": "alpaca_paper", "fill_price_basis": "alpaca_fill",
                     "data_provider": entry_order.get("data_provider"), "data_feed": entry_order.get("data_feed"),
-                    "candidate_id": pos.get("candidate_id"),
+                    "candidate_id": pos.get("candidate_id"), "proposal_id": pos.get("proposal_id"),
                     "execution_source": "alpaca_paper", "execution_provider": "alpaca_paper",
                     "trade_id": pos.get("trade_id"), "strategy": pos.get("strategy"),
                     "raw_request_json": {"purpose": "position_exit", "position_id": pos["position_id"],

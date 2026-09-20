@@ -246,3 +246,66 @@ def test_mixed_legacy_rows_resolve_without_reenrollment_or_relabeling_and_new_ro
     assert new["r_basis"] == "gross_vs_gross" and new["attribution_version"] == ATTRIBUTION_VERSION == "2.1.0"
     assert discover_events(journal, settings)["total"] == 0
     journal.close()
+
+
+@pytest.mark.parametrize("contradiction", ["entry_broker", "exit_broker", "entry_side", "exit_side",
+                                         "direction", "proposal", "candidate", "trade", "duplicate_fill", "duplicate_order"])
+def test_explicit_lineage_contradictions_cannot_certify_trade_arithmetic(contradiction):
+    outcome, position, orders, fills = fixture()
+    if contradiction in {"entry_broker", "exit_broker"}:
+        i = 0 if contradiction == "entry_broker" else 1
+        orders[i]["broker_order_id"], fills[i]["broker_order_id"] = "ours", "foreign"
+    elif contradiction in {"entry_side", "exit_side"}:
+        i = 0 if contradiction == "entry_side" else 1
+        orders[i]["side"] = "sell" if i == 0 else "buy"
+    elif contradiction == "direction":
+        orders[0]["direction"] = "short"
+    elif contradiction in {"proposal", "candidate", "trade"}:
+        key = contradiction + "_id"
+        position[key], orders[0][key] = "ours", "foreign"
+    elif contradiction == "duplicate_order":
+        orders.append(deepcopy(orders[0]))
+    else:
+        fills[0]["qty"] /= 2
+        fills.append(deepcopy(fills[0]))
+    result = build_trade_accounting(outcome, position, orders, fills)
+    assert result["status"] == "invalid_or_incomplete_evidence"
+    assert result["net_r"] is None and result["blockers"]
+
+
+def test_missing_legacy_order_identity_is_explicitly_unverified():
+    result = build_trade_accounting(*fixture())
+    assert result["status"] == "verified_ledger_arithmetic"
+    assert not result["order_fill_lineage_complete"] and result["identity_limitations"]
+
+
+@pytest.mark.parametrize("executed,observed", [
+    (None, None), ("not-a-timestamp", "not-a-timestamp"),
+    ("2026-09-03T15:00:00", "2026-09-03T15:01:00"),
+    ("2026-09-03T15:02:00Z", "2026-09-03T15:01:00Z"),
+])
+def test_matching_invalid_or_future_receipt_times_remain_unverified(executed, observed):
+    outcome, position, orders, fills = fixture()
+    fill = fills[0]
+    fill.update(broker_order_id="broker", filled_at=executed, created_at_utc=observed)
+    fill["raw_broker_fill_reference"] = json.dumps({
+        "version": "broker_cumulative_fill_v1", "broker_order_id": "broker",
+        "incremental_qty": fill["qty"], "incremental_price": fill["price"],
+        "broker_reported_filled_at": executed, "observed_at_utc": observed, "timestamp_source": "broker"})
+    result = build_trade_accounting(outcome, position, orders, fills)
+    assert result["status"] == "verified_ledger_arithmetic"
+    assert result["fill_timestamps"][0]["broker_reported_filled_at"] is None
+    assert result["fill_timestamps"][0]["timestamp_basis"] == "legacy_or_observation_unverified"
+
+
+def test_complete_supported_lineage_uses_transitive_fill_order_links():
+    outcome, position, orders, fills = fixture()
+    for row in (outcome, position, *orders):
+        row.update(proposal_id="proposal", candidate_id="candidate", trade_id="trade")
+    for order, fill, side in zip(orders, fills, ("buy", "sell")):
+        order.update(broker_order_id="broker-"+order["order_id"], side=side, direction="long")
+        fill.update(broker_order_id=order["broker_order_id"], trade_id="trade")
+    assert all("proposal_id" not in fill and "candidate_id" not in fill for fill in fills)
+    result = build_trade_accounting(outcome, position, orders, fills)
+    assert result["status"] == "verified_ledger_arithmetic"
+    assert result["order_fill_lineage_complete"] and result["identity_limitations"] == []
