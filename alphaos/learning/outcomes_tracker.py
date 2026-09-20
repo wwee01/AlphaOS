@@ -12,11 +12,11 @@ Two phases, both idempotent and both safe to call repeatedly / on a schedule:
   bracket replay (see ``outcomes_engine``), plus (EVID-1) a market-adjusted
   return per horizon against the already-captured SPY ``benchmark_bars``
   cache, and the bar index (time-to-excursion) of each horizon's MFE/MAE.
-  Write-only to ``candidate_outcomes``; never reads back into any trading
-  decision.
+  Writes outcomes and separate scheduling cursors; never reads back into any
+  trading decision.
 
-Both use SQL ``NOT EXISTS`` / status filters to only touch un-worked rows, so
-re-running converges rather than reprocessing.
+Status filters protect final evidence. Pending work rotates through durable,
+bounded cycles; incomplete rows are retried without starving later rows.
 
 RESEARCH-REPAIR (2026-09-12): the five-day outcome family retains its own
 completion status. Newly seeded rows carry a separate versioned replay
@@ -50,6 +50,7 @@ engine.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Optional
 
 from alphaos.cards.registry import get_card_by_id
@@ -480,6 +481,114 @@ def _repair_missing_decision_at_utc(journal, rows: list[dict]) -> list[dict]:
     return repaired
 
 
+_FORWARD_ELIGIBILITY = (
+    "outcome_status IN (?, ?) OR (outcome_status = ? AND replay_status = 'pending' "
+    "AND replay_window_days > 0 AND replay_r IS NULL AND replay_result IS NULL "
+    "AND (replay_method_version IS NULL OR replay_method_version = ?))"
+)
+_FORWARD_PARAMS = (_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, REPLAY_METHOD_VERSION)
+_HOLD10_ELIGIBILITY = (
+    "outcome_status = ? AND (outcome_status_10d IS NULL OR outcome_status_10d != 'complete')"
+)
+
+
+def _claim_outcome(journal, family: str, predicate: str, params: tuple, cycle: Optional[int]):
+    """Advance one durable cursor before work, in a short serialized transaction.
+
+    The cycle's frozen high-water ID makes retries fair even if new rows arrive
+    continuously. A crash after claiming sacrifices this attempt, not the row:
+    it is due again in the next cycle if still eligible. No evidence is changed
+    by a claim, and no provider request runs in this transaction. Concurrent
+    claimers cannot claim the same ID in the same cycle; a caller stops if
+    another caller has already started a newer cycle. This is scheduling state,
+    not a worker lease; the scheduled research worker owns its process lock.
+    """
+    journal.conn.execute("BEGIN IMMEDIATE")
+    try:
+        state = journal.one("SELECT * FROM outcome_processing_cursors WHERE family=?", (family,))
+        if state is None or (cycle is None and state["last_row_id"] >= state["cycle_max_id"]):
+            maximum = journal.scalar("SELECT COALESCE(MAX(id), 0) FROM candidate_outcomes")
+            number = state["cycle_number"] + 1 if state else 1
+            journal.conn.execute(
+                "INSERT INTO outcome_processing_cursors "
+                "(family, cycle_number, cycle_max_id, last_row_id) VALUES (?, ?, ?, 0) "
+                "ON CONFLICT(family) DO UPDATE SET cycle_number=excluded.cycle_number, "
+                "cycle_max_id=excluded.cycle_max_id, last_row_id=0",
+                (family, number, maximum),
+            )
+            state = {"cycle_number": number, "cycle_max_id": maximum, "last_row_id": 0}
+        number = state["cycle_number"]
+        if cycle is not None and number != cycle:
+            journal.conn.commit()
+            return None, cycle
+        row = journal.one(
+            f"SELECT * FROM candidate_outcomes WHERE ({predicate}) "
+            "AND id > ? AND id <= ? ORDER BY id ASC LIMIT 1",
+            (*params, state["last_row_id"], state["cycle_max_id"]),
+        )
+        if row is None:
+            journal.conn.execute(
+                "UPDATE outcome_processing_cursors SET last_row_id=cycle_max_id WHERE family=?",
+                (family,),
+            )
+        else:
+            journal.conn.execute(
+                "UPDATE outcome_processing_cursors SET last_row_id=?, last_attempt_at_utc=? WHERE family=?",
+                (row["id"], timeutils.now_utc().isoformat(), family),
+            )
+        journal.conn.commit()
+        return row, number
+    except BaseException:
+        journal.conn.rollback()
+        raise
+
+
+def _fair_outcome_rows(journal, family: str, predicate: str, params: tuple, limit: int):
+    """At most limit claims and one cycle per call; retries are due next cycle."""
+    cycle = None
+    for _ in range(limit):
+        row, cycle = _claim_outcome(journal, family, predicate, params, cycle)
+        if row is None:
+            break
+        yield row
+
+
+def _record_processing_error(counts: dict, row: dict, exc: Exception, kind: str):
+    counts["errors"] = counts.get("errors", 0) + 1
+    counts[f"{kind}_errors"] = counts.get(f"{kind}_errors", 0) + 1
+    by_type = counts.setdefault(f"{kind}_error_types", {})
+    error_type = type(exc).__name__
+    by_type[error_type] = by_type.get(error_type, 0) + 1
+    samples = counts.setdefault(f"{kind}_error_samples", [])
+    if len(samples) < 5:
+        samples.append({"outcome_id": row["outcome_id"], "error_type": error_type})
+
+
+@contextmanager
+def _calculation_boundary(row: dict, counts: dict):
+    """Isolate malformed row/bar values, never configuration or SQLite errors."""
+    try:
+        yield
+    except (ValueError, TypeError, KeyError) as exc:
+        _record_processing_error(counts, row, exc, "calculation")
+
+
+def _fetch_outcome_bars(bars_provider, row: dict, start: str, end: str, counts: dict):
+    """A provider failure leaves evidence intact but does not stop the queue.
+
+    The caller's persisted job summary gets exact error counts and a bounded
+    sample of affected IDs/types, never exception messages or provider payloads.
+    Malformed calculation inputs are counted separately by the caller. Other
+    programming/registry/SQLite failures still propagate; the already-committed
+    cursor ensures the next run can move past the claimed row.
+    """
+    try:
+        return bars_provider.get_daily_bars(row["symbol"], start, end) or []
+    except OSError as exc:
+        _record_processing_error(counts, row, exc, "provider")
+        return None
+
+
 def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> dict:
     """Resolve pending/partial candidate_outcomes rows with forward 1/3/5-day
     returns + bracket replay. A complete five-day family may still have an
@@ -495,138 +604,142 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     seeded) — seeding can lag the decision by days/weeks when catching up on
     a backlog, and anchoring on seed time would mislabel a multi-week-old
     candidate's next bar as a "1-day" return."""
-    rows = journal.query(
-        "SELECT * FROM candidate_outcomes WHERE outcome_status IN (?, ?) "
-        "OR (outcome_status = ? AND replay_status = 'pending' "
-        "AND replay_window_days > 0 AND replay_r IS NULL AND replay_result IS NULL "
-        "AND (replay_method_version IS NULL OR replay_method_version = ?)) "
-        "ORDER BY id ASC LIMIT ?",
-        (_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, REPLAY_METHOD_VERSION, limit))
-    counts = {"total": len(rows), "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError("outcome processing limit must be a nonnegative integer")
+    counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0,
               "hold1_10d": {"updated": 0, "completed": 0, "skipped": 0}}
     if bars_provider is None:
-        counts["skipped"] = len(rows)
+        rows = journal.query(
+            f"SELECT id FROM candidate_outcomes WHERE {_FORWARD_ELIGIBILITY} LIMIT ?",
+            (*_FORWARD_PARAMS, limit),
+        )
+        counts["total"] = counts["skipped"] = len(rows)
         return counts
 
-    rows = _repair_missing_decision_at_utc(journal, rows)
     now = timeutils.now_utc()
-    for row in rows:
-        decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
-        if decision_at is None:
-            counts["skipped"] += 1
-            continue
-        age_days = (now - decision_at).total_seconds() / 86400.0
-        decision_date = timeutils.market_date(decision_at).isoformat()
-        bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
-        # Bars strictly AFTER the decision day — never let the decision's own
-        # day count as "forward" (no lookahead leakage into the replay).
-        forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
-
-        if not forward_bars:
-            if age_days > UNAVAILABLE_AFTER_DAYS:
-                # Don't clobber an already-flagged unrecoverable decision_at_utc
-                # (repair may have just set it this same pass) — that provenance
-                # signal matters more than the more-obvious no-bars reason.
-                dq = row.get("data_quality_status") or "no_bars_after_window"
-                unavailable = {"replay_status": _STATUS_UNAVAILABLE, "data_quality_status": dq}
-                if row["outcome_status"] != _STATUS_COMPLETE:
-                    unavailable["outcome_status"] = _STATUS_UNAVAILABLE
-                _update_row(journal, row["outcome_id"], unavailable)
-                counts["unavailable"] += 1
-            else:
+    for row in _fair_outcome_rows(journal, "forward_replay_v1", _FORWARD_ELIGIBILITY,
+                                  _FORWARD_PARAMS, limit):
+        counts["total"] += 1
+        with _calculation_boundary(row, counts):
+            row = _repair_missing_decision_at_utc(journal, [row])[0]
+            decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
+            if decision_at is None:
                 counts["skipped"] += 1
-            continue
+                continue
+            age_days = (now - decision_at).total_seconds() / 86400.0
+            decision_date = timeutils.market_date(decision_at).isoformat()
+            bars = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
+            if bars is None:
+                continue
+            # Bars strictly AFTER the decision day — never let the decision's own
+            # day count as "forward" (no lookahead leakage into the replay).
+            forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
 
-        ref, stop, direction = row.get("entry_reference_price"), row.get("stop_price"), row.get("direction_hint")
-        f1 = forward_window_stats(ref, stop, direction, forward_bars, 1)
-        f3 = forward_window_stats(ref, stop, direction, forward_bars, 3)
-        f5 = forward_window_stats(ref, stop, direction, forward_bars, 5)
+            if not forward_bars:
+                if age_days > UNAVAILABLE_AFTER_DAYS:
+                    # Don't clobber an already-flagged unrecoverable decision_at_utc
+                    # (repair may have just set it this same pass) — that provenance
+                    # signal matters more than the more-obvious no-bars reason.
+                    dq = row.get("data_quality_status") or "no_bars_after_window"
+                    unavailable = {"replay_status": _STATUS_UNAVAILABLE, "data_quality_status": dq}
+                    if row["outcome_status"] != _STATUS_COMPLETE:
+                        unavailable["outcome_status"] = _STATUS_UNAVAILABLE
+                    _update_row(journal, row["outcome_id"], unavailable)
+                    counts["unavailable"] += 1
+                else:
+                    counts["skipped"] += 1
+                continue
 
-        # EVID-1: market-adjusted return, computed from the SAME
-        # already-captured benchmark_bars cache used by relative_performance.py
-        # -- a DB read, never a network fetch. Reuses forward_window_stats
-        # verbatim (stop=None so only return_pct is computed; no R/excursion
-        # for a benchmark, which has no stop to normalize against). Benchmark
-        # forward bars are restricted to the candidate's OWN bar dates (see
-        # _benchmark_reference_and_forward_bars's own docstring) so the two
-        # legs are aligned by DATE, never merely by position.
-        candidate_bar_dates = [b["date"] for b in forward_bars if b.get("date")]
-        bench_ref, bench_forward_bars = _benchmark_reference_and_forward_bars(
-            journal, decision_date, candidate_bar_dates)
-        bench_f1 = bench_f3 = bench_f5 = None
-        if bench_ref is not None:
-            bench_f1 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 1)
-            bench_f3 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 3)
-            bench_f5 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 5)
+            ref, stop, direction = row.get("entry_reference_price"), row.get("stop_price"), row.get("direction_hint")
+            f1 = forward_window_stats(ref, stop, direction, forward_bars, 1)
+            f3 = forward_window_stats(ref, stop, direction, forward_bars, 3)
+            f5 = forward_window_stats(ref, stop, direction, forward_bars, 5)
 
-        update = {
-            "forward_1d_return_pct": f1["return_pct"], "forward_1d_r": f1["r"],
-            "max_favorable_1d_r": f1["max_favorable_r"], "max_adverse_1d_r": f1["max_adverse_r"],
-            "bars_to_favorable_1d": f1["bars_to_favorable"], "bars_to_adverse_1d": f1["bars_to_adverse"],
-            "market_adjusted_return_1d_pct": _market_adjusted_return_pct(f1, bench_f1, 1),
-            "forward_3d_return_pct": f3["return_pct"], "forward_3d_r": f3["r"],
-            "max_favorable_3d_r": f3["max_favorable_r"], "max_adverse_3d_r": f3["max_adverse_r"],
-            "bars_to_favorable_3d": f3["bars_to_favorable"], "bars_to_adverse_3d": f3["bars_to_adverse"],
-            "market_adjusted_return_3d_pct": _market_adjusted_return_pct(f3, bench_f3, 3),
-            "forward_5d_return_pct": f5["return_pct"], "forward_5d_r": f5["r"],
-            "max_favorable_5d_r": f5["max_favorable_r"], "max_adverse_5d_r": f5["max_adverse_r"],
-            "bars_to_favorable_5d": f5["bars_to_favorable"], "bars_to_adverse_5d": f5["bars_to_adverse"],
-            "market_adjusted_return_5d_pct": _market_adjusted_return_pct(f5, bench_f5, 5),
-        }
+            # EVID-1: market-adjusted return, computed from the SAME
+            # already-captured benchmark_bars cache used by relative_performance.py
+            # -- a DB read, never a network fetch. Reuses forward_window_stats
+            # verbatim (stop=None so only return_pct is computed; no R/excursion
+            # for a benchmark, which has no stop to normalize against). Benchmark
+            # forward bars are restricted to the candidate's OWN bar dates (see
+            # _benchmark_reference_and_forward_bars's own docstring) so the two
+            # legs are aligned by DATE, never merely by position.
+            candidate_bar_dates = [b["date"] for b in forward_bars if b.get("date")]
+            bench_ref, bench_forward_bars = _benchmark_reference_and_forward_bars(
+                journal, decision_date, candidate_bar_dates)
+            bench_f1 = bench_f3 = bench_f5 = None
+            if bench_ref is not None:
+                bench_f1 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 1)
+                bench_f3 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 3)
+                bench_f5 = forward_window_stats(bench_ref, None, direction, bench_forward_bars, 5)
 
-        target = row.get("target_price")
-        used_fallback_window = False
-        if ref is not None and stop and target:
-            # AILEG-1 spec section 2: the AI leg's window comes from the
-            # card that governed THIS candidate, resolved by id -- never
-            # DEFAULT_REPLAY_WINDOW_DAYS (see outcomes_engine's own updated
-            # docstring; this is now the one production call site that used
-            # to omit max_days entirely).
-            window_days = row.get("replay_window_days")
-            if window_days is None:
-                window_days, used_fallback_window = resolve_ai_replay_window(journal, row.get("candidate_id"))
-            replay = replay_bracket_with_maturity(
-                ref, stop, target, direction, forward_bars, max_days=window_days,
-            )
-            update["replay_result"] = replay["result"]
-            update["replay_r"] = replay["replay_r"]
-            update["replay_exit_reason"] = replay["replay_exit_reason"]
-            update["replay_window_days"] = window_days
-            update["replay_status"] = replay["replay_status"]
-            update["replay_bars_used"] = replay["replay_bars_used"]
-            # Deliberately retain the row's original method stamp. A legacy
-            # continuation uses this engine but did not enter the repaired
-            # prospective cohort at seeding; assigning v2 here would admit it
-            # to baseline_report's verified cohort. No backfill is needed.
-        else:
-            update["replay_status"] = _STATUS_UNAVAILABLE
+            update = {
+                "forward_1d_return_pct": f1["return_pct"], "forward_1d_r": f1["r"],
+                "max_favorable_1d_r": f1["max_favorable_r"], "max_adverse_1d_r": f1["max_adverse_r"],
+                "bars_to_favorable_1d": f1["bars_to_favorable"], "bars_to_adverse_1d": f1["bars_to_adverse"],
+                "market_adjusted_return_1d_pct": _market_adjusted_return_pct(f1, bench_f1, 1),
+                "forward_3d_return_pct": f3["return_pct"], "forward_3d_r": f3["r"],
+                "max_favorable_3d_r": f3["max_favorable_r"], "max_adverse_3d_r": f3["max_adverse_r"],
+                "bars_to_favorable_3d": f3["bars_to_favorable"], "bars_to_adverse_3d": f3["bars_to_adverse"],
+                "market_adjusted_return_3d_pct": _market_adjusted_return_pct(f3, bench_f3, 3),
+                "forward_5d_return_pct": f5["return_pct"], "forward_5d_r": f5["r"],
+                "max_favorable_5d_r": f5["max_favorable_r"], "max_adverse_5d_r": f5["max_adverse_r"],
+                "bars_to_favorable_5d": f5["bars_to_favorable"], "bars_to_adverse_5d": f5["bars_to_adverse"],
+                "market_adjusted_return_5d_pct": _market_adjusted_return_pct(f5, bench_f5, 5),
+            }
 
-        resolved = f5["bars_used"] >= 5
-        update["outcome_status"] = _STATUS_COMPLETE if resolved else _STATUS_PARTIAL
-        # Five-day outcome semantics remain intact. Only the separately
-        # pending replay continues; already-complete forward values and
-        # legacy complete replay records are never automatically restated.
-        if row["outcome_status"] == _STATUS_COMPLETE:
-            update = {k: v for k, v in update.items() if k.startswith("replay_")}
-        # Don't clobber an unrecoverable-decision_at_utc flag from repair just
-        # because the forward-return math itself succeeded — the anchor being
-        # a fallback (not the true decision time) is still worth knowing.
-        # AILEG-1: the fallback-card stamp is the SECOND-priority data
-        # quality signal -- a pre-existing flag (e.g.
-        # 'decision_time_unrecoverable') always wins, since that flag
-        # already implies "this row's provenance is degraded" and is the
-        # more specific/urgent fact of the two.
-        existing_dq = row.get("data_quality_status")
-        if existing_dq:
-            update["data_quality_status"] = existing_dq
-        elif used_fallback_window:
-            update["data_quality_status"] = REPLAY_WINDOW_FALLBACK_DQ_STATUS
-        else:
-            update["data_quality_status"] = "ok"
-        _update_row(journal, row["outcome_id"], update)
-        counts["updated"] += 1
-        if resolved and row["outcome_status"] != _STATUS_COMPLETE:
-            counts["completed"] += 1
+            target = row.get("target_price")
+            used_fallback_window = False
+            if ref is not None and stop and target:
+                # AILEG-1 spec section 2: the AI leg's window comes from the
+                # card that governed THIS candidate, resolved by id -- never
+                # DEFAULT_REPLAY_WINDOW_DAYS (see outcomes_engine's own updated
+                # docstring; this is now the one production call site that used
+                # to omit max_days entirely).
+                window_days = row.get("replay_window_days")
+                if window_days is None:
+                    window_days, used_fallback_window = resolve_ai_replay_window(journal, row.get("candidate_id"))
+                replay = replay_bracket_with_maturity(
+                    ref, stop, target, direction, forward_bars, max_days=window_days,
+                )
+                update["replay_result"] = replay["result"]
+                update["replay_r"] = replay["replay_r"]
+                update["replay_exit_reason"] = replay["replay_exit_reason"]
+                update["replay_window_days"] = window_days
+                update["replay_status"] = replay["replay_status"]
+                update["replay_bars_used"] = replay["replay_bars_used"]
+                # Deliberately retain the row's original method stamp. A legacy
+                # continuation uses this engine but did not enter the repaired
+                # prospective cohort at seeding; assigning v2 here would admit it
+                # to baseline_report's verified cohort. No backfill is needed.
+            else:
+                update["replay_status"] = _STATUS_UNAVAILABLE
+
+            resolved = f5["bars_used"] >= 5
+            update["outcome_status"] = _STATUS_COMPLETE if resolved else _STATUS_PARTIAL
+            # Five-day outcome semantics remain intact. Only the separately
+            # pending replay continues; already-complete forward values and
+            # legacy complete replay records are never automatically restated.
+            if row["outcome_status"] == _STATUS_COMPLETE:
+                update = {k: v for k, v in update.items() if k.startswith("replay_")}
+            # Don't clobber an unrecoverable-decision_at_utc flag from repair just
+            # because the forward-return math itself succeeded — the anchor being
+            # a fallback (not the true decision time) is still worth knowing.
+            # AILEG-1: the fallback-card stamp is the SECOND-priority data
+            # quality signal -- a pre-existing flag (e.g.
+            # 'decision_time_unrecoverable') always wins, since that flag
+            # already implies "this row's provenance is degraded" and is the
+            # more specific/urgent fact of the two.
+            existing_dq = row.get("data_quality_status")
+            if existing_dq:
+                update["data_quality_status"] = existing_dq
+            elif used_fallback_window:
+                update["data_quality_status"] = REPLAY_WINDOW_FALLBACK_DQ_STATUS
+            else:
+                update["data_quality_status"] = "ok"
+            _update_row(journal, row["outcome_id"], update)
+            counts["updated"] += 1
+            if resolved and row["outcome_status"] != _STATUS_COMPLETE:
+                counts["completed"] += 1
 
     # HOLD-1: give already-'complete' rows (5d resolved) further passes to
     # reach the 10-day horizon too -- run in the SAME call so a backlog
@@ -659,35 +772,35 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
     if bars_provider is None:
         return {"updated": 0, "completed": 0, "skipped": 0}
 
-    rows = journal.query(
-        "SELECT * FROM candidate_outcomes WHERE outcome_status = ? "
-        "AND (outcome_status_10d IS NULL OR outcome_status_10d != 'complete') "
-        "ORDER BY id ASC LIMIT ?", (_STATUS_COMPLETE, limit))
     counts = {"updated": 0, "completed": 0, "skipped": 0}
     now = timeutils.now_utc()
-    for row in rows:
-        decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
-        if decision_at is None:   # pragma: no cover -- defensive only; a row
-            counts["skipped"] += 1  # can't reach outcome_status='complete'
-            continue                # without decision_at_utc already set.
-        decision_date = timeutils.market_date(decision_at).isoformat()
-        bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
-        forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
-        if not forward_bars:
-            counts["skipped"] += 1
-            continue
+    for row in _fair_outcome_rows(journal, "hold1_10d_v1", _HOLD10_ELIGIBILITY,
+                                  (_STATUS_COMPLETE,), limit):
+        with _calculation_boundary(row, counts):
+            decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
+            if decision_at is None:   # pragma: no cover -- defensive only; a row
+                counts["skipped"] += 1  # can't reach outcome_status='complete'
+                continue                # without decision_at_utc already set.
+            decision_date = timeutils.market_date(decision_at).isoformat()
+            bars = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
+            if bars is None:
+                continue
+            forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
+            if not forward_bars:
+                counts["skipped"] += 1
+                continue
 
-        ref, stop, direction = row.get("entry_reference_price"), row.get("stop_price"), row.get("direction_hint")
-        f10 = forward_window_stats(ref, stop, direction, forward_bars, 10)
-        resolved_10d = f10["bars_used"] >= 10
-        _update_row(journal, row["outcome_id"], {
-            "forward_10d_return_pct": f10["return_pct"], "forward_10d_r": f10["r"],
-            "max_favorable_10d_r": f10["max_favorable_r"], "max_adverse_10d_r": f10["max_adverse_r"],
-            "bars_to_favorable_10d": f10["bars_to_favorable"], "bars_to_adverse_10d": f10["bars_to_adverse"],
-            "outcome_status_10d": "complete" if resolved_10d else "partial",
-        })
-        counts["updated"] += 1
-        if resolved_10d:
-            counts["completed"] += 1
+            ref, stop, direction = row.get("entry_reference_price"), row.get("stop_price"), row.get("direction_hint")
+            f10 = forward_window_stats(ref, stop, direction, forward_bars, 10)
+            resolved_10d = f10["bars_used"] >= 10
+            _update_row(journal, row["outcome_id"], {
+                "forward_10d_return_pct": f10["return_pct"], "forward_10d_r": f10["r"],
+                "max_favorable_10d_r": f10["max_favorable_r"], "max_adverse_10d_r": f10["max_adverse_r"],
+                "bars_to_favorable_10d": f10["bars_to_favorable"], "bars_to_adverse_10d": f10["bars_to_adverse"],
+                "outcome_status_10d": "complete" if resolved_10d else "partial",
+            })
+            counts["updated"] += 1
+            if resolved_10d:
+                counts["completed"] += 1
 
     return counts

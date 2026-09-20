@@ -1410,6 +1410,20 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # Scheduling-only state; additive creation never migrates outcome values
+        # or historical provenance. Each family freezes its cycle high-water.
+        "outcome_processing_cursors",
+        """
+        CREATE TABLE IF NOT EXISTS outcome_processing_cursors (
+            family TEXT PRIMARY KEY,
+            cycle_number INTEGER NOT NULL,
+            cycle_max_id INTEGER NOT NULL,
+            last_row_id INTEGER NOT NULL,
+            last_attempt_at_utc TEXT
+        )
+        """,
+    ),
+    (
         # Measurement foundation (post-2.8, Fable 5 review PR1+PR2): the
         # COUNTERFACTUAL LEDGER. Every scanned candidate/proposal/reject/
         # armed-watch/user-override becomes learnable data via forward
