@@ -20,6 +20,7 @@ outside the cap get an explicit ``skipped_budget_cap`` row (distinct from
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -32,7 +33,9 @@ from alphaos.constants import (
     Severity,
 )
 from alphaos.research.last30days_provider import build_query, make_last30days_provider
+from alphaos.research.last30days_worker import SOURCES
 from alphaos.util.ids import new_id
+from alphaos.util.timeutils import now_utc
 
 
 @dataclass
@@ -119,20 +122,62 @@ class Last30DaysEnricher:
                                Last30DaysProvider.DISABLED.value, "disabled",
                                rank=rank, interest_score=interest_score)
         query = build_query(symbol)
+        started = time.monotonic()
+        attempt = {
+            "version": "last30days_attempt_v1", "attempt_id": new_id("l30attempt"),
+            "symbol": symbol, "candidate_id": getattr(packet, "candidate_id", None),
+            "packet_id": getattr(packet, "packet_id", None),
+            "provider": getattr(self._provider, "name", "unknown"),
+            "started_at_utc": now_utc().isoformat(),
+            "configured_sources": sorted(s.strip() for s in self.s.last30days_sources.split(",")
+                                         if s.strip() in SOURCES),
+            "profile": "deep" if self.s.last30days_profile == "deep" else "quick",
+            "deadline_seconds": self.s.last30days_timeout_seconds,
+        }
+        start_saved = self._record_attempt(attempt, phase="started")
         try:
             result = self._provider.get_research_for_symbol(symbol, query)
+            ctx = self._from_result(symbol, result, rank, interest_score)
         except Exception as exc:  # fail-safe: never crash the scan
-            if self.journal is not None:
-                self.journal.log_system_event(
-                    Severity.WARNING, "last30days",
-                    f"last30days provider failed for {symbol}; failing safe.", {"error": str(exc)},
-                )
             status = (Last30DaysStatus.UNAVAILABLE.value if self.s.last30days_fail_open_as_unavailable
                       else Last30DaysStatus.ERROR.value)
             ctx = self._empty(symbol, status, getattr(self._provider, "name", "unknown"),
                               "error", error=str(exc), rank=rank, interest_score=interest_score)
+            finish_saved = self._record_attempt(
+                attempt, phase="finished", elapsed_seconds=round(time.monotonic() - started, 6),
+                enrichment_status=ctx.enrichment_status, last30days_status=ctx.last30days_status,
+                error=str(exc), diagnostics=getattr(exc, "last30days_diagnostics", {}))
+            self._mark_telemetry_failure(ctx, start_saved, finish_saved)
             return ctx
-        return self._from_result(symbol, result, rank, interest_score)
+        meta = getattr(result, "raw_meta", {}) or {}
+        finish_saved = self._record_attempt(
+            attempt, phase="finished", elapsed_seconds=round(time.monotonic() - started, 6),
+            enrichment_status=ctx.enrichment_status, last30days_status=ctx.last30days_status,
+            source_coverage=[s for s in ctx.source_coverage if s in SOURCES],
+            sources_with_errors=meta.get("sources_with_errors", []), diagnostics=meta.get("diagnostics", {}))
+        self._mark_telemetry_failure(ctx, start_saved, finish_saved)
+        return ctx
+
+    def _record_attempt(self, attempt, **detail):
+        if self.journal is not None:
+            failed = detail.get("enrichment_status") == "error"
+            try:
+                self.journal.log_system_event(
+                    Severity.WARNING if failed else Severity.INFO, "last30days",
+                    "last30days enrichment attempt " + detail["phase"], {**attempt, **detail},
+                )
+            except Exception:
+                return False  # optional telemetry must not crash the scan
+            return True
+        return None
+
+    @staticmethod
+    def _mark_telemetry_failure(ctx, *saved):
+        if any(value is False for value in saved):
+            # This existing row metadata can retain the gap if journalling
+            # subsequently recovers. No error text enters the AI context.
+            ctx.reason = "runtime_telemetry_incomplete"
+            ctx.risk_tags.append("last30days_telemetry_unavailable")
 
     def skipped_budget_cap(self, packet, rank: Optional[int] = None,
                            interest_score: Optional[float] = None,
