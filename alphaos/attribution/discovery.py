@@ -8,7 +8,7 @@ time it runs.
 
 Each ``find_*`` function returns source rows (trade_proposals /
 user_decision_overrides) eligible for ONE attribution_type that do not
-already have an attribution_records row under the CURRENT
+already have an attribution_records row under ANY
 ATTRIBUTION_VERSION -- the belt of the idempotency guarantee; the suspenders
 are the two partial unique indexes in alphaos/journal/schema.py (see
 batch.py, which catches the resulting sqlite3.IntegrityError).
@@ -26,9 +26,9 @@ def _not_yet_attributed(journal, *, table: str, id_column: str, attribution_type
     return journal.query(
         f"SELECT * FROM {table} WHERE {status_filter} AND NOT EXISTS ("
         f"  SELECT 1 FROM attribution_records ar WHERE ar.attribution_type = ? "
-        f"  AND ar.{id_column} = {table}.{id_column} AND ar.attribution_version = ?"
+        f"  AND ar.{id_column} = {table}.{id_column}"
         f") ORDER BY id ASC LIMIT ?",
-        (*params, attribution_type, version, limit),
+        (*params, attribution_type, limit),
     )
 
 

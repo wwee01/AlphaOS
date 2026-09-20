@@ -24,6 +24,7 @@ from alphaos.constants import (
     OverrideOutcomeStatus,
 )
 from alphaos.reports.metrics import compute_metrics
+from alphaos.reports.trade_accounting import accounting_for_outcome, corrected_attribution_basis
 from alphaos.stats.effective_n import effective_n as _effective_n
 from alphaos.util import timeutils
 
@@ -48,7 +49,9 @@ ATTRIBUTION_V2_CAVEAT = (
     "blocked proposal a user later overrode). This is NOT a per-event "
     "verdict: no single trade proves AlphaOS or the user 'right' or 'wrong'. "
     "Mock/demo rows are always excluded from aggregates. Below the sample "
-    "floor, only counts are shown -- no mean/sum delta_r."
+    "floor, only counts are shown -- no mean/sum delta_r. "
+    "Stored realized_r and execution-gap R are gross of modeled costs. "
+    "Legacy net labels are preserved in source rows and corrected explicitly in the accounting view."
 )
 
 # Outcome statuses that count as a closed/decided override (have a real result).
@@ -362,6 +365,25 @@ def build_attribution_report(journal, settings, limit: int = 1000) -> dict:
         (limit,),
     )
     rep["v2"] = compute_attribution_v2(attribution_records)
+    rep["v2"]["execution_gap_r_basis"] = "gross_vs_gross"
+    # Bounded read-time sidecars: original ledger claims remain visible and
+    # unchanged. No historical re-enrollment or persisted correction occurs.
+    source_rows = journal.query(
+        "SELECT * FROM attribution_records WHERE trade_outcome_id IS NOT NULL ORDER BY id DESC LIMIT ?",
+        (limit,))
+    outcome_by_id = {row["outcome_id"]: row for row in alphaos_outcomes}
+    rep["trade_accounting"] = [
+        {"outcome_id": row["outcome_id"], "symbol": row["symbol"],
+         "accounting": accounting_for_outcome(journal, row)}
+        for row in alphaos_outcomes
+    ]
+    rep["attribution_basis_corrections"] = [
+        {"attribution_id": row["attribution_id"], "trade_outcome_id": row["trade_outcome_id"],
+         "stored_actual_path_r": row.get("actual_path_r"),
+         "basis_correction": corrected_attribution_basis(row),
+         "outcome_in_report": row["trade_outcome_id"] in outcome_by_id}
+        for row in source_rows
+    ]
     return rep
 
 

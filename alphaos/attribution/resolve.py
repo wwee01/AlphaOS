@@ -35,7 +35,7 @@ from alphaos.constants import AttributionDataQuality, AttributionResolvedStatus
 # affects rows discovered/resolved going forward; existing rows keep the
 # version they were computed under so cross-version comparison is never
 # silently invalid (same rule as alphaos/tqs/scoring.py's TQS_VERSION).
-ATTRIBUTION_VERSION = "2.0.0"
+ATTRIBUTION_VERSION = "2.1.0"
 
 # candidate_outcomes.replay_result values that mean "a level was actually
 # touched" (see alphaos/learning/outcomes_engine.py::replay_bracket()).
@@ -148,7 +148,7 @@ def resolve_user_override_trade(trade_outcome_row: Optional[dict],
         return {
             "alphaos_path_r": 0.0, "actual_path_r": actual_r,
             "delta_r": round(actual_r - 0.0, 4), "execution_delta_r": None,
-            "r_basis": "realized_net", "replay_status": None,
+            "r_basis": "realized_gross", "replay_status": None,
             "resolved_status": AttributionResolvedStatus.RESOLVED.value, "missing_reason": None,
         }
     rs = _replay_state(override_co_row)
@@ -173,9 +173,9 @@ def resolve_propose_approved_executed(trade_outcome_row: Optional[dict],
 
         alphaos_path_r    = replay_r of the frozen proposal bracket
         actual_path_r     = trade_outcomes.realized_r
-        execution_delta_r = realized_r - replay_r   (r_basis='net_vs_gross':
-                             realized_r is net-of-estimated-costs, replay_r is
-                             gross -- recorded, not "fixed")
+        execution_delta_r = realized_r - replay_r   (r_basis='gross_vs_gross':
+                             both stored realized_r and replay_r are gross;
+                             versioned net-R accounting is a separate read view)
         delta_r           = None always; agent='execution'
 
     If the trade hasn't closed yet: pending, regardless of replay state (this
@@ -197,13 +197,13 @@ def resolve_propose_approved_executed(trade_outcome_row: Optional[dict],
     if replay_r is None:
         return {
             "alphaos_path_r": None, "actual_path_r": realized_r, "delta_r": None,
-            "execution_delta_r": None, "r_basis": "realized_net", "replay_status": rs["replay_status"],
+            "execution_delta_r": None, "r_basis": "realized_gross", "replay_status": rs["replay_status"],
             "resolved_status": AttributionResolvedStatus.PARTIAL.value,
             "missing_reason": rs["missing_reason"] or "replay_pending",
         }
     return {
         "alphaos_path_r": replay_r, "actual_path_r": realized_r, "delta_r": None,
-        "execution_delta_r": round(realized_r - replay_r, 4), "r_basis": "net_vs_gross",
+        "execution_delta_r": round(realized_r - replay_r, 4), "r_basis": "gross_vs_gross",
         "replay_status": rs["replay_status"], "resolved_status": AttributionResolvedStatus.RESOLVED.value,
         "missing_reason": None,
     }

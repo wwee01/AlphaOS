@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from alphaos.reports.trade_accounting import build_trade_accounting, corrected_attribution_basis
+
 
 def assemble_trade_packet(
     journal,
@@ -127,6 +129,21 @@ def assemble_trade_packet(
     position_exits = journal.exits_for_position(position_id) if position_id else []
     exit_row = position_exits[-1] if position_exits else None
     outcome = journal.outcome_for_position(position_id) if position_id else None
+    # Include every incremental exit fill/order, not only the entry order.
+    # A final exit row points at just the last order in a partial-exit lifecycle.
+    if position_id:
+        fills = journal.query("SELECT * FROM paper_fills WHERE position_id=? ORDER BY id", (position_id,))
+        known_ids = {row["order_id"] for row in orders}
+        for fill in fills:
+            if fill["order_id"] not in known_ids:
+                extra_order = journal.order_by_id(fill["order_id"])
+                if extra_order:
+                    orders.append(extra_order)
+                    known_ids.add(fill["order_id"])
+    accounting = build_trade_accounting(outcome, position, orders, fills)
+    attribution_rows = journal.query(
+        "SELECT * FROM attribution_records WHERE trade_outcome_id=? ORDER BY id",
+        (outcome["outcome_id"],)) if outcome else []
     baseline = journal.baseline_for_candidate(candidate_id) if candidate_id else None
     rejections = journal.rejections_for_candidate(candidate_id) if candidate_id else []
 
@@ -171,6 +188,9 @@ def assemble_trade_packet(
         "position": position,
         "exit": exit_row,
         "outcome": outcome,
+        "accounting": accounting,
+        "attribution": [{**row, "basis_correction": corrected_attribution_basis(row)}
+                        for row in attribution_rows],
         "baseline": baseline,
         "rejections": rejections,
     }

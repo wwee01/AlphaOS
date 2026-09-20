@@ -80,7 +80,19 @@ def record_cumulative_fill(journal, order, norm, position_id=None):
     price = (qty * float(average) - old_notional) / delta
     if not math.isfinite(price) or price <= 0:
         raise ValueError("broker cumulative fill implies an invalid incremental price")
-    filled_at = norm.get("filled_at") or timeutils.stamp().utc
+    observed_stamp = timeutils.stamp()
+    observed_at = observed_stamp.utc
+    filled_at = norm.get("filled_at") or observed_at
+    receipt = {
+        "version": "broker_cumulative_fill_v1",
+        "broker_order_id": norm.get("broker_order_id"),
+        "broker_reported_filled_at": norm.get("filled_at"), "observed_at_utc": observed_at,
+        "timestamp_semantics": "cumulative_order_fill_time_not_individual_increment_execution",
+        "timestamp_source": "broker" if norm.get("filled_at") else "observation_fallback",
+        "cumulative_qty": qty, "cumulative_average_price": average,
+        "previous_cumulative_qty": old_qty, "incremental_qty": delta,
+        "incremental_price": price, "commission_source": "not_observed",
+    }
     fill_id = "fill_" + sha256(f"{order['order_id']}:{qty:.12g}".encode()).hexdigest()[:24]
     journal.insert("paper_fills", {
         "fill_id": fill_id, "order_id": order["order_id"],
@@ -90,6 +102,8 @@ def record_cumulative_fill(journal, order, norm, position_id=None):
         "data_provider": order.get("data_provider"), "data_feed": order.get("data_feed"),
         "fill_source": "alpaca_paper", "fill_price_basis": "alpaca_fill", "filled_at": filled_at,
         "trade_id": order.get("trade_id"),
+        "raw_broker_fill_reference": json.dumps(receipt, sort_keys=True),
+        "created_at_utc": observed_at, "created_at_sgt": observed_stamp.local_sgt,
     })
     update(journal, "paper_orders", "order_id", order["order_id"], {
         "filled_at": filled_at, "entry_price": average,

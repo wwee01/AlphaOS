@@ -163,7 +163,7 @@ def test_user_override_trade_realized_win():
     assert row["actual_path_r"] == 1.4
     assert row["delta_r"] == 1.4
     assert row["resolved_status"] == "resolved"
-    assert row["r_basis"] == "realized_net"
+    assert row["r_basis"] == "realized_gross"
     j.close()
 
 
@@ -208,7 +208,7 @@ def test_propose_approved_executed_stores_execution_delta_not_decision_delta():
     assert row["agent"] == "execution"
     assert row["delta_r"] is None
     assert row["execution_delta_r"] == round(1.1 - 1.5, 4)
-    assert row["r_basis"] == "net_vs_gross"
+    assert row["r_basis"] == "gross_vs_gross"
     assert row["resolved_status"] == "resolved"
     j.close()
 

@@ -14,6 +14,7 @@ MAE<=0 always; the final value at close is written onto
 
 from __future__ import annotations
 
+import json
 from copy import copy
 from datetime import date
 from typing import Optional
@@ -29,7 +30,7 @@ from alphaos.constants import (
 from alphaos.constants import ExecutionProvider
 from alphaos.data.freshness_guard import FreshnessGuard
 from alphaos.execution import exit_rules
-from alphaos.execution.ledger_ops import atomic
+from alphaos.execution.ledger_ops import atomic, update
 from alphaos.execution.costs import CostModel
 from alphaos import lineage
 from alphaos.util import alerts, timeutils
@@ -527,7 +528,8 @@ class PositionManager:
         is_short = direction == TradeDirection.SHORT.value
         pnl_per_share = (entry - exit_price) if is_short else (exit_price - entry)
         gross_pnl = round(pnl_per_share * qty, 2)
-        costs = self.cost_model.costs(qty, entry, exit_price).total
+        trade_costs = self.cost_model.costs(qty, entry, exit_price)
+        costs = trade_costs.total
         net_pnl = round(gross_pnl - costs, 2)
         risk_per_share = abs(entry - (pos["stop_price"] or entry)) or None
         realized_r = round(pnl_per_share / risk_per_share, 3) if risk_per_share else None
@@ -641,6 +643,45 @@ class PositionManager:
             },
         )
 
+        # Add a receipt only for this new close; historical outcomes are never
+        # migrated. Execution time and local accounting time are distinct.
+        exit_order = self.journal.order_by_id(exit_order_id)
+        if exit_order:
+            raw = exit_order.get("raw_response_json")
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (ValueError, TypeError):
+                parsed = None
+            response = dict(parsed) if isinstance(parsed, dict) else {
+                "prior_raw_response": raw, "prior_raw_response_status": "non_object_or_invalid_json"}
+            entry_order = self.journal.order_by_id(pos.get("order_id")) or {}
+            response["accounting_receipt"] = {
+                "version": "trade_close_accounting_v1", "position_id": position_id,
+                "exit_id": exit_id, "entry_order_id": pos.get("order_id"),
+                "qty": qty, "entry_vwap": entry, "exit_vwap": exit_price,
+                "stop_price_at_close": pos.get("stop_price"),
+                "original_entry_order_stop": entry_order.get("stop_loss_price"),
+                "risk_basis": "position_stop_at_close",
+                "original_stop_matches": entry_order.get("stop_loss_price") == pos.get("stop_price"),
+                "gross_pnl": gross_pnl, "modeled_costs": costs, "net_pnl": net_pnl,
+                "stored_realized_r": realized_r, "stored_realized_r_basis": "gross",
+                "gross_r": pnl_per_share / risk_per_share if risk_per_share else None,
+                "net_r": net_pnl / (risk_per_share * qty) if risk_per_share and qty > 0 else None,
+                "cost_model": {
+                    "commission_per_share": self.cost_model.commission_per_share,
+                    "min_commission": self.cost_model.min_commission,
+                    "slippage_bps_per_side": self.cost_model.slippage_bps,
+                    "breakdown": trade_costs.as_dict(),
+                },
+                "broker_fees_verified": False,
+                "close_execution_at": now_dt.isoformat() if response.get("fill_timestamp_source") == "broker" else None,
+                "close_effective_at": now_dt.isoformat(),
+                "close_timestamp_source": response.get("fill_timestamp_source", "observed_or_simulated"),
+                "accounting_recorded_at_utc": timeutils.stamp().utc,
+            }
+            update(self.journal, "paper_orders", "order_id", exit_order_id,
+                   {"raw_response_json": response})
+
         self.journal.conn.execute(
             "UPDATE positions SET status = 'closed', qty = ?, current_price = ?, unrealized_pnl = 0 WHERE position_id = ?",
             (qty, exit_price, position_id),
@@ -667,7 +708,7 @@ class PositionManager:
                 message=(
                     f"{pos['symbol']} SELL/close x{qty} @ {exit_price} -- {exit_reason} "
                     f"({classification.value}). net {net_pnl}"
-                    + (f", {realized_r}R" if realized_r is not None else "")
+                    + (f", gross {realized_r}R" if realized_r is not None else "")
                     + f". position_id={position_id}"
                 ),
                 priority="default",

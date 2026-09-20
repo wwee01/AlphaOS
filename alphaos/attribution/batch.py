@@ -236,7 +236,8 @@ def _resolve_one(journal, row: dict) -> Optional[str]:
         "actual_path_r": result["actual_path_r"],
         "delta_r": result["delta_r"],
         "execution_delta_r": result["execution_delta_r"],
-        "r_basis": result["r_basis"],
+        "r_basis": (row["r_basis"] if row.get("attribution_version") == "2.0.0"
+                    and row.get("r_basis") is not None else result["r_basis"]),
         "replay_status": result["replay_status"],
         "resolved_status": result["resolved_status"],
         "data_quality_status": compute_data_quality(is_mock, result["resolved_status"], degraded=degraded),

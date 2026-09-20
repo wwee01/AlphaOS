@@ -399,15 +399,29 @@ class OrderManager:
                 order = journal.one("SELECT * FROM paper_orders WHERE broker_order_id=?", (boid,))
             if order is None:
                 from hashlib import sha256
+                entry_order = journal.order_by_id(pos.get("order_id")) or {}
+                broker_type = norm.get("order_type") or (
+                    "stop" if norm.get("stop_price") is not None else
+                    "limit" if norm.get("limit_price") is not None else None)
                 order = {
                     "order_id": "exit_" + sha256(boid.encode()).hexdigest()[:24], "broker_order_id": boid,
                     "symbol": pos["symbol"], "direction": pos["direction"],
                     "side": "buy_to_cover" if pos["direction"] == "short" else "sell",
-                    "order_type": "market", "order_class": "simple", "qty": norm.get("qty") or total_qty,
+                    "order_type": broker_type, "order_class": norm.get("order_class"), "qty": norm.get("qty") or total_qty,
+                    "client_order_id": norm.get("client_order_id"),
+                    "submitted_at": norm.get("submitted_at"), "time_in_force": norm.get("time_in_force"),
+                    "limit_price": norm.get("limit_price"), "stop_loss_price": norm.get("stop_price"),
+                    "execution_mode": "alpaca_paper", "fill_price_basis": "alpaca_fill",
+                    "data_provider": entry_order.get("data_provider"), "data_feed": entry_order.get("data_feed"),
+                    "candidate_id": pos.get("candidate_id"),
                     "execution_source": "alpaca_paper", "execution_provider": "alpaca_paper",
                     "trade_id": pos.get("trade_id"), "strategy": pos.get("strategy"),
                     "raw_request_json": {"purpose": "position_exit", "position_id": pos["position_id"],
-                                         "original_qty": total_qty, "phase": "complete", "exit_reason": reason},
+                                         "original_qty": total_qty, "phase": "complete", "exit_reason": reason,
+                                         "provenance_version": "synthesized_broker_exit_v1",
+                                         "data_provenance_source": "entry_order",
+                                         "entry_order_id": pos.get("order_id"),
+                                         "broker_parent_id": pos.get("broker_order_id")},
                 }
                 journal.insert("paper_orders", order)
             ledger_ops.record_cumulative_fill(journal, order, norm, pos["position_id"])

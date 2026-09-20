@@ -132,7 +132,7 @@ def test_user_override_trade_real_closed_trade_wins():
     assert r["alphaos_path_r"] == 0.0
     assert r["actual_path_r"] == 1.6
     assert r["delta_r"] == 1.6
-    assert r["r_basis"] == "realized_net"
+    assert r["r_basis"] == "realized_gross"
 
 
 def test_user_override_trade_real_closed_trade_loses():
@@ -195,7 +195,7 @@ def test_propose_approved_executed_partial_when_closed_but_replay_pending():
     assert r["actual_path_r"] == 1.2
     assert r["alphaos_path_r"] is None
     assert r["execution_delta_r"] is None
-    assert r["r_basis"] == "realized_net"
+    assert r["r_basis"] == "realized_gross"
 
 
 def test_propose_approved_executed_partial_when_closed_but_replay_permanently_unresolvable():
@@ -211,7 +211,7 @@ def test_propose_approved_executed_resolved_computes_execution_delta():
     assert r["alphaos_path_r"] == 1.5
     assert r["actual_path_r"] == 1.1
     assert r["execution_delta_r"] == round(1.1 - 1.5, 4)
-    assert r["r_basis"] == "net_vs_gross"
+    assert r["r_basis"] == "gross_vs_gross"
 
 
 def test_propose_approved_executed_delta_r_is_always_none():
@@ -248,5 +248,5 @@ def test_compute_data_quality_ok():
 
 
 def test_attribution_version_is_a_stable_constant():
-    assert ATTRIBUTION_VERSION == "2.0.0"
+    assert ATTRIBUTION_VERSION == "2.1.0"
     assert isinstance(ATTRIBUTION_VERSION, str)

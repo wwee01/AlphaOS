@@ -64,6 +64,10 @@ def _leg_role(leg) -> str:
 def normalize_leg(leg) -> dict:
     return {
         "broker_order_id": _s(getattr(leg, "id", None)),
+        "client_order_id": _s(getattr(leg, "client_order_id", None)),
+        "order_type": _s(getattr(leg, "order_type", None) or getattr(leg, "type", None)),
+        "order_class": _s(getattr(leg, "order_class", None)),
+        "submitted_at": _s(getattr(leg, "submitted_at", None)),
         "role": _leg_role(leg),
         "symbol": _s(getattr(leg, "symbol", None)),
         "side": _s(getattr(leg, "side", None)),
@@ -93,6 +97,7 @@ def normalize_order(order) -> dict:
         "side": _s(getattr(order, "side", None)),
         "qty": _f(getattr(order, "qty", None)),
         "order_class": _s(getattr(order, "order_class", None)),
+        "order_type": _s(getattr(order, "order_type", None) or getattr(order, "type", None)),
         "status": _s(getattr(order, "status", None)),
         "state": map_status(getattr(order, "status", None)),
         "filled_qty": _f(getattr(order, "filled_qty", None)),
