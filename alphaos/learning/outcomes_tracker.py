@@ -16,7 +16,9 @@ Two phases, both idempotent and both safe to call repeatedly / on a schedule:
   trading decision.
 
 Status filters protect final evidence. Pending work rotates through durable,
-bounded cycles; incomplete rows are retried without starving later rows.
+bounded cycles; incomplete rows are retried without starving later rows. A
+separate durable turn alternates the first family across normal invocations,
+and leaves the other family first if either block is interrupted.
 
 RESEARCH-REPAIR (2026-09-12): the five-day outcome family retains its own
 completion status. Newly seeded rows carry a separate versioned replay
@@ -42,7 +44,10 @@ unchanged (the ticket's own non-goal: "any change to the 1/3/5-day columns
 or their consumers" is out of scope) -- the continuation pass reads rows the
 main loop above no longer touches (``outcome_status = 'complete'``) and
 writes ONLY the 6 HOLD-1 columns + its own ``outcome_status_10d`` marker,
-never ``forward_1d_*``/``forward_3d_*``/``forward_5d_*``/``replay_*``. Same
+never ``forward_1d_*``/``forward_3d_*``/``forward_5d_*``/``replay_*``. When
+HOLD1 runs first, rows newly completed by the later forward block wait for a
+later invocation under the existing cursor/cycle limits; there is no extra HOLD1 burst above its
+per-call limit. Same
 bar source (``bars_provider.get_daily_bars``), same pure ``forward_window_
 stats()`` call the 1d/3d/5d family already uses -- no second excursion
 engine.
@@ -490,6 +495,47 @@ _FORWARD_PARAMS = (_STATUS_PENDING, _STATUS_PARTIAL, _STATUS_COMPLETE, REPLAY_ME
 _HOLD10_ELIGIBILITY = (
     "outcome_status = ? AND (outcome_status_10d IS NULL OR outcome_status_10d != 'complete')"
 )
+_FORWARD_FAMILY = "forward_replay_v1"
+_HOLD10_FAMILY = "hold1_10d_v1"
+
+
+def _advance_dispatch_turn(journal, family: Optional[str] = None,
+                           expected_revision: Optional[int] = None) -> tuple[str, int]:
+    """Commit the opposite family before entering a block, without provider work.
+
+    With no family argument, claim the persisted first turn (forward initially).
+    Explicit families are used before the second block, and after successful
+    completion with the original first family to alternate the next first turn.
+    Interruption in either block therefore leaves the other first on recovery.
+    Revision checks prevent a stale overlapping dispatcher from overwriting a
+    newer turn. The existing research-worker lock remains the process owner;
+    this metadata is not a new lease or an automatic failure-fuse bypass.
+    """
+    journal.conn.execute("BEGIN IMMEDIATE")
+    try:
+        state = journal.one(
+            "SELECT * FROM outcome_family_dispatch WHERE dispatcher='candidate_outcomes'"
+        )
+        revision = state["revision"] if state else 0
+        if expected_revision is not None and revision != expected_revision:
+            raise RuntimeError("outcome family dispatch changed during processing")
+        selected = family or (state["next_family"] if state else _FORWARD_FAMILY)
+        if selected not in (_FORWARD_FAMILY, _HOLD10_FAMILY):
+            raise ValueError("unknown outcome processing family")
+        next_family = _HOLD10_FAMILY if selected == _FORWARD_FAMILY else _FORWARD_FAMILY
+        revision += 1
+        journal.conn.execute(
+            "INSERT INTO outcome_family_dispatch (dispatcher,next_family,revision,updated_at_utc) "
+            "VALUES ('candidate_outcomes',?,?,?) ON CONFLICT(dispatcher) DO UPDATE SET "
+            "next_family=excluded.next_family,revision=excluded.revision,"
+            "updated_at_utc=excluded.updated_at_utc",
+            (next_family, revision, timeutils.now_utc().isoformat()),
+        )
+        journal.conn.commit()
+        return selected, revision
+    except BaseException:
+        journal.conn.rollback()
+        raise
 
 
 def _claim_outcome(journal, family: str, predicate: str, params: tuple, cycle: Optional[int]):
@@ -590,6 +636,37 @@ def _fetch_outcome_bars(bars_provider, row: dict, start: str, end: str, counts: 
 
 
 def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> dict:
+    """Run each bounded family once, with durable alternating first turns.
+
+    New HOLD1 eligibility created while forward runs first is processed in the
+    same call. When HOLD1 runs first it waits for a later invocation under
+    the ordinary cursor/cycle limits, not necessarily the immediately next call.
+    Limits, counters, maturity/provenance and existing job fuses are unchanged.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+        raise ValueError("outcome processing limit must be a nonnegative integer")
+    if bars_provider is None or limit == 0:
+        return _update_forward_replay_family(journal, bars_provider, limit)
+
+    first, revision = _advance_dispatch_turn(journal)
+    second = _HOLD10_FAMILY if first == _FORWARD_FAMILY else _FORWARD_FAMILY
+    results = {}
+    for index, family in enumerate((first, second)):
+        if index:
+            _, revision = _advance_dispatch_turn(journal, family, revision)
+        if family == _FORWARD_FAMILY:
+            results[family] = _update_forward_replay_family(journal, bars_provider, limit)
+        else:
+            results[family] = _update_hold1_10d_family(journal, bars_provider, limit)
+    # A normal pass also alternates its FIRST family. Before this final short
+    # commit an interruption still leaves the opposite of the last block first.
+    _advance_dispatch_turn(journal, first, revision)
+    counts = results[_FORWARD_FAMILY]
+    counts["hold1_10d"] = results[_HOLD10_FAMILY]
+    return counts
+
+
+def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200) -> dict:
     """Resolve pending/partial candidate_outcomes rows with forward 1/3/5-day
     returns + bracket replay. A complete five-day family may still have an
     explicitly pending bracket replay; continue that replay alone, including
@@ -617,7 +694,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
         return counts
 
     now = timeutils.now_utc()
-    for row in _fair_outcome_rows(journal, "forward_replay_v1", _FORWARD_ELIGIBILITY,
+    for row in _fair_outcome_rows(journal, _FORWARD_FAMILY, _FORWARD_ELIGIBILITY,
                                   _FORWARD_PARAMS, limit):
         counts["total"] += 1
         with _calculation_boundary(row, counts):
@@ -741,13 +818,6 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
             if resolved and row["outcome_status"] != _STATUS_COMPLETE:
                 counts["completed"] += 1
 
-    # HOLD-1: give already-'complete' rows (5d resolved) further passes to
-    # reach the 10-day horizon too -- run in the SAME call so a backlog
-    # catch-up row that jumps straight past both the 5d and 10d windows in
-    # one pass (e.g. a very late seed) resolves both immediately, not one
-    # scheduler tick apart. See module docstring for why this is a separate
-    # pass rather than folded into the loop above.
-    counts["hold1_10d"] = _update_hold1_10d_family(journal, bars_provider, limit=limit)
     return counts
 
 
@@ -774,7 +844,7 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
 
     counts = {"updated": 0, "completed": 0, "skipped": 0}
     now = timeutils.now_utc()
-    for row in _fair_outcome_rows(journal, "hold1_10d_v1", _HOLD10_ELIGIBILITY,
+    for row in _fair_outcome_rows(journal, _HOLD10_FAMILY, _HOLD10_ELIGIBILITY,
                                   (_STATUS_COMPLETE,), limit):
         with _calculation_boundary(row, counts):
             decision_at = timeutils.parse_iso(row.get("decision_at_utc"))

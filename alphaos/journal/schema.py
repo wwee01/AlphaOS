@@ -1410,6 +1410,21 @@ SCHEMA: list[tuple[str, str]] = [
         """,
     ),
     (
+        # Scheduling-only first-family turn. Empty at startup; no outcome or
+        # per-family cursor migration. Revision checks reject stale dispatchers.
+        "outcome_family_dispatch",
+        """
+        CREATE TABLE IF NOT EXISTS outcome_family_dispatch (
+            dispatcher TEXT PRIMARY KEY CHECK (dispatcher = 'candidate_outcomes'),
+            next_family TEXT NOT NULL CHECK (
+                next_family IN ('forward_replay_v1', 'hold1_10d_v1')
+            ),
+            revision INTEGER NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        )
+        """,
+    ),
+    (
         # Scheduling-only state; additive creation never migrates outcome values
         # or historical provenance. Each family freezes its cycle high-water.
         "outcome_processing_cursors",
