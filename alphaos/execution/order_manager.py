@@ -383,7 +383,15 @@ class OrderManager:
         exit price, without manufacturing a second synthetic broker fill.
         """
         position_id = pos["position_id"]
+        origins = self.journal.query("SELECT position_id FROM positions WHERE status='open' AND symbol=?", (pos["symbol"],))
+        exit_proof = None
+        if len(origins) > 1:
+            from alphaos.execution.position_attribution import verify_exit_origin
+            exit_proof = verify_exit_origin(self.journal, self.alpaca, pos, norm, order)
         with ledger_ops.atomic(self.journal) as journal:
+            if exit_proof is not None:
+                from alphaos.execution.position_attribution import recheck_symbol_attribution
+                recheck_symbol_attribution(journal, exit_proof)
             # Read residual quantity and fill totals under the same write lock.
             # Another pass may have booked this cumulative fill or closed the
             # position after the caller fetched it but before BEGIN IMMEDIATE.
@@ -434,18 +442,43 @@ class OrderManager:
             ledger_ops.update(journal, "positions", "position_id", pos["position_id"], {"qty": max(remaining, 0)})
         if remaining > 1e-6:
             return None
-        # Broker flatness is a separate fresh read, outside the write lock.
-        current = self.alpaca.list_positions()
-        bp = next((p for p in current if p["symbol"] == pos["symbol"] and abs(float(p.get("qty") or 0)) > 1e-6), None)
-        if bp:
-            TimeExitLifecycle(self).incident(pos, "exit fills imply flat but broker still reports exposure", unknown=True)
-            return None
-        return self.positions.close_position(
-            pos["position_id"], float(totals["notional"]) / total_qty, reason,
-            triggered_by="order_manager_time_exit" if reason == "time_expiry" else "alpaca_reconcile",
-            execution_source=ExecutionSource.ALPACA_PAPER.value, broker_order_id=boid,
-            closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty, recorded_exit_order_id=order["order_id"],
-        )
+        # The broker holds aggregate symbol quantity. A completed origin may
+        # finalize while independently proved sibling origins remain open.
+        proof = None
+        origins = self.journal.query("SELECT position_id FROM positions WHERE status='open' AND symbol=?", (pos["symbol"],))
+        if len(origins) > 1:
+            from alphaos.execution.position_attribution import verify_symbol_attribution
+            try:
+                proof = verify_symbol_attribution(self.journal, self.alpaca, pos["symbol"],
+                                                  target_position_id=position_id)
+            except Exception as exc:
+                TimeExitLifecycle(self).incident(pos, f"exit origin cannot be finalized ({exc})", unknown=True)
+                return None
+        else:
+            current = self.alpaca.list_positions()
+            bp = next((p for p in current if p["symbol"] == pos["symbol"] and abs(float(p.get("qty") or 0)) > 1e-6), None)
+            if bp:
+                TimeExitLifecycle(self).incident(pos, "exit fills imply flat but broker still reports exposure", unknown=True)
+                return None
+        if proof is None:
+            return self.positions.close_position(
+                pos["position_id"], float(totals["notional"]) / total_qty, reason,
+                triggered_by="order_manager_time_exit" if reason == "time_expiry" else "alpaca_reconcile",
+                execution_source=ExecutionSource.ALPACA_PAPER.value, broker_order_id=boid,
+                closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty, recorded_exit_order_id=order["order_id"],
+            )
+        with ledger_ops.atomic(self.journal) as journal:
+            if proof is not None:
+                from alphaos.execution.position_attribution import recheck_symbol_attribution
+                recheck_symbol_attribution(journal, proof)
+            positions = copy(self.positions)
+            positions.journal = journal
+            return positions.close_position(
+                pos["position_id"], float(totals["notional"]) / total_qty, reason,
+                triggered_by="order_manager_time_exit" if reason == "time_expiry" else "alpaca_reconcile",
+                execution_source=ExecutionSource.ALPACA_PAPER.value, broker_order_id=boid,
+                closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty, recorded_exit_order_id=order["order_id"],
+            )
 
     def reconcile(self) -> dict:
         """Reconcile open Alpaca paper orders against the broker: open positions

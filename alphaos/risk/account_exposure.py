@@ -111,10 +111,23 @@ def read_exposure(client, journal) -> dict:
         raise ExposureUnavailable("broker position changed during exposure check; retry after reconciliation")
     positions = refreshed_positions
     local_positions = journal.open_positions()
-    local_by_symbol = {p["symbol"]: p for p in local_positions}
+    local_by_symbol: dict[str, list[dict]] = {}
+    for pos in local_positions:
+        local_by_symbol.setdefault(pos["symbol"], []).append(pos)
     known_reductions = set()
     for held in positions:
-        local = local_by_symbol.get(held.get("symbol"))
+        origins = local_by_symbol.get(held.get("symbol"), [])
+        if len(origins) > 1:
+            from alphaos.execution.position_attribution import verify_symbol_attribution
+            try:
+                proof = verify_symbol_attribution(journal, client, held["symbol"], allow_pending_entries=True)
+                if abs(proof["broker_position"]["qty"] - abs(float(held["qty"]))) > 1e-6:
+                    raise ValueError("aggregate changed during exposure check")
+            except Exception as exc:
+                raise ExposureUnavailable(f"origin attribution unavailable: {exc}") from exc
+            known_reductions.update(proof["verified_protection_ids"])
+            continue
+        local = origins[0] if origins else None
         if not local or abs(float(local["qty"])) != abs(float(held["qty"])):
             raise ExposureUnavailable("broker position is not reconciled to the local ledger")
         if not local.get("broker_order_id"):

@@ -28,6 +28,7 @@ class TimeExitLifecycle:
         self.om = manager
         self.journal = manager.journal
         self.broker = manager.alpaca
+        self._attribution = None
 
     def orders(self, position_id, purpose=None):
         rows = self.journal.query(
@@ -50,6 +51,7 @@ class TimeExitLifecycle:
             values["qty"] = qty
         with ledger_ops.atomic(self.journal) as journal:
             if expected_phase is not None:
+                self._recheck_attribution(journal)
                 current = journal.order_by_id(row["order_id"])
                 if current is None or ledger_ops.metadata(current).get("phase") != expected_phase:
                     raise ValueError("closing intent progressed concurrently; do not submit again")
@@ -196,6 +198,17 @@ class TimeExitLifecycle:
             "SELECT position_id FROM positions WHERE status='open' AND symbol=?",
             (pos["symbol"],),
         )
+        self._attribution = None
+        if len(duplicates) > 1:
+            from alphaos.execution.position_attribution import verify_symbol_attribution
+            proof = verify_symbol_attribution(self.journal, self.broker, pos["symbol"],
+                                              target_position_id=pos["position_id"],
+                                              allowed_target_order_ids=allowed_ids)
+            origin = next(p for p in proof["attributed_positions"] if p["position_id"] == pos["position_id"])
+            if origin["qty"] <= 0 or abs(origin["qty"] - float(pos["qty"])) > 1e-6:
+                raise ValueError("no matching positive origin residual to protect or reduce")
+            self._attribution = proof
+            return origin["qty"]
         if len(duplicates) != 1:
             raise ValueError("symbol has ambiguous local position ownership")
         positions = self.broker.list_positions()
@@ -226,6 +239,12 @@ class TimeExitLifecycle:
             raise ValueError("broker direction changed while verifying orders")
         return qty
 
+    def _recheck_attribution(self, journal):
+        if self._attribution is not None:
+            from alphaos.execution.position_attribution import recheck_symbol_attribution
+            recheck_symbol_attribution(journal, self._attribution)
+            self._attribution = None
+
     def _regular_session(self, now):
         """Use the broker calendar, including holidays and early closing days."""
         now = timeutils.to_et(now)
@@ -245,6 +264,7 @@ class TimeExitLifecycle:
         # A deterministic sequence+UNIQUE order_id elects one submission owner
         # even when two processes observed the same state before this lock.
         with ledger_ops.atomic(self.journal) as journal:
+            self._recheck_attribution(journal)
             existing = self.orders(pos["position_id"], purpose)
             for row in existing:
                 if ledger_ops.metadata(row).get("phase") in ACTIVE_PHASES:
@@ -492,6 +512,7 @@ class TimeExitLifecycle:
             if not {"stop_loss", "take_profit"} <= live:
                 raise ValueError("both protective legs are not verified live with matching remaining quantity")
             with ledger_ops.atomic(self.journal) as journal:
+                self._recheck_attribution(journal)
                 ledger_ops.update(journal, "positions", "position_id", pos["position_id"],
                                   {"broker_order_id": checked["broker_order_id"]})
                 ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"],

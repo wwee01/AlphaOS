@@ -289,7 +289,7 @@ def verify_entry_absence(journal, broker, row, *, terminal_order=None):
             raise ValueError("held overnight protection cannot expire intraday")
         for leg in protection["legs"]:
             price_key, local_key = ("stop_price", "stop_price") if leg["role"] == "stop_loss" else ("limit_price", "target_price")
-            if not _same(leg.get(price_key), pos.get(local_key)) or leg.get("time_in_force") != expected_tif:
+            if not _same(leg.get(price_key), round(_number(pos.get(local_key)), 2)) or leg.get("time_in_force") != expected_tif:
                 raise ValueError("held protection terms do not match the ledger")
             if leg["status"] != "held":
                 required_open.add(leg["broker_order_id"])

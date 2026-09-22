@@ -256,6 +256,7 @@ class EntrySubmission:
                                                        self.manager.settings)
             if check.protection_status != ProtectionStatus.PROTECTED.value or check.tif_appropriate is False:
                 raise ValueError(f"recovered entry protection is not fully verified: {check.detail}")
+            return check.attribution_evidence
         elif (norm.get("filled_qty") or 0) == 0 and norm.get("status") not in TERMINAL_ZERO:
             # An accepted unfilled bracket has conditional legs. Validate their
             # identity, quantities and prices without claiming an open holding.
@@ -268,6 +269,10 @@ class EntrySubmission:
             if verified_live_roles(proof, row["qty"], row["symbol"], exit_side) != {"stop_loss", "take_profit"}:
                 raise ValueError("recovered unfilled entry lacks verified conditional stop/target instructions")
         else:
+            siblings = self.journal.query("SELECT position_id FROM positions WHERE symbol=? AND status='open'", (row["symbol"],))
+            if siblings and pos and pos["status"] == "closed":
+                from alphaos.execution.position_attribution import verify_symbol_attribution
+                return verify_symbol_attribution(self.journal, self.broker, row["symbol"], allow_pending_entries=True)
             if any(p["symbol"] == row["symbol"] and abs(float(p["qty"])) > 1e-6
                    for p in self.broker.list_positions()):
                 raise ValueError("terminal entry recovery still has unexplained broker exposure")
@@ -285,7 +290,11 @@ class EntrySubmission:
 
                 if current != expected:
                     raise ValueError("entry changed during terminal recovery")
-                recheck_entry_absence(journal, row, evidence)
+                if evidence.get("kind") == "symbol_attribution":
+                    from alphaos.execution.position_attribution import recheck_symbol_attribution
+                    recheck_symbol_attribution(journal, evidence)
+                else:
+                    recheck_entry_absence(journal, row, evidence)
             meta = ledger_ops.metadata(current)
             if meta.get("phase") != "acknowledged":
                 self._event(journal, current, meta.get("phase"), "acknowledged")

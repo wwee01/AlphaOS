@@ -26,7 +26,7 @@ an operator-confirmed price -- never raw SQL, never a guessed price).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 from alphaos.constants import ExecutionSource, ProtectionStatus, Severity
 from alphaos.execution import ledger_ops
@@ -60,6 +60,9 @@ class ProtectionCheckResult:
     time_in_force: Optional[str] = None
     tif_appropriate: Optional[bool] = None
     incident_id: Optional[str] = None  # set by _record_check only when a NEW incident opened this pass
+    # Instance-only proof used to guard incident resolution; excluded from the
+    # public dataclass serialization and never written into historical rows.
+    attribution_evidence: ClassVar[Optional[dict]] = None
 
 
 def _recorded_tif(journal, order_id: Optional[str]) -> Optional[str]:
@@ -93,6 +96,32 @@ def check_position(journal, alpaca_client, position: dict,
                     f"position -- it closed via a path this system didn't observe (manual flatten, "
                     f"external close, etc). Resolve via `alphaos protection_resolve`."),
         )
+
+    origins = journal.query("SELECT position_id FROM positions WHERE status='open' AND symbol=?", (symbol,))
+    if len(origins) > 1:
+        from alphaos.execution.position_attribution import verify_symbol_attribution
+        try:
+            proof = verify_symbol_attribution(journal, alpaca_client, symbol, allow_pending_entries=True)
+            origin = next(item for item in proof["attributed_positions"] if item["position_id"] == position_id)
+            aggregate = proof["broker_position"]["qty"]
+            if origin["qty"] <= 0:
+                raise ValueError("origin has zero residual and still requires exit finalization; no live protection claimed")
+            observed_tif = proof["broker_orders"][origin["protection_order_id"]]["time_in_force"]
+            signed_aggregate = -aggregate if proof["broker_position"]["direction"] == "short" else aggregate
+            result = ProtectionCheckResult(
+                position_id=position_id, symbol=symbol, protection_status=ProtectionStatus.PROTECTED.value,
+                severity=Severity.INFO.value, stop_live=True, target_live=True,
+                broker_position_exists=True, qty_match=True, broker_qty=signed_aggregate,
+                time_in_force=observed_tif, tif_appropriate=True,
+                detail=f"{symbol}: broker aggregate {aggregate:g} attributed across {len(origins)} origins; "
+                       f"this origin {origin['qty']:g} has its own verified stop/target instructions.")
+            result.attribution_evidence = proof
+            return result
+        except Exception as exc:
+            return ProtectionCheckResult(
+                position_id=position_id, symbol=symbol, protection_status=ProtectionStatus.UNVERIFIABLE.value,
+                severity=Severity.CRITICAL.value, broker_position_exists=True, qty_match=False,
+                broker_qty=broker_pos.get("qty"), detail=f"{symbol}: aggregate origin attribution failed ({exc}).")
 
     broker_qty = broker_pos.get("qty")
     local_qty = position.get("qty")
@@ -228,6 +257,16 @@ def _record_check(journal, position: dict, result: ProtectionCheckResult, schedu
     # Selection, observation insertion and incident resolution are one write
     # transaction, so concurrent callers cannot create two canonical owners.
     with ledger_ops.atomic(journal) as scoped:
+        if result.attribution_evidence is not None:
+            from alphaos.execution.position_attribution import recheck_symbol_attribution
+            try:
+                recheck_symbol_attribution(scoped, result.attribution_evidence)
+            except ValueError:
+                result.protection_status = ProtectionStatus.UNVERIFIABLE.value
+                result.severity = Severity.CRITICAL.value
+                result.stop_live = result.target_live = None
+                result.qty_match = False
+                result.detail = f"{result.symbol}: origin ledger changed before protection recording; fresh reconciliation required."
         _record_check_atomic(scoped, position, result, scheduler_run_id)
 
 
