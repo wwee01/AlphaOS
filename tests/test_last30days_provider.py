@@ -5,6 +5,7 @@ is monkeypatched; no real process, no network)."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from types import SimpleNamespace
@@ -75,7 +76,8 @@ def test_mock_is_deterministic():
 
 def _cli():
     s = make_settings(LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli",
-                      LAST30DAYS_REPO_PATH="/tmp/last30days-fake")  # avoids auto-resolve glob
+                      LAST30DAYS_REPO_PATH="/tmp/last30days-fake",
+                      LAST30DAYS_CMD="fake-cli")  # parsing fixture, not verified upstream
     return CliLast30DaysProvider(s)
 
 
@@ -162,6 +164,10 @@ def test_cli_builds_python312_command(monkeypatch):
         captured["cmd"] = cmd
         result = _R()
         result.communicate = lambda timeout: (result.stdout, result.stderr)
+        receipt = {"event": "source_policy", "version": l30p.POLICY_VERSION,
+                   "status": "completed", "violations": 0, "completed_runs": 1,
+                   "requested": sorted(s.last30days_sources.split(",")), "dispatch_counts": {}}
+        os.write(k["pass_fds"][0], (json.dumps(receipt) + "\n").encode())
         captured["kwargs"] = k
         return result
 
@@ -178,3 +184,4 @@ def test_cli_builds_python312_command(monkeypatch):
     assert "reddit,hackernews,polymarket,github" in cmd
     assert "--quick" in cmd
     assert captured["kwargs"]["start_new_session"] is True
+    assert captured["kwargs"]["env"][l30p.POLICY_ENV] == l30p.POLICY_VERSION

@@ -42,6 +42,9 @@ def provider_fixture(tmp_path, body, *, retrieval="return [], None", timeout=2):
     settings = make_settings(
         LAST30DAYS_ENABLED="true", LAST30DAYS_PROVIDER="cli", LAST30DAYS_PYTHON=sys.executable,
         LAST30DAYS_REPO_PATH=str(tmp_path), LAST30DAYS_SOURCES="reddit,hackernews,polymarket,github,x,youtube",
+        # Deliberately synthetic upstream: exercise supervisor through the
+        # existing custom-command contract without claiming pinned routing.
+        LAST30DAYS_CMD=shlex.join([sys.executable, l30p._WORKER, str(scripts / "last30days.py")]),
     )
     settings = replace(settings, last30days_timeout_seconds=timeout)
     return CliLast30DaysProvider(settings), settings
@@ -64,6 +67,7 @@ print(json.dumps({"clusters":[{"title":"actual theme","score":5,"sources":["redd
     diag = result.raw_meta["diagnostics"]
     assert diag["instrumented"] is True
     assert diag["outcome"] == "returned"
+    assert diag["source_policy"]["status"] == "unverified"
     assert diag["elapsed_seconds"] >= .03
     hooks = next(e for e in diag["events"] if e["event"] == "hooks")
     assert hooks["missing"] == []

@@ -1,4 +1,4 @@
-"""Supervise the installed CLI without changing its retrieval or query policy.
+"""Supervise the installed CLI and enforce the default adapter's explicit sources.
 
 Executed by the configured provider Python, so this file uses only the stdlib.
 The inherited private telemetry descriptor carries allowlisted metadata only.
@@ -21,7 +21,7 @@ import time
 SOURCES = frozenset({
     "reddit", "hackernews", "polymarket", "github", "x", "youtube",
     "grounding", "jobs", "bluesky", "digg", "instagram", "pinterest",
-    "threads", "tiktok", "truthsocial", "xiaohongshu",
+    "threads", "tiktok", "truthsocial", "xiaohongshu", "perplexity",
 })
 STAGES = frozenset({
     "planner", "retrieval", "supplemental", "thin_retry", "finalize",
@@ -169,8 +169,26 @@ def main():
     supervisor = ChildSupervisor(telemetry)
     supervisor.install()
     telemetry.emit("worker_start")
-    sys.path.insert(0, os.path.dirname(script))
+    policy = None
+    policy_requested = os.environ.pop("ALPHAOS_L30_SOURCE_POLICY", "")
     try:
+        if policy_requested:
+            # Import our adjacent stdlib module, not an external provider hook.
+            from last30days_source_policy import (  # type: ignore[import-not-found]
+                POLICY_VERSION, SourcePolicy, requested_from_argv, verify_imports, verify_supported,
+            )
+            if policy_requested != POLICY_VERSION:
+                raise RuntimeError("last30days source policy version unsupported")
+            verify_supported(script)  # before upstream imports or discovery
+            policy = SourcePolicy(requested_from_argv(sys.argv[2:]), telemetry.emit)
+            sys.path.insert(0, os.path.dirname(script))
+            pipeline = importlib.import_module("lib.pipeline")
+            planner = importlib.import_module("lib.planner")
+            verify_imports(script, pipeline, planner)
+            policy.install(pipeline, planner)
+            telemetry.emit("source_policy", **policy.summary("installed"))
+        else:
+            sys.path.insert(0, os.path.dirname(script))
         installed = []
         missing = []
         for module_name, name, stage in HOOKS:
@@ -188,6 +206,12 @@ def main():
         sys.argv = [script, *sys.argv[2:]]
         runpy.run_path(script, run_name="__main__")
     finally:
+        if policy_requested:
+            if policy is None:
+                telemetry.emit("source_policy", version=policy_requested, status="unsupported")
+            else:
+                status = "completed" if policy.completed_runs == 1 and not policy.violations else "incomplete"
+                telemetry.emit("source_policy", **policy.summary(status))
         # Normal completion also must not leave live direct helpers behind.
         # Do not signal the shutdown thread here: a SystemExit(0) must keep its
         # original return code. Only an external SIGTERM triggers os._exit.

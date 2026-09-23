@@ -34,6 +34,7 @@ from typing import Optional
 
 from alphaos.constants import MOCK_L30D_SOURCE, Last30DaysProvider, SentimentLabel
 from alphaos.research.last30days_worker import SOURCES, STAGES, stop_owned_child
+from alphaos.research.last30days_source_policy import POLICY_ENV, POLICY_VERSION, requested_from_argv
 from alphaos.util import timeutils
 
 # Keyless-only source pool used by the deterministic mock.
@@ -59,7 +60,7 @@ def _read_telemetry(stream) -> dict:
             diagnostic["malformed"] = True
             continue
         kind = event.get("event")
-        if not isinstance(kind, str) or kind not in {"worker_start", "worker_end", "hooks", "cleanup", "stage_start", "stage_end"}:
+        if not isinstance(kind, str) or kind not in {"worker_start", "worker_end", "hooks", "cleanup", "stage_start", "stage_end", "source_policy"}:
             continue
         row = {"event": kind}
         for key in ("at_seconds", "elapsed_seconds", "item_count"):
@@ -86,6 +87,20 @@ def _read_telemetry(stream) -> dict:
                              if k in {"identity_unverified", "already_reaped", "already_exited",
                                       "detached_group_stopped", "child_stopped"}
                              and type(v) is int and 0 <= v <= 10000}
+        if kind == "source_policy":
+            row["version"] = POLICY_VERSION if event.get("version") == POLICY_VERSION else "unknown"
+            row["status"] = event.get("status") if isinstance(event.get("status"), str) and event.get("status") in {
+                "installed", "active", "completed", "incomplete", "unsupported"} else "unknown"
+            for key in ("requested", "eligible", "planned", "suppressed"):
+                values = event.get(key)
+                row[key] = sorted({s for s in (values if isinstance(values, list) else [])
+                                   if isinstance(s, str) and s in SOURCES})
+            counts = event.get("dispatch_counts")
+            row["dispatch_counts"] = {k: v for k, v in (counts.items() if isinstance(counts, dict) else [])
+                                      if k in SOURCES and type(v) is int and 0 <= v <= 10000}
+            for key in ("violations", "completed_runs"):
+                value = event.get(key)
+                row[key] = value if type(value) is int and 0 <= value <= 10000 else None
         diagnostic["events"].append(row)
     if len(diagnostic["events"]) >= 512:
         diagnostic["truncated"] = True  # worker event cap, independent of byte cap
@@ -96,6 +111,8 @@ def _read_telemetry(stream) -> dict:
         else "incomplete" if hooks else "unavailable"
     )
     diagnostic["cleanup_scope"] = "registered_direct_children" if cleanups else "unverified"
+    policies = [event for event in diagnostic["events"] if event["event"] == "source_policy"]
+    diagnostic["source_policy"] = policies[-1] if policies else {"status": "unverified"}
     # Reaped/exited parents cannot prove their former descendant groups gone.
     diagnostic["unverified_descendant_roots"] = (
         sum(cleanups[-1]["counts"].get(status, 0)
@@ -206,6 +223,7 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
     def get_research_for_symbol(self, symbol: str, query: str) -> Last30DaysResult:
         cmd = self._build_cmd(query)
         instrumented = len(cmd) > 1 and cmd[1] == _WORKER
+        strict_sources = instrumented and not getattr(self.s, "last30days_cmd", "")
         timeout = float(self.s.last30days_timeout_seconds)
         started = time.monotonic()
         diagnostic = {"version": "last30days_runtime_v1", "instrumented": instrumented,
@@ -219,6 +237,11 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
         # detach with setsid(). Outer killpg alone cannot stop those helpers.
         with tempfile.TemporaryFile() as telemetry:
             env = dict(os.environ, ALPHAOS_L30_TELEMETRY_FD=str(telemetry.fileno()))
+            # Never silently apply policy to a custom command, even if that
+            # command happens to use this worker. Inherited flags cannot opt in.
+            env.pop(POLICY_ENV, None)
+            if strict_sources:
+                env[POLICY_ENV] = POLICY_VERSION
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -258,11 +281,26 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                 if proc.returncode != 0:
                     diagnostic["outcome"] = "nonzero_exit"
                     raise RuntimeError(f"last30days exited {proc.returncode}; provider output omitted")
+                if strict_sources:
+                    receipt = _read_telemetry(telemetry)
+                    policy = receipt["source_policy"]
+                    requested = requested_from_argv(cmd[3:])
+                    if (receipt["truncated"] or receipt.get("malformed")
+                            or policy.get("version") != POLICY_VERSION
+                            or policy.get("status") != "completed"
+                            or policy.get("violations") != 0 or policy.get("completed_runs") != 1
+                            or policy.get("requested") != requested
+                            or not set(policy.get("dispatch_counts", {})) <= set(requested)):
+                        diagnostic["outcome"] = "source_policy_unverified"
+                        raise RuntimeError("last30days explicit source policy not verified; result unavailable")
                 data = json.loads(stdout)
                 try:
                     result = self._parse(data, symbol, query)
                 except (ValueError, TypeError, AttributeError, KeyError):
                     raise ValueError("last30days result is malformed; provider output omitted") from None
+                if strict_sources and not set(result.sources_used) <= set(requested):
+                    diagnostic["outcome"] = "source_policy_result_mismatch"
+                    raise RuntimeError("last30days result outside explicit source request; result unavailable")
                 diagnostic["outcome"] = "returned"
             except Exception as exc:
                 diagnostic.setdefault("outcome", "invalid_result" if isinstance(exc, (ValueError, TypeError))
