@@ -317,9 +317,15 @@ class JobRunner:
         Monitor runs independently at the existing cadence. Fuses remain
         explicit-recovery states; scheduled calls never reclaim interrupted
         monitor rows or consume AI budget to diagnose them.
+
+        A research job can finish inside a scan window that was not open at
+        the start of this pass. Recheck after each dispatched non-scan job,
+        without retrying a scan window twice in one invocation. Work that
+        overruns a whole window still cannot trigger an outside-window scan.
         """
         self._reap_stale_started_jobs(job_types=self._role_jobs(), recover_monitor=False)
         results = []
+        scan_attempts: set[str] = set()
         for job_type in (
             cadence.JobType.SCAN,
             cadence.JobType.MONITOR,
@@ -336,34 +342,56 @@ class JobRunner:
             # jobs above (so it can meaningfully report on what they
             # produced) and before SHADOW_LABEL (kept last -- see below).
             cadence.JobType.PREFLIGHT,
-            # EXP-1 mechanism 4: labelling never rides inside SCAN and is
-            # ORDERED LAST in the tick -- a budget squeeze hits research,
-            # never the live book; core SCAN/MONITOR are never delayed.
+            # Labelling remains last. A returned long research job can now
+            # prompt an in-window scan recheck; monitoring is independent.
             cadence.JobType.SHADOW_LABEL,
         ):
             if job_type not in self._role_jobs():
                 continue
-            if self.role == "research" and job_type == cadence.JobType.SCAN:
-                health = monitor_health(self.journal, self.orch.settings)
-                if not health.get("entry_ready", health["ok"]):
-                    results.append({"job_type": job_type, "status": "blocked",
-                                    "reason": "monitor_not_ready", "monitor_health": health})
-                    continue
-            due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
-            if not due:
-                results.append({"job_type": job_type, "status": "not_due", "reason": reason})
-                continue
-
-            fused, fuse_reason, streak = cadence.is_fused(
-                job_type, self.orch.settings.scheduler_max_consecutive_failures, self.orch.journal,
-            )
-            if fused:
-                self._handle_fuse(job_type, fuse_reason, streak)
-                results.append({"job_type": job_type, "status": "fused", "reason": fuse_reason})
-                continue
-
-            results.append(self.run_job(job_type, allow_monitor_recovery=False))
+            result, dispatched = self._dispatch_scheduled_job(job_type, scan_attempts)
+            results.append(result)
+            if self.role == "research" and dispatched and job_type != cadence.JobType.SCAN:
+                scan, _ = self._dispatch_scheduled_job(cadence.JobType.SCAN, scan_attempts)
+                # Keep actual attempts/refusals visible without adding one
+                # redundant not-due result after every background job.
+                if scan["status"] != "not_due":
+                    results.append(scan)
         return results
+
+    def _dispatch_scheduled_job(self, job_type: str, scan_attempts: set[str]) -> tuple[dict, bool]:
+        """Shared scheduled gates; the flag means run_job was actually called."""
+        research_scan = self.role == "research" and job_type == cadence.JobType.SCAN
+        if research_scan:
+            # Re-read after long work; an earlier healthy pass is not a lease.
+            health = monitor_health(self.journal, self.orch.settings)
+            if not health.get("entry_ready", health["ok"]):
+                return {"job_type": job_type, "status": "blocked",
+                        "reason": "monitor_not_ready", "monitor_health": health}, False
+        due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal)
+        if not due:
+            return {"job_type": job_type, "status": "not_due", "reason": reason}, False
+
+        fused, fuse_reason, streak = cadence.is_fused(
+            job_type, self.orch.settings.scheduler_max_consecutive_failures, self.orch.journal,
+        )
+        if fused:
+            self._handle_fuse(job_type, fuse_reason, streak)
+            return {"job_type": job_type, "status": "fused", "reason": fuse_reason}, False
+
+        lock_key = None
+        if research_scan:
+            # Failed/skipped rows do not consume the persistent window claim.
+            # Bound same-pass retries too, while allowing normal future ticks.
+            now = timeutils.now_utc()
+            due, reason = cadence.is_due(job_type, self.orch.settings, self.orch.journal, now)
+            if not due:
+                return {"job_type": job_type, "status": "not_due", "reason": reason}, False
+            lock_key = cadence.default_lock_key(job_type, self.orch.settings, now)
+            if lock_key in scan_attempts:
+                return {"job_type": job_type, "status": "not_due",
+                        "reason": "scan_window_already_attempted_this_pass", "lock_key": lock_key}, False
+            scan_attempts.add(lock_key)
+        return self.run_job(job_type, lock_key=lock_key, allow_monitor_recovery=False), True
 
     def _handle_fuse(self, job_type: str, reason: str, streak: int) -> None:
         """Log + alert ONCE per fused state, not per tick (a fused job type
