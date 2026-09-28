@@ -18,6 +18,7 @@ def fixed_per_membership(candidates: list[dict], earnings: list[dict], outcomes:
     cache = {str(e["id"]): e for e in earnings}
     events: dict[tuple, tuple] = {}
     malformed = []
+    reference_errors = {}
 
     def dated(c: dict) -> dict:
         # One immutable input clock. Outcome-row presence or later backfills
@@ -32,8 +33,9 @@ def fixed_per_membership(candidates: list[dict], earnings: list[dict], outcomes:
         if c.get("card_id") != "post_earnings_reaction":
             continue
         e = cache.get(str(c.get("card_assignment_ref")))
-        if not e or not e.get("report_date"):
+        if not e or not e.get("report_date") or e.get("symbol") != c["symbol"]:
             malformed.append(c["candidate_id"])
+            reference_errors[c["candidate_id"]] = "missing_event_reference" if not e or not e.get("report_date") else "event_reference_symbol_missing_or_mismatched"
             continue
         key = (c["symbol"], e.get("fiscal_date_ending") or e["report_date"])
         order = (utc(c["selection_time_utc"]), c["candidate_id"])
@@ -77,6 +79,7 @@ def fixed_per_membership(candidates: list[dict], earnings: list[dict], outcomes:
               "max_pooled_20pct": rungs["pooled_tier"] <= .2 * len(selected),
               "max_no_rung_10pct": rungs["no_rung"] <= .1 * len(selected)}
     return {"events": selected, "controls": control_rows, "missing_event_reference_ids": malformed,
+            "invalid_event_reference_reasons": reference_errors,
             "overlap_excluded_control_ids": sorted(exclusions), "event_membership_uses_outcomes": False,
             "selection_clock": "immutable_candidate_created_at_utc_not_outcome_timestamp",
             "rungs_fixed_before_outcomes": True, "population_guards_all_reported": guards,

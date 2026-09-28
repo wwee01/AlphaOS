@@ -97,7 +97,7 @@ def test_explicit_draft_horizon_is_not_written_into_original_or_activated():
 
 
 def per_fixture():
-    earnings = [{"id": 1, "report_date": "2026-07-01", "fiscal_date_ending": "2026-06-30"}]
+    earnings = [{"id": 1, "symbol": "AAA", "report_date": "2026-07-01", "fiscal_date_ending": "2026-06-30"}]
     rows = [{"candidate_id": "z-earliest", "symbol": "AAA", "created_at_utc": "2026-07-01T14:00:00Z", "card_id": "post_earnings_reaction", "card_assignment_status": "ok", "card_assignment_ref": "1", "shadow_tier": 0},
             {"candidate_id": "a-later-complete", "symbol": "AAA", "created_at_utc": "2026-07-01T15:00:00Z", "card_id": "post_earnings_reaction", "card_assignment_status": "ok", "card_assignment_ref": "1", "shadow_tier": 0}]
     rows += [{"candidate_id": f"control-{i}", "symbol": f"CTL{i}", "created_at_utc": "2026-07-01T14:00:00Z", "card_id": "default", "card_assignment_status": "ok", "shadow_tier": 0} for i in range(5)]
@@ -154,3 +154,13 @@ def test_ttl_open_executed_reference_cannot_disappear_until_close():
     assert len(f["members"]) == 1 and f["members"][0]["arm"] == "reference"
     assert f["members"][0]["measurement"]["reason"] == "executed_entry_outcome_still_open_or_missing"
     assert f["details"]["closed_reference_records"] == 0
+
+
+def test_per_foreign_or_missing_event_symbol_cannot_manufacture_enrollment():
+    rows, earnings = per_fixture()
+    for wrong in ("BBB", None):
+        earnings[0]["symbol"] = wrong
+        result = fixed_per_membership(rows, earnings, {})
+        assert result["events"] == [] and result["counts"]["events"] == 0
+        assert len(result["missing_event_reference_ids"]) == 2
+        assert set(result["invalid_event_reference_reasons"].values()) == {"event_reference_symbol_missing_or_mismatched"}
