@@ -6,9 +6,13 @@ import pytest
 
 from alphaos.execution import ledger_ops
 from alphaos.execution.time_exit_lifecycle import TimeExitLifecycle
+from alphaos.journal.journal_store import JournalStore
+from alphaos.safety import KillSwitch
 from alphaos.util import alerts
 from test_execution_lifecycle_repair import complete, restart, setup
-from test_time_exit_enforcement import _NOW
+from test_time_exit_enforcement import (
+    FakeTradingClient, _NOW, _NOW_DATE, _open_broker_position, _opened_date_for, _paper_om,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -157,3 +161,45 @@ def test_absent_historical_receipt_stays_absent(tmp_path, monkeypatch):
     journal.conn.commit()
     TimeExitLifecycle(manager)._set(row, "complete", norm)
     assert json.loads(journal.order_by_id(row["order_id"])["raw_response_json"]) == norm
+
+
+@pytest.mark.parametrize("first,total", [(0.245981, 4.284099), (0.480726, 2.52748), (0.054701, 1.537961)])
+def test_actual_fractional_partial_then_final_close_uses_existing_cumulative_tolerance(tmp_path, first, total):
+    fake = FakeTradingClient()
+    journal = JournalStore(":memory:")
+    _, journal, manager = _paper_om(
+        fake, journal=journal, kill_switch=KillSwitch(str(tmp_path / "KILL_SWITCH")),
+    )
+    pos, _ = _open_broker_position(
+        journal, fake, qty=total, opened_market_date=_opened_date_for(_NOW_DATE, 5),
+    )
+    fake.close_fill_price["XLV"] = 105
+    fake.close_fill_qty["XLV"] = first
+    partial = manager.enforce_time_exits(now=_NOW)
+    assert not partial["closed"] and partial["errors"]
+    row = journal.one("SELECT * FROM paper_orders WHERE order_type='market'")
+    complete(fake, row["broker_order_id"], qty=total, price=105)
+    final = manager.enforce_time_exits(now=_NOW)
+    booked = journal.one("SELECT SUM(qty) qty FROM paper_fills WHERE order_id=?", (row["order_id"],))["qty"]
+    assert booked != total and abs(booked - total) < 1e-12
+    assert len(final["closed"]) == 1 and not final["errors"]
+    saved = journal.order_by_id(row["order_id"])
+    assert ledger_ops.metadata(saved)["phase"] == "complete"
+    assert json.loads(saved["raw_response_json"])["accounting_receipt"]["position_id"] == pos["position_id"]
+    assert journal.count_rows("exits") == journal.count_rows("trade_outcomes") == 1
+    assert journal.count_rows("paper_fills") == 2
+    assert len([item for item in fake.call_log if item[0] == "close"]) == 1
+
+
+@pytest.mark.parametrize("field", ["qty", "filled_qty", "filled_avg_price"])
+@pytest.mark.parametrize("value", [True, "10", None, float("nan"), float("inf")])
+def test_receipt_snapshot_numbers_must_be_finite_numeric_not_boolean(tmp_path, monkeypatch, field, value):
+    _, _, journal, manager, _, row, _ = close_with_receipt(tmp_path, monkeypatch)
+    norm = manager.alpaca.get_order(row["broker_order_id"])
+    norm[field] = value
+    before = journal.order_by_id(row["order_id"])
+    events = journal.query("SELECT * FROM order_events")
+    with pytest.raises(ValueError, match="receipt"):
+        TimeExitLifecycle(manager)._set(row, "complete", norm)
+    assert journal.order_by_id(row["order_id"]) == before
+    assert journal.query("SELECT * FROM order_events") == events

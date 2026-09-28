@@ -112,12 +112,19 @@ class TimeExitLifecycle:
                 raise ValueError("invalid or foreign local accounting receipt")
             side = "buy" if current.get("side") == "buy_to_cover" else current.get("side")
             fills = journal.one("SELECT SUM(qty) qty FROM paper_fills WHERE order_id=?", (current["order_id"],))
+            quantities = (norm.get("qty"), norm.get("filled_qty"), (fills or {}).get("qty"),
+                          norm.get("filled_avg_price"))
+            if any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(value) for value in quantities):
+                raise ValueError("broker response has invalid local close receipt quantities or price")
             if (norm.get("broker_order_id") != current.get("broker_order_id")
                     or norm.get("client_order_id") != current.get("client_order_id")
                     or norm.get("symbol") != current.get("symbol") or norm.get("side") != side
                     or norm.get("qty") != current.get("qty")
                     or fills is None or fills.get("qty") is None
-                    or norm.get("filled_qty") != fills["qty"]
+                    # Match record_cumulative_fill's existing absolute tolerance:
+                    # summing valid fractional deltas can introduce float noise.
+                    or abs(norm["filled_qty"] - fills["qty"]) > 1e-8
                     or norm.get("filled_avg_price") != current.get("entry_price")):
                 raise ValueError("broker response conflicts with the local close receipt identity or fill")
             outcome = outcomes[0]
