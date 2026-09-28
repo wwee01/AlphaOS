@@ -206,8 +206,14 @@ def run_monitor_job(orch, runner) -> dict:
 def run_outcomes_job(orch, runner) -> dict:
     """Scheduler wrapper around ``orch.outcomes_update()``. No gating needed --
     pure measurement, never read by any gate/eval/labeller/risk/execution path."""
+    from alphaos.reports.trade_learning import record_pending_trade_reviews
+
+    # Persist closed-trade evidence before the slow network replay work. No
+    # execution path reads these records, and no outcome history is rewritten.
+    learning_result = record_pending_trade_reviews(orch.journal)
     outcomes_result = orch.outcomes_update(limit=500)
-    return {"status": "completed", "outcomes_result": outcomes_result}
+    return {"status": "completed", "outcomes_result": outcomes_result,
+            "trade_learning_result": learning_result}
 
 
 def run_daily_digest_job(orch, runner) -> dict:

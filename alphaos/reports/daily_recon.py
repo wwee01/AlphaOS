@@ -6,8 +6,8 @@ same-day-exit breakdown. It explicitly does NOT claim statistical conclusions
 (the forward sample is too small); it builds the structure those conclusions
 will later use.
 
-When an OpenAI key is present and not in mock mode, the narrative can be authored
-by the model; otherwise a deterministic template is used and labelled as such.
+The narrative is a deterministic template. The presence of an API key does not
+make the template model-authored.
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ class DailyRecon:
                 "fills_count": counts["fills"],
                 "net_pnl": counts["net_pnl"],
                 "content_md": content,
-                "generated_by": "template" if (self.settings.is_mock or not self.settings.has_openai_key) else "openai",
+                "generated_by": "template",
             },
         )
         self.journal.log_system_event(Severity.INFO, "report", f"Daily report {report_date} generated.")

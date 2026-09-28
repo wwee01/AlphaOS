@@ -44,6 +44,7 @@ from alphaos.reports.position_health import assess_positions
 from alphaos.reports.research_status import build_collection_status, build_experiment_registry_report
 from alphaos.reports.tqs_report import build_tqs_report
 from alphaos.reports.trade_packet import assemble_trade_packet
+from alphaos.reports.trade_learning import trade_learning_report
 from alphaos.safety import KillSwitch
 from alphaos.scanner.candidate_scanner import (
     SHADOW_INTEREST_SCORE_VERSION_CURRENT, SHADOW_V1_CHANGE_SCALE, SHADOW_V1_DAY_RANGE_MIN,
@@ -321,6 +322,7 @@ def learning(settings: Settings = Depends(get_settings), journal: JournalStore =
         "experiment_registry": build_experiment_registry_report(journal, hypotheses),
         "hypothesis_drafts": list_drafts(journal, status="draft"),
         "journal_feed": build_journal_feed(journal, limit=50),
+        "trade_learning": trade_learning_report(journal, limit=50),
         "as_of": _as_of(),
     }
 

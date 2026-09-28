@@ -14,6 +14,23 @@ from __future__ import annotations
 # Ordered list of (name, DDL). Kept as data so tests can assert table presence.
 SCHEMA: list[tuple[str, str]] = [
     (
+        "trade_learning_records",
+        """
+        CREATE TABLE IF NOT EXISTS trade_learning_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            outcome_id TEXT NOT NULL,
+            position_id TEXT NOT NULL,
+            method_version TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            review_status TEXT NOT NULL,
+            review_json TEXT NOT NULL,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL,
+            UNIQUE(outcome_id, method_version)
+        )
+        """,
+    ),
+    (
         "config_versions",
         """
         CREATE TABLE IF NOT EXISTS config_versions (
