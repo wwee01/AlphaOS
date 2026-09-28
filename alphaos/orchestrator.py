@@ -1438,8 +1438,15 @@ class Orchestrator:
             f"monitor_once complete: {len(all_exits)} exit(s); "
             f"reconciled {recon.get('reconciled', 0)} alpaca_paper order(s), "
             f"opened {len(recon.get('opened', []))}; "
-            f"protection: {protection.get('unprotected', 0)} unprotected, "
-            f"{protection.get('closed_mismatch', 0)} mismatched.",
+            f"protection: {protection.get('protected', 0)} protected, "
+            f"{protection.get('degraded', 0)} degraded, "
+            f"{protection.get('unprotected', 0)} unprotected, "
+            f"{protection.get('unverifiable', 0)} unverifiable, "
+            f"{protection.get('check_error', 0)} check errors, "
+            f"{protection.get('qty_mismatches', 0)} quantity mismatches, "
+            f"{protection.get('closed_mismatch', 0)} closed-position mismatches, "
+            f"{protection.get('open_incident_count', 0)} open incidents; "
+            f"execution errors: {len(execution_errors)}.",
         )
         return {
             "exits": all_exits,
