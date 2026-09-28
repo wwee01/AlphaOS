@@ -29,6 +29,15 @@ bars must carry a completed-session observation time. The resulting gross,
 idealized R excludes trading costs and is not a real fill. Holding dependence is
 bounded by the saved decision and daily exit bound, not `replay_bars_used`.
 
+Ten completed daily bars are not the live timed-exit endpoint. For the same ET
+anchor and N, the date aligns, but a live paper exit can start at the first
+eligible regular-session monitor on day N, subject to safety checks and broker
+or recovery delays. Replay scans that whole day's high/low and otherwise uses
+its close. Live expiry also uses the actual entry fill date, which can differ
+from this receipt's decision date. These receipts therefore measure the
+declared idealized candidate-R window, not a faithful live-policy replay or
+realized portfolio profit. They do not imply incorrect actual fill accounting.
+
 ## Explicit API and additive schema proposal
 
 Only the new `alphaos/research/hold10_receipts.py` module and its tests/docs are

@@ -363,11 +363,13 @@ class PositionManager:
                 return "target"
         # Time expiry (swing horizon). Day-trade experiment uses max_holding_days=0.
         #
-        # HOLD-1: max_holding_days means TRADING days, matching the replay
-        # engine (outcomes_engine.replay_bracket() counts bars[:max_days],
-        # where bars are already filtered to strictly after the decision day
-        # -- see trading_days_between()'s docstring for the exact alignment
-        # proof). A position entered Thursday with max_days=3 hits Fri=1,
+        # HOLD-1: max_holding_days counts begun TRADING sessions. With the
+        # same ET anchor and N, this aligns only the expiry DATE with replay's
+        # Nth post-decision bar. Live paper time exits may start on the first
+        # eligible regular-session monitor; daily replay scans the entire Nth
+        # bar and otherwise marks at its close. It does not reproduce that
+        # execution timing (see trading_days_between). A Thursday entry with
+        # max_days=3 hits Fri=1,
         # Mon=2, Tue=3 -> expires during Tuesday's checks, never over the
         # weekend. Two guards, both required:
         #   (a) is_trading_day(now) -- never fire a time_expiry against a

@@ -119,15 +119,20 @@ def trading_days_between(start: date, end: date) -> int:
     i.e. how many NEW trading sessions have begun since ``start``. 0 when
     ``end <= start``.
 
-    This is HOLD-1's alignment anchor: ``outcomes_engine.replay_bracket()``
+    This is HOLD-1's calendar-date alignment anchor: ``replay_bracket()``
     replays a decision against ``bars[:N]`` where ``bars`` is already
     filtered to strictly AFTER the decision day, so ``bars[0]`` is the first
     trading day post-decision (trading day 1), ``bars[1]`` the second
     (trading day 2), etc. ``trading_days_between(start, end)`` counts on the
-    exact same convention -- the day after ``start`` is trading day 1 -- so a
-    live position's ``trading_days_between(opened, now) >= max_days`` fires
-    at precisely the point ``replay_bracket``'s ``bars[:max_days]`` window
-    would have fully resolved. See ``PositionManager._check_exit``.
+    same date convention. With the SAME ET anchor and N, the live due date
+    is the date of replay's Nth bar, not the time that bar finishes.
+
+    Live paper time-exit initiation can start at the first eligible regular-
+    session monitor on that date, subject to ownership, protection and broker
+    checks. Replay instead scans the whole Nth bar's high/low and, absent a
+    barrier, marks at its close. It is an idealized daily-window measurement,
+    not a timing-faithful live execution replay. Actual entry fill date can
+    also differ from the candidate decision-date anchor.
 
     One audit-recorded nuance (2026-07-12, STATUS CORRECTED by AILEG-1,
     2026-08-16): quantizing to trading-day granularity means a late-day
@@ -140,12 +145,12 @@ def trading_days_between(start: date, end: date) -> int:
 
     (The candidate-outcomes ledger path used to call ``replay_bracket``
     WITHOUT ``max_days`` -- fixed always-5-day forward stats via
-    ``DEFAULT_REPLAY_WINDOW_DAYS`` -- "by design", so the max-days alignment
-    claim above used to apply only to the live exit check and
+    ``DEFAULT_REPLAY_WINDOW_DAYS`` -- "by design", so explicit window selection
+    used to apply only to the live exit check and
     ``baseline/tracker.py``. AILEG-1 (docs/roadmap/alphaos-aileg1-replay-
     window-coherence-spec.md) closed that gap: ``learning/outcomes_tracker.py``
-    now resolves and passes an explicit, card-derived ``max_days`` too, so
-    the alignment claim above holds for all three call sites.)"""
+    now resolves and passes an explicit, card-derived ``max_days`` too.
+    That repairs window selection, not the intraday timing difference.)"""
     if end <= start:
         return 0
     count = 0
