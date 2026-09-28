@@ -34,6 +34,8 @@ from alphaos.reports.hold1_report import (
     render_markdown as render_hold1_markdown,
 )
 from alphaos.util.ids import new_id
+from alphaos.util import timeutils
+from alphaos.util.market_calendar import nth_trading_day_after
 from conftest import make_settings
 
 
@@ -80,18 +82,23 @@ def _proposal(o, cand_id, symbol="AAPL", entry=100.0, stop=95.0, target=112.0, d
     })
 
 
-def _seeded_row(o, entry=100.0, stop=95.0, target=112.0, symbol="AAPL", direction="long"):
+def _seeded_row(o, entry=100.0, stop=95.0, target=112.0, symbol="AAPL", direction="long", monkeypatch=None):
+    if monkeypatch is not None:
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime.datetime(2026, 1, 5, 16, tzinfo=datetime.timezone.utc))
     cid = _candidate(o, symbol=symbol, direction=direction)
     _eval(o, cid, symbol=symbol, entry=entry, stop=stop, target=target, direction=direction)
     _proposal(o, cid, symbol=symbol, entry=entry, stop=stop, target=target, direction=direction)
     seed_pending_outcomes(o.journal)
-    return o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    row = o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    if monkeypatch is not None:
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime.datetime(2026, 1, 30, 22, tzinfo=datetime.timezone.utc))
+    return row
 
 
 def _bars_from(d0: datetime.date, spec: list[tuple]) -> list[dict]:
-    """spec: list of (day_offset, open, high, low, close)."""
+    """spec: list of (trading_session_offset, open, high, low, close)."""
     return [
-        {"date": (d0 + datetime.timedelta(days=off)).isoformat(),
+        {"date": nth_trading_day_after(d0, off).isoformat(),
          "open": o, "high": hi, "low": lo, "close": c}
         for off, o, hi, lo, c in spec
     ]
@@ -154,14 +161,14 @@ def test_additive_migration_on_old_db_schema_version_stays_3_old_rows_null(tmp_p
 
 
 # ---------------------------------------------------------------- Spec test 2
-def test_10d_resolution_long_and_short_target_first_reached_day7():
+def test_10d_resolution_long_and_short_target_first_reached_day7(monkeypatch):
     """Exact MFE/MAE/bars-to arithmetic for LONG and SHORT, both hitting the
     2.4xATR target distance for the FIRST time on day 7 -- the exact
     pre-registered scenario: the 5d family says <2.4, the 10d family says
     >=2.4 with bars_to_favorable_10d == 7."""
     # ---- LONG: entry=100, stop=95 (risk=5); 2.4R distance = 100+2.4*5=112.
     o = _orch()
-    row = _seeded_row(o, entry=100.0, stop=95.0, target=999.0, symbol="LONGX", direction="long")
+    row = _seeded_row(o, monkeypatch=monkeypatch, entry=100.0, stop=95.0, target=999.0, symbol="LONGX", direction="long")
     d0 = datetime.date.fromisoformat(row["created_at_utc"][:10])
     bars = _bars_from(d0, [
         (1, 100, 105, 99, 101),
@@ -189,7 +196,7 @@ def test_10d_resolution_long_and_short_target_first_reached_day7():
 
     # ---- SHORT: entry=100, stop=105 (risk=5); 2.4R distance = 100-2.4*5=88.
     o2 = _orch()
-    row2 = _seeded_row(o2, entry=100.0, stop=105.0, target=1.0, symbol="SHORTX", direction="short")
+    row2 = _seeded_row(o2, monkeypatch=monkeypatch, entry=100.0, stop=105.0, target=1.0, symbol="SHORTX", direction="short")
     d0b = datetime.date.fromisoformat(row2["created_at_utc"][:10])
     bars2 = _bars_from(d0b, [
         (1, 100, 101, 95, 99),
@@ -217,7 +224,7 @@ def test_10d_resolution_long_and_short_target_first_reached_day7():
 
 
 # ---------------------------------------------------------------- Spec test 3
-def test_10d_window_not_yet_elapsed_stays_partial_without_touching_5d_status():
+def test_10d_window_not_yet_elapsed_stays_partial_without_touching_5d_status(monkeypatch):
     """A row whose 5-day family has resolved (outcome_status='complete') but
     whose 10-day window has NOT yet elapsed (only 7 of 10 forward bars exist
     so far) must show outcome_status_10d='partial' -- and, critically,
@@ -225,7 +232,7 @@ def test_10d_window_not_yet_elapsed_stays_partial_without_touching_5d_status():
     completely unaffected by the 10d family's own state, across MULTIPLE
     update passes."""
     o = _orch()
-    row = _seeded_row(o, entry=100.0, stop=90.0, target=999.0)
+    row = _seeded_row(o, monkeypatch=monkeypatch, entry=100.0, stop=90.0, target=999.0)
     d0 = datetime.date.fromisoformat(row["created_at_utc"][:10])
     bars = _bars_from(d0, [
         (i, 100, 101, 99, 100.2) for i in range(1, 8)   # 7 bars: 5d resolves, 10d does not

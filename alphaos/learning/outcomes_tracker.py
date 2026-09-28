@@ -63,6 +63,7 @@ from alphaos.constants import OUTCOME_STATUSES
 from alphaos.learning.outcomes_engine import (
     REPLAY_METHOD_VERSION, forward_window_stats, replay_bracket_with_maturity,
 )
+from alphaos.learning.session_admission import admit_completed_forward_bars, record_admission_diagnostic
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -629,7 +630,13 @@ def _fetch_outcome_bars(bars_provider, row: dict, start: str, end: str, counts: 
     cursor ensures the next run can move past the claimed row.
     """
     try:
-        return bars_provider.get_daily_bars(row["symbol"], start, end) or []
+        requested = timeutils.now_utc()
+        bars = bars_provider.get_daily_bars(row["symbol"], start, end) or []
+        admitted, receipt = admit_completed_forward_bars(
+            bars, start, requested_at=requested, received_at=timeutils.now_utc(),
+        )
+        record_admission_diagnostic(counts, receipt)
+        return admitted, receipt
     except OSError as exc:
         _record_processing_error(counts, row, exc, "provider")
         return None
@@ -705,14 +712,18 @@ def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200)
                 continue
             age_days = (now - decision_at).total_seconds() / 86400.0
             decision_date = timeutils.market_date(decision_at).isoformat()
-            bars = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
-            if bars is None:
+            fetched = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
+            if fetched is None:
                 continue
+            bars, admission = fetched
             # Bars strictly AFTER the decision day — never let the decision's own
             # day count as "forward" (no lookahead leakage into the replay).
             forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
 
             if not forward_bars:
+                if admission["waiting_for_admissible_sessions"]:
+                    counts["skipped"] += 1
+                    continue
                 if age_days > UNAVAILABLE_AFTER_DAYS:
                     # Don't clobber an already-flagged unrecoverable decision_at_utc
                     # (repair may have just set it this same pass) — that provenance
@@ -852,9 +863,10 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
                 counts["skipped"] += 1  # can't reach outcome_status='complete'
                 continue                # without decision_at_utc already set.
             decision_date = timeutils.market_date(decision_at).isoformat()
-            bars = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
-            if bars is None:
+            fetched = _fetch_outcome_bars(bars_provider, row, decision_date, now.date().isoformat(), counts)
+            if fetched is None:
                 continue
+            bars, admission = fetched
             forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
             if not forward_bars:
                 counts["skipped"] += 1

@@ -183,7 +183,7 @@ def test_crash_after_claim_survives_restart_and_retries_next_cycle(tmp_path, fam
 
 
 @pytest.mark.parametrize("family", ["forward", "hold10"])
-def test_single_failed_row_once_per_call_then_retry_next_cycle(family):
+def test_single_failed_row_once_per_call_then_retry_next_cycle(family, monkeypatch):
     j = JournalStore(":memory:")
     seed(j, "ERR_0", family=family)
     source = Provider(j, family=family)
@@ -195,6 +195,8 @@ def test_single_failed_row_once_per_call_then_retry_next_cycle(family):
         assert row(j, "ERR_0") == original
     assert source.calls == ["ERR_0", "ERR_0"]
     source.recovered = True
+    # Source recovery is observed after the tenth real trading session closes.
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 9, 29, 22, tzinfo=timezone.utc))
     assert family_result(tracker.update_pending_outcomes(j, source, limit=500), family)["completed"] == 1
     j.close()
 
@@ -273,7 +275,7 @@ def test_additive_cursor_schema_on_restored_old_ledger_is_idempotent(tmp_path):
 
 
 @pytest.mark.parametrize("family", ["forward", "hold10"])
-def test_malformed_bars_and_levels_are_counted_without_blocking_valid_rows_or_other_family(family):
+def test_malformed_bars_and_levels_are_counted_without_blocking_valid_rows_or_other_family(family, monkeypatch):
     j = JournalStore(":memory:")
     seed(j, "BADBAR", family=family)
     seed(j, "BADSTOP", family=family)
@@ -303,6 +305,8 @@ def test_malformed_bars_and_levels_are_counted_without_blocking_valid_rows_or_ot
     assert result["completed"] == result["hold1_10d"]["completed"] == 1
     # A later cycle retries the malformed provider input after source recovery.
     source.recovered = True
+    # The replay retry requires completed observations, not future fixture bars.
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 9, 29, 22, tzinfo=timezone.utc))
     retry = family_result(tracker.update_pending_outcomes(j, source), family)
     assert retry["completed"] == 1 and retry["calculation_errors"] == 1
     assert row(j, "BADSTOP") == originals[1]

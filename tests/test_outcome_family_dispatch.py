@@ -194,7 +194,8 @@ def test_successful_reopened_passes_alternate_first_and_preserve_both_caps(tmp_p
         assert sum(s.startswith("HOLD") for s in provider.calls) <= 2
         assert result["total"] == result["updated"] == sum(s.startswith("FWD") for s in provider.calls)
         assert result["hold1_10d"]["updated"] == sum(s.startswith("HOLD") for s in provider.calls)
-        assert set(result) == {"total", "updated", "completed", "skipped", "unavailable", "hold1_10d"}
+        assert set(result) == {"total", "updated", "completed", "skipped", "unavailable", "hold1_10d", "session_admission"}
+        assert result["session_admission"]["method_version"] == "daily_session_admission_v1"
         all_calls.extend(provider.calls)
         j.close()
     assert set(all_calls) == {f"{prefix}_{i}" for prefix in ("FWD", "HOLD") for i in range(3)}

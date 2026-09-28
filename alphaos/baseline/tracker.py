@@ -32,6 +32,7 @@ from alphaos.constants import Severity
 from alphaos.data.atr import ATR_RULES_V1
 from alphaos.learning.outcomes_engine import replay_bracket
 from alphaos.learning.outcomes_tracker import UNAVAILABLE_AFTER_DAYS
+from alphaos.learning.session_admission import admit_completed_forward_bars, record_admission_diagnostic
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
 
@@ -327,7 +328,7 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
     residual: this roughly doubles worst-case bars-API calls per invocation
     (no caching exists between the two sub-calls -- noted in the build
     report, not fixed here)."""
-    counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    counts: dict = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     if bars_provider is None:
         return counts
 
@@ -342,11 +343,17 @@ def resolve_pending_baseline_decisions(journal, bars_provider=None, limit: int =
     # replayed).
     arm_windows = resolve_baseline_arm_windows()
 
+    admission_by_arm = {}
     for rule_versions in (BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10):
         window_days = arm_windows[rule_versions[0]]
         sub_counts = _resolve_pending_rows_for_arm_set(journal, bars_provider, limit, rule_versions, window_days)
         for key in counts:
             counts[key] += sub_counts[key]
+        if "session_admission" in sub_counts:
+            admission_by_arm[rule_versions[0]] = sub_counts["session_admission"]
+
+    if admission_by_arm:
+        counts["session_admission_by_arm"] = admission_by_arm
 
     _warn_on_orphaned_pending_rows(journal)
     return counts
@@ -399,7 +406,7 @@ def _resolve_pending_rows_for_arm_set(
     ``_write_baseline_row``) is provenance for "what the card said when this
     row was written"; it is no longer read here at all, so the two can never
     silently diverge."""
-    counts = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    counts: dict = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     placeholders = ",".join("?" for _ in rule_versions)
     rows = journal.query(
         f"SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
@@ -416,8 +423,12 @@ def _resolve_pending_rows_for_arm_set(
             continue
         age_days = (now - decision_at).total_seconds() / 86400.0
         decision_date = timeutils.market_date(decision_at).isoformat()
+        requested = timeutils.now_utc()
         bars = bars_provider.get_daily_bars(row["symbol"], decision_date, now.date().isoformat()) or []
-        forward_bars = [b for b in bars if b.get("date") and b["date"] > decision_date]
+        forward_bars, admission = admit_completed_forward_bars(
+            bars, decision_date, requested_at=requested, received_at=timeutils.now_utc(),
+        )
+        record_admission_diagnostic(counts, admission)
         # HOLD-2 (STATUS CORRECTION item 3): hold10 rows get a wider
         # calendar give-up -- see HOLD10_UNAVAILABLE_AFTER_DAYS's own
         # module-level docstring for why the shared 15.0 would selectively
@@ -429,6 +440,9 @@ def _resolve_pending_rows_for_arm_set(
         )
 
         if not forward_bars:
+            if admission["waiting_for_admissible_sessions"]:
+                counts["skipped"] += 1
+                continue
             if age_days > unavailable_after_days:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    "no_bars_after_window", None, "no_bars_after_window", window_days)
@@ -455,7 +469,7 @@ def _resolve_pending_rows_for_arm_set(
             # arrive next call; a "neither" here would be a premature,
             # not-yet-final mark-to-market read (mirrors
             # update_pending_outcomes' own bars_used>=N completeness gate).
-            if age_days > unavailable_after_days:
+            if age_days > unavailable_after_days and not admission["waiting_for_admissible_sessions"]:
                 _mark_baseline_row(journal, row["baseline_decision_id"], "unavailable",
                                    None, None, "window_never_completed", window_days)
                 counts["unavailable"] += 1

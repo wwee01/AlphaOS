@@ -47,6 +47,7 @@ from alphaos.learning.outcomes_tracker import (
 from alphaos.orchestrator import Orchestrator
 from alphaos.util import timeutils
 from alphaos.util.ids import new_id
+from alphaos.util.market_calendar import nth_trading_day_after
 from conftest import make_settings
 
 from scripts.replay_recompute import run_replay_recompute
@@ -92,22 +93,26 @@ def _proposal(o, cand_id, symbol="AAPL", entry=100.0, stop=95.0, target=112.0):
     })
 
 
-def _seeded_row(o, *, card_id=None, entry=100.0, stop=95.0, target=112.0, symbol="AAPL"):
+def _seeded_row(o, *, card_id=None, entry=100.0, stop=95.0, target=112.0, symbol="AAPL", monkeypatch=None):
+    if monkeypatch is not None:
+        from datetime import datetime, timezone
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 5, 16, tzinfo=timezone.utc))
     cid = _candidate(o, symbol=symbol, card_id=card_id)
     _eval(o, cid, symbol=symbol, entry=entry, stop=stop, target=target)
     _proposal(o, cid, symbol=symbol, entry=entry, stop=stop, target=target)
     seed_pending_outcomes(o.journal)
-    return o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    row = o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    if monkeypatch is not None:
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 30, 22, tzinfo=timezone.utc))
+    return row
 
 
 class _FakeBars:
-    """Deliberately does NOT filter by [start, end] (matches
-    tests/test_outcomes_tracker.py's own _FakeBars) -- the production
-    code's own forward_bars filtering (strictly after decision_date) is
-    what actually matters for these tests, and several fixtures below
-    build "days after the decision" from a decision_at_utc that is
-    effectively "now" (real wall clock), which a date-bounded fake would
-    incorrectly exclude as "in the future" relative to today."""
+    """Supply fixture bars; writer admission owns date/session validation.
+
+    Prospective resolution tests explicitly seed before the completed-session
+    observation clock. Recompute-only tests retain their independent fixtures.
+    """
     def __init__(self, bars_by_symbol):
         self.bars_by_symbol = bars_by_symbol
 
@@ -122,7 +127,7 @@ def _bars_days_after(created_date: str, n: int, **defaults):
     low = defaults.get("low", 99.0)
     close = defaults.get("close", 100.2)
     return [
-        {"date": (d0 + datetime.timedelta(days=i)).isoformat(), "open": close, "high": high,
+        {"date": nth_trading_day_after(d0, i).isoformat(), "open": close, "high": high,
          "low": low, "close": close}
         for i in range(1, n + 1)
     ]
@@ -144,21 +149,20 @@ def _pending_row(j, *, entry=100.0, stop=96.0, target=104.8, direction="long",
 
 
 def _bar_dates_after(decision_at_utc: str, n: int) -> list[str]:
-    from datetime import timedelta
-    decision_date = timeutils.parse_iso(decision_at_utc).date()
-    return [(decision_date + timedelta(days=i)).isoformat() for i in range(1, n + 1)]
+    decision_date = timeutils.market_date(timeutils.parse_iso(decision_at_utc))
+    return [nth_trading_day_after(decision_date, i).isoformat() for i in range(1, n + 1)]
 
 
 # ============================================================ obligation 1
 # AI leg uses the candidate's card window, resolved BY ID, immune to
 # ACTIVE_CARD_ID.
-def test_1a_ai_leg_uses_candidates_own_card_window_not_5day_default():
+def test_1a_ai_leg_uses_candidates_own_card_window_not_5day_default(monkeypatch):
     """catalyst_momentum_v3's window is 10 -- a target hit on day 7 is
     INVISIBLE to the old, buggy always-5-day replay (bars[:5] never reaches
     day 7) but correctly found once the window is resolved from the
     candidate's own stamped card."""
     o = _orch()
-    row = _seeded_row(o, card_id="catalyst_momentum_v3", entry=100.0, stop=90.0, target=150.0)
+    row = _seeded_row(o, monkeypatch=monkeypatch, card_id="catalyst_momentum_v3", entry=100.0, stop=90.0, target=150.0)
     created_date = row["created_at_utc"][:10]
     bars = _bars_days_after(created_date, 6, high=101.0, low=99.0, close=100.2)
     bars.append({  # day 7: target finally hit
@@ -173,9 +177,9 @@ def test_1a_ai_leg_uses_candidates_own_card_window_not_5day_default():
     o.close()
 
 
-def test_1b_ai_leg_falls_back_to_pinned_v2_only_when_candidate_has_no_card():
+def test_1b_ai_leg_falls_back_to_pinned_v2_only_when_candidate_has_no_card(monkeypatch):
     o = _orch()
-    row = _seeded_row(o, card_id=None)   # no card at all
+    row = _seeded_row(o, monkeypatch=monkeypatch, card_id=None)   # no card at all
     created_date = row["created_at_utc"][:10]
     bars = _bars_days_after(created_date, 5)
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
@@ -185,9 +189,9 @@ def test_1b_ai_leg_falls_back_to_pinned_v2_only_when_candidate_has_no_card():
     o.close()
 
 
-def test_1c_ai_leg_with_a_card_never_uses_the_fallback_stamp():
+def test_1c_ai_leg_with_a_card_never_uses_the_fallback_stamp(monkeypatch):
     o = _orch()
-    row = _seeded_row(o, card_id="catalyst_momentum_v2")
+    row = _seeded_row(o, monkeypatch=monkeypatch, card_id="catalyst_momentum_v2")
     created_date = row["created_at_utc"][:10]
     bars = _bars_days_after(created_date, 5)
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
@@ -196,7 +200,7 @@ def test_1c_ai_leg_with_a_card_never_uses_the_fallback_stamp():
     o.close()
 
 
-def test_1d_ai_leg_window_resolved_by_id_is_immune_to_active_card_id_swap():
+def test_1d_ai_leg_window_resolved_by_id_is_immune_to_active_card_id_swap(monkeypatch):
     """The HOLD-2 lesson, applied to the AI leg: a candidate stamped with
     catalyst_momentum_v2 (window 3) must keep replaying at 3 even when the
     LIVE ACTIVE_CARD_ID is swapped to catalyst_momentum_v3 (window 10) --
@@ -204,7 +208,7 @@ def test_1d_ai_leg_window_resolved_by_id_is_immune_to_active_card_id_swap():
     default at all (see its own signature)."""
     o = _orch(ACTIVE_CARD_ID="catalyst_momentum_v3")
     assert o.settings.active_card_id == "catalyst_momentum_v3"
-    row = _seeded_row(o, card_id="catalyst_momentum_v2", entry=100.0, stop=90.0, target=200.0)
+    row = _seeded_row(o, monkeypatch=monkeypatch, card_id="catalyst_momentum_v2", entry=100.0, stop=90.0, target=200.0)
     created_date = row["created_at_utc"][:10]
     bars = _bars_days_after(created_date, 5)
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
@@ -305,9 +309,9 @@ def test_2d_v1_and_hold10_arms_pinned_regardless_of_active_card_id(monkeypatch):
 
 # ============================================================ obligation 3
 # replay_window_days persisted on both tables, matches the window used.
-def test_3a_candidate_outcomes_replay_window_days_matches_window_used():
+def test_3a_candidate_outcomes_replay_window_days_matches_window_used(monkeypatch):
     o = _orch()
-    row = _seeded_row(o, card_id="catalyst_momentum_v1")   # v1 card -> window 3
+    row = _seeded_row(o, monkeypatch=monkeypatch, card_id="catalyst_momentum_v1")   # v1 card -> window 3
     created_date = row["created_at_utc"][:10]
     bars = _bars_days_after(created_date, 5)
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))

@@ -861,12 +861,15 @@ class _FakeBarsProvider:
         return [b for b in self.bars_by_symbol.get(symbol, []) if start <= b["date"] <= end]
 
 
+@pytest.fixture(autouse=True)
+def completed_session_clock(monkeypatch):
+    from datetime import datetime, timezone
+    # Finished Friday session: relative fixtures cannot accidentally use today pre-close.
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 23, 22, tzinfo=timezone.utc))
+
+
 def _days_ago_iso(n: int) -> str:
-    """§H.1: relative to REAL wall-clock now, never a hardcoded literal date
-    -- resolve_pending_baseline_decisions computes age_days against
-    timeutils.now_utc(), so a fixed past date would silently drift stale as
-    real time advances (exactly this codebase's own recurring flaky-test
-    class)."""
+    """Relative to the explicit completed-session fixture clock."""
     from datetime import timedelta
     return timeutils.to_iso(timeutils.now_utc() - timedelta(days=n))
 
@@ -887,11 +890,10 @@ def _pending_row(j, *, entry=100.0, stop=96.0, target=104.8, direction="long",
 
 
 def _bar_dates_after(decision_at_utc: str, n: int) -> list[str]:
-    """n consecutive calendar-day dates strictly after decision_at_utc's own
-    date -- forward_bars filtering requires bar date > decision_date."""
-    from datetime import timedelta
-    decision_date = timeutils.parse_iso(decision_at_utc).date()
-    return [(decision_date + timedelta(days=i)).isoformat() for i in range(1, n + 1)]
+    """Real scheduled trading sessions after the ET decision date."""
+    from alphaos.util.market_calendar import nth_trading_day_after
+    decision_date = timeutils.market_date(timeutils.parse_iso(decision_at_utc))
+    return [nth_trading_day_after(decision_date, i).isoformat() for i in range(1, n + 1)]
 
 
 def test_resolve_pending_baseline_decisions_no_provider_is_a_noop():

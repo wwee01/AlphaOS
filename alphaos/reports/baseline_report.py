@@ -70,6 +70,9 @@ HOLD10_REPORT_TITLE = (
 # gap-haircut re-statement, applied identically to every arm (never
 # BASELINE-specific), once that PR exists.
 BASELINE_CAVEAT = (
+    "Session finality remains unverified without independent per-row source receipts. "
+    "The bracket_maturity_v2 stamp describes replay arithmetic, not completed-session provenance. "
+    "A later daily_session_admission_v1 job does not retrospectively certify historical rows. "
     "This repaired cohort is a descriptive, same-horizon comparison; it does not "
     "replace or evaluate the original preregistration. Legacy/unverified replay "
     "rows, immature outcomes and mismatched horizons are explicitly excluded. "
@@ -225,6 +228,8 @@ def build_baseline_report(
         "formal_evaluation_allowed": False,
         "formal_block_reason": "repaired cohort requires a reviewed prospective registration",
         "historical_corrections_used": False,
+        "session_finality_status": "unverified_without_independent_per_row_receipts",
+        "arithmetic_method_is_source_finality_proof": False,
     }
     today = timeutils.market_date().isoformat()
     rep["analysis_ready"] = today >= analysis_not_before

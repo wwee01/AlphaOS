@@ -11,6 +11,7 @@ from __future__ import annotations
 from alphaos.journal.journal_store import JournalStore
 from alphaos.orchestrator import Orchestrator
 from alphaos.util.ids import new_id
+from alphaos.util.market_calendar import nth_trading_day_after
 from conftest import make_settings, inject_pending_proposal
 
 from alphaos.learning.outcomes_tracker import seed_pending_outcomes, update_pending_outcomes
@@ -288,26 +289,34 @@ class _FakeBars:
         return self.bars_by_symbol.get(symbol, [])
 
 
-def _seeded_row(o, entry=100.0, stop=95.0, target=112.0, symbol="AAPL"):
+def _seeded_row(o, entry=100.0, stop=95.0, target=112.0, symbol="AAPL", monkeypatch=None):
+    if monkeypatch is not None:
+        from datetime import datetime, timezone
+        from alphaos.util import timeutils
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 5, 16, tzinfo=timezone.utc))
     cid = _candidate(o, symbol=symbol)
     _eval(o, cid, symbol=symbol, entry=entry, stop=stop, target=target)
     _proposal(o, cid, symbol=symbol, entry=entry, stop=stop, target=target)
     seed_pending_outcomes(o.journal)
-    return o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    row = o.journal.one("SELECT * FROM candidate_outcomes WHERE candidate_id = ?", (cid,))
+    if monkeypatch is not None:
+        # Ten completed trading sessions are available when the provider is called.
+        monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 30, 22, tzinfo=timezone.utc))
+    return row
 
 
-def test_update_resolves_forward_returns_and_replay_end_to_end():
+def test_update_resolves_forward_returns_and_replay_end_to_end(monkeypatch):
     o = _orch()
-    row = _seeded_row(o)
+    row = _seeded_row(o, monkeypatch=monkeypatch)
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
-    bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+    bars = [{"date": nth_trading_day_after(d0, i).isoformat(),
             "open": 100, "high": 101, "low": 99, "close": 100.5} for i in range(1, 3)]
-    bars.append({"date": (d0 + datetime.timedelta(days=3)).isoformat(),
+    bars.append({"date": nth_trading_day_after(d0, 3).isoformat(),
                 "open": 100, "high": 113, "low": 100, "close": 112})   # target hit
     for i in range(4, 6):
-        bars.append({"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+        bars.append({"date": nth_trading_day_after(d0, i).isoformat(),
                     "open": 112, "high": 113, "low": 111, "close": 112})
     res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     assert res["updated"] == 1 and res["completed"] == 1
@@ -346,7 +355,7 @@ def test_update_computes_market_adjusted_return_against_benchmark_bars(monkeypat
     row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
     d0 = datetime.date.fromisoformat(decision_date)
-    day1 = (d0 + datetime.timedelta(days=1)).isoformat()
+    day1 = nth_trading_day_after(d0, 1).isoformat()
 
     bars = [{"date": day1, "open": 100, "high": 103, "low": 99, "close": 102}]   # AAPL: +2%
     _insert_benchmark_bar(o, decision_date, 400.0)   # SPY reference
@@ -360,15 +369,15 @@ def test_update_computes_market_adjusted_return_against_benchmark_bars(monkeypat
     o.close()
 
 
-def test_update_market_adjusted_return_none_without_benchmark_bars():
+def test_update_market_adjusted_return_none_without_benchmark_bars(monkeypatch):
     """No benchmark_bars rows at all -> market_adjusted_return_*d_pct stay
     None, but the candidate's own forward return is unaffected."""
     o = _orch()
-    row = _seeded_row(o)
+    row = _seeded_row(o, monkeypatch=monkeypatch)
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
-    bars = [{"date": (d0 + datetime.timedelta(days=1)).isoformat(),
+    bars = [{"date": nth_trading_day_after(d0, 1).isoformat(),
             "open": 100, "high": 103, "low": 99, "close": 102}]
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
@@ -388,11 +397,11 @@ def test_update_market_adjusted_return_none_when_benchmark_window_lags(monkeypat
     row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
     d0 = datetime.date.fromisoformat(decision_date)
-    bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+    bars = [{"date": nth_trading_day_after(d0, i).isoformat(),
             "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 6)]
     _insert_benchmark_bar(o, decision_date, 400.0)
     for i in range(1, 4):   # only 3 of the 5 forward SPY bars
-        _insert_benchmark_bar(o, (d0 + datetime.timedelta(days=i)).isoformat(), 400.0 + i)
+        _insert_benchmark_bar(o, nth_trading_day_after(d0, i).isoformat(), 400.0 + i)
 
     res = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     assert res["completed"] == 1
@@ -404,18 +413,18 @@ def test_update_market_adjusted_return_none_when_benchmark_window_lags(monkeypat
 
 
 # ------------------------------------------------------------ time-to-excursion (EVID-1)
-def test_update_stores_bars_to_favorable_and_adverse():
+def test_update_stores_bars_to_favorable_and_adverse(monkeypatch):
     o = _orch()
-    row = _seeded_row(o, entry=100.0, stop=90.0, target=200.0)   # target far away: no replay noise
+    row = _seeded_row(o, entry=100.0, stop=90.0, target=200.0, monkeypatch=monkeypatch)   # target far away: no replay noise
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
     bars = [
-        {"date": (d0 + datetime.timedelta(days=1)).isoformat(), "open": 100, "high": 102, "low": 99, "close": 101},
-        {"date": (d0 + datetime.timedelta(days=2)).isoformat(), "open": 101, "high": 108, "low": 100, "close": 107},
-        {"date": (d0 + datetime.timedelta(days=3)).isoformat(), "open": 107, "high": 105, "low": 96, "close": 104},
-        {"date": (d0 + datetime.timedelta(days=4)).isoformat(), "open": 104, "high": 106, "low": 103, "close": 105},
-        {"date": (d0 + datetime.timedelta(days=5)).isoformat(), "open": 105, "high": 106, "low": 104, "close": 105},
+        {"date": nth_trading_day_after(d0, 1).isoformat(), "open": 100, "high": 102, "low": 99, "close": 101},
+        {"date": nth_trading_day_after(d0, 2).isoformat(), "open": 101, "high": 108, "low": 100, "close": 107},
+        {"date": nth_trading_day_after(d0, 3).isoformat(), "open": 107, "high": 105, "low": 96, "close": 104},
+        {"date": nth_trading_day_after(d0, 4).isoformat(), "open": 104, "high": 106, "low": 103, "close": 105},
+        {"date": nth_trading_day_after(d0, 5).isoformat(), "open": 105, "high": 106, "low": 104, "close": 105},
     ]
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
@@ -425,22 +434,16 @@ def test_update_stores_bars_to_favorable_and_adverse():
 
 
 # ---------------------------------------------- audit-fixup regressions (MED)
-def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_position(monkeypatch):
-    """Audit-fixup regression (correctness MED): the candidate's own bar
-    series has a gap on day 2 (simulating e.g. a halt) while SPY's series is
-    continuous. The benchmark leg must be aligned to the candidate's OWN
-    bar dates (d1, d3, d4), never to "the first N benchmark bars"
-    positionally -- taking SPY's first 3 bars unaligned would wrongly pull
-    in SPY's own d2 (a date the candidate has no bar for at all), silently
-    comparing spans that don't actually match."""
+def test_update_market_adjusted_return_does_not_shift_missing_session_into_horizon(monkeypatch):
+    """Retain helper date alignment, and refuse calendar-gap horizon shifting."""
     o = _orch()
     row, decision_date = _seeded_row_at_explicit_us_date(o, monkeypatch)
     import datetime
     d0 = datetime.date.fromisoformat(decision_date)
-    d1 = (d0 + datetime.timedelta(days=1)).isoformat()
-    d2 = (d0 + datetime.timedelta(days=2)).isoformat()
-    d3 = (d0 + datetime.timedelta(days=3)).isoformat()
-    d4 = (d0 + datetime.timedelta(days=4)).isoformat()
+    d1 = nth_trading_day_after(d0, 1).isoformat()
+    d2 = nth_trading_day_after(d0, 2).isoformat()
+    d3 = nth_trading_day_after(d0, 3).isoformat()
+    d4 = nth_trading_day_after(d0, 4).isoformat()
 
     # Candidate has NO bar on d2 (a halt) -- only 3 bars total: d1, d3, d4.
     bars = [
@@ -456,14 +459,26 @@ def test_update_market_adjusted_return_aligns_benchmark_bars_by_date_not_positio
     _insert_benchmark_bar(o, d3, 404.0)
     _insert_benchmark_bar(o, d4, 406.0)
 
+    # Preserve the original date-alignment regression independently of the new
+    # writer admission gate: supplied sparse dates must not pick SPY day2.
+    from alphaos.learning.outcomes_tracker import _benchmark_reference_and_forward_bars
+    from alphaos.learning.outcomes_engine import forward_window_stats
+    ref, aligned = _benchmark_reference_and_forward_bars(o.journal, decision_date, [d1, d3, d4])
+    assert [b["date"] for b in aligned] == [d1, d3, d4]
+    assert forward_window_stats(ref, None, "long", aligned, 3)["return_pct"] == .015
+
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     updated = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id = ?", (row["outcome_id"],))
 
-    assert updated["forward_3d_return_pct"] == 0.06   # candidate: entry=100 -> d4 close=106
-    # Correctly DATE-aligned SPY leg uses d1/d3/d4 (402/404/406) -> +1.5%.
-    # The WRONG position-aligned leg would have used d1/d2/d3 (402/403/404)
-    # -> +1.0%, a different (and wrong) number.
-    assert updated["market_adjusted_return_3d_pct"] == round(0.06 - 0.015, 4)
+    # A missing required session now keeps the horizon pending. Neither later
+    # candidate bars nor SPY's continuous dates may fill its missing day slot.
+    assert updated["outcome_status"] == "partial"
+    assert updated["forward_3d_return_pct"] == 0.01  # descriptive available prefix only
+    assert updated["market_adjusted_return_3d_pct"] is None
+    bars.insert(1, {"date": d2, "open": 101, "high": 103, "low": 100, "close": 102})
+    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    restored = o.journal.one("SELECT * FROM candidate_outcomes WHERE outcome_id=?", (row["outcome_id"],))
+    assert restored["market_adjusted_return_3d_pct"] == round(0.04 - 0.01, 4)
     o.close()
 
 
@@ -532,7 +547,7 @@ def test_update_marks_unavailable_after_window_with_no_bars():
     o.close()
 
 
-def test_update_is_idempotent_once_complete():
+def test_update_is_idempotent_once_complete(monkeypatch):
     # HOLD-1: extended to 10 bars (was 5) so BOTH the 5d and 10d families
     # genuinely resolve within this fixture -- with only 5 bars the row would
     # stay outcome_status_10d='partial' forever (a real, documented gap; see
@@ -542,11 +557,11 @@ def test_update_is_idempotent_once_complete():
     # first call (see test_hold1_10day_shadow.py for the dedicated HOLD-1
     # resolution tests).
     o = _orch()
-    row = _seeded_row(o)
+    row = _seeded_row(o, monkeypatch=monkeypatch)
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
-    bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+    bars = [{"date": nth_trading_day_after(d0, i).isoformat(),
             "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 11)]
     provider = _FakeBars({"AAPL": bars})
     first = update_pending_outcomes(o.journal, bars_provider=provider)
@@ -573,15 +588,16 @@ def test_update_excludes_decision_day_bar_no_lookahead(monkeypatch):
     o.close()
 
 
-def test_update_never_submits_order_or_approval():
+def test_update_never_submits_order_or_approval(monkeypatch):
     o = _orch()
-    row = _seeded_row(o)
+    row = _seeded_row(o, monkeypatch=monkeypatch)
     created_date = row["created_at_utc"][:10]
     import datetime
     d0 = datetime.date.fromisoformat(created_date)
-    bars = [{"date": (d0 + datetime.timedelta(days=i)).isoformat(),
+    bars = [{"date": nth_trading_day_after(d0, i).isoformat(),
             "open": 100, "high": 101, "low": 99, "close": 100.2} for i in range(1, 6)]
-    update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    result = update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
+    assert result["updated"] == result["completed"] == 1
     assert o.journal.count_rows("paper_orders") == 0
     assert o.journal.count_rows("approvals") == 0
     assert o.journal.count_open_positions() == 0
@@ -694,11 +710,14 @@ def test_repair_falls_back_safely_when_source_row_is_gone():
     o.close()
 
 
-def test_repair_unrecoverable_flag_survives_a_successful_resolution_pass():
+def test_repair_unrecoverable_flag_survives_a_successful_resolution_pass(monkeypatch):
     """A row repaired with the fallback flag must keep that flag even if the
     SAME update pass goes on to successfully compute forward returns — losing
     the 'this timestamp is not the real decision time' signal would be worse
     than an unresolved row."""
+    from datetime import datetime, timezone
+    from alphaos.util import timeutils
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 5, 16, tzinfo=timezone.utc))
     o = _orch()
     cid = _candidate(o, symbol="AAPL")
     _eval(o, cid, symbol="AAPL")
@@ -710,9 +729,9 @@ def test_repair_unrecoverable_flag_survives_a_successful_resolution_pass():
     o.journal.conn.execute("UPDATE candidate_outcomes SET decision_at_utc = NULL WHERE outcome_id = ?", (out_id,))
     o.journal.conn.commit()
 
-    # A bar dated far in the future is always "forward" of whatever fallback
-    # timestamp repair picks, so this pass succeeds rather than skipping.
-    bars = [{"date": "2099-01-01", "open": 100, "high": 105, "low": 99, "close": 103}]
+    # Observe an actually completed forward session while retaining degraded provenance.
+    monkeypatch.setattr(timeutils, "now_utc", lambda: datetime(2026, 1, 6, 22, tzinfo=timezone.utc))
+    bars = [{"date": "2026-01-06", "open": 100, "high": 105, "low": 99, "close": 103}]
     update_pending_outcomes(o.journal, bars_provider=_FakeBars({"AAPL": bars}))
     row = o.journal.one("SELECT data_quality_status, forward_1d_r FROM candidate_outcomes "
                         "WHERE outcome_id = ?", (out_id,))
