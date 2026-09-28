@@ -153,3 +153,17 @@ def test_saved_review_corruption_never_crashes_learning_or_certifies_evidence(or
     assert not trade_learning_report(j)['records'][0]['source_unchanged']
     text = next(e['text'] for e in build_journal_feed(j)['entries'] if e['kind'] == 'trade_review')
     assert 'Guaranteed profits' not in text and 'Net R' not in text
+
+
+def test_later_evaluation_never_replaces_origin_and_demo_scope_is_explicit(orchestrator):
+    prop, _ = _seed_and_exit_at_target(orchestrator)
+    j = orchestrator.journal
+    outcome = j.one('SELECT * FROM trade_outcomes')
+    original = build_trade_review(j, outcome)
+    j.insert('openai_evaluations', {'eval_id': 'later', 'candidate_id': prop['candidate_id'],
+                                  'symbol': prop['symbol'], 'decision': 'reject'})
+    reviewed = build_trade_review(j, outcome)
+    assert reviewed == original
+    row = reviewed['source_evidence']['openai_evaluation']
+    assert row is None or row['eval_id'] == prop['eval_id']
+    assert reviewed['data_scope'] == 'mock_or_demo'

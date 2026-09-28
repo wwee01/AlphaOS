@@ -167,7 +167,7 @@ def _trade_review_entries(journal, limit: int) -> list[dict]:
         facts = " ".join(review["facts"]) if unchanged else "Source changed or could not be verified; retained review needs reassessment."
         gaps = "; ".join(review["limitations"]) if unchanged else ""
         out.append({"kind": "trade_review", "timestamp": record["recorded_at_utc"],
-                    "text": f"{review['symbol']}: factual trade review. {facts}" +
+                    "text": f"{review['symbol']} ({review['data_scope']}): factual trade review. {facts}" +
                             (f" Evidence gaps: {gaps}." if gaps else ""),
                     "provenance": {"outcome_id": review["outcome_id"], "position_id": review["position_id"],
                                    "method_version": review["version"], "source_sha256": review["source_sha256"]}})
