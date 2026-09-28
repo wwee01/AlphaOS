@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 from hashlib import sha256
+import json
+import math
 from time import monotonic, sleep
 from zoneinfo import ZoneInfo
 
@@ -43,30 +45,113 @@ class TimeExitLifecycle:
                 if ledger_ops.metadata(row).get("phase") in ACTIVE_PHASES]
 
     def _set(self, row, phase, norm=None, *, qty=None, expected_phase=None):
-        values = {"raw_request_json": {**ledger_ops.metadata(row), "phase": phase}}
-        if norm:
-            values.update({"broker_order_id": norm.get("broker_order_id"),
-                           "state": norm.get("state"), "raw_response_json": norm})
-        if qty is not None:
-            values["qty"] = qty
         with ledger_ops.atomic(self.journal) as journal:
+            current = journal.order_by_id(row["order_id"])
+            if current is None:
+                raise ValueError("durable closing intent is missing")
+            values = {"raw_request_json": {**ledger_ops.metadata(current), "phase": phase}}
+            if norm:
+                values.update({"broker_order_id": norm.get("broker_order_id"),
+                               "state": norm.get("state"),
+                               "raw_response_json": self._merge_local_receipt(journal, current, norm)})
+            if qty is not None:
+                values["qty"] = qty
             if expected_phase is not None:
                 self._recheck_attribution(journal)
-                current = journal.order_by_id(row["order_id"])
-                if current is None or ledger_ops.metadata(current).get("phase") != expected_phase:
+                if ledger_ops.metadata(current).get("phase") != expected_phase:
                     raise ValueError("closing intent progressed concurrently; do not submit again")
                 if qty is not None and (qty <= 0 or qty > float(current["qty"]) + 1e-6):
                     raise ValueError("closing intent may only shrink to a verified positive residual")
             ledger_ops.update(journal, "paper_orders", "order_id", row["order_id"], values)
-            if ledger_ops.metadata(row).get("phase") != phase or row.get("state") != values.get("state", row.get("state")):
+            if ledger_ops.metadata(current).get("phase") != phase or current.get("state") != values.get("state", current.get("state")):
                 journal.insert("order_events", {
                     "event_id": new_id("oev"), "order_id": row["order_id"],
                     "broker_order_id": values.get("broker_order_id", row.get("broker_order_id")),
-                    "prev_state": row.get("state"), "new_state": values.get("state", row.get("state")),
+                    "prev_state": current.get("state"), "new_state": values.get("state", current.get("state")),
                     "execution_source": "alpaca_paper", "message": f"durable execution phase: {phase}",
                 })
         row.update(values)
         return row
+
+    @staticmethod
+    def _merge_local_receipt(journal, current, norm):
+        """Keep committed local evidence when refreshing a broker snapshot.
+
+        The caller holds the write lock. In particular close_position may just
+        have appended a receipt which the caller's pre-close row does not know
+        about. Broker payloads may never introduce or replace this local data.
+        Missing historical receipts stay missing; this is not reconstruction.
+        """
+        raw = current.get("raw_response_json")
+        try:
+            saved = json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            saved = None
+        exits = journal.query("SELECT * FROM exits WHERE exit_order_id=?", (current["order_id"],))
+        if not isinstance(saved, dict):
+            if exits:
+                raise ValueError("malformed saved close response; local receipt cannot be verified")
+            saved = {}
+        keys = ("accounting_receipt", "fill_timestamp_source")
+        for key in keys:
+            if key in norm and (key not in saved or norm[key] != saved[key]):
+                raise ValueError("broker response conflicts with reserved local receipt metadata")
+        if "fill_timestamp_source" in saved and saved["fill_timestamp_source"] not in {"broker", "observed"}:
+            raise ValueError("invalid local fill timestamp source")
+        if "accounting_receipt" in saved:
+            receipt = saved["accounting_receipt"]
+            pos_id = ledger_ops.metadata(current).get("position_id")
+            pos = journal.position_by_id(pos_id)
+            outcomes = journal.query("SELECT * FROM trade_outcomes WHERE position_id=?", (pos_id,))
+            if (not isinstance(receipt, dict) or receipt.get("version") != "trade_close_accounting_v1"
+                    or not pos or pos.get("status") != "closed" or len(exits) != 1 or len(outcomes) != 1
+                    or receipt.get("position_id") != pos_id or exits[0]["position_id"] != pos_id
+                    or receipt.get("entry_order_id") != pos.get("order_id")
+                    or receipt.get("exit_id") != exits[0]["exit_id"]
+                    or outcomes[0].get("exit_id") != receipt.get("exit_id")):
+                raise ValueError("invalid or foreign local accounting receipt")
+            side = "buy" if current.get("side") == "buy_to_cover" else current.get("side")
+            fills = journal.one("SELECT SUM(qty) qty FROM paper_fills WHERE order_id=?", (current["order_id"],))
+            if (norm.get("broker_order_id") != current.get("broker_order_id")
+                    or norm.get("client_order_id") != current.get("client_order_id")
+                    or norm.get("symbol") != current.get("symbol") or norm.get("side") != side
+                    or norm.get("qty") != current.get("qty")
+                    or fills is None or fills.get("qty") is None
+                    or norm.get("filled_qty") != fills["qty"]
+                    or norm.get("filled_avg_price") != current.get("entry_price")):
+                raise ValueError("broker response conflicts with the local close receipt identity or fill")
+            outcome = outcomes[0]
+            for key, field in (("qty", "qty"), ("entry_vwap", "entry_price"),
+                               ("exit_vwap", "exit_price"), ("gross_pnl", "gross_pnl"),
+                               ("modeled_costs", "costs"), ("net_pnl", "net_pnl")):
+                value = receipt.get(key)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value != outcome.get(field)):
+                    raise ValueError("local accounting receipt terms differ from recorded close")
+            try:
+                # Reject malformed nested metadata rather than silently copying
+                # a nonfinite or unsupported receipt as a new broker response.
+                json.dumps(receipt, allow_nan=False)
+                effective = timeutils.parse_iso(receipt["close_effective_at"])
+                recorded = timeutils.parse_iso(receipt["accounting_recorded_at_utc"])
+                source = saved.get("fill_timestamp_source")
+                valid = (effective is not None and recorded is not None
+                         and effective.utcoffset() is not None and recorded.utcoffset() is not None
+                         and effective == timeutils.parse_iso(outcome["created_at_utc"])
+                         and receipt.get("close_timestamp_source") == source
+                         and source in {"broker", "observed"}
+                         and receipt.get("stored_realized_r_basis") == "gross"
+                         and receipt.get("stored_realized_r") == outcome.get("realized_r")
+                         and isinstance(receipt.get("cost_model"), dict)
+                         and isinstance(receipt["cost_model"].get("breakdown"), dict))
+                if source == "broker":
+                    executed = receipt.get("close_execution_at")
+                    valid = valid and isinstance(executed, str) and timeutils.parse_iso(executed) == effective
+                if not valid:
+                    raise ValueError("malformed local accounting receipt metadata")
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("malformed local accounting receipt metadata") from exc
+        return {**norm, **{key: saved[key] for key in keys if key in saved}}
 
     def incident(self, pos, detail, *, unknown=False, flat=False, deferred=False):
         status = (ProtectionStatus.CLOSED_MISMATCH.value if flat else
