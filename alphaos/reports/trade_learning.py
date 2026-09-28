@@ -47,8 +47,12 @@ def _origin_links(journal, packet):
     limits = []
     proposal = packet.get("proposal") or {}
     position = packet.get("position") or {}
-    order = next((r for r in packet.get("orders", []) if r["order_id"] == position.get("order_id")), {})
+    order: dict[str, Any] = next((r for r in packet.get("orders", []) if r["order_id"] == position.get("order_id")), {})
     risk_id = order.get("risk_check_id") or proposal.get("risk_check_id")
+    if not order.get("risk_check_id"):
+        limits.append("entry_order_execution_risk_anchor_unavailable")
+    packet["ids"] = {**packet.get("ids", {}), "eval_id": proposal.get("eval_id"),
+                     "claude_review_id": proposal.get("claude_review_id"), "risk_check_id": risk_id}
     if order.get("risk_check_id") and proposal.get("risk_check_id") and order["risk_check_id"] != proposal["risk_check_id"]:
         limits.append("order_and_proposal_risk_anchor_differ")
     for key, table, id_col, anchor in (
