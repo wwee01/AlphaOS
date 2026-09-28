@@ -1,0 +1,1309 @@
+{
+  "captured_at_utc": "2026-09-28T05:49:45.580394+00:00",
+  "corporate_actions": {
+    "pages": [
+      {
+        "next_page_token": null,
+        "received_at_utc": "2026-09-28T05:49:45.580378+00:00",
+        "request": {
+          "data_quality": "all",
+          "end": "2027-09-26",
+          "limit": 1000,
+          "sort": "asc",
+          "start": "2025-09-17",
+          "symbols": "AMD,AVGO,META,SPY"
+        },
+        "requested_at_utc": "2026-09-28T05:49:44.885907+00:00"
+      }
+    ],
+    "pagination_exhausted": true,
+    "received_at_utc": "2026-09-28T05:49:45.580378+00:00",
+    "request": {
+      "data_quality": "all",
+      "end": "2027-09-26",
+      "limit": 1000,
+      "sort": "asc",
+      "start": "2025-09-17",
+      "symbols": [
+        "AMD",
+        "AVGO",
+        "META",
+        "SPY"
+      ]
+    },
+    "requested_at_utc": "2026-09-28T05:49:44.885907+00:00",
+    "rows": {
+      "cash_dividends": [
+        {
+          "cusip": "11135F101",
+          "ex_date": "2025-09-22",
+          "foreign": false,
+          "id": "fixture-id-1",
+          "payable_date": "2025-09-30",
+          "process_date": "2025-09-30",
+          "rate": 0.59,
+          "record_date": "2025-09-22",
+          "special": false,
+          "symbol": "AVGO"
+        },
+        {
+          "cusip": "11135F101",
+          "ex_date": "2025-12-22",
+          "foreign": false,
+          "id": "fixture-id-2",
+          "payable_date": "2025-12-31",
+          "process_date": "2025-12-31",
+          "rate": 0.65,
+          "record_date": "2025-12-22",
+          "special": false,
+          "symbol": "AVGO"
+        },
+        {
+          "cusip": "11135F101",
+          "ex_date": "2026-03-23",
+          "foreign": false,
+          "id": "fixture-id-3",
+          "payable_date": "2026-03-31",
+          "process_date": "2026-03-31",
+          "rate": 0.65,
+          "record_date": "2026-03-23",
+          "special": false,
+          "symbol": "AVGO"
+        },
+        {
+          "cusip": "11135F101",
+          "ex_date": "2026-06-22",
+          "foreign": false,
+          "id": "fixture-id-4",
+          "payable_date": "2026-06-30",
+          "process_date": "2026-06-30",
+          "rate": 0.65,
+          "record_date": "2026-06-22",
+          "special": false,
+          "symbol": "AVGO"
+        },
+        {
+          "cusip": "11135F101",
+          "ex_date": "2026-09-21",
+          "foreign": false,
+          "id": "fixture-id-5",
+          "payable_date": "2026-09-30",
+          "process_date": "2026-09-30",
+          "rate": 0.65,
+          "record_date": "2026-09-21",
+          "special": false,
+          "symbol": "AVGO"
+        },
+        {
+          "cusip": "30303M102",
+          "ex_date": "2025-09-22",
+          "foreign": false,
+          "id": "fixture-id-6",
+          "payable_date": "2025-09-29",
+          "process_date": "2025-09-29",
+          "rate": 0.525,
+          "record_date": "2025-09-22",
+          "special": false,
+          "symbol": "META"
+        },
+        {
+          "cusip": "30303M102",
+          "ex_date": "2025-12-15",
+          "foreign": false,
+          "id": "fixture-id-7",
+          "payable_date": "2025-12-23",
+          "process_date": "2025-12-23",
+          "rate": 0.525,
+          "record_date": "2025-12-15",
+          "special": false,
+          "symbol": "META"
+        },
+        {
+          "cusip": "30303M102",
+          "ex_date": "2026-03-16",
+          "foreign": false,
+          "id": "fixture-id-8",
+          "payable_date": "2026-03-26",
+          "process_date": "2026-03-26",
+          "rate": 0.525,
+          "record_date": "2026-03-16",
+          "special": false,
+          "symbol": "META"
+        },
+        {
+          "cusip": "30303M102",
+          "ex_date": "2026-06-15",
+          "foreign": false,
+          "id": "fixture-id-9",
+          "payable_date": "2026-06-25",
+          "process_date": "2026-06-25",
+          "rate": 0.525,
+          "record_date": "2026-06-15",
+          "special": false,
+          "symbol": "META"
+        },
+        {
+          "cusip": "30303M102",
+          "ex_date": "2026-09-21",
+          "foreign": false,
+          "id": "fixture-id-10",
+          "payable_date": "2026-09-28",
+          "process_date": "2026-09-28",
+          "rate": 0.525,
+          "record_date": "2026-09-21",
+          "special": false,
+          "symbol": "META"
+        },
+        {
+          "cusip": "78462F103",
+          "ex_date": "2025-09-19",
+          "foreign": false,
+          "id": "fixture-id-11",
+          "payable_date": "2025-10-31",
+          "process_date": "2025-10-31",
+          "rate": 1.831114,
+          "record_date": "2025-09-19",
+          "special": false,
+          "symbol": "SPY"
+        },
+        {
+          "cusip": "78462F103",
+          "ex_date": "2025-12-19",
+          "foreign": false,
+          "id": "fixture-id-12",
+          "payable_date": "2026-01-30",
+          "process_date": "2026-01-30",
+          "rate": 1.993368,
+          "record_date": "2025-12-19",
+          "special": false,
+          "symbol": "SPY"
+        },
+        {
+          "cusip": "78462F103",
+          "ex_date": "2026-03-20",
+          "foreign": false,
+          "id": "fixture-id-13",
+          "payable_date": "2026-04-30",
+          "process_date": "2026-04-30",
+          "rate": 1.796999,
+          "record_date": "2026-03-20",
+          "special": false,
+          "symbol": "SPY"
+        },
+        {
+          "cusip": "78462F103",
+          "ex_date": "2026-06-18",
+          "foreign": false,
+          "id": "fixture-id-14",
+          "payable_date": "2026-07-31",
+          "process_date": "2026-07-31",
+          "rate": 1.903516,
+          "record_date": "2026-06-18",
+          "special": false,
+          "symbol": "SPY"
+        },
+        {
+          "cusip": "78462F103",
+          "ex_date": "2026-09-18",
+          "foreign": false,
+          "id": "fixture-id-15",
+          "payable_date": "2026-10-30",
+          "process_date": "2026-10-30",
+          "rate": 1.888834,
+          "record_date": "2026-09-18",
+          "special": false,
+          "symbol": "SPY"
+        }
+      ]
+    }
+  },
+  "end_capture": {
+    "account_fingerprint": "fixture-account-same-at-both-endpoints",
+    "activity_summary": {
+      "external_cash": 0.0,
+      "external_event_count": 0,
+      "fills": 0,
+      "internal_cash": 0.0,
+      "unknown_or_ambiguous": []
+    },
+    "adjustment": "raw",
+    "benchmark_price": 771.35,
+    "blockers": [],
+    "cash": 58493.55,
+    "cashflow_status": "none_observed",
+    "comparison_eligible": false,
+    "convention": "cash plus signed closing holdings marked at the last qualifying trade in each exact final regular-session minute",
+    "dividend_treatment": "SPY price return; dividends are not reinvested",
+    "feed": "iex",
+    "input_sha256": "ff1e9eafad95176832953d85067bb146225f2290ba75d0d5320cdf5eac42c9e4",
+    "market_date": "2026-09-25",
+    "marks": {
+      "AMD": 630.47,
+      "SPY": 771.35
+    },
+    "method": "common_final_minute_nav_candidate_v1",
+    "raw_evidence": {
+      "account_after": {
+        "received_at_utc": "2026-09-28T05:49:43.496311+00:00",
+        "requested_at_utc": "2026-09-28T05:49:42.797919+00:00",
+        "value": {
+          "account_fingerprint": "fixture-account-same-at-both-endpoints",
+          "cash": "58493.55",
+          "currency": "USD",
+          "equity": "95445.15"
+        }
+      },
+      "account_before": {
+        "received_at_utc": "2026-09-28T05:49:40.673092+00:00",
+        "requested_at_utc": "2026-09-28T05:49:39.987066+00:00",
+        "value": {
+          "account_fingerprint": "fixture-account-same-at-both-endpoints",
+          "cash": "58493.55",
+          "currency": "USD",
+          "equity": "95445.15"
+        }
+      },
+      "activities_after": {
+        "pages": [
+          {
+            "received_at_utc": "2026-09-28T05:49:44.885674+00:00",
+            "request": {
+              "after": "2026-09-10T20:00:00+00:00",
+              "direction": "asc",
+              "page_size": 100,
+              "until": "2026-09-28T05:49:44.196307+00:00"
+            },
+            "requested_at_utc": "2026-09-28T05:49:44.196312+00:00",
+            "row_count": 16
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-28T05:49:44.885674+00:00",
+        "request": {
+          "after": "2026-09-10T20:00:00+00:00",
+          "direction": "asc",
+          "page_size": 100,
+          "until": "2026-09-28T05:49:44.196307+00:00"
+        },
+        "requested_at_utc": "2026-09-28T05:49:44.196312+00:00",
+        "rows": [
+          {
+            "activity_type": "FILL",
+            "cum_qty": "3",
+            "id": "fixture-id-16",
+            "leaves_qty": "40",
+            "order_id": "fixture-id-17",
+            "order_status": "partially_filled",
+            "price": "348",
+            "qty": "3",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:32:59.575489Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "43",
+            "id": "fixture-id-18",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-17",
+            "order_status": "filled",
+            "price": "347.09",
+            "qty": "40",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:34:05.567845Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "6",
+            "id": "fixture-id-19",
+            "leaves_qty": "21",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670",
+            "qty": "6",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:10.779053Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "23",
+            "id": "fixture-id-21",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670.22",
+            "qty": "17",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:12.63623Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "27",
+            "id": "fixture-id-22",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-20",
+            "order_status": "filled",
+            "price": "670.28",
+            "qty": "4",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:13.7385Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "8",
+            "id": "fixture-id-23",
+            "leaves_qty": "13",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "8",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:56.016993Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "10",
+            "id": "fixture-id-25",
+            "leaves_qty": "11",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:56.376231Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "17",
+            "id": "fixture-id-26",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "7",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:57.050324Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "19",
+            "id": "fixture-id-27",
+            "leaves_qty": "2",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.16",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:57.891493Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "20",
+            "id": "fixture-id-28",
+            "leaves_qty": "1",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.33",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:34:03.681413Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "21",
+            "id": "fixture-id-29",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-24",
+            "order_status": "filled",
+            "price": "612.33",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:34:04.345321Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "15",
+            "id": "fixture-id-30",
+            "leaves_qty": "6",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.13",
+            "qty": "15",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:24.484507Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "17",
+            "id": "fixture-id-32",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.14",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:25.328421Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "18",
+            "id": "fixture-id-33",
+            "leaves_qty": "3",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.15",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:26.11163Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "21",
+            "id": "fixture-id-34",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-31",
+            "order_status": "filled",
+            "price": "615.15",
+            "qty": "3",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:26.782176Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "18",
+            "id": "fixture-id-35",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-36",
+            "order_status": "filled",
+            "price": "628.63",
+            "qty": "18",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-24T19:47:42.885101Z",
+            "type": "fill"
+          }
+        ]
+      },
+      "activities_before": {
+        "pages": [
+          {
+            "received_at_utc": "2026-09-28T05:49:42.797883+00:00",
+            "request": {
+              "after": "2026-09-10T20:00:00+00:00",
+              "direction": "asc",
+              "page_size": 100,
+              "until": "2026-09-28T05:49:42.050470+00:00"
+            },
+            "requested_at_utc": "2026-09-28T05:49:42.050478+00:00",
+            "row_count": 16
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-28T05:49:42.797883+00:00",
+        "request": {
+          "after": "2026-09-10T20:00:00+00:00",
+          "direction": "asc",
+          "page_size": 100,
+          "until": "2026-09-28T05:49:42.050470+00:00"
+        },
+        "requested_at_utc": "2026-09-28T05:49:42.050478+00:00",
+        "rows": [
+          {
+            "activity_type": "FILL",
+            "cum_qty": "3",
+            "id": "fixture-id-16",
+            "leaves_qty": "40",
+            "order_id": "fixture-id-17",
+            "order_status": "partially_filled",
+            "price": "348",
+            "qty": "3",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:32:59.575489Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "43",
+            "id": "fixture-id-18",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-17",
+            "order_status": "filled",
+            "price": "347.09",
+            "qty": "40",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:34:05.567845Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "6",
+            "id": "fixture-id-19",
+            "leaves_qty": "21",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670",
+            "qty": "6",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:10.779053Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "23",
+            "id": "fixture-id-21",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670.22",
+            "qty": "17",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:12.63623Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "27",
+            "id": "fixture-id-22",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-20",
+            "order_status": "filled",
+            "price": "670.28",
+            "qty": "4",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:13.7385Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "8",
+            "id": "fixture-id-23",
+            "leaves_qty": "13",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "8",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:56.016993Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "10",
+            "id": "fixture-id-25",
+            "leaves_qty": "11",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:56.376231Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "17",
+            "id": "fixture-id-26",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.17",
+            "qty": "7",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:57.050324Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "19",
+            "id": "fixture-id-27",
+            "leaves_qty": "2",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.16",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:33:57.891493Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "20",
+            "id": "fixture-id-28",
+            "leaves_qty": "1",
+            "order_id": "fixture-id-24",
+            "order_status": "partially_filled",
+            "price": "612.33",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:34:03.681413Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "21",
+            "id": "fixture-id-29",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-24",
+            "order_status": "filled",
+            "price": "612.33",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T15:34:04.345321Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "15",
+            "id": "fixture-id-30",
+            "leaves_qty": "6",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.13",
+            "qty": "15",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:24.484507Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "17",
+            "id": "fixture-id-32",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.14",
+            "qty": "2",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:25.328421Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "18",
+            "id": "fixture-id-33",
+            "leaves_qty": "3",
+            "order_id": "fixture-id-31",
+            "order_status": "partially_filled",
+            "price": "615.15",
+            "qty": "1",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:26.11163Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "21",
+            "id": "fixture-id-34",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-31",
+            "order_status": "filled",
+            "price": "615.15",
+            "qty": "3",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-21T19:49:26.782176Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "18",
+            "id": "fixture-id-35",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-36",
+            "order_status": "filled",
+            "price": "628.63",
+            "qty": "18",
+            "side": "buy",
+            "symbol": "AMD",
+            "transaction_time": "2026-09-24T19:47:42.885101Z",
+            "type": "fill"
+          }
+        ]
+      },
+      "bars": {
+        "pages": [
+          {
+            "next_page_token": null,
+            "received_at_utc": "2026-09-28T05:49:42.050441+00:00",
+            "request": {
+              "adjustment": "raw",
+              "end": "2026-09-25T19:59:59+00:00",
+              "feed": "iex",
+              "limit": 1000,
+              "start": "2026-09-25T19:59:00+00:00",
+              "symbols": "AMD,SPY",
+              "timeframe": "1Min"
+            },
+            "requested_at_utc": "2026-09-28T05:49:41.354814+00:00"
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-28T05:49:42.050441+00:00",
+        "request": {
+          "adjustment": "raw",
+          "end": "2026-09-25T19:59:59+00:00",
+          "feed": "iex",
+          "limit": 1000,
+          "start": "2026-09-25T19:59:00+00:00",
+          "symbols": [
+            "AMD",
+            "SPY"
+          ],
+          "timeframe": "1Min"
+        },
+        "requested_at_utc": "2026-09-28T05:49:41.354814+00:00",
+        "rows": {
+          "AMD": [
+            {
+              "c": 630.47,
+              "h": 631.465,
+              "l": 630.285,
+              "n": 286,
+              "o": 631.4,
+              "t": "2026-09-25T19:59:00Z",
+              "v": 11208,
+              "vw": 630.94702
+            }
+          ],
+          "SPY": [
+            {
+              "c": 771.35,
+              "h": 771.535,
+              "l": 771.17,
+              "n": 623,
+              "o": 771.51,
+              "t": "2026-09-25T19:59:00Z",
+              "v": 46593,
+              "vw": 771.303888
+            }
+          ]
+        }
+      },
+      "calendar_response": [
+        {
+          "close": "16:00",
+          "date": "2026-09-14",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-15",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-16",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-17",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-18",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-21",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-22",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-23",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-24",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-25",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-28",
+          "open": "09:30"
+        }
+      ],
+      "captured_at_utc": "2026-09-28T05:49:44.885706+00:00",
+      "configured_feed": "iex",
+      "positions_after": {
+        "received_at_utc": "2026-09-28T05:49:44.196291+00:00",
+        "requested_at_utc": "2026-09-28T05:49:43.496333+00:00",
+        "value": [
+          {
+            "asset_class": "us_equity",
+            "qty": "60",
+            "side": "long",
+            "symbol": "AMD"
+          }
+        ]
+      },
+      "positions_before": {
+        "received_at_utc": "2026-09-28T05:49:41.354777+00:00",
+        "requested_at_utc": "2026-09-28T05:49:40.673117+00:00",
+        "value": [
+          {
+            "asset_class": "us_equity",
+            "qty": "60",
+            "side": "long",
+            "symbol": "AMD"
+          }
+        ]
+      },
+      "previous_session": {
+        "close": "16:00",
+        "date": "2026-09-24",
+        "open": "09:30"
+      },
+      "session": {
+        "close": "16:00",
+        "date": "2026-09-25",
+        "open": "09:30"
+      }
+    },
+    "reconstructed_nav": 96321.75,
+    "signed_holdings": {
+      "AMD": 60.0
+    },
+    "source_interval_end_exclusive_utc": "2026-09-25T20:00:00+00:00",
+    "source_interval_start_utc": "2026-09-25T19:59:00+00:00",
+    "source_limitations": [
+      "Activity pagination proves only the returned creation-time query was exhausted. Late postings and settlement-date activities require independent reconciliation; two stable account reads do not certify complete economic-event knowledge."
+    ],
+    "status": "reconstructed_candidate",
+    "strict_comparison_blockers": [
+      "economic_activity_completeness_unverified",
+      "method_not_activated"
+    ],
+    "valuation_cutoff_utc": "2026-09-25T20:00:00+00:00"
+  },
+  "fixture_provenance": {
+    "redaction": "Account fingerprint and activity/order/corporate-action IDs replaced; accounting amounts, timestamps and request provenance unchanged.",
+    "source_file": "economic-inputs-20260928T055100Z.json",
+    "source_file_sha256": "d6751fdea52fdc1c19c3c4f9a02d954325fe1869275d99e81f8ffb4baa136e05"
+  },
+  "get_count": 9,
+  "schema": "cash_basis_economic_inputs_v1",
+  "start_capture": {
+    "account_fingerprint": "fixture-account-same-at-both-endpoints",
+    "activity_summary": {
+      "external_cash": 0.0,
+      "external_event_count": 0,
+      "fills": 0,
+      "internal_cash": 0.0,
+      "unknown_or_ambiguous": []
+    },
+    "adjustment": "raw",
+    "benchmark_price": 761.62,
+    "blockers": [],
+    "cash": 95582.59,
+    "cashflow_status": "none_observed",
+    "comparison_eligible": false,
+    "convention": "cash plus signed closing holdings marked at the last qualifying trade in each exact final regular-session minute",
+    "dividend_treatment": "SPY price return; dividends are not reinvested",
+    "feed": "iex",
+    "input_sha256": "23b49be42fea13218fdb72a4d9334b754e7f23f1664366eb30374e3bc825a9f9",
+    "market_date": "2026-09-18",
+    "marks": {
+      "SPY": 761.62
+    },
+    "method": "common_final_minute_nav_candidate_v1",
+    "raw_evidence": {
+      "account_after": {
+        "received_at_utc": "2026-09-20T05:44:51.810815+00:00",
+        "requested_at_utc": "2026-09-20T05:44:51.120478+00:00",
+        "value": {
+          "account_fingerprint": "fixture-account-same-at-both-endpoints",
+          "cash": "95582.59",
+          "currency": "USD",
+          "equity": "95582.59"
+        }
+      },
+      "account_before": {
+        "received_at_utc": "2026-09-20T05:44:48.975918+00:00",
+        "requested_at_utc": "2026-09-20T05:44:48.276213+00:00",
+        "value": {
+          "account_fingerprint": "fixture-account-same-at-both-endpoints",
+          "cash": "95582.59",
+          "currency": "USD",
+          "equity": "95582.59"
+        }
+      },
+      "activities_after": {
+        "pages": [
+          {
+            "received_at_utc": "2026-09-20T05:44:53.202256+00:00",
+            "request": {
+              "after": "2026-09-10T20:00:00+00:00",
+              "direction": "asc",
+              "page_size": 100,
+              "until": "2026-09-20T05:44:52.494494+00:00"
+            },
+            "requested_at_utc": "2026-09-20T05:44:52.494521+00:00",
+            "row_count": 5
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-20T05:44:53.202256+00:00",
+        "request": {
+          "after": "2026-09-10T20:00:00+00:00",
+          "direction": "asc",
+          "page_size": 100,
+          "until": "2026-09-20T05:44:52.494494+00:00"
+        },
+        "requested_at_utc": "2026-09-20T05:44:52.494521+00:00",
+        "rows": [
+          {
+            "activity_type": "FILL",
+            "cum_qty": "3",
+            "id": "fixture-id-16",
+            "leaves_qty": "40",
+            "order_id": "fixture-id-17",
+            "order_status": "partially_filled",
+            "price": "348",
+            "qty": "3",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:32:59.575489Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "43",
+            "id": "fixture-id-18",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-17",
+            "order_status": "filled",
+            "price": "347.09",
+            "qty": "40",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:34:05.567845Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "6",
+            "id": "fixture-id-19",
+            "leaves_qty": "21",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670",
+            "qty": "6",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:10.779053Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "23",
+            "id": "fixture-id-21",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670.22",
+            "qty": "17",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:12.63623Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "27",
+            "id": "fixture-id-22",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-20",
+            "order_status": "filled",
+            "price": "670.28",
+            "qty": "4",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:13.7385Z",
+            "type": "fill"
+          }
+        ]
+      },
+      "activities_before": {
+        "pages": [
+          {
+            "received_at_utc": "2026-09-20T05:44:51.120395+00:00",
+            "request": {
+              "after": "2026-09-10T20:00:00+00:00",
+              "direction": "asc",
+              "page_size": 100,
+              "until": "2026-09-20T05:44:50.368465+00:00"
+            },
+            "requested_at_utc": "2026-09-20T05:44:50.368495+00:00",
+            "row_count": 5
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-20T05:44:51.120395+00:00",
+        "request": {
+          "after": "2026-09-10T20:00:00+00:00",
+          "direction": "asc",
+          "page_size": 100,
+          "until": "2026-09-20T05:44:50.368465+00:00"
+        },
+        "requested_at_utc": "2026-09-20T05:44:50.368495+00:00",
+        "rows": [
+          {
+            "activity_type": "FILL",
+            "cum_qty": "3",
+            "id": "fixture-id-16",
+            "leaves_qty": "40",
+            "order_id": "fixture-id-17",
+            "order_status": "partially_filled",
+            "price": "348",
+            "qty": "3",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:32:59.575489Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "43",
+            "id": "fixture-id-18",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-17",
+            "order_status": "filled",
+            "price": "347.09",
+            "qty": "40",
+            "side": "sell",
+            "symbol": "AVGO",
+            "transaction_time": "2026-09-14T13:34:05.567845Z",
+            "type": "fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "6",
+            "id": "fixture-id-19",
+            "leaves_qty": "21",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670",
+            "qty": "6",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:10.779053Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "23",
+            "id": "fixture-id-21",
+            "leaves_qty": "4",
+            "order_id": "fixture-id-20",
+            "order_status": "partially_filled",
+            "price": "670.22",
+            "qty": "17",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:12.63623Z",
+            "type": "partial_fill"
+          },
+          {
+            "activity_type": "FILL",
+            "cum_qty": "27",
+            "id": "fixture-id-22",
+            "leaves_qty": "0",
+            "order_id": "fixture-id-20",
+            "order_status": "filled",
+            "price": "670.28",
+            "qty": "4",
+            "side": "sell",
+            "symbol": "META",
+            "transaction_time": "2026-09-15T13:39:13.7385Z",
+            "type": "fill"
+          }
+        ]
+      },
+      "bars": {
+        "pages": [
+          {
+            "next_page_token": null,
+            "received_at_utc": "2026-09-20T05:44:50.368375+00:00",
+            "request": {
+              "adjustment": "raw",
+              "end": "2026-09-18T19:59:59+00:00",
+              "feed": "iex",
+              "limit": 1000,
+              "start": "2026-09-18T19:59:00+00:00",
+              "symbols": "SPY",
+              "timeframe": "1Min"
+            },
+            "requested_at_utc": "2026-09-20T05:44:49.656646+00:00"
+          }
+        ],
+        "pagination_exhausted": true,
+        "received_at_utc": "2026-09-20T05:44:50.368375+00:00",
+        "request": {
+          "adjustment": "raw",
+          "end": "2026-09-18T19:59:59+00:00",
+          "feed": "iex",
+          "limit": 1000,
+          "start": "2026-09-18T19:59:00+00:00",
+          "symbols": [
+            "SPY"
+          ],
+          "timeframe": "1Min"
+        },
+        "requested_at_utc": "2026-09-20T05:44:49.656646+00:00",
+        "rows": {
+          "SPY": [
+            {
+              "c": 761.62,
+              "h": 761.81,
+              "l": 761.42,
+              "n": 662,
+              "o": 761.5,
+              "t": "2026-09-18T19:59:00Z",
+              "v": 81918,
+              "vw": 761.584689
+            }
+          ]
+        }
+      },
+      "calendar_response": [
+        {
+          "close": "16:00",
+          "date": "2026-09-08",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-09",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-10",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-11",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-14",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-15",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-16",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-17",
+          "open": "09:30"
+        },
+        {
+          "close": "16:00",
+          "date": "2026-09-18",
+          "open": "09:30"
+        }
+      ],
+      "captured_at_utc": "2026-09-20T05:44:53.202337+00:00",
+      "configured_feed": "iex",
+      "positions_after": {
+        "received_at_utc": "2026-09-20T05:44:52.494444+00:00",
+        "requested_at_utc": "2026-09-20T05:44:51.810905+00:00",
+        "value": []
+      },
+      "positions_before": {
+        "received_at_utc": "2026-09-20T05:44:49.656582+00:00",
+        "requested_at_utc": "2026-09-20T05:44:48.975963+00:00",
+        "value": []
+      },
+      "previous_session": {
+        "close": "16:00",
+        "date": "2026-09-17",
+        "open": "09:30"
+      },
+      "session": {
+        "close": "16:00",
+        "date": "2026-09-18",
+        "open": "09:30"
+      }
+    },
+    "reconstructed_nav": 95582.59,
+    "signed_holdings": {},
+    "source_interval_end_exclusive_utc": "2026-09-18T20:00:00+00:00",
+    "source_interval_start_utc": "2026-09-18T19:59:00+00:00",
+    "source_limitations": [
+      "Activity pagination proves only the returned creation-time query was exhausted. Late postings and settlement-date activities require independent reconciliation; two stable account reads do not certify complete economic-event knowledge."
+    ],
+    "status": "reconstructed_candidate",
+    "strict_comparison_blockers": [
+      "economic_activity_completeness_unverified",
+      "method_not_activated"
+    ],
+    "valuation_cutoff_utc": "2026-09-18T20:00:00+00:00"
+  }
+}
