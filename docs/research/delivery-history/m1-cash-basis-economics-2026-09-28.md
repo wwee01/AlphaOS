@@ -121,6 +121,14 @@ no redirects and no credential-bearing error output. Partial failure preserves
 sanitized evidence. It never registers scheduled work. Historical opening receipt
 hashes and the live ledger are not modified.
 
+The collector currently requests marks for **current holdings plus SPY**. If an
+origin was completely sold after the selected historical cutoff and no other
+origin in that symbol remains, its old mark is not automatically requested.
+The pure engine correctly refuses that missing mark; a separately reviewed
+supplemental exact historical-mark GET is needed. Post-cutoff reversal support
+in the engine is therefore broader than automatic source coverage in this
+collector. The actual September 18–25 interval has no such reversal or gap.
+
 ## Source semantics
 
 [Alpaca account activities](https://docs.alpaca.markets/us/docs/account-activities)
