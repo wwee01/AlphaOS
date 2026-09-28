@@ -13,6 +13,7 @@ the orchestrator (the scanner does not touch news).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import Counter
 from datetime import date
 from typing import Optional
 
@@ -267,6 +268,8 @@ class CandidateScanner:
         symbols) rather than looping ``get_snapshot()`` per symbol -- the
         whole reason EXP-0 needed the batch endpoint at all.
         """
+        if not symbols or len(set(symbols)) != len(symbols):
+            raise ValueError("shadow symbols must be nonempty and unique")
         scan_id = scan_batch_id or new_id("scan")
         self._scan_batch_id = scan_batch_id
         result = ScanResult(scan_id=scan_id)
@@ -274,45 +277,65 @@ class CandidateScanner:
             scan_id, symbols, tier=UniverseTier.WATCHLIST.value,
             universe_file_version=universe_file_version,
         )
-        snapshots = self.market.get_snapshots(symbols)
+        for chunk_index, chunk in enumerate(self._shadow_snapshot_batches(symbols)):
+            observations = []
+            for sym, snapshot, response_status in chunk:
+                assessed_at = timeutils.now_utc()
+                source_provenance = snapshot.pop("_source_provenance", None)
+                report = self.freshness.assess(snapshot, now=assessed_at)
+                snapshot_id = new_id("snap")
+                self._persist_snapshot(snapshot_id, snapshot, report)
+                observations.append({
+                    "symbol": sym, "snapshot_id": snapshot_id, "response_status": response_status,
+                    "assessed_at_utc": assessed_at.isoformat(), "received_at_utc": report.received_at,
+                    "processing_age_seconds": (timeutils.age_seconds(report.received_at, assessed_at)
+                                               if report.received_at else None),
+                    "freshness_status": report.freshness_status, "block_reason": report.block_reason,
+                    "quote_age_seconds": report.quote_age_seconds, "bar_age_seconds": report.bar_age_seconds,
+                    "source_provenance": source_provenance,
+                })
+                result.snapshots += 1
+                result.per_symbol[sym] = {"freshness_status": report.freshness_status, "candidate_id": None}
 
-        for sym, snapshot in zip(symbols, snapshots):
-            report = self.freshness.assess(snapshot)
-            snapshot_id = new_id("snap")
-            self._persist_snapshot(snapshot_id, snapshot, report)
-            result.snapshots += 1
-            result.per_symbol[sym] = {"freshness_status": report.freshness_status, "candidate_id": None}
+                if not report.is_usable:
+                    result.blocked_stale += 1
+                    self._reject(
+                        None, sym, "shadow_scan", report.block_reason or ReasonCode.STALE_DATA.value,
+                        f"freshness={report.freshness_status}", snapshot,
+                    )
+                    continue
 
-            if not report.is_usable:
-                result.blocked_stale += 1
-                self._reject(
-                    None, sym, "shadow_scan", report.block_reason or ReasonCode.STALE_DATA.value,
-                    f"freshness={report.freshness_status}", snapshot,
+                # EXP-1 mechanism 10 INVARIANT: the core tradeability gate
+                # (MIN_DOLLAR_VOLUME/MAX_SPREAD_PCT/crossed-quote) NEVER filters
+                # shadow capture or selection eligibility -- the $2M cumulative
+                # floor alone fails roughly half the band before noon; gating
+                # would censor exactly the tail COST-1 needs. Compute the
+                # verdict (for instrumentation/reporting) but never act on it
+                # here -- freshness above is a SEPARATE, still-enforced gate
+                # (data trustworthiness, not tradeability).
+                core_gate_verdict = self._tradeability_reason(snapshot) or "pass"
+
+                cand = self._maybe_candidate(
+                    scan_id, sym, snapshot, snapshot_id,
+                    shadow_tier=True, instrument_version=CURRENT_INSTRUMENT_VERSION,
+                    interest_scanner=self.interest_shadow, core_gate_verdict=core_gate_verdict,
+                    scan_window=scan_window,
+                    adv_20d_dollar=(adv_by_symbol or {}).get(sym),
+                    quote_age_seconds=report.quote_age_seconds,
+                    card_activation=card_activation,
                 )
-                continue
+                if cand is not None:
+                    result.candidates.append(cand)
+                    result.per_symbol[sym]["candidate_id"] = cand["candidate_id"]
 
-            # EXP-1 mechanism 10 INVARIANT: the core tradeability gate
-            # (MIN_DOLLAR_VOLUME/MAX_SPREAD_PCT/crossed-quote) NEVER filters
-            # shadow capture or selection eligibility -- the $2M cumulative
-            # floor alone fails roughly half the band before noon; gating
-            # would censor exactly the tail COST-1 needs. Compute the
-            # verdict (for instrumentation/reporting) but never act on it
-            # here -- freshness above is a SEPARATE, still-enforced gate
-            # (data trustworthiness, not tradeability).
-            core_gate_verdict = self._tradeability_reason(snapshot) or "pass"
-
-            cand = self._maybe_candidate(
-                scan_id, sym, snapshot, snapshot_id,
-                shadow_tier=True, instrument_version=CURRENT_INSTRUMENT_VERSION,
-                interest_scanner=self.interest_shadow, core_gate_verdict=core_gate_verdict,
-                scan_window=scan_window,
-                adv_20d_dollar=(adv_by_symbol or {}).get(sym),
-                quote_age_seconds=report.quote_age_seconds,
-                card_activation=card_activation,
+            self.journal.log_system_event(
+                Severity.INFO, "shadow_collection", "Shadow snapshot chunk assessed at current decision time.",
+                {"version": "shadow_chunk_assessment_v1", "scan_id": scan_id,
+                 "scan_window": scan_window, "universe_file_version": universe_file_version,
+                 "chunk_index": chunk_index, "requested": len(chunk),
+                 "freshness_counts": dict(Counter(row["freshness_status"] for row in observations)),
+                 "observations": observations},
             )
-            if cand is not None:
-                result.candidates.append(cand)
-                result.per_symbol[sym]["candidate_id"] = cand["candidate_id"]
 
         self.journal.log_system_event(
             Severity.INFO,
@@ -322,6 +345,35 @@ class CandidateScanner:
             f"{result.rejected_illiquid} illiquid.",
         )
         return result
+
+    def _shadow_snapshot_batches(self, symbols: list[str]):
+        """Process each existing 100-symbol request before fetching the next.
+
+        No parallel requests, retries or freshness-at-receipt substitution.
+        Match returned identities explicitly: unknown, repeated or missing
+        observations cannot borrow another symbol's data or leave the denominator.
+        """
+        for start in range(0, len(symbols), 100):
+            requested = symbols[start:start + 100]
+            snapshots = self.market.get_snapshots(requested)
+            by_symbol: dict[str, list[dict]] = {sym: [] for sym in requested}
+            for snapshot in snapshots:
+                if (isinstance(snapshot, dict) and isinstance(snapshot.get("symbol"), str)
+                        and snapshot["symbol"] in by_symbol):
+                    by_symbol[snapshot["symbol"]].append(snapshot)
+            chunk = []
+            for sym in requested:
+                matches = by_symbol[sym]
+                if len(matches) == 1:
+                    snapshot, status = matches[0], "matched"
+                else:
+                    # Missing/ambiguous data remains a real failed observation.
+                    snapshot = {"symbol": sym, "provider": self.market.provider_name,
+                                "feed": self.market.feed, "is_mock": self.market.use_mock,
+                                "market_session": timeutils.market_session().value}
+                    status = "missing" if not matches else "duplicate"
+                chunk.append((sym, snapshot, status))
+            yield chunk
 
     # ------------------------------------------------------------- internals
     def _tradeability_reason(self, snapshot: dict) -> Optional[str]:

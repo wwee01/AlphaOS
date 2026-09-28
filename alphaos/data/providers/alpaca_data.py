@@ -15,6 +15,7 @@ Real network calls are exercised only behind ``RUN_LIVE_ALPACA_TESTS=true``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import urllib.error
 import urllib.request
@@ -31,6 +32,7 @@ HTTP_TIMEOUT = 10
 # endpoint (spec's own estimate: "~100 symbols/call; ~5 calls per window for
 # the full tier").
 _BATCH_SIZE = 100
+SOURCE_PROVENANCE_VERSION = "alpaca_snapshot_sources_v1"
 
 
 class AlpacaDataProvider(MarketDataProvider):
@@ -88,6 +90,7 @@ class AlpacaDataProvider(MarketDataProvider):
         by_symbol: dict[str, dict] = {}
         for start in range(0, len(symbols), _BATCH_SIZE):
             chunk = symbols[start:start + _BATCH_SIZE]
+            requested = timeutils.stamp().utc
             try:  # pragma: no cover - live network path (gated test only)
                 url = (
                     f"{ALPACA_DATA_BASE_URL}/v2/stocks/snapshots"
@@ -107,20 +110,32 @@ class AlpacaDataProvider(MarketDataProvider):
                     # response must not inherit the first request's timestamp.
                     received = timeutils.stamp().utc
                     payload = json.loads(body.decode("utf-8"))
+                response_sha256 = hashlib.sha256(body).hexdigest()
                 for sym in chunk:
                     entry = payload.get(sym)
-                    by_symbol[sym] = self._map(sym, entry, received) if entry else self._empty(sym, received)
+                    by_symbol[sym] = self._map(
+                        sym, entry, received, requested=requested, response_sha256=response_sha256,
+                    ) if entry else self._empty(sym, received)
+                    if not entry:
+                        by_symbol[sym]["_source_provenance"] = self._source_provenance(
+                            sym, {}, received, requested, response_sha256, response_present=False,
+                        )
             except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
                 self._log(Severity.ERROR, f"Alpaca batch snapshot fetch failed for chunk starting "
                           f"{chunk[0] if chunk else '?'}: {exc}")
                 received = timeutils.stamp().utc
                 for sym in chunk:
                     by_symbol[sym] = self._empty(sym, received)
+                    by_symbol[sym]["_source_provenance"] = {
+                        **self._source_provenance(sym, {}, received, requested, None, response_present=False),
+                        "transport_status": "request_failed", "error_type": type(exc).__name__,
+                    }
 
         return [by_symbol[s] for s in symbols]
 
     # ------------------------------------------------------------------ mapping
-    def _map(self, symbol: str, payload: dict, received: str) -> dict:  # pragma: no cover - live
+    def _map(self, symbol: str, payload: dict, received: str, *, requested: str | None = None,
+             response_sha256: str | None = None) -> dict:  # pragma: no cover - live
         quote = payload.get("latestQuote") or {}
         trade = payload.get("latestTrade") or {}
         minute_bar = payload.get("minuteBar") or {}
@@ -181,6 +196,37 @@ class AlpacaDataProvider(MarketDataProvider):
             "source_timestamp": quote.get("t"),
             "received_at": received,
             "market_session": timeutils.market_session().value,
+            # Diagnostic-only: explicit source fields, never a substitute for
+            # the quote/minute timestamps assessed by FreshnessGuard.
+            **({"_source_provenance": self._source_provenance(
+                symbol, payload, received, requested, response_sha256, response_present=True,
+            )} if requested is not None else {}),
+        }
+
+    def _source_provenance(self, symbol, payload, received, requested, response_sha256,
+                           *, response_present):
+        """Allowlisted evidence from the same HTTP body; no extra source calls.
+
+        The shadow scanner persists this outside decision inputs. Keeping both
+        minute/daily presence and timestamps distinguishes sparse old minutes
+        from a daily fallback; a body hash binds the record without storing
+        arbitrary upstream fields or HTTP headers.
+        """
+        parts = {key: payload.get(key) for key in ("latestQuote", "latestTrade", "minuteBar", "dailyBar")}
+        minute = parts["minuteBar"] or {}
+        daily = parts["dailyBar"] or {}
+        return {
+            "version": SOURCE_PROVENANCE_VERSION,
+            "provider": PROVIDER, "feed": self.feed, "requested_symbol": symbol,
+            "response_present": response_present,
+            "transport_status": "received",
+            "requested_at_utc": requested, "received_at_utc": received,
+            "response_sha256": response_sha256,
+            "parts": {key: {"present": isinstance(part, dict) and bool(part),
+                            "timestamp": part.get("t") if isinstance(part, dict) else None}
+                      for key, part in parts.items()},
+            "normalized_bar_source": "minuteBar" if minute.get("t") else "dailyBar" if daily.get("t") else None,
+            "minute_bar_volume": minute.get("v"), "minute_bar_trade_count": minute.get("n"),
         }
 
     def _empty(self, symbol: str, received: str) -> dict:
