@@ -167,3 +167,14 @@ def test_later_evaluation_never_replaces_origin_and_demo_scope_is_explicit(orche
     row = reviewed['source_evidence']['openai_evaluation']
     assert row is None or row['eval_id'] == prop['eval_id']
     assert reviewed['data_scope'] == 'mock_or_demo'
+
+
+def test_later_approval_does_not_replace_origin_receipt_or_anchor(orchestrator):
+    prop, _ = _seed_and_exit_at_target(orchestrator)
+    j = orchestrator.journal
+    outcome = j.one('SELECT * FROM trade_outcomes')
+    first = build_trade_review(j, outcome)
+    j.insert('approvals', {'approval_id': 'later-approval', 'proposal_id': prop['proposal_id'],
+                          'candidate_id': prop['candidate_id'], 'symbol': prop['symbol'],
+                          'approved': 1, 'created_at_utc': '2099-01-01T00:00:00+00:00'})
+    assert build_trade_review(j, outcome) == first

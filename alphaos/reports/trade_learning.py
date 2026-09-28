@@ -82,6 +82,7 @@ def _origin_links(journal, packet):
         except (ValueError, TypeError):
             continue
     packet["approval"] = approvals[0] if len(approvals) == 1 else None
+    packet["ids"]["approval_id"] = packet["approval"]["approval_id"] if packet["approval"] else None
     if len(approvals) != 1:
         limits.append("unique_origin_approval_unverifiable")
     elif approvals[0].get("freshness_ok") != 1 or approvals[0].get("risk_ok") != 1:
