@@ -8,6 +8,7 @@ checks its source hash against current evidence before presenting it as current.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from alphaos.reports.trade_packet import assemble_trade_packet
@@ -15,6 +16,19 @@ from alphaos.reports.trade_accounting import source_sha256
 from alphaos.util import timeutils
 
 VERSION = "factual_trade_review_v1"
+
+
+def _failed_source(value):
+    """Preserve malformed numeric evidence explicitly, never as financial zero."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"invalid_nonfinite_number": repr(value)}
+    if isinstance(value, dict):
+        return {key: _failed_source(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_failed_source(item) for item in value]
+    if isinstance(value, bytes):
+        return {"unexpected_bytes_hex": value.hex()}
+    return value
 
 
 def build_trade_review(journal, outcome: dict) -> dict:
@@ -79,9 +93,10 @@ def record_pending_trade_reviews(journal, limit: int = 100) -> dict:
         try:
             review = build_trade_review(journal, outcome)
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            failed_source = _failed_source({"outcome": outcome})
             review = {"version": VERSION, "outcome_id": outcome["outcome_id"],
                       "position_id": outcome["position_id"], "symbol": outcome["symbol"],
-                      "source_sha256": source_sha256(outcome), "source_evidence": {"outcome": outcome},
+                      "source_sha256": source_sha256(failed_source), "source_evidence": failed_source,
                       "review_status": "failed", "limitations": [str(exc)],
                       "facts": [], "policy_updated": False, "causal_lesson_claimed": False,
                       "generated_by": "deterministic_ledger_review"}
@@ -116,14 +131,35 @@ def trade_learning_report(journal, limit: int = 50) -> dict:
     counts = journal.query("SELECT review_status,COUNT(*) n FROM trade_learning_records WHERE method_version=? GROUP BY review_status", (VERSION,))
     result["status_counts"] = {row["review_status"]: row["n"] for row in counts}
     result["recorded"] = sum(result["status_counts"].values())
+    result["status_counts_basis"] = "stored_first_review_status_not_current_source_verification"
     for row in journal.query("SELECT * FROM trade_learning_records WHERE method_version=? ORDER BY id DESC LIMIT ?", (VERSION, limit)):
-        review = json.loads(row["review_json"])
         outcome = journal.one("SELECT * FROM trade_outcomes WHERE outcome_id=?", (row["outcome_id"],))
+        review = None
         try:
+            saved = json.loads(row["review_json"])
+            if (not isinstance(saved, dict) or saved.get("version") != row["method_version"]
+                    or saved.get("outcome_id") != row["outcome_id"]
+                    or saved.get("position_id") != row["position_id"]
+                    or saved.get("review_status") != row["review_status"]
+                    or saved.get("source_sha256") != row["source_sha256"]
+                    or source_sha256(saved.get("source_evidence")) != row["source_sha256"]
+                    or not isinstance(saved.get("symbol"), str)
+                    or any(not isinstance(saved.get(key), list) or
+                           any(not isinstance(item, str) for item in saved[key])
+                           for key in ("facts", "limitations"))):
+                raise ValueError("invalid_saved_review")
+            review = saved
             current = build_trade_review(journal, outcome) if outcome else None
-            unchanged = current is not None and current["source_sha256"] == row["source_sha256"]
+            # Verify derived text/arithmetic too; a matching source hash alone
+            # does not authenticate a stored review's claims.
+            unchanged = current is not None and current == saved
         except (ValueError, TypeError, KeyError, OverflowError):
             unchanged = False
+        if review is None:
+            review = {"version": VERSION, "outcome_id": row["outcome_id"],
+                      "position_id": row["position_id"], "symbol": (outcome or {}).get("symbol", "unknown"),
+                      "source_sha256": row["source_sha256"], "facts": [],
+                      "limitations": ["saved_review_unverifiable"], "review_status": "invalid_saved_review"}
         result["records"].append({"recorded_at_utc": row["created_at_utc"],
                                   "source_unchanged": unchanged, "review": review})
     result["status"] = "recorded_factual_reviews"

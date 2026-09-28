@@ -235,29 +235,6 @@ function JournalPanel({ feed }) {
   );
 }
 
-function TradeReviews({ report }) {
-  if (!report) return null;
-  return (
-    <Block title="Closed-trade reviews" tone="shadow">
-      <HowToRead>
-        These are factual reviews linked to recorded trades, including known evidence gaps.
-        They do not change trading rules or establish why a trade won or lost.
-      </HowToRead>
-      <p>{report.recorded} recorded reviews / {report.eligible} closed trades.
-        {report.status === 'not_installed' ? ' Review collection is not installed yet.' : ''}</p>
-      {(report.records ?? []).map(({ review, recorded_at_utc, source_unchanged }) => (
-        <details key={review.outcome_id} style={{ marginBottom: 10 }}>
-          <summary>{review.symbol} — {review.review_status.replaceAll('_', ' ')}
-            {!source_unchanged ? ' — source changed or unverifiable' : ''}</summary>
-          <p>Recorded {formatClockUTC(recorded_at_utc)} · Outcome {review.outcome_id}</p>
-          <ul>{review.facts.map((fact, i) => <li key={i}>{fact}</li>)}</ul>
-          {review.limitations.length > 0 && <p>Evidence gaps: {review.limitations.join('; ')}</p>}
-        </details>
-      ))}
-    </Block>
-  );
-}
-
 export default function Learning() {
   const [data, setData] = useState(null);
   const [unreachable, setUnreachable] = useState(false);
@@ -308,7 +285,6 @@ export default function Learning() {
         <>
           <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 12 }}>as of {formatClockUTC(data.as_of)}</div>
           <div className="grid reveal-stagger">
-            <div className="col-12"><TradeReviews report={data.trade_learning} /></div>
             <div className="col-12"><ExperimentRegistry report={data.experiment_registry} /></div>
             <div className="col-12"><TqsPanel tqs={data.tqs} /></div>
             <div className="col-12"><AttributionPanel attribution={data.attribution} /></div>

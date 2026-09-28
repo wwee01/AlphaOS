@@ -1,5 +1,5 @@
 """PR-UI-B2: the Learning tab's Journal panel feed -- PURE READ assembly of
-three entry types only (UI/UX doc §9: "a feed, newest first, three entry
+source-linked entry types (UI/UX doc §9: "a feed, newest first, three entry
 types only: resolved events, hypothesis lifecycle (proposed -> testing n/N ->
 met/failed), promotions/demotions with evidence links"):
 
@@ -155,8 +155,27 @@ def _promotion_demotion_entries(journal, limit: int) -> list[dict]:
     return out
 
 
+def _trade_review_entries(journal, limit: int) -> list[dict]:
+    from alphaos.reports.trade_learning import trade_learning_report
+
+    out = []
+    for record in trade_learning_report(journal, limit=min(500, max(1, limit)))["records"]:
+        review = record["review"]
+        unchanged = record["source_unchanged"]
+        # Preserve the old snapshot but never display its numeric facts as
+        # current evidence after a source change or verification failure.
+        facts = " ".join(review["facts"]) if unchanged else "Source changed or could not be verified; retained review needs reassessment."
+        gaps = "; ".join(review["limitations"]) if unchanged else ""
+        out.append({"kind": "trade_review", "timestamp": record["recorded_at_utc"],
+                    "text": f"{review['symbol']}: factual trade review. {facts}" +
+                            (f" Evidence gaps: {gaps}." if gaps else ""),
+                    "provenance": {"outcome_id": review["outcome_id"], "position_id": review["position_id"],
+                                   "method_version": review["version"], "source_sha256": review["source_sha256"]}})
+    return out
+
+
 def build_journal_feed(journal, limit: int = 50) -> dict:
-    """Combine all three entry kinds, newest first, truncated to ``limit``.
+    """Combine recorded entry kinds, newest first, truncated to ``limit``.
     A per-source over-fetch (``limit`` on each query) keeps this cheap even
     when the combined, sorted result is trimmed further -- avoids silently
     starving one entry kind (e.g. hypothesis lifecycle, inherently rare)
@@ -166,6 +185,7 @@ def build_journal_feed(journal, limit: int = 50) -> dict:
         _resolved_attribution_entries(journal, limit)
         + _hypothesis_lifecycle_entries(journal, limit)
         + _promotion_demotion_entries(journal, limit)
+        + _trade_review_entries(journal, limit)
     )
     # A missing/unparseable timestamp is uncountable, not "oldest" or
     # "newest" -- excluded from the sorted feed rather than fabricating a

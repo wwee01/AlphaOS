@@ -103,3 +103,53 @@ def test_wrong_latest_packet_outcome_cannot_create_matching_review(orchestrator)
     outcome = orchestrator.journal.one('SELECT * FROM trade_outcomes')
     with pytest.raises(ValueError, match='identity_mismatch'):
         build_trade_review(orchestrator.journal, {**outcome, 'outcome_id': 'foreign'})
+
+
+def test_existing_journal_feed_displays_reviews_and_hides_changed_source_numbers(orchestrator):
+    from alphaos.reports.journal_feed import build_journal_feed
+    _seed_and_exit_at_target(orchestrator)
+    j = orchestrator.journal
+    record_pending_trade_reviews(j)
+    row = next(e for e in build_journal_feed(j)["entries"] if e["kind"] == "trade_review")
+    assert row["provenance"]["outcome_id"]
+    assert "single outcome" in row["text"]
+    j.conn.execute("UPDATE trade_outcomes SET net_pnl=net_pnl+10")
+    j.conn.commit()
+    changed = next(e for e in build_journal_feed(j)["entries"] if e["kind"] == "trade_review")
+    assert "Source changed" in changed["text"] and "Net R" not in changed["text"]
+
+
+def test_nonfinite_failed_source_cannot_starve_replay(orchestrator):
+    _seed_and_exit_at_target(orchestrator)
+    j = orchestrator.journal
+    j.conn.execute('UPDATE trade_outcomes SET net_pnl=?', (float('inf'),))
+    j.conn.commit()
+    calls = []
+    orch = SimpleNamespace(journal=j, outcomes_update=lambda **k: calls.append(k) or {})
+    result = run_outcomes_job(orch, None)
+    assert calls and result['trade_learning_result']['failed'] == 1
+    review = json.loads(j.one('SELECT review_json FROM trade_learning_records')['review_json'])
+    assert review['source_evidence']['outcome']['net_pnl'] == {'invalid_nonfinite_number': 'inf'}
+    assert not trade_learning_report(j)['records'][0]['source_unchanged']
+
+
+@pytest.mark.parametrize('corruption', ['not json', '[]', '{}', 'facts', 'identity', 'hash'])
+def test_saved_review_corruption_never_crashes_learning_or_certifies_evidence(orchestrator, corruption):
+    from alphaos.reports.journal_feed import build_journal_feed
+    _seed_and_exit_at_target(orchestrator)
+    j = orchestrator.journal
+    record_pending_trade_reviews(j)
+    row = j.one('SELECT * FROM trade_learning_records')
+    review = json.loads(row['review_json'])
+    if corruption == 'facts':
+        review['facts'] = ['Guaranteed profits']
+    elif corruption == 'identity':
+        review['outcome_id'] = 'foreign'
+    elif corruption == 'hash':
+        review['source_sha256'] = 'tampered'
+    value = corruption if corruption in ('not json', '[]', '{}') else json.dumps(review)
+    j.conn.execute('UPDATE trade_learning_records SET review_json=?', (value,))
+    j.conn.commit()
+    assert not trade_learning_report(j)['records'][0]['source_unchanged']
+    text = next(e['text'] for e in build_journal_feed(j)['entries'] if e['kind'] == 'trade_review')
+    assert 'Guaranteed profits' not in text and 'Net R' not in text
