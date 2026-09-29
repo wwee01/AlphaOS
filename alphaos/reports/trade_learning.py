@@ -12,6 +12,7 @@ import math
 from datetime import datetime
 from typing import Any
 
+from alphaos.reports.close_provenance import validate_close_receipt
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.reports.trade_accounting import source_sha256
 from alphaos.util import timeutils
@@ -195,6 +196,9 @@ def trade_learning_report(journal, limit: int = 50) -> dict:
     result["recorded"] = sum(result["status_counts"].values())
     result["status_counts_basis"] = "stored_first_review_status_not_current_source_verification"
     result["eligible_counts_scope"] = "all_closed_outcomes_including_mock_demo_and_unknown"
+    result['current_status_counts'] = {}
+    result['current_counts_scope'] = 'displayed_records_only'
+    result['current_validation_version'] = 'factual_trade_current_audit_v1'
     for row in journal.query("SELECT * FROM trade_learning_records WHERE method_version=? ORDER BY id DESC LIMIT ?", (VERSION, limit)):
         outcome = journal.one("SELECT * FROM trade_outcomes WHERE outcome_id=?", (row["outcome_id"],))
         review = None
@@ -225,8 +229,23 @@ def trade_learning_report(journal, limit: int = 50) -> dict:
                       "source_sha256": row["source_sha256"], "facts": [],
                       "data_scope": "unknown_execution_scope",
                       "limitations": ["saved_review_unverifiable"], "review_status": "invalid_saved_review"}
+        receipt = validate_close_receipt(journal, outcome)
+        gaps = sorted(set(review['limitations'] + receipt['limitations']))
+        current_status = ('unverifiable' if not unchanged else
+                          'linked_factual_review' if review['review_status'] == 'linked_factual_review'
+                          and receipt['status'] == 'verified_local_close_receipt' and not gaps
+                          else 'limited_factual_review')
+        if not unchanged:
+            gaps = sorted(set(gaps + ['stored_review_or_current_source_unverifiable']))
+        provenance = {'version': 'factual_trade_current_audit_v1', 'review_status': current_status,
+                      'limitations': gaps, 'close_receipt': receipt, 'broker_fees_verified': False}
+        counts = result['current_status_counts']
+        counts[current_status] = counts.get(current_status, 0) + 1
         result["records"].append({"recorded_at_utc": row["created_at_utc"],
+                                  'current_provenance': provenance,
                                   "source_unchanged": unchanged, "review": review})
     result["status"] = "recorded_factual_reviews"
     result["display_limit"] = limit
+    result['current_audited_count'] = len(result['records'])
+    result['current_unreviewed_record_count'] = result['recorded'] - len(result['records'])
     return result

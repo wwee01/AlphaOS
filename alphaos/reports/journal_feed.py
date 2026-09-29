@@ -165,9 +165,11 @@ def _trade_review_entries(journal, limit: int) -> list[dict]:
         # Preserve the old snapshot but never display its numeric facts as
         # current evidence after a source change or verification failure.
         facts = " ".join(review["facts"]) if unchanged else "Source changed or could not be verified; retained review needs reassessment."
-        gaps = "; ".join(review["limitations"]) if unchanged else ""
+        current = record['current_provenance']
+        gaps = "; ".join(current["limitations"]) if unchanged else ""
+        state = 'linked current provenance' if current['review_status'] == 'linked_factual_review' else 'limited current provenance' if unchanged else 'unverified current provenance'
         out.append({"kind": "trade_review", "timestamp": record["recorded_at_utc"],
-                    "text": f"{review['symbol']} ({review['data_scope']}): factual trade review. {facts}" +
+                    "text": f"{review['symbol']} ({review['data_scope']}): factual trade review ({state}). {facts}" +
                             (f" Evidence gaps: {gaps}." if gaps else ""),
                     "provenance": {"outcome_id": review["outcome_id"], "position_id": review["position_id"],
                                    "method_version": review["version"], "source_sha256": review["source_sha256"]}})
