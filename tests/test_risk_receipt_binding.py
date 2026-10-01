@@ -84,7 +84,7 @@ def setup_path(tmp_path, monkeypatch, mode="manual"):
     return fake, orch, proposal, initial_id, snapshots
 
 
-def assert_final_binding(orch, proposal, initial_id, equity):
+def assert_final_binding(orch, proposal, initial_id, equity, *, market_rechecked=False):
     journal = orch.journal
     row = journal.orders_for_proposal(proposal.proposal_id)[0]
     stored = journal.proposal_by_id(proposal.proposal_id)
@@ -97,6 +97,14 @@ def assert_final_binding(orch, proposal, initial_id, equity):
         and risk["max_risk_amount"] == equity * orch.settings.max_risk_per_trade_pct
     )
     assert risk["proposal_id"] == proposal.proposal_id
+    expected_market_result = "pass" if market_rechecked else "not_rechecked"
+    assert risk["liquidity_check_result"] == expected_market_result
+    assert risk["spread_check_result"] == expected_market_result
+    initial_risk = journal.one(
+        "SELECT * FROM risk_checks WHERE risk_check_id=?", (initial_id,)
+    )
+    assert initial_risk["liquidity_check_result"] == "pass"
+    assert initial_risk["spread_check_result"] == "pass"
     events = [
         json.loads(r["detail_json"])
         for r in journal.query(
@@ -106,10 +114,31 @@ def assert_final_binding(orch, proposal, initial_id, equity):
     matching = [e for e in events if e.get("risk_check_id") == risk["risk_check_id"]]
     assert len(matching) == 1
     assert matching[0]["stage"] == "final_account_submission"
+    assert matching[0]["market_snapshot_rechecked"] is market_rechecked
     assert matching[0]["proposal_qty"] == proposal.qty
     assert matching[0]["risk"]["account_context"]["equity"] == equity
     assert row["qty"] == proposal.qty and row["limit_price"] == proposal.entry
     return row
+
+
+def test_refreshed_market_retains_evaluated_gate_results(tmp_path, monkeypatch):
+    from alphaos.risk.account_exposure import entry_submission_lock
+    from alphaos.scheduler.ownership import monitor_ownership
+
+    fake, orch, proposal, initial_id, _ = setup_path(tmp_path, monkeypatch, mode="auto")
+    with entry_submission_lock(orch.journal), monitor_ownership(orch.journal) as owned:
+        assert owned
+        result = orch._execute_owned(
+            proposal,
+            None,
+            lambda: orch.approvals.consider(
+                proposal, risk_ok=True, freshness_ok=True
+            ),
+            refresh_market=True,
+        )
+    assert not result.blocked and not result.deferred
+    assert_final_binding(orch, proposal, initial_id, 95000, market_rechecked=True)
+    assert fake.submits == 1
 
 
 def test_manual_paper_approval_anchors_order_to_final_account_check(

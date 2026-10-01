@@ -2127,7 +2127,10 @@ class Orchestrator:
         # The capacity decision above and proposed quantity are unchanged.
         from alphaos.execution.ledger_ops import atomic
         with atomic(self.journal) as journal:
-            rc_id = self._record_risk_check(proposal, _eval_view_from_proposal(proposal), risk, journal=journal)
+            rc_id = self._record_risk_check(
+                proposal, _eval_view_from_proposal(proposal), risk, journal=journal,
+                market_snapshot_rechecked=snapshot is not None,
+            )
             journal.conn.execute(
                 "UPDATE trade_proposals SET risk_check_id=? WHERE proposal_id=?",
                 (rc_id, proposal.proposal_id),
@@ -2951,7 +2954,8 @@ class Orchestrator:
         )
         self.journal.conn.commit()
 
-    def _record_risk_check(self, proposal, evaluation, risk, *, journal=None) -> str:
+    def _record_risk_check(self, proposal, evaluation, risk, *, journal=None,
+                           market_snapshot_rechecked=True) -> str:
         """Persist a risk_checks row for the proposal. Pure audit: it never
         changes whether the trade proceeds (the RiskDecision already decided)."""
         journal = self.journal if journal is None else journal
@@ -2985,10 +2989,12 @@ class Orchestrator:
                 "stop_loss_pct": self.settings.stop_loss_pct,
                 "target_reward_risk": self.settings.target_reward_risk,
                 "target_profile": TargetProfile.CONFIGURED_STANDARD.value,
-                "liquidity_check_result": gate(ReasonCode.LOW_LIQUIDITY.value),
+                "liquidity_check_result": (
+                    gate(ReasonCode.LOW_LIQUIDITY.value) if market_snapshot_rechecked else "not_rechecked"
+                ),
                 "spread_check_result": gate(
                     ReasonCode.WIDE_SPREAD.value, ReasonCode.CROSSED_QUOTE.value
-                ),
+                ) if market_snapshot_rechecked else "not_rechecked",
                 "daily_loss_check_result": gate(ReasonCode.DAILY_LOSS_LIMIT.value),
                 "max_trades_check_result": gate(ReasonCode.DAILY_TRADE_LIMIT.value),
                 "max_open_positions_check_result": gate(ReasonCode.TOO_MANY_POSITIONS.value),
