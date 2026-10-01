@@ -23,6 +23,8 @@ TERMINAL = {"canceled", "cancelled", "expired", "rejected", "filled"}
 ACTIVE_PHASES = {"canceling", "submitting", "working", "unknown"}
 CANCEL_VERIFY_ATTEMPTS = 5
 CANCEL_VERIFY_DELAY_SECONDS = 0.5
+CLOSE_CONFIRM_ATTEMPTS = 4
+CLOSE_CONFIRM_DELAY_SECONDS = 0.5
 
 
 class TimeExitLifecycle:
@@ -388,12 +390,68 @@ class TimeExitLifecycle:
             return self.broker.get_order(row["broker_order_id"])
         return self.broker.get_order_by_client_id(row["client_order_id"])
 
+    @staticmethod
+    def _validate_close(pos, row, norm):
+        side = "buy" if pos["direction"] == "short" else "sell"
+        if (not isinstance(norm, dict) or not norm.get("broker_order_id")
+                or norm.get("symbol") != pos["symbol"] or norm.get("side") != side
+                or norm.get("client_order_id") != row.get("client_order_id")
+                or (row.get("broker_order_id") and norm["broker_order_id"] != row["broker_order_id"])):
+            raise ValueError("closing order identity does not match its durable intent")
+        for key in ("qty", "filled_qty"):
+            value = norm.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError("closing order quantity is invalid")
+        if (norm["qty"] != row["qty"] or norm["filled_qty"] < 0
+                or norm["filled_qty"] > float(row["qty"]) + 1e-8):
+            raise ValueError("closing order quantity differs from durable intent")
+
+    def _confirm_submitted_close(self, pos, row, norm):
+        """At most four GETs and four half-second waits, never a second POST.
+
+        Broker timeouts and existing SDK rate-limit retries apply separately;
+        this bounds application calls/delays, not HTTP requests or total time.
+        Persist identity before waiting so process death remains recoverable.
+        """
+        self._validate_close(pos, row, norm)
+        self._set(row, "working", norm)
+        for _ in range(CLOSE_CONFIRM_ATTEMPTS):
+            if (norm.get("status") or "").lower() in TERMINAL:
+                break
+            sleep(CLOSE_CONFIRM_DELAY_SECONDS)
+            checked = self._lookup(row)
+            self._validate_close(pos, row, checked)
+            if checked["filled_qty"] < norm["filled_qty"] - 1e-8:
+                raise ValueError("closing cumulative fill moved backwards during confirmation")
+            norm = checked
+        return norm
+
+    def closed_intent_errors(self):
+        """Report old split commits without reconstructing or rewriting them.
+
+        Future closes atomically complete their intent. An existing closed
+        origin with an active intent needs separately reviewed recovery: a
+        receipt's presence alone cannot certify the whole historical chain.
+        """
+        errors = []
+        for row in self.journal.query(
+            "SELECT order_id,raw_request_json FROM paper_orders WHERE execution_source='alpaca_paper' "
+            "AND order_type IN ('market','oco')"
+        ):
+            meta = ledger_ops.metadata(row)
+            if meta.get("phase") not in ACTIVE_PHASES:
+                continue
+            pos = self.journal.position_by_id(meta.get("position_id"))
+            if pos and pos.get("status") == "closed":
+                errors.append({"position_id": pos["position_id"], "order_id": row["order_id"],
+                               "critical": True, "error": "legacy closed origin has unfinished intent; reviewed recovery required"})
+        return errors
+
     def _observe_close(self, pos, row, norm):
-        if norm.get("symbol") != pos["symbol"] or norm.get("side") != (
-                "buy" if pos["direction"] == "short" else "sell"):
-            return self.incident(pos, "closing order identity/side does not match its durable intent", unknown=True)
-        if float(norm.get("filled_qty") or 0) > float(row["qty"]) + 1e-6:
-            return self.incident(pos, "closing fill exceeds the verified submitted quantity", unknown=True)
+        try:
+            self._validate_close(pos, row, norm)
+        except ValueError as exc:
+            return self.incident(pos, str(exc), unknown=True)
         self._set(row, "working", norm)
         if (norm.get("filled_qty") or 0) > 0:
             try:
@@ -406,7 +464,6 @@ class TimeExitLifecycle:
                 return self.incident(pos, f"could not record liquidation fill ({exc}); durable intent retained",
                                      unknown=not flat, flat=flat, deferred=False)
             if outcome:
-                self._set(row, "complete", norm)
                 return {"ok": True, "position_id": pos["position_id"], "symbol": pos["symbol"], "exit": outcome}
         pos = self.journal.one("SELECT * FROM positions WHERE position_id=?", (pos["position_id"],))
         if float(pos["qty"]) <= 1e-6:
@@ -535,6 +592,10 @@ class TimeExitLifecycle:
             if close is None:
                 self._set(row, "terminal")
                 return self.recover(pos, f"close was not accepted ({exc})")
+        try:
+            close = self._confirm_submitted_close(pos, row, close)
+        except Exception as exc:
+            return self.incident(pos, f"close confirmation is uncertain ({exc}); intent retained", unknown=True)
         return self._observe_close(pos, row, close)
 
     def recover(self, pos, reason, row=None):

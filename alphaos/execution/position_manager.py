@@ -501,10 +501,14 @@ class PositionManager:
     def close_position(self, *args, **kwargs):
         # An exit and its outcome, fill/order and position state are one commit.
         # A failed write must never leave half an exit for the retry to duplicate.
+        finalize = kwargs.pop("_finalize", None)
         with atomic(self.journal) as journal:
             scoped = copy(self)
             scoped.journal = journal
-            return scoped._close_position(*args, **kwargs)
+            outcome = scoped._close_position(*args, **kwargs)
+            if outcome is not None and finalize is not None:
+                finalize(journal, outcome)
+            return outcome
 
     def _close_position(
         self,

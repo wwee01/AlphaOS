@@ -23,6 +23,8 @@ from alphaos.scheduler import cadence, cost_guard, jobs
 from alphaos.scheduler.monitor_health import monitor_health
 from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import monitor_ownership
+from alphaos.scheduler.monitor_recovery import record_started, recover_interrupted_monitor
+from alphaos.execution.ledger_ops import atomic
 from alphaos.util import alerts, timeutils
 from alphaos.util.ids import new_id
 
@@ -86,39 +88,32 @@ class JobRunner:
         and could write one run's result onto the other's row; an id-keyed
         UPDATE can only ever touch the exact row this call just inserted.
         """
-        existing = self.journal.one(
-            "SELECT 1 FROM job_runs WHERE lock_key = ? AND status IN ('started', 'completed')",
-            (lock_key,),
-        )
-        if existing:
-            return None
-
-        st = timeutils.stamp()
         try:
-            row_id = self.journal.insert(
-                "job_runs",
-                {
-                    "job_run_id": new_id("jobrun"),
-                    "job_type": job_type,
-                    "trigger_source": "scheduler",
-                    "lock_key": lock_key,
-                    "started_at_utc": st.utc,
-                    "started_at_sgt": st.local_sgt,
-                    "status": "started",
-                },
-            )
+            with atomic(self.journal) as journal:
+                existing = journal.one(
+                    "SELECT id FROM job_runs WHERE lock_key = ? AND status IN ('started', 'completed') LIMIT 1",
+                    (lock_key,),
+                )
+                if existing:
+                    return None
+                st = timeutils.stamp()
+                rowid = journal.insert("job_runs", {
+                    "job_run_id": new_id("jobrun"), "job_type": job_type,
+                    "trigger_source": "scheduler", "lock_key": lock_key,
+                    "started_at_utc": st.utc, "started_at_sgt": st.local_sgt, "status": "started",
+                })
+                if job_type == cadence.JobType.MONITOR:
+                    record_started(journal, "job_runs", journal.one("SELECT * FROM job_runs WHERE id=?", (rowid,)))
+                return rowid
         except sqlite3.IntegrityError:
-            # Another process won the race for this lock_key between our
-            # SELECT and INSERT -- the partial unique index caught it.
             return None
-        return row_id
 
-    # ---------------------------------------------------------------- run
     def run_job(self, job_type: str, lock_key: Optional[str] = None,
                 *, allow_monitor_recovery: bool = True) -> dict:
-        """Manual calls may recover stale monitor rows only under ownership.
+        """Both caller types recover only durably identified ended ownership.
 
-        Scheduled calls never recover an ambiguous, interrupted monitor pass.
+        allow_monitor_recovery preserves explicit manual fuse bypass only;
+        it never authorizes missing-receipt or age-only monitor recovery.
         The OS lock covers the complete pass across different interval keys;
         the SQLite lock still prevents a second completed run in one interval.
         """
@@ -137,28 +132,34 @@ class JobRunner:
         genuinely unexpected exceptions from the dispatched job are caught here
         and recorded as a 'failed' job_runs row instead of propagating.
 
-        2026-07-17: also reaps stale 'started' rows before acquiring (belt on
-        top of `run_due_jobs()`'s own reap at the top of its tick) -- this
-        method is ALSO the operator's manual escape hatch (the
-        `scheduler_run_job` CLI command calls it directly, bypassing
-        `run_due_jobs()`/`is_due()` entirely, "still respects... locking" per
-        its own --help text). Without this, the exact tool an operator would
-        reach for to clear a wedged job was itself blocked by the same wedge
-        -- a manual force-run and a scheduled tick hit the identical
-        `acquire()` lock, so both must be able to self-heal it. Idempotent:
-        called again moments later from within run_due_jobs()'s loop, it
-        simply finds nothing left to reclaim."""
+        Research staleness handling is unchanged. Monitor interruption is
+        recovered only from a durable ownership receipt under a new lock epoch;
+        generic manual calls no longer clear legacy/unknown monitor rows.
+        """
         self._reap_stale_started_jobs(job_types=[job_type], recover_monitor=allow_monitor_recovery)
         if job_type not in _JOB_FUNCS:
             # Validate before acquire() -- an unknown job_type must never claim
             # a lock row it can then never resolve to completed/failed.
             return {"job_type": job_type, "status": "failed", "error": f"unknown job_type: {job_type!r}"}
 
+        if job_type == cadence.JobType.MONITOR:
+            try:
+                recover_interrupted_monitor(self.journal)
+            except (ValueError, RuntimeError):
+                return {"job_type": job_type, "status": "blocked", "reason": "monitor_inflight_requires_review"}
         if job_type == cadence.JobType.MONITOR and self.journal.one(
             "SELECT id FROM job_runs WHERE job_type = 'monitor' AND status = 'started' LIMIT 1"
         ):
             return {"job_type": job_type, "status": "blocked", "reason": "monitor_inflight_requires_review"}
 
+        if job_type == cadence.JobType.MONITOR and not allow_monitor_recovery:
+            # An interrupted row becomes a real failure during recovery. It can
+            # reach the fuse threshold after the dispatch's initial fuse check.
+            fused, reason, streak = cadence.is_fused(
+                job_type, self.orch.settings.scheduler_max_consecutive_failures, self.journal)
+            if fused:
+                self._handle_fuse(job_type, reason, streak)
+                return {"job_type": job_type, "status": "fused", "reason": reason}
         if lock_key is None:
             lock_key = cadence.default_lock_key(job_type, self.orch.settings)
 
@@ -254,10 +255,9 @@ class JobRunner:
         """Reclaim interrupted research jobs; monitor recovery is explicit.
 
         Role filters prevent one worker from reclaiming another worker's jobs.
-        Scheduled callers always pass recover_monitor=False. A manual recovery
-        may mark a stale monitor row failed only while holding its OS ownership
-        lock. Never delete historical rows or infer an active process is dead
-        merely because the job timestamp is old.
+        Monitor rows are excluded regardless of the compatibility flag. Their
+        separate recovery requires an ended ownership receipt and exclusive
+        lock, never elapsed time. Research recovery behavior is unchanged.
         """
         stale_before = timeutils.to_iso(
             timeutils.now_utc() - timedelta(minutes=int(self.orch.settings.scheduler_stale_job_minutes))
@@ -271,11 +271,9 @@ class JobRunner:
             if job_types is not None and row["job_type"] not in job_types:
                 continue
             if row["job_type"] == cadence.JobType.MONITOR:
-                if not recover_monitor:
-                    continue
-                with monitor_ownership(self.journal) as acquired:
-                    if acquired:
-                        reclaimed.extend(self._reap_monitor_row(row))
+                # Neither scheduled nor manual callers may clear an unknown
+                # monitor by age. Versioned ownership recovery runs under the
+                # monitor lock in _run_job_owned, independently of this timer.
                 continue
             done = timeutils.stamp()
             error = (
@@ -294,29 +292,14 @@ class JobRunner:
             reclaimed.append({"job_type": row["job_type"], "lock_key": row["lock_key"], "error": error})
         return reclaimed
 
-    def _reap_monitor_row(self, row: dict) -> list[dict]:
-        """Explicit/manual recovery only; an active owner can never be reaped."""
-        done = timeutils.stamp()
-        error = "stale monitor recovered under exclusive ownership by explicit request; prior broker state requires reconciliation"
-        cur = self.journal.conn.execute(
-            "UPDATE job_runs SET status = 'failed', error = ?, finished_at_utc = ?, finished_at_sgt = ? "
-            "WHERE id = ? AND status = 'started'", (error, done.utc, done.local_sgt, row["id"]),
-        )
-        self.journal.conn.commit()
-        if not cur.rowcount:
-            return []
-        self._log_failure_best_effort("monitor", row["lock_key"], error)
-        self._alert_job_failure("monitor", error)
-        return [{"job_type": "monitor", "lock_key": row["lock_key"], "error": error}]
-
     # ------------------------------------------------------------- cadence
     def run_due_jobs(self) -> list:
         """Dispatch due jobs belonging to this worker role.
 
         Research excludes monitoring and gates scans on monitor readiness.
         Monitor runs independently at the existing cadence. Fuses remain
-        explicit-recovery states; scheduled calls never reclaim interrupted
-        monitor rows or consume AI budget to diagnose them.
+        explicit-recovery states. Interrupted monitors require ended-owner
+        proof; no AI budget is used to diagnose them.
 
         A research job can finish inside a scan window that was not open at
         the start of this pass. Recheck after each dispatched non-scan job,

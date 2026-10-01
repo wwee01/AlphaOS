@@ -1392,18 +1392,20 @@ class Orchestrator:
         scheduler_run_id = new_id("schr")
         st = timeutils.stamp()
         positions_seen = self.journal.count_open_positions()
-        self.journal.insert(
-            "scheduler_runs",
-            {
-                "scheduler_run_id": scheduler_run_id,
-                "run_type": SchedulerRunType.MONITOR.value,
-                "trigger_source": trigger_source,
-                "started_at_utc": st.utc,
-                "started_at_sgt": st.local_sgt,
-                "status": RunStatus.STARTED.value,
+        from alphaos.execution.ledger_ops import atomic
+        from alphaos.scheduler.monitor_recovery import record_started, recover_interrupted_monitor
+
+        parent_job_id = recover_interrupted_monitor(self.journal, allow_current_job=True)
+        with atomic(self.journal) as journal:
+            journal.insert("scheduler_runs", {
+                "scheduler_run_id": scheduler_run_id, "run_type": SchedulerRunType.MONITOR.value,
+                "trigger_source": trigger_source, "started_at_utc": st.utc,
+                "started_at_sgt": st.local_sgt, "status": RunStatus.STARTED.value,
                 "positions_touched": positions_seen,
-            },
-        )
+            })
+            record_started(journal, "scheduler_runs", journal.one(
+                "SELECT * FROM scheduler_runs WHERE scheduler_run_id=?", (scheduler_run_id,)),
+                parent_job_id=parent_job_id)
         # Reconcile real Alpaca paper orders first (broker-managed bracket OCO):
         # opens positions on entry fills, closes them on TP/SL leg fills. The
         # protection watchdog runs NEXT, not before -- it must see this pass's

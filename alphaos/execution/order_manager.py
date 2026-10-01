@@ -460,25 +460,31 @@ class OrderManager:
             if bp:
                 TimeExitLifecycle(self).incident(pos, "exit fills imply flat but broker still reports exposure", unknown=True)
                 return None
-        if proof is None:
-            return self.positions.close_position(
-                pos["position_id"], float(totals["notional"]) / total_qty, reason,
-                triggered_by="order_manager_time_exit" if reason == "time_expiry" else "alpaca_reconcile",
-                execution_source=ExecutionSource.ALPACA_PAPER.value, broker_order_id=boid,
-                closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty, recorded_exit_order_id=order["order_id"],
-            )
-        with ledger_ops.atomic(self.journal) as journal:
-            if proof is not None:
-                from alphaos.execution.position_attribution import recheck_symbol_attribution
-                recheck_symbol_attribution(journal, proof)
-            positions = copy(self.positions)
-            positions.journal = journal
+        # PositionManager invokes this hook inside the economic-close commit.
+        # Raising here rolls back close/receipt/phase together. Already recorded
+        # cumulative fills remain idempotent on the next reconciliation.
+        def finalize(journal, outcome):
+            if ledger_ops.metadata(order).get("purpose") == "time_exit":
+                scoped = copy(self)
+                scoped.journal = journal
+                TimeExitLifecycle(scoped)._set(order, "complete", norm)
+
+        def close(positions):
             return positions.close_position(
                 pos["position_id"], float(totals["notional"]) / total_qty, reason,
                 triggered_by="order_manager_time_exit" if reason == "time_expiry" else "alpaca_reconcile",
                 execution_source=ExecutionSource.ALPACA_PAPER.value, broker_order_id=boid,
-                closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty, recorded_exit_order_id=order["order_id"],
+                closed_at=norm.get("filled_at") or totals["filled_at"], total_qty=total_qty,
+                recorded_exit_order_id=order["order_id"], _finalize=finalize,
             )
+        if proof is None:
+            return close(self.positions)
+        with ledger_ops.atomic(self.journal) as journal:
+            from alphaos.execution.position_attribution import recheck_symbol_attribution
+            recheck_symbol_attribution(journal, proof)
+            positions = copy(self.positions)
+            positions.journal = journal
+            return close(positions)
 
     def reconcile(self) -> dict:
         """Reconcile open Alpaca paper orders against the broker: open positions
@@ -992,6 +998,9 @@ class OrderManager:
         now = now or timeutils.now_utc()
         now_et_date = timeutils.to_et(now).date()
         lifecycle = TimeExitLifecycle(self)
+        # Never reconstruct a historical split commit from a receipt alone.
+        # Keep the discrepancy visible and entry readiness blocked for review.
+        result["errors"].extend(lifecycle.closed_intent_errors())
         if not self.settings.time_exit_enforcement_enabled:
             if not any(lifecycle.pending(p) for p in self.journal.open_positions()):
                 return result

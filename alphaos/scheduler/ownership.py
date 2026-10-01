@@ -11,19 +11,23 @@ import fcntl
 import os
 import threading
 import time
+from hashlib import sha256
+from uuid import uuid4
 from contextlib import contextmanager
 from pathlib import Path
 
 _guard = threading.Lock()
 _held: dict[str, tuple[int, int, int, int | None]] = {}
+_epochs: dict[str, dict] = {}
 
 
 def _after_fork() -> None:
-    global _guard, _held
+    global _guard, _held, _epochs
     for _, _, _, fd in _held.values():
         if fd is not None:
             os.close(fd)
     _held = {}
+    _epochs = {}
     _guard = threading.Lock()
 
 
@@ -35,7 +39,9 @@ def _key(journal, role: str) -> tuple[str, bool]:
         raise ValueError("unknown worker ownership role")
     path = str(journal.db_path)
     if path in ("", ":memory:"):
-        return f"memory:{id(journal)}:{role}", False
+        connection = getattr(journal, "conn", journal)
+        connection = getattr(connection, "connection", connection)
+        return f"memory:{id(connection)}:{role}", False
     if path.startswith("file:"):
         raise ValueError("worker ownership requires a filesystem ledger path")
     return str(Path(path).resolve()) + f".{role}.lock", True
@@ -58,6 +64,11 @@ def worker_ownership(journal, role: str):
                 if persistent:
                     fd = os.open(key, os.O_CREAT | os.O_RDWR, 0o600)
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stat = os.fstat(fd) if fd is not None else None
+                _epochs[key] = {"version": "monitor_owner_v1", "epoch": uuid4().hex,
+                                "pid": owner[0], "ledger_lock_sha256": sha256(key.encode()).hexdigest(),
+                                "device": stat.st_dev if stat else None,
+                                "inode": stat.st_ino if stat else None}
                 _held[key] = (*owner, 1, fd)
                 acquired = True
             except BlockingIOError:
@@ -77,6 +88,7 @@ def worker_ownership(journal, role: str):
                     _held[key] = (*owner, current[2] - 1, current[3])
                 else:
                     del _held[key]
+                    del _epochs[key]
                     if current[3] is not None:
                         fcntl.flock(current[3], fcntl.LOCK_UN)
                         os.close(current[3])
@@ -96,3 +108,25 @@ def monitor_ownership(journal, *, timeout_seconds: float = 0.0):
                 yield acquired
                 return
         time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
+def current_ownership(journal, role: str = "monitor") -> dict | None:
+    """Proof of this thread's lock scope, stable across reentrant acquisition.
+
+    A different epoch proves a previous compliant ownership scope ended only
+    when both receipts identify the SAME locked inode. Deleted/replaced lock
+    files never authorize reclaiming the old inode's owner.
+    """
+    key, _ = _key(journal, role)
+    with _guard:
+        held = _held.get(key)
+        if not held or held[:2] != (os.getpid(), threading.get_ident()):
+            return None
+        receipt = dict(_epochs[key])
+        fd = held[3]
+        if fd is not None:
+            actual, path = os.fstat(fd), os.stat(key, follow_symlinks=False)
+            expected = (receipt["device"], receipt["inode"])
+            if (actual.st_dev, actual.st_ino) != expected or (path.st_dev, path.st_ino) != expected:
+                raise RuntimeError("monitor ownership lock inode changed; review required")
+        return receipt

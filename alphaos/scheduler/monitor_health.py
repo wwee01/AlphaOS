@@ -51,15 +51,14 @@ def monitor_health(journal, settings, now=None) -> dict:
         )
         result["running_count"] = len(running)
         # Manual monitor calls have scheduler_runs but no job_runs wrapper.
-        # A later completed scheduled pass supersedes an older interrupted
-        # observation; a newer unfinished pass makes entry ownership uncertain.
+        # Every unfinished pass remains uncertain until receipt-based recovery
+        # explicitly resolves it. A later success cannot supersede missing proof.
         manual_running = []
         for row in journal.query(
             "SELECT started_at_utc FROM scheduler_runs WHERE run_type = 'monitor' AND status = 'started'"
         ):
             pass_age = timeutils.age_seconds(row["started_at_utc"], now)
-            if pass_age is None or age is None or pass_age < age:
-                manual_running.append((row, pass_age))
+            manual_running.append((row, pass_age))
         result["unfinished_monitor_passes"] = len(manual_running)
         problems = []
         issue_codes = set()
@@ -96,6 +95,19 @@ def monitor_health(journal, settings, now=None) -> dict:
             if (summary.get("protection_blocking") or inner.get("errors")
                     or inner.get("time_exits_errors") or inner.get("error_count")):
                 problem("execution_incident", "latest monitor reported execution/protection errors")
+        unfinished_closes = []
+        for row in journal.query(
+            "SELECT o.order_id,o.raw_request_json FROM paper_orders o "
+            "WHERE o.execution_source='alpaca_paper' AND o.order_type IN ('market','oco')"
+        ):
+            metadata = json.loads(row["raw_request_json"] or "{}")
+            if metadata.get("phase") in {"canceling", "submitting", "working", "unknown"}:
+                pos = journal.position_by_id(metadata.get("position_id"))
+                if pos and pos.get("status") == "closed":
+                    unfinished_closes.append(row["order_id"])
+        result["unfinished_closed_intents"] = unfinished_closes
+        if unfinished_closes:
+            problem("closed_intent_unverified", "closed origin has unfinished execution intent; reconciliation required")
         blocking = protection_watchdog.has_blocking_incident(journal)
         result["protection_blocking"] = blocking is not None
         if blocking:
