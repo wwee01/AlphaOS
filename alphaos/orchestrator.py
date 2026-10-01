@@ -986,6 +986,7 @@ class Orchestrator:
                 "UPDATE trade_proposals SET risk_check_id = ? WHERE proposal_id = ?", (rc_id, proposal_id)
             )
             self.journal.conn.commit()
+            proposal.risk_check_id = rc_id
         if not risk.approved:
             # Journal the block explicitly (uniform with the freshness/drift
             # blocks above); the risk_check row recorded just above carries the
@@ -2114,12 +2115,31 @@ class Orchestrator:
             trades_today=self.journal.count_paper_orders_today(),
             realized_pnl_today=self.journal.realized_pnl_today(),
         )
-        self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
         if not risk.approved or not risk.sizing or proposal.qty > risk.sizing.shares:
+            self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
             detail = risk.block_reasons or [{"code": ReasonCode.RISK_OVERSIZED.value,
                                             "detail": "approved size exceeds current account capacity"}]
             self.journal.log_system_event(Severity.WARNING, "risk", "Entry blocked by fresh account limits", {"proposal_id": proposal.proposal_id, "reasons": detail})
             return OrderResult(blocked=True, block_reason=detail[0]["code"], detail=str(detail), state=OrderState.REJECTED.value)
+        # Bind the successful final account check, not the earlier proposal or
+        # manual-approval check. Capture is atomic and precedes approval/order
+        # dispatch; failure cannot leave half an evidence link or send a POST.
+        # The capacity decision above and proposed quantity are unchanged.
+        from alphaos.execution.ledger_ops import atomic
+        with atomic(self.journal) as journal:
+            rc_id = self._record_risk_check(proposal, _eval_view_from_proposal(proposal), risk, journal=journal)
+            journal.conn.execute(
+                "UPDATE trade_proposals SET risk_check_id=? WHERE proposal_id=?",
+                (rc_id, proposal.proposal_id),
+            )
+            journal.log_system_event(
+                Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission",
+                {"proposal_id": proposal.proposal_id, "risk_check_id": rc_id,
+                 "stage": "final_account_submission", "proposal_qty": proposal.qty,
+                 "scope": "account_limits_and_remaining_capacity",
+                 "market_snapshot_rechecked": snapshot is not None, "risk": risk.as_dict()},
+            )
+        proposal.risk_check_id = rc_id
         return self._execute_checked(proposal, fill_price, approval)
 
     def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None,
@@ -2931,9 +2951,10 @@ class Orchestrator:
         )
         self.journal.conn.commit()
 
-    def _record_risk_check(self, proposal, evaluation, risk) -> str:
+    def _record_risk_check(self, proposal, evaluation, risk, *, journal=None) -> str:
         """Persist a risk_checks row for the proposal. Pure audit: it never
         changes whether the trade proceeds (the RiskDecision already decided)."""
+        journal = self.journal if journal is None else journal
         risk_check_id = new_id("rchk")
         codes = {b.get("code") for b in (risk.block_reasons or [])}
 
@@ -2944,7 +2965,7 @@ class Orchestrator:
         margin_approved = getattr(proposal, "margin_approved", False)
         is_short = proposal.direction == TradeDirection.SHORT.value
         sizing = risk.sizing
-        self.journal.insert(
+        journal.insert(
             "risk_checks",
             {
                 "risk_check_id": risk_check_id,
