@@ -181,15 +181,76 @@ def record_pending_trade_reviews(journal, limit: int = 100) -> dict:
             "failed": failed, "pending": pending, "policy_updated": False}
 
 
+def _coverage(journal, result, limit, *, installed):
+    """Exact population counts; current validation remains explicitly bounded.
+
+    Recording is not validation. Missing outcomes, orphan records, and records
+    outside this display cannot silently join the verified numerator.
+    """
+    eligible = result['eligible']
+    predicate = ("NOT EXISTS (SELECT 1 FROM trade_learning_records r "
+                 "WHERE r.outcome_id=o.outcome_id AND r.method_version=?)")
+    params = (VERSION,) if installed else ()
+    where = predicate if installed else '1=1'
+    missing = journal.one('SELECT COUNT(*) n FROM trade_outcomes o WHERE ' + where, params)['n']
+    pending = journal.query(
+        'SELECT o.outcome_id,o.position_id,o.symbol,o.created_at_utc FROM trade_outcomes o WHERE '
+        + where + ' ORDER BY o.id LIMIT ?', (*params, limit))
+    orphan = journal.one(
+        'SELECT COUNT(*) n FROM trade_learning_records r WHERE r.method_version=? AND NOT EXISTS '
+        '(SELECT 1 FROM trade_outcomes o WHERE o.outcome_id=r.outcome_id)', (VERSION,))['n'] if installed else 0
+    closed_without_outcome = journal.one(
+        "SELECT COUNT(*) n FROM positions p WHERE p.status='closed' AND NOT EXISTS "
+        '(SELECT 1 FROM trade_outcomes o WHERE o.position_id=p.position_id)')['n']
+    # IDs can be absent or corrupt in stored JSON. Membership uses the exact
+    # outcome row looked up for validation, never a claimed ID in that JSON.
+    audited = result.pop('_audited_outcome_ids', set())
+    complete = sum(r['current_provenance']['review_status'] == 'linked_factual_review'
+                   for r in result['records'] if r.get('_outcome_present'))
+    for row in result['records']:
+        row.pop('_outcome_present', None)
+    recorded = eligible - missing
+    status = ('not_installed' if not installed else
+              'incomplete' if orphan or closed_without_outcome else
+              'not_observed' if not eligible else
+              'complete_local_evidence' if complete == eligible else 'incomplete')
+    return {'version': 'trade_learning_coverage_v1', 'status': status,
+            'scope': 'all_closed_outcomes_including_mock_demo_and_unknown',
+            'eligible_outcomes': eligible, 'recorded_outcomes': recorded,
+            'missing_review_count': missing, 'missing_reviews': pending,
+            'missing_reviews_truncated': missing > len(pending),
+            'orphan_review_count': orphan,
+            'closed_positions_without_outcome_count': closed_without_outcome,
+            'current_audited_outcomes': len(audited),
+            'recorded_outcomes_not_audited': recorded - len(audited),
+            'current_unaudited_outcomes': eligible - len(audited),
+            'complete_local_chain_count': complete,
+            'complete_local_chain_count_basis': 'audited_records_only',
+            'broker_fees_verified': False, 'policy_updated': False}
+
+
 def trade_learning_report(journal, limit: int = 50) -> dict:
-    """Read-only compatibility with pre-migration DBs; explicit whole-cohort counts."""
+    """Read one consistent population without committing a caller transaction."""
     if not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
+    owned = not journal.conn.in_transaction
+    if owned:
+        journal.conn.execute('BEGIN')
+    try:
+        return _trade_learning_report(journal, limit)
+    finally:
+        if owned:
+            journal.conn.rollback()
+
+
+def _trade_learning_report(journal, limit):
+    """Read-only compatibility with pre-migration DBs; explicit whole-cohort counts."""
     eligible = journal.one("SELECT COUNT(*) n FROM trade_outcomes")["n"]
     result: dict[str, Any] = {"version": VERSION, "eligible": eligible, "recorded": 0,
                               "status_counts": {}, "records": [], "policy_updated": False}
     if not journal.one("SELECT name FROM sqlite_master WHERE type='table' AND name='trade_learning_records'"):
         result["status"] = "not_installed"
+        result['coverage'] = _coverage(journal, result, limit, installed=False)
         return result
     counts = journal.query("SELECT review_status,COUNT(*) n FROM trade_learning_records WHERE method_version=? GROUP BY review_status", (VERSION,))
     result["status_counts"] = {row["review_status"]: row["n"] for row in counts}
@@ -199,8 +260,11 @@ def trade_learning_report(journal, limit: int = 50) -> dict:
     result['current_status_counts'] = {}
     result['current_counts_scope'] = 'displayed_records_only'
     result['current_validation_version'] = 'factual_trade_current_audit_v1'
+    result['_audited_outcome_ids'] = set()
     for row in journal.query("SELECT * FROM trade_learning_records WHERE method_version=? ORDER BY id DESC LIMIT ?", (VERSION, limit)):
         outcome = journal.one("SELECT * FROM trade_outcomes WHERE outcome_id=?", (row["outcome_id"],))
+        if outcome:
+            result['_audited_outcome_ids'].add(outcome['outcome_id'])
         review = None
         try:
             saved = json.loads(row["review_json"])
@@ -241,11 +305,12 @@ def trade_learning_report(journal, limit: int = 50) -> dict:
                       'limitations': gaps, 'close_receipt': receipt, 'broker_fees_verified': False}
         counts = result['current_status_counts']
         counts[current_status] = counts.get(current_status, 0) + 1
-        result["records"].append({"recorded_at_utc": row["created_at_utc"],
+        result["records"].append({"recorded_at_utc": row["created_at_utc"], '_outcome_present': bool(outcome),
                                   'current_provenance': provenance,
                                   "source_unchanged": unchanged, "review": review})
     result["status"] = "recorded_factual_reviews"
     result["display_limit"] = limit
     result['current_audited_count'] = len(result['records'])
     result['current_unreviewed_record_count'] = result['recorded'] - len(result['records'])
+    result['coverage'] = _coverage(journal, result, limit, installed=True)
     return result
