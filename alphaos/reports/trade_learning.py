@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from alphaos.reports.close_provenance import validate_close_receipt
+from alphaos.reports.origin_provenance import validate_origin_provenance
 from alphaos.reports.trade_packet import assemble_trade_packet
 from alphaos.reports.trade_accounting import source_sha256
 from alphaos.util import timeutils
@@ -259,7 +260,7 @@ def _trade_learning_report(journal, limit):
     result["eligible_counts_scope"] = "all_closed_outcomes_including_mock_demo_and_unknown"
     result['current_status_counts'] = {}
     result['current_counts_scope'] = 'displayed_records_only'
-    result['current_validation_version'] = 'factual_trade_current_audit_v1'
+    result['current_validation_version'] = 'factual_trade_current_audit_v2'
     result['_audited_outcome_ids'] = set()
     for row in journal.query("SELECT * FROM trade_learning_records WHERE method_version=? ORDER BY id DESC LIMIT ?", (VERSION, limit)):
         outcome = journal.one("SELECT * FROM trade_outcomes WHERE outcome_id=?", (row["outcome_id"],))
@@ -294,15 +295,18 @@ def _trade_learning_report(journal, limit):
                       "data_scope": "unknown_execution_scope",
                       "limitations": ["saved_review_unverifiable"], "review_status": "invalid_saved_review"}
         receipt = validate_close_receipt(journal, outcome)
-        gaps = sorted(set(review['limitations'] + receipt['limitations']))
+        origin = validate_origin_provenance(journal, outcome)
+        gaps = sorted(set(review['limitations'] + receipt['limitations'] + origin['limitations']))
         current_status = ('unverifiable' if not unchanged else
                           'linked_factual_review' if review['review_status'] == 'linked_factual_review'
                           and receipt['status'] == 'verified_local_close_receipt' and not gaps
+                          and origin['complete'] is True
                           else 'limited_factual_review')
         if not unchanged:
             gaps = sorted(set(gaps + ['stored_review_or_current_source_unverifiable']))
-        provenance = {'version': 'factual_trade_current_audit_v1', 'review_status': current_status,
-                      'limitations': gaps, 'close_receipt': receipt, 'broker_fees_verified': False}
+        provenance = {'version': 'factual_trade_current_audit_v2', 'review_status': current_status,
+                      'limitations': gaps, 'close_receipt': receipt, 'origin': origin,
+                      'broker_fees_verified': False}
         counts = result['current_status_counts']
         counts[current_status] = counts.get(current_status, 0) + 1
         result["records"].append({"recorded_at_utc": row["created_at_utc"], '_outcome_present': bool(outcome),
