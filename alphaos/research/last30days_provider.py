@@ -29,12 +29,15 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 from alphaos.constants import MOCK_L30D_SOURCE, Last30DaysProvider, SentimentLabel
 from alphaos.research.last30days_worker import SOURCES, STAGES, stop_owned_child
 from alphaos.research.last30days_source_policy import POLICY_ENV, POLICY_VERSION, requested_from_argv
+from alphaos.research.last30days_partial import ENV_KEYS, read_partial
 from alphaos.util import timeutils
 
 # Keyless-only source pool used by the deterministic mock.
@@ -86,6 +89,7 @@ def _read_telemetry(stream) -> dict:
             row["counts"] = {k: v for k, v in (counts.items() if isinstance(counts, dict) else [])
                              if k in {"identity_unverified", "already_reaped", "already_exited",
                                       "detached_group_stopped", "child_stopped"}
+                             | {"owned_group_signalled_before_reap", "owned_group_absent_before_reap"}
                              and type(v) is int and 0 <= v <= 10000}
         if kind == "source_policy":
             row["version"] = POLICY_VERSION if event.get("version") == POLICY_VERSION else "unknown"
@@ -119,6 +123,12 @@ def _read_telemetry(stream) -> dict:
             for status in ("identity_unverified", "already_reaped", "already_exited"))
         if cleanups else None
     )
+    diagnostic["owned_group_cleanup"] = {
+        "version": "owned_group_before_reap_v1",
+        "pre_reap_groups_signalled": sum(e["counts"].get("owned_group_signalled_before_reap", 0) for e in cleanups),
+        "pre_reap_groups_absent": sum(e["counts"].get("owned_group_absent_before_reap", 0) for e in cleanups),
+        "independently_detached_descendants_verified": False,
+    }
     return diagnostic
 
 
@@ -226,8 +236,16 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
         strict_sources = instrumented and not getattr(self.s, "last30days_cmd", "")
         timeout = float(self.s.last30days_timeout_seconds)
         started = time.monotonic()
+        started_utc = datetime.now(timezone.utc).isoformat()
+        nonce = uuid4().hex
         diagnostic = {"version": "last30days_runtime_v1", "instrumented": instrumented,
                       "deadline_seconds": timeout}
+        diagnostic["adapter_contract"] = "structural_partial_owned_groups_v1"
+        diagnostic["adapter_file_sha256"] = {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("last30days_provider.py", "last30days_worker.py",
+                         "last30days_wait.py", "last30days_partial.py", "last30days_source_policy.py")
+        }
         if instrumented:
             try:
                 diagnostic["provider_script_sha256"] = hashlib.sha256(Path(cmd[2]).read_bytes()).hexdigest()
@@ -235,22 +253,29 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                 diagnostic["provider_script_sha256"] = None
         # The bootstrap retains direct-child handles, including helpers that
         # detach with setsid(). Outer killpg alone cannot stop those helpers.
-        with tempfile.TemporaryFile() as telemetry:
+        with tempfile.TemporaryFile() as telemetry, tempfile.TemporaryFile() as partial_stream:
             env = dict(os.environ, ALPHAOS_L30_TELEMETRY_FD=str(telemetry.fileno()))
             # Never silently apply policy to a custom command, even if that
             # command happens to use this worker. Inherited flags cannot opt in.
             env.pop(POLICY_ENV, None)
+            for key in ENV_KEYS:
+                env.pop(key, None)
+            inherited_fds = (telemetry.fileno(),)
             if strict_sources:
                 env[POLICY_ENV] = POLICY_VERSION
+                env.update(dict(zip(ENV_KEYS, (str(partial_stream.fileno()), nonce, started_utc,
+                                              str(started), str(timeout)))))
+                inherited_fds += (partial_stream.fileno(),)
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                     cwd=self._repo_path() or None, start_new_session=True,
-                    pass_fds=(telemetry.fileno(),), env=env,
+                    pass_fds=inherited_fds, env=env,
                 )
                 try:
                     stdout, _stderr = proc.communicate(timeout=timeout)
                 except subprocess.TimeoutExpired:
+                    cleanup_started = time.monotonic()
                     diagnostic["outcome"] = "timeout"
                     diagnostic["deadline_observed_seconds"] = round(time.monotonic() - started, 6)
                     if instrumented:
@@ -273,6 +298,7 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                         proc.stdout.close()
                     if proc.stderr:
                         proc.stderr.close()
+                    diagnostic["cleanup_elapsed_seconds"] = round(time.monotonic() - cleanup_started, 6)
                     # Never include TimeoutExpired.cmd (templates may contain credentials).
                     cleanup = ("process group stopped; detached descendants not guaranteed"
                                if diagnostic["outer_cleanup"] == "detached_group_stopped"
@@ -307,6 +333,12 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                                       else "provider_error")
                 diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 6)
                 diagnostic.update(_read_telemetry(telemetry))
+                if strict_sources:
+                    diagnostic["partial_evidence"] = read_partial(
+                        partial_stream, nonce=nonce, requested=requested_from_argv(cmd[3:]),
+                        policy_version=POLICY_VERSION, started_utc=started_utc,
+                        deadline=timeout, diagnostics=diagnostic,
+                    )
                 exc.last30days_diagnostics = diagnostic
                 raise
             diagnostic["elapsed_seconds"] = round(time.monotonic() - started, 6)
