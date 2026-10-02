@@ -154,6 +154,26 @@ class ScanResult:
     per_symbol: "dict[str, dict]" = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _ShadowScanLineage:
+    """One best-effort identity observation, local to a single shadow scan.
+
+    Missing lineage is retained as None, not retried for every symbol. This
+    captures the scan's environment before its data requests; it does not
+    certify that repository files remain unchanged during the scan.
+    """
+    lineage_id: Optional[str]
+    started_at_utc: str
+    completed_at_utc: str
+
+    def as_dict(self) -> dict:
+        return {"version": "shadow_scan_lineage_v1", "scope": "single_shadow_scan",
+                "lineage_id": self.lineage_id,
+                "status": "recorded" if self.lineage_id is not None else "unavailable",
+                "started_at_utc": self.started_at_utc,
+                "completed_at_utc": self.completed_at_utc}
+
+
 class CandidateScanner:
     def __init__(self, settings, journal, market_data: Optional[MarketDataClient] = None):
         self.settings = settings
@@ -277,6 +297,14 @@ class CandidateScanner:
             scan_id, symbols, tier=UniverseTier.WATCHLIST.value,
             universe_file_version=universe_file_version,
         )
+        # Recomputing Git/config lineage per candidate/reject launches three
+        # subprocesses between source receipt and the next freshness check.
+        # Observe once before fetching, with local explicit scope (no cache).
+        lineage_started = timeutils.now_utc().isoformat()
+        scan_lineage = _ShadowScanLineage(
+            lineage.get_or_create_lineage_id(self.journal, self.settings),
+            lineage_started, timeutils.now_utc().isoformat(),
+        )
         for chunk_index, chunk in enumerate(self._shadow_snapshot_batches(symbols)):
             observations = []
             for sym, snapshot, response_status in chunk:
@@ -301,7 +329,7 @@ class CandidateScanner:
                     result.blocked_stale += 1
                     self._reject(
                         None, sym, "shadow_scan", report.block_reason or ReasonCode.STALE_DATA.value,
-                        f"freshness={report.freshness_status}", snapshot,
+                        f"freshness={report.freshness_status}", snapshot, scan_lineage=scan_lineage,
                     )
                     continue
 
@@ -323,6 +351,7 @@ class CandidateScanner:
                     adv_20d_dollar=(adv_by_symbol or {}).get(sym),
                     quote_age_seconds=report.quote_age_seconds,
                     card_activation=card_activation,
+                    scan_lineage=scan_lineage,
                 )
                 if cand is not None:
                     result.candidates.append(cand)
@@ -332,6 +361,7 @@ class CandidateScanner:
                 Severity.INFO, "shadow_collection", "Shadow snapshot chunk assessed at current decision time.",
                 {"version": "shadow_chunk_assessment_v1", "scan_id": scan_id,
                  "scan_window": scan_window, "universe_file_version": universe_file_version,
+                 "lineage_capture": scan_lineage.as_dict(),
                  "chunk_index": chunk_index, "requested": len(chunk),
                  "freshness_counts": dict(Counter(row["freshness_status"] for row in observations)),
                  "observations": observations},
@@ -457,6 +487,7 @@ class CandidateScanner:
         core_gate_verdict: Optional[str] = None, scan_window: Optional[str] = None,
         adv_20d_dollar: Optional[float] = None, quote_age_seconds: Optional[float] = None,
         card_activation: Optional[ScanCardActivation] = None,
+        scan_lineage: Optional[_ShadowScanLineage] = None,
     ) -> Optional[ScanContext]:
         change = float(snapshot.get("change_pct") or 0.0)
         rel_vol = float(snapshot.get("rel_volume") or 1.0)
@@ -531,7 +562,8 @@ class CandidateScanner:
             "shortlist_reason": signals.shortlist_reason,
             "notes_json": {"snapshot": {k: snapshot.get(k) for k in ("last_price", "change_pct", "rel_volume")}},
             # PR4: measurement-only lineage stamp (never influences the candidate decision above).
-            "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+            "lineage_id": (scan_lineage.lineage_id if scan_lineage is not None
+                           else lineage.get_or_create_lineage_id(self.journal, self.settings)),
             # --- EXP-0: shadow tier stamping. shadow_tier=1 is the structural
             # marker the orchestrator's chokepoint guards refuse on -- this
             # scanner class never calls AI/proposal code itself either way. ---
@@ -609,7 +641,8 @@ class CandidateScanner:
             },
         )
 
-    def _reject(self, candidate_id, symbol, stage, reason_code, detail, snapshot) -> None:
+    def _reject(self, candidate_id, symbol, stage, reason_code, detail, snapshot,
+                *, scan_lineage: Optional[_ShadowScanLineage] = None) -> None:
         self.journal.insert(
             "rejected_candidates",
             {
@@ -621,6 +654,7 @@ class CandidateScanner:
                 "reason_detail": detail,
                 "would_be_entry": snapshot.get("last_price") if snapshot else None,
                 "scan_batch_id": getattr(self, "_scan_batch_id", None),
-                "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
+                "lineage_id": (scan_lineage.lineage_id if scan_lineage is not None
+                               else lineage.get_or_create_lineage_id(self.journal, self.settings)),
             },
         )
