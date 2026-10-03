@@ -342,10 +342,19 @@ def validate_canary_recovery(journal, settings, *, as_of_utc=None, corpus_dir=No
             if (reference["finish"] is None or current["start"] is None
                     or reference["finish"] > current["start"] or baseline["run_id"] == latest["run_id"]):
                 reasons.append("baseline.not_prior_reference")
+            for packet_id in current["by_packet"].keys() & reference["by_packet"].keys():
+                current_row = current["by_packet"][packet_id]
+                baseline_row = reference["by_packet"][packet_id]
+                if current_row.get("response_model") != baseline_row.get("response_model"):
+                    reasons.append("packet_response_model_scope_changed")
+                if current_row.get("system_fingerprint") != baseline_row.get("system_fingerprint"):
+                    reasons.append("packet_fingerprint_scope_changed_or_missing")
             if current["fingerprints"] != reference["fingerprints"]:
                 reasons.append("fingerprint_scope_changed_or_missing")
             if not current["fingerprints"]:
                 result["limitations"].append("The model supplied no system fingerprint; none is authenticated or inferred.")
+            elif any(row.get("system_fingerprint") is None for row in current["by_packet"].values()):
+                result["limitations"].append("Some packets supplied no system fingerprint; matching absences are not authentication.")
             if latest.get("drift_tier") != DRIFT_NONE:
                 reasons.append("latest.not_clean_drift")
             if not reasons:

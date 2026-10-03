@@ -287,3 +287,27 @@ def test_missing_schema_returns_unavailable_without_creating_tables(proof):
     assert not result["ok"] and result["reasons"] == ["evidence_unavailable:OperationalError"]
     assert conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0] == 0
     conn.close()
+
+
+@pytest.mark.parametrize("identity", ["fingerprint_missing_one", "models_swapped"])
+def test_per_packet_identity_cannot_hide_behind_equal_aggregate_sets(proof, identity):
+    conn = proof.journal.conn
+    if identity == "fingerprint_missing_one":
+        conn.execute("UPDATE canary_results SET system_fingerprint='fp-shared'")
+        conn.execute("UPDATE canary_runs SET system_fingerprints_json='[\"fp-shared\"]'")
+        conn.execute("UPDATE canary_results SET system_fingerprint=NULL WHERE run_id=? AND packet_id='pkt_0'", (proof.latest,))
+    else:
+        conn.execute("UPDATE canary_results SET response_model=CASE WHEN packet_id='pkt_0' THEN 'model-a' ELSE 'model-b' END")
+        conn.execute("UPDATE canary_runs SET response_models_json='[\"model-a\",\"model-b\"]'")
+        conn.execute("UPDATE canary_results SET response_model=CASE WHEN packet_id='pkt_0' THEN 'model-b' ELSE 'model-a' END WHERE run_id=?", (proof.latest,))
+    conn.commit()
+    assert not check(proof)["ok"]
+
+
+def test_matching_per_packet_fingerprint_absence_remains_explicit(proof):
+    conn = proof.journal.conn
+    conn.execute("UPDATE canary_results SET system_fingerprint='fp-shared' WHERE packet_id='pkt_1'")
+    conn.execute("UPDATE canary_runs SET system_fingerprints_json='[\"fp-shared\"]'")
+    conn.commit()
+    result = check(proof)
+    assert result["ok"] and any("Some packets" in value for value in result["limitations"])
