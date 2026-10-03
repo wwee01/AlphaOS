@@ -23,6 +23,7 @@ All offline, in-memory, mock mode. No real money, no network.
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 import json
 import sqlite3
 from datetime import timedelta
@@ -655,7 +656,8 @@ def test_auto_suspend_engages_switch_and_stays_engaged(tmp_path):
         assert "auto-suspended" in result2["reason"]
     finally:
         sl_module.ShadowLabelSuspendSwitch = orig
-        switch.release()
+        # Scratch-path teardown only; runtime release requires audited recovery.
+        Path(switch.path).unlink(missing_ok=True)
     orch.journal.close()
 
 

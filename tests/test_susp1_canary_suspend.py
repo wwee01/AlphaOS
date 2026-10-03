@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+from pathlib import Path
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -460,7 +461,8 @@ def test_susp1_e2e_not_confirmed_proceeds_to_labelling_via_run_shadow_label(tmp_
         assert result["labelled"] > 0
         assert orch.journal.count_rows("candidate_labels", "shadow_tier = 1") > 0
     finally:
-        switch.release()
+        # Scratch-path teardown only; runtime release requires audited recovery.
+        Path(switch.path).unlink(missing_ok=True)
     orch.journal.close()
 
 
@@ -507,7 +509,8 @@ def test_susp1_e2e_confirmed_suspends_engages_switch_and_pages_via_run_shadow_la
         )
         assert len(events) == 1
     finally:
-        switch.release()
+        # Scratch-path teardown only; runtime release requires audited recovery.
+        Path(switch.path).unlink(missing_ok=True)
     orch.journal.close()
 
 

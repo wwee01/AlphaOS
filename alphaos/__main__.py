@@ -1207,6 +1207,39 @@ def cmd_last30days_probe(orch: Orchestrator, symbol: str) -> int:
     return 0
 
 
+def cmd_shadow_recovery(settings, args) -> int:
+    """Read-only preview by default; bypasses all Orchestrator/startup work."""
+    import sqlite3
+    from alphaos import shadow_marker
+    from alphaos.scheduler import shadow_recovery
+
+    try:
+        if args.apply and not (args.preview_file and args.expected_preview_sha256 and args.note):
+            raise shadow_recovery.RecoveryRefused("apply requires preview file, expected hash and operator note")
+        if not args.apply and (args.preview_file or args.expected_preview_sha256 or args.note):
+            raise shadow_recovery.RecoveryRefused("apply-only arguments require --apply")
+        with shadow_recovery.existing_journal(settings.db_path, writable=args.apply) as journal:
+            if args.apply:
+                _, raw = shadow_marker.fingerprint(args.preview_file)
+                if raw is None:
+                    raise shadow_recovery.RecoveryRefused("preview file missing")
+                result = shadow_recovery.apply_recovery(
+                    journal, settings, json.loads(raw), expected_preview_sha256=args.expected_preview_sha256,
+                    note=args.note,
+                )
+            else:
+                result = shadow_recovery.preview(journal, settings)
+        _print(result)
+        return 0 if result.get("eligible") or result.get("status") == "released" else 1
+    except (shadow_recovery.RecoveryRefused, shadow_marker.MarkerError) as exc:
+        _print({"status": "refused", "reason": str(exc)})
+        return 1
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+        _print({"status": "refused", "reason": "Recovery evidence unavailable or malformed.",
+                "error_type": type(exc).__name__})
+        return 1
+
+
 def cmd_armed_watch(orch: Orchestrator) -> int:
     """List ARMED WATCH (near-action) candidates: override armed but stayed watch."""
     rows = orch.journal.armed_watches(100)
@@ -1593,6 +1626,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "adjustment_id, override_id, outcome_id, eval_id, review_id, or polarity_id)")
     dl.add_argument("decision_id")
     sub.add_parser("dashboard", help="how to launch the Streamlit dashboard")
+    recovery = sub.add_parser("shadow_recovery", help="preview a strictly gated, audited shadow-only recovery")
+    recovery.add_argument("--apply", action="store_true")
+    recovery.add_argument("--preview-file")
+    recovery.add_argument("--expected-preview-sha256")
+    recovery.add_argument("--note")
+
     kill = sub.add_parser("kill", help="engage/release the kill switch")
     kill.add_argument("action", choices=["engage", "release"])
     console = sub.add_parser(
@@ -1622,6 +1661,9 @@ def main(argv=None) -> int:
     except SettingsError as exc:
         print(f"CONFIG ERROR: {exc}", file=sys.stderr)
         return 2
+
+    if args.command == "shadow_recovery":
+        return cmd_shadow_recovery(settings, args)
 
     orch = Orchestrator(settings=settings)
     try:

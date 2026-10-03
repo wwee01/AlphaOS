@@ -117,9 +117,10 @@ class ShadowLabelSuspendSwitch:
     exact, current per-tier semantics (this docstring intentionally does not
     re-derive them -- it went stale once already after SUSP-1's own
     confirmation filtering, before the cross-class arm even existed).
-    Clearing it is a deliberate operator action (delete the file, or a
-    future CLI command), never automatic -- an auto-suspend is "force off +
-    page, don't wait to finish the week," not a condition that should
+    Clearing it requires the audited shadow_recovery CLI; raw release is
+    refused. A pending recovery sidecar also keeps it engaged. Release is
+    never automatic: an auto-suspend is "force off + page, don't wait to
+    finish the week," not a condition that should
     silently self-heal the moment the metric recovers for one good tick.
     """
 
@@ -127,24 +128,16 @@ class ShadowLabelSuspendSwitch:
         self.path = path
 
     def is_engaged(self) -> bool:
-        return os.path.exists(self.path)
+        from alphaos import shadow_marker
+        return shadow_marker.is_engaged(self.path)
 
     def engage(self, reason: str = "auto-suspended") -> None:
-        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write(reason)
+        from alphaos import shadow_marker
+        shadow_marker.engage(self.path, reason)
 
     def release(self) -> None:
-        try:
-            os.remove(self.path)
-        except FileNotFoundError:
-            pass
+        raise RuntimeError("shadow release requires preview-first audited shadow_recovery")
 
     def reason(self) -> Optional[str]:
-        if not self.is_engaged():
-            return None
-        try:
-            with open(self.path, "r", encoding="utf-8") as fh:
-                return fh.read().strip() or "engaged"
-        except OSError:  # pragma: no cover
-            return "engaged"
+        from alphaos import shadow_marker
+        return shadow_marker.reason(self.path)
