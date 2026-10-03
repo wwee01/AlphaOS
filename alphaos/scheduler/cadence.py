@@ -278,8 +278,8 @@ def _interval_due(job_type: str, interval_minutes: int, journal, now: Optional[d
 def is_fused(job_type: str, max_consecutive_failures: int, journal) -> tuple[bool, str, int]:
     """Whether ``job_type`` is self-halted after too many consecutive failures.
 
-    Reads the most recent ``max_consecutive_failures`` TERMINAL (status !=
-    'started') ``job_runs`` rows for ``job_type``, most-recent first, and
+    Reads the most recent ``max_consecutive_failures`` failure-relevant terminal (excluding 'started' and
+    cooperative 'yielded') ``job_runs`` rows for ``job_type``, most-recent first, and
     counts a leading streak of 'failed' rows (a 'completed' or 'skipped' row
     anywhere in that window breaks the streak). Fused iff the streak reaches
     the threshold.
@@ -298,7 +298,7 @@ def is_fused(job_type: str, max_consecutive_failures: int, journal) -> tuple[boo
     """
     try:
         rows = journal.query(
-            "SELECT status FROM job_runs WHERE job_type = ? AND status != 'started' "
+            "SELECT status FROM job_runs WHERE job_type = ? AND status NOT IN ('started','yielded') "
             "ORDER BY id DESC LIMIT ?",
             (job_type, max_consecutive_failures),
         )

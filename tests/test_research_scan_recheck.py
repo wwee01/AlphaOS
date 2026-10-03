@@ -25,6 +25,11 @@ def dispatch(tmp_path, monkeypatch):
     clock = SimpleNamespace(now=START)
     monkeypatch.setattr(timeutils, 'now_utc', lambda: clock.now)
     monkeypatch.setattr(alerts, 'send_alert', lambda *a, **k: True)
+    # These are post-return recheck tests for work already admitted. The new
+    # admission/real-writer tests separately prove deferral near a window;
+    # retain all original health/fuse/window/claim assertions here.
+    monkeypatch.setattr("alphaos.scheduler.research_budget.admission",
+                        lambda *a: {"allowed": True})
     journal = JournalStore(str(tmp_path / 'ledger.db'))
     settings = make_settings(ALPHAOS_DB_PATH=journal.db_path,
         SCHEDULER_SCAN_WINDOWS='09:35-09:50,11:30-12:00,15:45-16:00',

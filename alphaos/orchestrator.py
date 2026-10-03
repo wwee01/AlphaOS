@@ -1831,7 +1831,7 @@ class Orchestrator:
 
         return build_ab_eval_report(self.journal, ab_run_id=ab_run_id)
 
-    def outcomes_update(self, limit: int = 500) -> dict:
+    def outcomes_update(self, limit: int = 500, *, should_yield=None) -> dict:
         """Counterfactual outcome tracker (Fable 5 review PR2): seed
         candidate_outcomes rows for candidates/proposals/rejects/armed-watch/
         user-overrides not yet tracked, then resolve pending rows with 1/3/5-day
@@ -1840,6 +1840,10 @@ class Orchestrator:
         makes no order/approval/execution changes."""
         from alphaos.data.providers.alpaca_bars import make_bars_provider
         from alphaos.learning.outcomes_tracker import seed_pending_outcomes, update_pending_outcomes
+
+        if should_yield is not None:
+            from alphaos.learning.cooperative_outcomes import run_cooperative_outcomes
+            return run_cooperative_outcomes(self, limit=limit, should_yield=should_yield)
 
         seeded = seed_pending_outcomes(self.journal, limit=limit)
         provider = make_bars_provider(self.settings, self.journal)

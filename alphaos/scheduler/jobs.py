@@ -210,10 +210,17 @@ def run_outcomes_job(orch, runner) -> dict:
 
     # Persist closed-trade evidence before the slow network replay work. No
     # execution path reads these records, and no outcome history is rewritten.
+    budget = getattr(runner, "outcome_budget", None)
+    if budget is not None and budget():
+        return {"status": "yielded", "research_budget": budget.as_dict(), "outcomes_result": {"not_started": True}}
     learning_result = record_pending_trade_reviews(orch.journal)
-    outcomes_result = orch.outcomes_update(limit=500)
-    return {"status": "completed", "outcomes_result": outcomes_result,
-            "trade_learning_result": learning_result}
+    outcomes_result = (orch.outcomes_update(limit=500, should_yield=budget) if budget is not None
+                       else orch.outcomes_update(limit=500))
+    result = {"status": "yielded" if outcomes_result.get("yielded") else "completed",
+              "outcomes_result": outcomes_result, "trade_learning_result": learning_result}
+    if budget is not None:
+        result["research_budget"] = budget.as_dict()
+    return result
 
 
 def run_daily_digest_job(orch, runner) -> dict:

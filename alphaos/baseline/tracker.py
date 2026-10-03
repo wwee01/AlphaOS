@@ -393,6 +393,7 @@ def _warn_on_orphaned_pending_rows(journal) -> None:
 
 def _resolve_pending_rows_for_arm_set(
     journal, bars_provider, limit: int, rule_versions: tuple, window_days: int,
+    *, should_yield=None, cursor_family=None,
 ) -> dict:
     """One arm-set's worth of ``resolve_pending_baseline_decisions`` --
     factored out (HOLD-2 audit-fixup HIGH-4) so v1 and hold10 each get their
@@ -408,15 +409,26 @@ def _resolve_pending_rows_for_arm_set(
     silently diverge."""
     counts: dict = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
     placeholders = ",".join("?" for _ in rule_versions)
-    rows = journal.query(
-        f"SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
-        f"AND rule_version IN ({placeholders}) ORDER BY id ASC LIMIT ?",
-        (*rule_versions, limit),
-    )
-    counts["total"] = len(rows)
+    if cursor_family is not None:
+        from alphaos.learning.outcomes_tracker import _fair_outcome_rows
+        expected = "baseline_v1_v1" if rule_versions == BASELINE_RULE_VERSIONS else "baseline_hold10_v1"
+        if rule_versions not in (BASELINE_RULE_VERSIONS, BASELINE_RULE_VERSIONS_HOLD10) or cursor_family != expected:
+            raise ValueError("baseline cursor does not match fixed arm")
+        rows = _fair_outcome_rows(journal, cursor_family,
+            f"replay_status = 'pending' AND rule_version IN ({placeholders})", tuple(rule_versions), limit,
+            should_yield=should_yield)
+    else:
+        rows = journal.query(
+            f"SELECT * FROM shadow_baseline_decisions WHERE replay_status = 'pending' "
+            f"AND rule_version IN ({placeholders}) ORDER BY id ASC LIMIT ?",
+            (*rule_versions, limit),
+        )
+        counts["total"] = len(rows)
     now = timeutils.now_utc()
 
     for row in rows:
+        if cursor_family is not None:
+            counts["total"] += 1
         decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
         if decision_at is None:
             counts["skipped"] += 1

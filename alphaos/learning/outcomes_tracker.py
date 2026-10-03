@@ -298,7 +298,7 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
     })
 
 
-def seed_pending_outcomes(journal, limit: int = 500) -> dict:
+def seed_pending_outcomes(journal, limit: int = 500, *, should_yield=None) -> dict:
     """Create missing candidate_outcomes rows. Returns counts by type + total.
     NEVER writes to candidates/proposals/rejects/overrides — read-only there."""
     counts = {t: 0 for t in (*_ALPHAOS_SIDE_TYPES, "user_override")}
@@ -309,6 +309,10 @@ def seed_pending_outcomes(journal, limit: int = 500) -> dict:
         "  AND co.candidate_type IN ('proposal','blocked','armed_watch','reject','candidate')"
         ") ORDER BY c.id ASC LIMIT ?", (limit,))
     for cand in candidates:
+        if should_yield is not None and should_yield():
+            counts["total"] = sum(counts.values())
+            counts["yielded"] = True
+            return counts
         info = _classify_candidate(journal, cand)
         _insert_outcome_row(
             journal, candidate_id=cand["candidate_id"], symbol=cand.get("symbol"),
@@ -322,6 +326,10 @@ def seed_pending_outcomes(journal, limit: int = 500) -> dict:
         "  AND co.candidate_type = 'user_override'"
         ") ORDER BY o.id ASC LIMIT ?", (limit,))
     for ov in overrides:
+        if should_yield is not None and should_yield():
+            counts["total"] = sum(counts.values())
+            counts["yielded"] = True
+            return counts
         info = _source_from_override(journal, ov)
         cand = journal.candidate_by_id(ov["candidate_id"])
         _insert_outcome_row(
@@ -550,11 +558,18 @@ def _claim_outcome(journal, family: str, predicate: str, params: tuple, cycle: O
     another caller has already started a newer cycle. This is scheduling state,
     not a worker lease; the scheduled research worker owns its process lock.
     """
+    # Table names are selected by exact internal family identities, never caller SQL.
+    if family in (_FORWARD_FAMILY, _HOLD10_FAMILY):
+        table = "candidate_outcomes"
+    elif family in ("baseline_v1_v1", "baseline_hold10_v1"):
+        table = "shadow_baseline_decisions"
+    else:
+        raise ValueError("unknown table-bound outcome cursor family")
     journal.conn.execute("BEGIN IMMEDIATE")
     try:
         state = journal.one("SELECT * FROM outcome_processing_cursors WHERE family=?", (family,))
         if state is None or (cycle is None and state["last_row_id"] >= state["cycle_max_id"]):
-            maximum = journal.scalar("SELECT COALESCE(MAX(id), 0) FROM candidate_outcomes")
+            maximum = journal.scalar(f"SELECT COALESCE(MAX(id), 0) FROM {table}")
             number = state["cycle_number"] + 1 if state else 1
             journal.conn.execute(
                 "INSERT INTO outcome_processing_cursors "
@@ -569,7 +584,7 @@ def _claim_outcome(journal, family: str, predicate: str, params: tuple, cycle: O
             journal.conn.commit()
             return None, cycle
         row = journal.one(
-            f"SELECT * FROM candidate_outcomes WHERE ({predicate}) "
+            f"SELECT * FROM {table} WHERE ({predicate}) "
             "AND id > ? AND id <= ? ORDER BY id ASC LIMIT 1",
             (*params, state["last_row_id"], state["cycle_max_id"]),
         )
@@ -590,10 +605,12 @@ def _claim_outcome(journal, family: str, predicate: str, params: tuple, cycle: O
         raise
 
 
-def _fair_outcome_rows(journal, family: str, predicate: str, params: tuple, limit: int):
+def _fair_outcome_rows(journal, family: str, predicate: str, params: tuple, limit: int, *, should_yield=None):
     """At most limit claims and one cycle per call; retries are due next cycle."""
     cycle = None
     for _ in range(limit):
+        if should_yield is not None and should_yield():
+            break
         row, cycle = _claim_outcome(journal, family, predicate, params, cycle)
         if row is None:
             break
@@ -642,7 +659,7 @@ def _fetch_outcome_bars(bars_provider, row: dict, start: str, end: str, counts: 
         return None
 
 
-def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> dict:
+def update_pending_outcomes(journal, bars_provider=None, limit: int = 200, *, should_yield=None) -> dict:
     """Run each bounded family once, with durable alternating first turns.
 
     New HOLD1 eligibility created while forward runs first is processed in the
@@ -655,6 +672,8 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     if bars_provider is None or limit == 0:
         return _update_forward_replay_family(journal, bars_provider, limit)
 
+    if should_yield is not None:
+        return _cooperative_candidate_families(journal, bars_provider, limit, should_yield)
     first, revision = _advance_dispatch_turn(journal)
     second = _HOLD10_FAMILY if first == _FORWARD_FAMILY else _FORWARD_FAMILY
     results = {}
@@ -673,7 +692,7 @@ def update_pending_outcomes(journal, bars_provider=None, limit: int = 200) -> di
     return counts
 
 
-def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200) -> dict:
+def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200, *, should_yield=None) -> dict:
     """Resolve pending/partial candidate_outcomes rows with forward 1/3/5-day
     returns + bracket replay. A complete five-day family may still have an
     explicitly pending bracket replay; continue that replay alone, including
@@ -701,8 +720,9 @@ def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200)
         return counts
 
     now = timeutils.now_utc()
+    options = {"should_yield": should_yield} if should_yield is not None else {}
     for row in _fair_outcome_rows(journal, _FORWARD_FAMILY, _FORWARD_ELIGIBILITY,
-                                  _FORWARD_PARAMS, limit):
+                                  _FORWARD_PARAMS, limit, **options):
         counts["total"] += 1
         with _calculation_boundary(row, counts):
             row = _repair_missing_decision_at_utc(journal, [row])[0]
@@ -832,7 +852,7 @@ def _update_forward_replay_family(journal, bars_provider=None, limit: int = 200)
     return counts
 
 
-def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
+def _update_hold1_10d_family(journal, bars_provider, limit: int = 200, *, should_yield=None) -> dict:
     """HOLD-1 continuation pass: resolve the additive 10-trading-day shadow
     horizon for rows whose 5d family has already gone ``outcome_status =
     'complete'`` but whose 10d family (``outcome_status_10d``) has not.
@@ -855,8 +875,9 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
 
     counts = {"updated": 0, "completed": 0, "skipped": 0}
     now = timeutils.now_utc()
+    options = {"should_yield": should_yield} if should_yield is not None else {}
     for row in _fair_outcome_rows(journal, _HOLD10_FAMILY, _HOLD10_ELIGIBILITY,
-                                  (_STATUS_COMPLETE,), limit):
+                                  (_STATUS_COMPLETE,), limit, **options):
         with _calculation_boundary(row, counts):
             decision_at = timeutils.parse_iso(row.get("decision_at_utc"))
             if decision_at is None:   # pragma: no cover -- defensive only; a row
@@ -885,4 +906,30 @@ def _update_hold1_10d_family(journal, bars_provider, limit: int = 200) -> dict:
             if resolved_10d:
                 counts["completed"] += 1
 
+    return counts
+
+
+def _cooperative_candidate_families(journal, bars_provider, limit, should_yield):
+    empty = {"total": 0, "updated": 0, "completed": 0, "skipped": 0, "unavailable": 0}
+    results = {}
+    if should_yield():
+        return {**empty, "yielded": True, "families_not_started": [_FORWARD_FAMILY, _HOLD10_FAMILY]}
+    first, revision = _advance_dispatch_turn(journal)
+    second = _HOLD10_FAMILY if first == _FORWARD_FAMILY else _FORWARD_FAMILY
+    for index, family in enumerate((first, second)):
+        if index:
+            if should_yield():
+                break
+            _, revision = _advance_dispatch_turn(journal, family, revision)
+        func = _update_forward_replay_family if family == _FORWARD_FAMILY else _update_hold1_10d_family
+        results[family] = func(journal, bars_provider, limit, should_yield=should_yield)
+        if should_yield():
+            break
+    yielded = should_yield()
+    if not yielded:
+        _advance_dispatch_turn(journal, first, revision)
+    counts = {**results.get(_FORWARD_FAMILY, empty)}
+    counts["hold1_10d"] = results.get(_HOLD10_FAMILY, {"not_started": True})
+    counts["yielded"] = yielded
+    counts["families_not_started"] = [family for family in (first, second) if family not in results]
     return counts

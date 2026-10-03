@@ -54,6 +54,7 @@ class JobRunner:
         self.orch = orch
         self.journal = orch.journal
         self.role = role
+        self.outcome_budget = None
 
     def _role_jobs(self) -> list[str]:
         return [job for job in _JOB_FUNCS if (self.role == "all" or
@@ -374,7 +375,16 @@ class JobRunner:
                 return {"job_type": job_type, "status": "not_due",
                         "reason": "scan_window_already_attempted_this_pass", "lock_key": lock_key}, False
             scan_attempts.add(lock_key)
-        return self.run_job(job_type, lock_key=lock_key, allow_monitor_recovery=False), True
+        if self.role == "research" and job_type not in (cadence.JobType.SCAN, cadence.JobType.MONITOR):
+            from alphaos.scheduler.research_budget import admission, ScanWindowBudget
+            reserved = admission(self.journal, self.orch.settings, job_type)
+            if not reserved["allowed"]:
+                return {"job_type": job_type, "status": "deferred", **reserved}, False
+            self.outcome_budget = ScanWindowBudget(self.journal, self.orch.settings) if job_type == cadence.JobType.OUTCOMES_UPDATE else None
+        try:
+            return self.run_job(job_type, lock_key=lock_key, allow_monitor_recovery=False), True
+        finally:
+            self.outcome_budget = None
 
     def _handle_fuse(self, job_type: str, reason: str, streak: int) -> None:
         """Log + alert ONCE per fused state, not per tick (a fused job type
