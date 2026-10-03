@@ -130,7 +130,7 @@ def test_annunciator_returns_expected_fields(tmp_path):
     journal.close()
 
 
-def test_tonight_matches_build_daily_brief_field_for_field(tmp_path):
+def test_tonight_matches_build_daily_brief_field_for_field(tmp_path, monkeypatch):
     """'Expected' is computed on a SEPARATE read-only handle to the same DB
     file, not the write-capable seed handle -- apples-to-apples with what
     the API itself does internally. 'expected' also passes the same
@@ -141,6 +141,12 @@ def test_tonight_matches_build_daily_brief_field_for_field(tmp_path):
     read-only journal -- see build_daily_brief()'s own `market` parameter
     docstring in alphaos/reports/daily_brief.py for the prior mock-mode
     write-attempt mechanism this replaced)."""
+    from alphaos.util import timeutils
+
+    # Both complete payloads include read-time observations. Seed and compare
+    # them at one captured aware instant; retain every existing field assertion.
+    observed_at = timeutils.now_utc()
+    monkeypatch.setattr(timeutils, "now_utc", lambda: observed_at)
     settings, journal, _ = _seed(tmp_path)
     r = _client(settings).get("/api/v1/tonight", headers=HEADERS)
     assert r.status_code == 200
