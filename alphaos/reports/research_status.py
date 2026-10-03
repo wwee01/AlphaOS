@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
+from alphaos.canary.recovery_evidence import validate_canary_recovery
 from alphaos.safety import KillSwitch, ShadowLabelSuspendSwitch
 from alphaos.stats.fdr import compute_verdicts
 from alphaos.util import timeutils
@@ -120,10 +121,7 @@ def build_collection_status(journal, settings, suspend_switch=None, kill_switch=
         "SELECT status, started_at_utc, finished_at_utc FROM job_runs "
         "WHERE job_type = 'shadow_label' ORDER BY id DESC LIMIT 1"
     )
-    latest_canary = journal.one(
-        "SELECT run_id, started_at_utc, finished_at_utc, drift_tier, n_prompts, n_parse_or_failsafe, total_tokens "
-        "FROM canary_runs WHERE is_mock = 0 AND confirmation_of IS NULL ORDER BY id DESC LIMIT 1"
-    )
+    latest_canary = None
     checks = {}
     try:
         triggered, reason = shadow_label.check_auto_suspend(journal, settings)
@@ -131,14 +129,14 @@ def build_collection_status(journal, settings, suspend_switch=None, kill_switch=
         # Worst-case configured window, not an invented spending allowance.
         planned = settings.shadow_label_top_k + max(1, round(settings.shadow_explore_fraction * settings.shadow_label_top_k))
         budget_ok, budget_reason = shadow_label.check_shadow_budget(settings, journal, planned)
-        from alphaos.scheduler.jobs import PREFLIGHT_CANARY_STALENESS_DAYS
-
-        canary_age = timeutils.age_seconds(latest_canary.get("started_at_utc")) if latest_canary else None
-        canary_ok = bool(latest_canary and latest_canary.get("finished_at_utc") and
-                         latest_canary.get("n_prompts", 0) > 0 and
-                         latest_canary.get("total_tokens", 0) and
-                         latest_canary.get("n_parse_or_failsafe") == 0 and
-                         canary_age is not None and 0 <= canary_age < PREFLIGHT_CANARY_STALENESS_DAYS * 86400)
+        canary_evidence = validate_canary_recovery(journal, settings)
+        if canary_evidence.get("run_id"):
+            latest_canary = journal.one(
+                "SELECT run_id, started_at_utc, finished_at_utc, drift_tier, n_prompts, "
+                "n_parse_or_failsafe, total_tokens FROM canary_runs WHERE run_id = ?",
+                (canary_evidence["run_id"],),
+            )
+        canary_age = canary_evidence.get("age_seconds")
         checks = {
             "auto_suspend_triggered": triggered, "auto_suspend_reason": reason,
             "coverage_ok": coverage_ok, "coverage_reason": coverage_reason,
@@ -146,7 +144,8 @@ def build_collection_status(journal, settings, suspend_switch=None, kill_switch=
             "shadow_calls_30d": shadow_label.shadow_calls_in_last_30_days(journal),
             "shadow_calls_today": shadow_label.shadow_calls_today(journal),
             "shared_calls_30d": cost_guard.calls_in_last_30_days(journal),
-            "latest_canary_recent_and_complete": canary_ok,
+            "latest_canary_recent_and_complete": canary_evidence["ok"],
+            "canary_recovery_evidence": canary_evidence,
             "canary_age_days": canary_age / 86400 if canary_age is not None else None,
         }
     except Exception:

@@ -62,7 +62,7 @@ def _collection_fixture(tmp_path):
     return journal, settings, ShadowLabelSuspendSwitch(str(tmp_path / "suspend")), KillSwitch(str(tmp_path / "kill"))
 
 
-def test_clear_current_conditions_never_hide_or_clear_persistent_latch(tmp_path):
+def test_incomplete_canary_never_counts_as_recovery_or_clears_persistent_latch(tmp_path):
     journal, settings, suspend, kill = _collection_fixture(tmp_path)
     suspend.engage("historical drift needs acknowledgment")
     before = journal.conn.total_changes
@@ -72,7 +72,8 @@ def test_clear_current_conditions_never_hide_or_clear_persistent_latch(tmp_path)
     assert shadow["successful_labels"] == 0
     assert shadow["last_successful_label_at_utc"] is None
     assert not shadow["current_checks"]["auto_suspend_triggered"]
-    assert shadow["current_checks"]["latest_canary_recent_and_complete"]
+    assert not shadow["current_checks"]["latest_canary_recent_and_complete"]
+    assert shadow["current_checks"]["canary_recovery_evidence"]["reasons"]
     assert shadow["current_checks"]["coverage_ok"]
     assert shadow["current_checks"]["budget_ok"]
     assert suspend.is_engaged()
@@ -81,7 +82,26 @@ def test_clear_current_conditions_never_hide_or_clear_persistent_latch(tmp_path)
     journal.close()
 
 
-def test_only_real_passed_labels_count_and_stale_evidence_is_visible(tmp_path):
+
+def test_verified_canary_is_reported_without_clearing_latch(tmp_path, monkeypatch):
+    proof = {"ok": True, "age_seconds": 86400, "reasons": [], "evidence_sha256": "proof"}
+    monkeypatch.setattr("alphaos.reports.research_status.validate_canary_recovery", lambda *args: proof)
+    journal, settings, suspend, kill = _collection_fixture(tmp_path)
+    suspend.engage("operator review required")
+    before = journal.conn.total_changes
+    report = build_collection_status(journal, settings, suspend, kill)["shadow"]
+    assert report["state"] == "suspended"
+    assert report["current_checks"]["canary_recovery_evidence"] == proof
+    assert report["current_checks"]["latest_canary_recent_and_complete"] is True
+    assert report["current_checks"]["canary_age_days"] == 1
+    assert journal.conn.total_changes == before
+    assert suspend.is_engaged()
+    journal.close()
+
+def test_only_real_passed_labels_count_and_stale_evidence_is_visible(tmp_path, monkeypatch):
+    # Isolate collection-age reporting from the separately tested canary proof.
+    monkeypatch.setattr("alphaos.reports.research_status.validate_canary_recovery",
+                        lambda *args: {"ok": True, "age_seconds": 0, "reasons": []})
     journal, settings, suspend, kill = _collection_fixture(tmp_path)
     old = timeutils.to_iso(timeutils.now_utc() - timedelta(days=10))
     for label_id, mock, validation, when in [("real", 0, "passed", old),
