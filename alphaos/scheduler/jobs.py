@@ -256,9 +256,20 @@ def run_benchmark_spine_job(orch, runner) -> dict:
     gate/eval/labeller/risk/execution path (same rationale as
     run_outcomes_job)."""
     from alphaos.reports.benchmark_capture import capture_benchmark_spine
+    from alphaos.reports.operational_economics import capture_operational_economics
+    from alphaos.scheduler.research_budget import ScanWindowBudget
 
+    budget = ScanWindowBudget(orch.journal, orch.settings) if getattr(runner, "role", "all") == "research" else None
     result = capture_benchmark_spine(orch.journal, orch.settings)
-    return {"status": "completed", "benchmark_spine_result": result}
+    try:
+        operational = capture_operational_economics(orch.journal, orch.settings, should_yield=budget)
+    except Exception as exc:
+        # Existing capture remains available; never expose credential-bearing source errors.
+        operational = {"status": "unavailable", "reason": "operational_capture_failed", "error_type": type(exc).__name__, "written": 0}
+    result["operational_economics"] = operational
+    return {"status": "yielded" if operational["status"] == "yielded" else "completed",
+            "benchmark_spine_result": result,
+            "research_budget": budget.as_dict() if budget else None}
 
 
 def run_atr_update_job(orch, runner) -> dict:

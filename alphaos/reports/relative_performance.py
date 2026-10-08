@@ -288,6 +288,8 @@ def build_relative_performance_report(journal, settings, limit: int = 3650) -> d
             rep["common_valuation"]["comparison_eligible"] = False
         except (TypeError, ValueError, AttributeError, OverflowError):
             rep["common_valuation"] = {"status": "evidence_unreadable", "comparison_eligible": False}
+    from alphaos.reports.operational_economics import build_operational_economics_report
+    rep["operational_economics"] = build_operational_economics_report(journal, settings)
     return rep
 
 
@@ -322,6 +324,24 @@ def render_markdown(rep: dict) -> str:
                      "economic activity completeness is unverified, so this does not enable performance comparisons.")
     elif common.get("status") == "blocked":
         lines.append("- Common valuation capture blocked: " + "; ".join(common.get("blockers") or ["evidence incomplete"]))
+    operational = rep.get("operational_economics", {})
+    if operational:
+        lines.append(f"- Operational cash-basis observation: **{operational.get('status')}**; recorded {operational.get('recorded_at_utc', 'not yet')}.")
+        if operational.get("blockers"):
+            lines.append("  Evidence limitations: " + "; ".join(operational["blockers"]) + ".")
+        if operational.get("activity_coverage_start_utc"):
+            lines.append(f"  Activity coverage begins {operational['activity_coverage_start_utc']}; retained history grows within the unchanged request/page caps. History rollover is not implemented.")
+        economic = operational.get("economic", {})
+        if economic.get("status") == "reconciled_asof":
+            lines.append(f"  Common interval: {economic['start_at_utc']} through {economic['end_at_utc']}; account marked gain **${float(economic['account_gain_usd']):,.2f}** including open holdings and reported cash activity.")
+            if economic.get("comparison_eligible"):
+                lines.append(f"  Same opening NAV in hypothetical SPY: **${float(economic['benchmark_gain_usd']):,.2f}**; account minus SPY **${float(economic['excess_gain_usd']):,.2f}**. As-of cash-basis diagnostic, not verified total return.")
+            else:
+                lines.append("  Percentage/excess comparison unavailable: matching subperiod valuations are missing.")
+        if operational.get("subscription_allocation_usd"):
+            allocation = operational["subscription_allocation_usd"]["display"]
+            lines.append(f"  Known subscription convention: $150 × 12 / 52 per week; **${float(allocation):,.2f}** allocated to this interval, not a verified cash deduction.")
+        lines.append("  Other operating expenses/shared allocation remain unknown. All-in profit and the original weekly target verdict are unavailable; no research activation.")
     lines.append(
         f"- Rolling beta: **{rep['rolling_beta']}**" if rep["rolling_beta"] is not None
         else f"- Rolling beta: _{rep['rolling_beta_note']}_"
