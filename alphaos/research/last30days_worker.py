@@ -266,6 +266,7 @@ def main():
     supervisor.install()
     telemetry.emit("worker_start")
     policy = None
+    reddit_deadline = None
     policy_requested = os.environ.pop("ALPHAOS_L30_SOURCE_POLICY", "")
     try:
         if policy_requested:
@@ -276,12 +277,23 @@ def main():
             if policy_requested != POLICY_VERSION:
                 raise RuntimeError("last30days source policy version unsupported")
             verify_supported(script)  # before upstream imports or discovery
+            from last30days_reddit_deadline import (  # type: ignore[import-not-found]
+                RedditDeadline, install as install_reddit_deadline,
+                verify_supported as verify_reddit_deadline,
+            )
+            verify_reddit_deadline(script)
+            reddit_deadline = RedditDeadline(
+                float(os.environ["ALPHAOS_L30_START_MONOTONIC"]),
+                float(os.environ["ALPHAOS_L30_DEADLINE"]), telemetry.emit,
+                supervisor.stopping.set,
+            )
             policy = SourcePolicy(requested_from_argv(sys.argv[2:]), telemetry.emit)
             sys.path.insert(0, os.path.dirname(script))
             pipeline = importlib.import_module("lib.pipeline")
             planner = importlib.import_module("lib.planner")
             verify_imports(script, pipeline, planner)
             policy.install(pipeline, planner)
+            install_reddit_deadline(script, pipeline, reddit_deadline)
             if os.environ.get("ALPHAOS_L30_PARTIAL_FD"):
                 partial = PartialCapture(
                     int(os.environ.pop("ALPHAOS_L30_PARTIAL_FD")),
@@ -312,6 +324,8 @@ def main():
         sys.argv = [script, *sys.argv[2:]]
         runpy.run_path(script, run_name="__main__")
     finally:
+        if reddit_deadline is not None:
+            reddit_deadline.finish()
         if policy_requested:
             if policy is None:
                 telemetry.emit("source_policy", version=policy_requested, status="unsupported")

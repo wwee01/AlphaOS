@@ -90,6 +90,8 @@ def run(*,requested_sources,topic):
             + "\n"
         )
     monkeypatch.setattr(module, "_WORKER", str(worker_dir / "last30days_worker.py"))
+    from test_last30days_reddit_deadline import pin_reddit_fixture
+    pin_reddit_fixture(worker_dir, scripts, monkeypatch)
     settings = replace(
         make_settings(
             LAST30DAYS_ENABLED="true",
@@ -143,7 +145,8 @@ def test_default_timeout_journals_item_evidence_without_changing_packet(
     assert diag["source_policy"]["dispatch_counts"] == {"hackernews": 1, "reddit": 1}
     assert not partial["research_complete"] and not partial["model_context_eligible"]
     assert diag["adapter_contract"] == "structural_partial_owned_groups_v1"
-    assert len(diag["adapter_file_sha256"]) == 5
+    assert len(diag["adapter_file_sha256"]) == 6
+    assert "last30days_reddit_deadline.py" in diag["adapter_file_sha256"]
     assert diag["cleanup_elapsed_seconds"] >= 0
     assert "SECRET" not in json.dumps(finish) and "PRIVATE" not in json.dumps(finish)
 

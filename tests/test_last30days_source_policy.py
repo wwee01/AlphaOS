@@ -260,6 +260,12 @@ def test_default_result_sources_must_match_verified_request(monkeypatch, source)
                "status": "completed", "requested": ["reddit"], "dispatch_counts": {"reddit": 1},
                "completed_runs": 1, "violations": 0}
         os.write(kwargs["pass_fds"][0], (json.dumps(row) + "\n").encode())
+        for receipt in (
+            {"status": "installed", "module_sha256": provider_module.REDDIT_FILES},
+            {"status": "completed", "completed_runs": 1},
+        ):
+            os.write(kwargs["pass_fds"][0], (json.dumps({"event": "reddit_deadline",
+                "version": provider_module.REDDIT_DEADLINE_VERSION, **receipt}) + "\n").encode())
         result = {"clusters": [{"title": "theme", "sources": [source], "score": 2, "candidate_ids": ["a"]}]}
         return SimpleNamespace(returncode=0, communicate=lambda timeout: (json.dumps(result), ""))
     monkeypatch.setattr(provider_module.subprocess, "Popen", fake_process)

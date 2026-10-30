@@ -38,6 +38,10 @@ from alphaos.constants import MOCK_L30D_SOURCE, Last30DaysProvider, SentimentLab
 from alphaos.research.last30days_worker import SOURCES, STAGES, stop_owned_child
 from alphaos.research.last30days_source_policy import POLICY_ENV, POLICY_VERSION, requested_from_argv
 from alphaos.research.last30days_partial import ENV_KEYS, read_partial
+from alphaos.research.last30days_reddit_deadline import (
+    ACTIONS as REDDIT_ACTIONS, OUTCOMES as REDDIT_OUTCOMES, PHASES as REDDIT_PHASES,
+    REASONS as REDDIT_REASONS, SUPPORTED_FILES as REDDIT_FILES, VERSION as REDDIT_DEADLINE_VERSION,
+)
 from alphaos.util import timeutils
 
 # Keyless-only source pool used by the deterministic mock.
@@ -63,9 +67,27 @@ def _read_telemetry(stream) -> dict:
             diagnostic["malformed"] = True
             continue
         kind = event.get("event")
-        if not isinstance(kind, str) or kind not in {"worker_start", "worker_end", "hooks", "cleanup", "stage_start", "stage_end", "source_policy"}:
+        if not isinstance(kind, str) or kind not in {"worker_start", "worker_end", "hooks", "cleanup", "stage_start", "stage_end", "source_policy", "reddit_deadline"}:
             continue
         row = {"event": kind}
+        if kind == "reddit_deadline":
+            row["version"] = REDDIT_DEADLINE_VERSION if event.get("version") == REDDIT_DEADLINE_VERSION else "unknown"
+            for key, allowed in (("action", REDDIT_ACTIONS), ("phase", REDDIT_PHASES),
+                                 ("reason", REDDIT_REASONS), ("outcome", REDDIT_OUTCOMES),
+                                 ("status", {"installed", "completed", "refused", "incomplete", "unsupported"})):
+                if isinstance(event.get(key), str) and event[key] in allowed:
+                    row[key] = event[key]
+            for key in ("remaining_seconds", "wait_seconds", "timeout_seconds"):
+                if type(event.get(key)) in (int, float) and math.isfinite(event[key]) and 0 <= event[key] <= 1e9:
+                    row[key] = event[key]
+            if type(event.get("http_status")) is int and 100 <= event["http_status"] <= 599:
+                row["http_status"] = event["http_status"]
+            if type(event.get("omitted_events")) is int and event["omitted_events"] >= 0:
+                row["omitted_events"] = min(event["omitted_events"], 1000000)
+            if type(event.get("completed_runs")) is int and 0 <= event["completed_runs"] <= 10000:
+                row["completed_runs"] = event["completed_runs"]
+            if event.get("module_sha256") == REDDIT_FILES:
+                row["module_sha256"] = dict(REDDIT_FILES)
         for key in ("at_seconds", "elapsed_seconds", "item_count"):
             value = event.get(key)
             if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1e9:
@@ -128,6 +150,18 @@ def _read_telemetry(stream) -> dict:
         "pre_reap_groups_signalled": sum(e["counts"].get("owned_group_signalled_before_reap", 0) for e in cleanups),
         "pre_reap_groups_absent": sum(e["counts"].get("owned_group_absent_before_reap", 0) for e in cleanups),
         "independently_detached_descendants_verified": False,
+    }
+    reddit = [e for e in diagnostic["events"] if e["event"] == "reddit_deadline"]
+    installed = any(e.get("version") == REDDIT_DEADLINE_VERSION and e.get("status") == "installed"
+                    and e.get("module_sha256") == REDDIT_FILES for e in reddit)
+    refused = any(e.get("action") == "refused" or e.get("status") == "refused" for e in reddit)
+    diagnostic["reddit_deadline"] = {
+        "version": REDDIT_DEADLINE_VERSION,
+        "status": "refused" if refused else (
+            "completed" if installed and any(e.get("version") == REDDIT_DEADLINE_VERSION
+                and e.get("status") == "completed" and e.get("completed_runs") == 1 for e in reddit)
+            else "installed" if installed else "unverified"),
+        "module_sha256": dict(REDDIT_FILES) if installed else {},
     }
     return diagnostic
 
@@ -244,7 +278,8 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
         diagnostic["adapter_file_sha256"] = {
             name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
             for name in ("last30days_provider.py", "last30days_worker.py",
-                         "last30days_wait.py", "last30days_partial.py", "last30days_source_policy.py")
+                         "last30days_wait.py", "last30days_partial.py", "last30days_source_policy.py",
+                         "last30days_reddit_deadline.py")
         }
         if instrumented:
             try:
@@ -305,6 +340,9 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                                else "registered cleanup requested; full descendant cleanup not guaranteed")
                     raise TimeoutError(f"last30days timed out after {timeout:g}s; {cleanup}") from None
                 if proc.returncode != 0:
+                    if strict_sources and _read_telemetry(telemetry)["reddit_deadline"]["status"] == "refused":
+                        diagnostic["outcome"] = "deadline_refused"
+                        raise TimeoutError("last30days Reddit could not complete within the original attempt deadline")
                     diagnostic["outcome"] = "nonzero_exit"
                     raise RuntimeError(f"last30days exited {proc.returncode}; provider output omitted")
                 if strict_sources:
@@ -319,6 +357,9 @@ class CliLast30DaysProvider(Last30DaysResearchProvider):  # pragma: no cover - l
                             or not set(policy.get("dispatch_counts", {})) <= set(requested)):
                         diagnostic["outcome"] = "source_policy_unverified"
                         raise RuntimeError("last30days explicit source policy not verified; result unavailable")
+                    if receipt["reddit_deadline"]["status"] != "completed":
+                        diagnostic["outcome"] = "reddit_deadline_unverified"
+                        raise RuntimeError("last30days Reddit deadline not verified; result unavailable")
                 data = json.loads(stdout)
                 try:
                     result = self._parse(data, symbol, query)

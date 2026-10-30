@@ -168,6 +168,12 @@ def test_cli_builds_python312_command(monkeypatch):
                    "status": "completed", "violations": 0, "completed_runs": 1,
                    "requested": sorted(s.last30days_sources.split(",")), "dispatch_counts": {}}
         os.write(k["pass_fds"][0], (json.dumps(receipt) + "\n").encode())
+        for row in (
+            {"status": "installed", "module_sha256": l30p.REDDIT_FILES},
+            {"status": "completed", "completed_runs": 1},
+        ):
+            os.write(k["pass_fds"][0], (json.dumps({"event": "reddit_deadline",
+                "version": l30p.REDDIT_DEADLINE_VERSION, **row}) + "\n").encode())
         captured["kwargs"] = k
         return result
 
