@@ -144,7 +144,10 @@ class ScanSummary:
 
 
 class Orchestrator:
-    def __init__(self, settings: Optional[Settings] = None, journal: Optional[JournalStore] = None):
+    def __init__(self, settings: Optional[Settings] = None, journal: Optional[JournalStore] = None,
+                 *, runtime_identity_sink=None):
+        self.runtime_identity_sink = runtime_identity_sink
+        self.runtime_identity_failures = 0
         self.settings = settings or load_settings()
         self.journal = journal or JournalStore(self.settings.db_path, self.settings.jsonl_mirror)
 
@@ -495,6 +498,11 @@ class Orchestrator:
             # v1 NO-NEWS mode for the EVAL: it never sees catalyst context.
             self._update_candidate_news(cand["candidate_id"], NEWS_STATUS_DISABLED_V1)
 
+            runtime_token = None
+            if self.runtime_identity_sink is not None:
+                from alphaos.research import runtime_identity
+                runtime_token = runtime_identity.begin(self, cand, scan_batch_id, skipped=ai_degraded)
+
             if ai_degraded:
                 # EXP-1 mechanism 13 degrade law: the candidate row + snapshot
                 # above are already durably captured (deterministic, zero AI
@@ -550,6 +558,10 @@ class Orchestrator:
             decision = evaluation.decision
             if classification is not None:
                 decision = self._resolve_decision(cand, evaluation, classification, scan_batch_id, summary)
+
+            if self.runtime_identity_sink is not None:
+                runtime_identity.finish(self, runtime_token, cand, scan_batch_id,
+                                        evaluation, classification, decision)
 
             # BASELINE: the deterministic shadow baseline (the "does the AI
             # add R?" instrument) -- written strictly AFTER the live decision
