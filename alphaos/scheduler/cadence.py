@@ -114,7 +114,8 @@ def default_lock_key(job_type: str, settings, now: Optional[datetime] = None) ->
 
     - scan: "scan:<market-date>T<window-start>" (the window START, not now).
     - monitor / outcomes_update: "<job_type>:<market-date>T<now rounded down to
-      the interval>".
+      the interval>", with ":fold1" on the second occurrence of a repeated
+      Eastern hour. Normal dates and the first occurrence retain their keys.
     - daily_digest: "daily_digest:<sgt-date>" (date only, SGT calendar day).
     """
     market_dt_et = market_now_et(now)
@@ -161,7 +162,13 @@ def _rounded_down_key(dt_et: datetime, interval_minutes: int) -> str:
     total_minutes = dt_et.hour * 60 + dt_et.minute
     rounded = (total_minutes // interval_minutes) * interval_minutes
     hh, mm = divmod(rounded, 60)
-    return f"{dt_et.date().isoformat()}T{hh:02d}:{mm:02d}"
+    key = f"{dt_et.date().isoformat()}T{hh:02d}:{mm:02d}"
+    # market_now_et's ISO parse produces a fixed-offset datetime (fold=0).
+    # Recover the market-zone fold from the instant, not that parsed flag.
+    # Preserve legacy keys outside the repeated hour; never replay old jobs.
+    if dt_et.utcoffset() is not None and timeutils.to_et(dt_et).fold:
+        key += ":fold1"
+    return key
 
 
 def is_due(job_type: str, settings, journal, now: Optional[datetime] = None) -> tuple[bool, str]:
