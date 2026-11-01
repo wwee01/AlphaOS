@@ -127,6 +127,21 @@ def run_scan_job(orch, runner) -> dict:
             "cost_cap_exceeded": False,
         }
 
+    # No collector imports, file access or runtime sink when not configured.
+    # The optional disposition never changes the scan's own success/failure.
+    if ("ALPHAOS_HOLD10_COLLECTOR_CONFIG" in os.environ
+            or "ALPHAOS_HOLD10_COLLECTOR_CONFIG_SHA256" in os.environ):
+        from alphaos.research.hold10_production_collector import scan_collection
+
+        with scan_collection(orch) as collection:
+            result = _run_unblocked_scan_job(orch, runner)
+        return {**result, "prospective_collection": collection}
+    return _run_unblocked_scan_job(orch, runner)
+
+
+def _run_unblocked_scan_job(orch, runner) -> dict:
+    """Existing scan logic, called only after the unchanged kill-switch check."""
+
     within_budget, detail = cost_guard.check_scan_budget(orch.settings, orch.journal)
     if not within_budget:
         scan_summary = orch.run_scan_once(trigger_source=TriggerSource.SCHEDULER.value, ai_degraded=True)

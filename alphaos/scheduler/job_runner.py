@@ -174,6 +174,14 @@ class JobRunner:
             return {"job_type": job_type, "status": "skipped", "reason": "duplicate_lock", "lock_key": lock_key}
 
         job_func = _JOB_FUNCS[job_type]
+        # New completion metadata only: an old returned batch must never be
+        # attributed to this job, even if its identifiers otherwise agree.
+        scan_highwater = None
+        if job_type == cadence.JobType.SCAN:
+            try:
+                scan_highwater = self.journal.scalar("SELECT coalesce(max(rowid),0) FROM scan_batches")
+            except sqlite3.Error:
+                pass  # Optional linkage never changes the scan's disposition.
         started = time.monotonic()
         try:
             result = job_func(self.orch, self)
@@ -203,24 +211,68 @@ class JobRunner:
         duration_ms = int((time.monotonic() - started) * 1000)
         done = timeutils.stamp()
         # id-keyed -- see the failure-path UPDATE's comment above, same reason.
-        self.journal.conn.execute(
-            "UPDATE job_runs SET status = ?, kill_switch_engaged = ?, protection_blocking = ?, "
+        values = (result.get("status"), result.get("kill_switch_engaged"),
+            result.get("protection_blocking"), result.get("cost_cap_exceeded"),
+            json.dumps(result, default=str), done.utc, done.local_sgt, duration_ms)
+        terminal = ("UPDATE job_runs SET status = ?, kill_switch_engaged = ?, protection_blocking = ?, "
             "cost_cap_exceeded = ?, result_summary_json = ?, finished_at_utc = ?, finished_at_sgt = ?, "
-            "duration_ms = ? WHERE id = ?",
-            (
-                result.get("status"),
-                result.get("kill_switch_engaged"),
-                result.get("protection_blocking"),
-                result.get("cost_cap_exceeded"),
-                json.dumps(result, default=str),
-                done.utc,
-                done.local_sgt,
-                duration_ms,
-                job_run_id,
-            ),
-        )
-        self.journal.conn.commit()
+            "duration_ms = ?")
+        if job_type == cadence.JobType.SCAN:
+            # A scan callback may leave a raw write transaction open. It already
+            # owns SQLite's write lock; preserve the original terminal commit.
+            scope = nullcontext(self.journal) if self.journal.conn.in_transaction else atomic(self.journal)
+            with scope as journal:
+                scheduler_run_id = self._scan_completion_link(
+                    journal, job_type, result, job_run_id, done.utc, scan_highwater)
+                journal.conn.execute(terminal + ", scheduler_run_id = ? WHERE id = ?",
+                    (*values, scheduler_run_id, job_run_id))
+            self.journal.conn.commit()
+        else:
+            # Preserve existing non-scan transaction/column behavior exactly.
+            self.journal.conn.execute(terminal + " WHERE id = ?", (*values, job_run_id))
+            self.journal.conn.commit()
         return {"job_type": job_type, "lock_key": lock_key, **result}
+
+    @staticmethod
+    def _scan_completion_link(journal, job_type, result, job_run_id, finished, highwater):
+        """Link only an exact, newly produced completed scan in this job interval.
+
+        No historical rows, nearest-time matching, or inferred links. Invalid
+        optional metadata remains NULL while the original job result is saved.
+        Caller owns the terminal write transaction, including the reuse check.
+        """
+        try:
+            if job_type != cadence.JobType.SCAN or result.get("status") != "completed" or highwater is None:
+                return None
+            summary = result.get("scan_summary")
+            if not isinstance(summary, dict):
+                return None
+            bid, rid = summary.get("scan_batch_id"), summary.get("scheduler_run_id")
+            if any(not isinstance(x, str) or not x or len(x) > 128 for x in (bid, rid)):
+                return None
+            batch = journal.one("SELECT rowid AS source_rowid, * FROM scan_batches WHERE scan_batch_id=?", (bid,))
+            run = journal.one("SELECT * FROM scheduler_runs WHERE scheduler_run_id=?", (rid,))
+            job = journal.one("SELECT * FROM job_runs WHERE id=?", (job_run_id,))
+            if (not batch or not run or not job or batch["source_rowid"] <= highwater
+                    or job["status"] != "started" or job["job_type"] != cadence.JobType.SCAN
+                    or batch["scheduler_run_id"] != rid or run["scan_batch_id"] != bid
+                    or batch["status"] != "completed" or run["status"] != "completed"
+                    or run["run_type"] != "scan" or run["trigger_source"] != "scheduler"
+                    or journal.one("SELECT id FROM job_runs WHERE scheduler_run_id=? AND id<>? LIMIT 1", (rid, job_run_id))):
+                return None
+            def aware(raw):
+                value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                if value.tzinfo is None or value.utcoffset() is None:
+                    raise ValueError("aware scan chronology required")
+                return value
+            begin, end = aware(job["started_at_utc"]), aware(finished)
+            bs, be = aware(batch["started_at_utc"]), aware(batch["completed_at_utc"])
+            rs, re = aware(run["started_at_utc"]), aware(run["completed_at_utc"])
+            if not begin <= bs == rs <= be == re <= end:
+                return None
+            return rid
+        except (KeyError, TypeError, ValueError, AttributeError, sqlite3.Error):
+            return None
 
     def _log_failure_best_effort(self, job_type: str, lock_key: str, message: str) -> None:
         """Best-effort audit log -- mirrors JournalStore._migrate()'s own
