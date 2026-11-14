@@ -87,9 +87,12 @@ def run_once(paths, runner=run_child, now=None):
     # Whitelist child output, so pin IDs/provider text can't enter service logs.
     public = {k: observer[k] for k in ('status', 'reason', 'ok', 'broker_verified',
               'finding_codes', 'unresolved_incidents', 'completed_at_utc', 'error_type') if k in observer}
-    result = {'role': 'health_with_paper_observer', 'ok': health_ok and observer_ok,
+    # Observer findings remain diagnostic; only execution-monitor health owns
+    # this heartbeat's exit status. A healthy observer cannot mask a health fault.
+    result = {'role': 'health_with_paper_observer', 'ok': health_ok,
               'original_health': health_summary,
-              'observer': public, 'observer_exit_code': observer_code,
+              'observer': public, 'observer_ok': observer_ok, 'observer_exit_code': observer_code,
+              'observer_affects_exit_code': False,
               'observer_freshness': freshness, 'observer_alerts_enabled': False}
     return result, 0 if result['ok'] else 1
 

@@ -121,7 +121,8 @@ def test_original_health_always_runs_first_even_if_observer_fails(paths, capsys)
     result, code = run_once(paths, runner=runner, now=NOW)
     assert calls[0][0][-2:] == ['--role', 'health'] and calls[0][1] == 30
     assert calls[1][0][2] == 'alphaos.monitoring.poll' and calls[1][1] == 75
-    assert result['original_health']['ok'] and not result['ok'] and code == 1
+    assert result['original_health']['ok'] and result['ok'] and code == 0
+    assert not result['observer_ok'] and not result['observer_affects_exit_code']
     assert 'secret' not in json.dumps(result) + capsys.readouterr().out
 
 
@@ -139,19 +140,22 @@ def test_observer_completion_expiry_and_future_rejection(paths, age, ok):
     assert observer_freshness(paths, NOW)['ok'] is ok
 
 
-def test_successful_child_without_durable_state_is_not_healthy(paths):
+def test_missing_observer_state_does_not_fail_healthy_heartbeat(paths):
     def runner(command, timeout):
         return ({'ready': True}, 0) if command[-1] == 'health' else ({'ok': True}, 0)
     result, code = run_once(paths, runner=runner, now=NOW)
-    assert code == 1 and result['observer_freshness']['code'] == 'observer_state_unavailable'
+    assert code == 0 and not result['observer_ok']
+    assert result['observer_freshness']['code'] == 'observer_state_unavailable'
 
 
-def test_busy_child_only_retains_health_with_fresh_completed_receipt(paths):
+def test_busy_observer_freshness_remains_visible_without_affecting_exit(paths):
     fresh(paths)
     def runner(command, timeout):
         return ({'ready': True}, 0) if command[-1] == 'health' else ({'reason': 'observer_poll_owner_busy'}, 0)
     assert run_once(paths, runner=runner, now=NOW)[1] == 0
-    assert run_once(paths, runner=runner, now=NOW + timedelta(minutes=16))[1] == 1
+    result, code = run_once(paths, runner=runner, now=NOW + timedelta(minutes=16))
+    assert code == 0 and not result['observer_ok']
+    assert result['observer_freshness']['code'] == 'observer_stale'
 
 
 def test_report_retention_preserves_other_files(paths, monkeypatch):

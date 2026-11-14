@@ -19,6 +19,16 @@ from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import worker_ownership
 
 
+def _job_fault(result: dict) -> bool:
+    # A healthy monitor currently supervising positions defers research entries.
+    # Keep that refusal in the result, but do not report it as a service failure.
+    if (result.get("job_type") == "scan" and result.get("status") == "blocked"
+            and result.get("reason") == "monitor_not_ready"
+            and result.get("monitor_health", {}).get("ok") is True):
+        return False
+    return result.get("status") in ("failed", "fused", "blocked")
+
+
 def run_role(role: str, settings) -> tuple[dict, int]:
     if role in ("health", "readiness", "preflight"):
         journal = JournalStore(settings.db_path, read_only=True)
@@ -56,7 +66,7 @@ def run_role(role: str, settings) -> tuple[dict, int]:
         try:
             results = JobRunner(orch, role=role).run_due_jobs()
             health = monitor_health(orch.journal, settings)
-            failed = any(r["status"] in ("failed", "fused", "blocked") for r in results)
+            failed = any(_job_fault(r) for r in results)
             result = {"role": role, "results": results, "monitor_health": health,
                       "entry_ready": health.get("entry_ready", False)}
             if role == "research":
