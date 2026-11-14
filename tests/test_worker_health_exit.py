@@ -60,3 +60,22 @@ def test_worker_exception_has_nonzero_exit_without_exception_text(monkeypatch, c
     monkeypatch.setattr(worker, "run_role", failed)
     assert worker.main(["--role", "monitor"]) == 2
     assert "sensitive" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('role', ['monitor', 'research'])
+def test_deadman_role_and_delivery_failure_do_not_change_health_or_job(worker_fixture, monkeypatch, role):
+    settings, health, jobs, closed = worker_fixture
+    health['entry_ready'] = True
+    jobs.append({'job_type': role, 'status': 'completed'})
+    calls = []
+    def ping(s, **kwargs):
+        assert kwargs == {'role': role, 'results': jobs, 'health': health}
+        assert not closed  # supervision finished, worker ownership still held
+        calls.append(True)
+        return {'status': 'failed', 'reason': 'transport_error'}
+    monkeypatch.setattr(worker, 'ping_monitor_success', ping)
+    result, code = worker.run_role(role, settings)
+    assert code == 0 and result['monitor_health'] == health and result['results'] == jobs
+    assert calls == ([True] if role == 'monitor' else [])
+    assert ('deadman' in result) is (role == 'monitor')
+    assert closed == [True]

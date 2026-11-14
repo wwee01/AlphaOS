@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from alphaos.config.settings import load_settings
 from alphaos.journal.journal_store import JournalStore
 from alphaos.scheduler.job_runner import JobRunner
+from alphaos.scheduler.monitor_deadman import ping_monitor_success
 from alphaos.scheduler.monitor_health import monitor_health
 from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import worker_ownership
@@ -69,6 +70,8 @@ def run_role(role: str, settings) -> tuple[dict, int]:
             failed = any(_job_fault(r) for r in results)
             result = {"role": role, "results": results, "monitor_health": health,
                       "entry_ready": health.get("entry_ready", False)}
+            if role == "monitor":
+                result["deadman"] = ping_monitor_success(settings, role=role, results=results, health=health)
             if role == "research":
                 try:
                     from alphaos.research.swing_audit_worker import maybe_run
