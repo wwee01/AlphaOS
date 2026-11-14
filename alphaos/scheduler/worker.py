@@ -57,8 +57,17 @@ def run_role(role: str, settings) -> tuple[dict, int]:
             results = JobRunner(orch, role=role).run_due_jobs()
             health = monitor_health(orch.journal, settings)
             failed = any(r["status"] in ("failed", "fused", "blocked") for r in results)
-            return {"role": role, "results": results, "monitor_health": health,
-                    "entry_ready": health.get("entry_ready", False)}, int(failed or not health["ok"])
+            result = {"role": role, "results": results, "monitor_health": health,
+                      "entry_ready": health.get("entry_ready", False)}
+            if role == "research":
+                try:
+                    from alphaos.research.swing_audit_worker import maybe_run
+                    audit = maybe_run(orch)
+                except Exception as exc:
+                    audit = {"status": "blocked", "error_type": type(exc).__name__}
+                if audit is not None:
+                    result["swing_availability_audit"] = audit
+            return result, int(failed or not health["ok"])
         finally:
             orch.close()
 

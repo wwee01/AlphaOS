@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.ck.alphaos.heartbeat</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/ck/Documents/Claude Playground/AlphaOS/.venv/bin/python</string>
+		<string>-m</string>
+		<string>alphaos.monitoring.heartbeat</string>
+		<string>--pin-path</string>
+		<string>/Users/ck/Documents/Claude Playground/AlphaOS/data/paper-observer-account.json</string>
+		<string>--state-path</string>
+		<string>/Users/ck/Documents/Claude Playground/AlphaOS/data/alphaos.paper-observer.json</string>
+		<string>--report-directory</string>
+		<string>/Users/ck/Library/Logs/alphaos/paper-observer</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/ck/Documents/Claude Playground/AlphaOS</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOME</key>
+		<string>/Users/ck</string>
+	</dict>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/ck/Library/Logs/alphaos/heartbeat.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/ck/Library/Logs/alphaos/heartbeat-error.log</string>
+</dict>
+</plist>

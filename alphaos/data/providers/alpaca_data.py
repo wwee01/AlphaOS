@@ -215,6 +215,12 @@ class AlpacaDataProvider(MarketDataProvider):
         parts = {key: payload.get(key) for key in ("latestQuote", "latestTrade", "minuteBar", "dailyBar")}
         minute = parts["minuteBar"] or {}
         daily = parts["dailyBar"] or {}
+        trade = parts["latestTrade"] or {}
+        # Diagnostic binding only: identical selection to _map's existing
+        # last_price expression. It never enters decision inputs or changes
+        # a freshness gate, request, price, feature, or strategy setting.
+        price_source = "latestTrade" if trade.get("p") else "dailyBar" if daily.get("c") else None
+        normalized_price = trade.get("p") or daily.get("c")
         return {
             "version": SOURCE_PROVENANCE_VERSION,
             "provider": PROVIDER, "feed": self.feed, "requested_symbol": symbol,
@@ -226,6 +232,12 @@ class AlpacaDataProvider(MarketDataProvider):
                             "timestamp": part.get("t") if isinstance(part, dict) else None}
                       for key, part in parts.items()},
             "normalized_bar_source": "minuteBar" if minute.get("t") else "dailyBar" if daily.get("t") else None,
+            "price_evidence_version": "normalized_last_price_v1",
+            "normalized_last_price_source": price_source,
+            "normalized_last_price": normalized_price,
+            "normalized_last_price_timestamp": (parts.get(price_source) or {}).get("t"),
+            "raw_latest_trade_price": trade.get("p"),
+            "raw_daily_bar_close": daily.get("c"),
             "minute_bar_volume": minute.get("v"), "minute_bar_trade_count": minute.get("n"),
         }
 
