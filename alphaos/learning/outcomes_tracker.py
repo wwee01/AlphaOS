@@ -216,8 +216,11 @@ def _classify_candidate(journal, cand: dict) -> dict:
         decision_at_utc = cand.get("created_at_utc")
         lineage_id = cand.get("lineage_id")
 
-    final_decision = adj.get("final_decision") or cand.get("label_decision") or cand.get("status")
+    final_decision = (cand.get("policy_decision") or adj.get("final_decision")
+                      or cand.get("label_decision") or cand.get("status"))
     return {
+        "arm": cand.get("arm"),
+        "policy_version": cand.get("policy_version"),
         "candidate_type": candidate_type,
         "eval_decision": ev.get("decision"),
         "label_decision": cand.get("label_decision"),
@@ -276,6 +279,8 @@ def _insert_outcome_row(journal, *, candidate_id: str, symbol: Optional[str],
         "outcome_id": new_id("cout"),
         "scan_id": scan_id,
         "scan_batch_id": scan_batch_id,
+        "arm": info.get("arm"),
+        "policy_version": info.get("policy_version"),
         "candidate_id": candidate_id,
         "symbol": symbol,
         "candidate_type": info["candidate_type"],

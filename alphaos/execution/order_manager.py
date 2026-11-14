@@ -412,6 +412,7 @@ class OrderManager:
                     "stop" if norm.get("stop_price") is not None else
                     "limit" if norm.get("limit_price") is not None else None)
                 order = {
+                    "arm": pos.get("arm"), "policy_version": pos.get("policy_version"),
                     "order_id": "exit_" + sha256(boid.encode()).hexdigest()[:24], "broker_order_id": boid,
                     "symbol": pos["symbol"], "direction": pos["direction"],
                     "side": "buy_to_cover" if pos["direction"] == "short" else "sell",

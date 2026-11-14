@@ -367,6 +367,7 @@ class TimeExitLifecycle:
             order_id = f"ord_{digest}"
             total = float(pos["qty"]) + float(ledger_ops.exit_totals(journal, pos)["qty"])
             row = {
+                "arm": pos.get("arm"), "policy_version": pos.get("policy_version"),
                 "order_id": order_id, "client_order_id": f"aos_{digest}",
                 "symbol": pos["symbol"], "direction": pos["direction"],
                 "side": "buy_to_cover" if pos["direction"] == "short" else "sell",

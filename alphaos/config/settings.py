@@ -788,6 +788,8 @@ class Settings:
     # cancel -> verify -> close -> record sequence and its fail directions.
     time_exit_enforcement_enabled: bool
 
+    explore_1_enabled: bool = False
+
     # ------------------------------------------------------------------ helpers
     @property
     def is_mock(self) -> bool:
@@ -1937,4 +1939,5 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_preflight_time=scheduler_preflight_time,
         time_exit_breach_alert_enabled=time_exit_breach_alert_enabled,
         time_exit_enforcement_enabled=time_exit_enforcement_enabled,
+        explore_1_enabled=_get_bool(src, "EXPLORE_1_ENABLED", False),
     )

@@ -73,6 +73,7 @@ from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.order_manager import OrderManager, OrderResult
 from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
+from alphaos import explore_policy
 from alphaos import lineage
 from alphaos import proposals as proposal_ttl
 from alphaos import tqs
@@ -233,6 +234,8 @@ class Orchestrator:
         survivorship hole in "prune nothing, this IS the dataset" on every
         cost-cap-breach day. Every existing caller omits this parameter and
         is completely unaffected (default False -- byte-identical)."""
+        if self.settings.explore_1_enabled and not self.settings.is_paper:
+            raise RuntimeError("EXPLORE-1 is paper-only")
         self._ensure_startup()
 
         # TRIP-1: evaluator identity tripwire. MUST run here, before this
@@ -415,6 +418,11 @@ class Orchestrator:
                     "review, and commit the result first.",
                 )
 
+        if self.settings.explore_1_enabled:
+            self.journal.conn.execute("UPDATE candidates SET policy_version=? WHERE scan_batch_id=?",
+                                      (explore_policy.VERSION, scan_batch_id))
+            self.journal.conn.commit()
+
         if self.kill_switch.is_engaged():
             self.journal.log_system_event(
                 Severity.WARNING, "scan", "Kill switch engaged: no proposals will be executed."
@@ -486,6 +494,7 @@ class Orchestrator:
             if earnings_enabled else None
         )
 
+        campaign = []
         for cand in scan.candidates:
             # EXP-0 backstop: structurally this can never be true (the shadow-
             # tier pass above returns its own separate ScanResult, never
@@ -584,6 +593,10 @@ class Orchestrator:
                     scan_batch_id=scan_batch_id, lineage_id=eval_lineage_id,
                 )
 
+            if self.settings.explore_1_enabled:
+                campaign.append((cand, evaluation, classification))
+                continue
+
             if decision == Decision.REJECT.value:
                 if (classification is not None
                         and classification.label_decision == Decision.REJECT.value
@@ -632,6 +645,9 @@ class Orchestrator:
             )
             if not handled:
                 summary.rejected += 1
+
+        if self.settings.explore_1_enabled:
+            self._route_campaign(campaign, summary, scan_batch_id, st.utc, unattended)
 
         # --- Close out the batch + scheduler run (raw UPDATE, like
         #     _set_proposal_status). -----------------------------------------
@@ -691,8 +707,41 @@ class Orchestrator:
 
         return summary
 
+    def _route_campaign(self, candidates, summary, batch_id, started_at, unattended):
+        default_hold = cards.get_default_card(settings=self.settings)["max_holding_days_default"]
+        routes = [(cand, ev, explore_policy.route(cand, ev, label, self.settings, default_hold))
+                  for cand, ev, label in candidates]
+        chosen = explore_policy.freeze_draw(self.journal, self.settings, batch_id, started_at,
+                                           [c["candidate_id"] for c, _, r in routes if r and not r[0]])
+        staged: list[TradeProposal] = []
+        for cand, original, routing in routes:
+            arm = (routing[0] or ("C" if cand["candidate_id"] == chosen else None)) if routing else None
+            decision = "propose" if arm else "watch" if original.decision == "watch" else "reject"
+            cand["arm"], cand["policy_version"] = arm, explore_policy.VERSION
+            self.journal.conn.execute("UPDATE candidates SET arm=?, policy_version=?, policy_decision=? "
+                                      "WHERE candidate_id=?", (arm, explore_policy.VERSION, decision,
+                                                               cand["candidate_id"]))
+            self.journal.conn.commit()
+            if arm:
+                if getattr(cand.polarity, "arming_classification", None) == ArmingClassification.HIGH_RISK_NARRATIVE.value:
+                    cand.arming_classification = ArmingClassification.HIGH_RISK_NARRATIVE.value
+                    cand.narrative_warning = getattr(cand.polarity, "warning_message", "")
+                handled = self._handle_proposal(cand, routing[1], summary, scan_batch_id=batch_id,
+                                                unattended=unattended, staged=staged)
+                if not handled:
+                    summary.rejected += 1
+            elif decision == "watch":
+                self._set_candidate_status(cand["candidate_id"], CandidateStatus.WATCH.value)
+                summary.watch += 1
+            else:
+                self._reject_candidate(cand, "explore_1", original)
+                summary.rejected += 1
+        # Every pending arm is visible before the first entry fairness check.
+        for proposal in staged:
+            self._dispatch_proposal(proposal, summary, unattended)
+
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
-                         scan_batch_id=None, unattended: bool = False) -> bool:
+                         scan_batch_id=None, unattended: bool = False, staged=None) -> bool:
         # EXP-0: guards the scan loop's two proposal-creation branches.
         # CORRECTION (scope/safety audit, F-1): this is NOT the one true
         # proposal-creation chokepoint -- _override_open_trade builds and
@@ -729,6 +778,7 @@ class Orchestrator:
         if not risk.approved or risk.sizing is None:
             proposal = self.swing.build_proposal(evaluation, risk.sizing or _zero_sizing(evaluation))
             self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
+            self._tag_campaign_proposal(proposal, cand, evaluation)
             proposal.scan_batch_id = scan_batch_id
             proposal.playbook_name = PLAYBOOK_V1
             proposal.setup_classification = "momentum_continuation"
@@ -775,6 +825,7 @@ class Orchestrator:
 
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
         self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
+        self._tag_campaign_proposal(proposal, cand, evaluation)
         proposal.scan_batch_id = scan_batch_id
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "momentum_continuation"
@@ -815,6 +866,21 @@ class Orchestrator:
         self._set_candidate_status(cand["candidate_id"], CandidateStatus.PROPOSED.value)
         summary.proposed += 1
 
+        if staged is not None:
+            staged.append(proposal)
+            return True
+        return self._dispatch_proposal(proposal, summary, unattended)
+
+    def _tag_campaign_proposal(self, proposal, cand, evaluation):
+        if self.settings.explore_1_enabled:
+            proposal.arm, proposal.policy_version = cand.get("arm"), explore_policy.VERSION
+            if evaluation.stop_source == "config":
+                proposal.target_price_source = proposal.stop_price_source = "config"
+            proposal.proposal_reason = (f"EXPLORE-1 {proposal.arm}; levels={proposal.target_price_source}; "
+                                        f"holding_days={evaluation.max_holding_days}")
+
+    def _dispatch_proposal(self, proposal, summary, unattended):
+        arming_cls = (self.journal.proposal_by_id(proposal.proposal_id) or {}).get("arming_classification")
         # HIGH-RISK narrative (hype/meme/squeeze) is MANUAL-ONLY: never auto-approve,
         # regardless of approval mode. It still went through every risk/freshness gate.
         if (arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
@@ -1240,6 +1306,10 @@ class Orchestrator:
         proposal tagged as a user override. NEVER executes here — manual approval is
         still required. On any gate failure the override is recorded with
         execution_allowed=0 + a blocked_reason."""
+        if self.settings.explore_1_enabled:
+            rec["blocked_reason"] = OverrideBlockedReason.OTHER.value
+            rec["execution_result"] = "EXPLORE-1 accepts only arm-routed scan proposals"
+            return "blocked: manual overrides cannot create an unassigned campaign trade"
         symbol = cand.get("symbol")
         # EXP-0: unlike the scan loop's two RuntimeError backstops (genuinely
         # unreachable today -- shadow candidates never enter scan.candidates
@@ -2041,6 +2111,8 @@ class Orchestrator:
         This is not the runtime scan and never fabricates news. It is gated to
         non-real modes and logged as DEMO_SEED.
         """
+        if self.settings.explore_1_enabled:
+            raise RuntimeError("EXPLORE-1 does not admit demo trades")
         self._ensure_startup()
         symbol = "DEMO"
         # Price from the same symbol the approval path will re-fetch, so the
@@ -2267,6 +2339,9 @@ class Orchestrator:
 
     def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None,
                          approval: Optional[Callable[[], ApprovalOutcome]] = None):
+        refusal = explore_policy.entry_refusal(self.journal, self.settings, proposal)
+        if refusal:
+            return self._defer_entry(proposal, refusal, ReasonCode.APPROVAL_REQUIRED.value)
         current = self.journal.proposal_by_id(proposal.proposal_id)
         if current and current["status"] not in ProposalStatus.approvable():
             return OrderResult(blocked=True, block_reason=ReasonCode.APPROVAL_REQUIRED.value,

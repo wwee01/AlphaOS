@@ -15,6 +15,8 @@ from alphaos.constants import TargetProfile, TradeDirection
 # The canonical set of columns a paper_orders row carries (excluding the DB id
 # and the auto-stamped created_at_* columns). Used by tests to prove parity.
 ORDER_ROW_FIELDS = [
+    "arm",
+    "policy_version",
     "order_id",
     "client_order_id",
     "broker_order_id",
@@ -94,6 +96,8 @@ def build_order_row(
 ) -> dict:
     """Build a single paper_orders row, identical in shape across sources."""
     return {
+        "arm": getattr(proposal, "arm", None),
+        "policy_version": getattr(proposal, "policy_version", None),
         "order_id": order_id,
         "client_order_id": client_order_id,
         "broker_order_id": broker_order_id,

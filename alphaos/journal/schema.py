@@ -190,6 +190,9 @@ SCHEMA: list[tuple[str, str]] = [
         "candidates",
         """
         CREATE TABLE IF NOT EXISTS candidates (
+            policy_decision TEXT,
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_id TEXT NOT NULL UNIQUE,
             scan_id TEXT,
@@ -420,6 +423,8 @@ SCHEMA: list[tuple[str, str]] = [
         "trade_proposals",
         """
         CREATE TABLE IF NOT EXISTS trade_proposals (
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             proposal_id TEXT NOT NULL UNIQUE,
             candidate_id TEXT NOT NULL,
@@ -503,6 +508,8 @@ SCHEMA: list[tuple[str, str]] = [
         "paper_orders",
         """
         CREATE TABLE IF NOT EXISTS paper_orders (
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             order_id TEXT NOT NULL UNIQUE,
             client_order_id TEXT,
@@ -605,6 +612,8 @@ SCHEMA: list[tuple[str, str]] = [
         "positions",
         """
         CREATE TABLE IF NOT EXISTS positions (
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             position_id TEXT NOT NULL UNIQUE,
             order_id TEXT,
@@ -678,6 +687,8 @@ SCHEMA: list[tuple[str, str]] = [
         "trade_outcomes",
         """
         CREATE TABLE IF NOT EXISTS trade_outcomes (
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             outcome_id TEXT NOT NULL UNIQUE,
             position_id TEXT NOT NULL,
@@ -821,6 +832,8 @@ SCHEMA: list[tuple[str, str]] = [
         "scan_batches",
         """
         CREATE TABLE IF NOT EXISTS scan_batches (
+            explore_window_key TEXT,
+            explore_draw_json TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_batch_id TEXT NOT NULL UNIQUE,
             scheduler_run_id TEXT,
@@ -1473,6 +1486,8 @@ SCHEMA: list[tuple[str, str]] = [
         "candidate_outcomes",
         """
         CREATE TABLE IF NOT EXISTS candidate_outcomes (
+            arm TEXT,
+            policy_version TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             outcome_id TEXT NOT NULL UNIQUE,
             scan_id TEXT,
@@ -2718,6 +2733,7 @@ SCHEMA: list[tuple[str, str]] = [
 ]
 
 INDEXES: list[str] = [
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_explore_window ON scan_batches(explore_window_key)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_scan ON candidates(scan_id)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_symbol ON candidates(symbol)",
     "CREATE INDEX IF NOT EXISTS idx_evals_candidate ON openai_evaluations(candidate_id)",
