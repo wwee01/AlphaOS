@@ -377,6 +377,32 @@ def test_lineage_proposal_order_position_and_trade_outcome(monkeypatch):
     assert all(row["arm"] == "A+B" for row in j.query("SELECT arm FROM paper_orders"))
 
 
+def test_older_retry_sees_new_opposing_arm_before_capacity_check(monkeypatch):
+    j = JournalStore(":memory:")
+    o = Orchestrator(settings=settings(), journal=j)
+    old = tagged(j, "A", "NFLX")
+    o._schedule_entry_retry(old)
+    for n in range(10):
+        j.insert("positions", {"position_id": str(n), "symbol": f"OLD{n}", "direction": "long",
+                               "qty": 1, "avg_entry_price": 100, "status": "open", "arm": "A"})
+    scan(j, "current")
+    c = candidate("new-b", "MSFT", scan_batch_id="current")
+    ev = evaluation("new-b", "MSFT", "watch")
+    j.insert("candidates", c.row)
+    seen = []
+    def retry(pid, **kwargs):
+        assert pid == old.proposal_id and kwargs["_auto_retry"]
+        assert j.one("SELECT 1 FROM trade_proposals WHERE arm='B' AND status='pending_approval'")
+        assert "slot fairness" in ep.entry_refusal(j, o.settings, old)
+        seen.append(pid)
+        return False, "fairness"
+    monkeypatch.setattr(o, "approve_proposal", retry)
+    monkeypatch.setattr(o, "_dispatch_proposal", lambda *a: None)
+    o._route_campaign([(c, ev, label("propose", candidate_id="new-b", symbol="MSFT"))],
+                      ScanSummary("current"), "current", "2026-11-16T14:35:00+00:00", True)
+    assert seen == [old.proposal_id]
+
+
 def test_natural_broker_exit_and_time_exit_orders_inherit_position_tags(
     tmp_path, monkeypatch
 ):

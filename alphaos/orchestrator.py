@@ -351,7 +351,7 @@ class Orchestrator:
         )
         # Retry only previously deferred automatic entries, before this scan
         # creates replacements. Original TTL and all approval gates still apply.
-        if not ai_degraded:
+        if not ai_degraded and not self.settings.explore_1_enabled:
             self._retry_deferred_entries(summary, unattended=unattended)
 
         # --- REG-1: regime classifier + packet stamping (shadow/measurement
@@ -737,6 +737,7 @@ class Orchestrator:
                 self._reject_candidate(cand, "explore_1", original)
                 summary.rejected += 1
         # Every pending arm is visible before the first entry fairness check.
+        self._retry_deferred_entries(summary, unattended=unattended, exclude_batch_id=batch_id)
         for proposal in staged:
             self._dispatch_proposal(proposal, summary, unattended)
 
@@ -2200,11 +2201,14 @@ class Orchestrator:
             {"proposal_id": proposal.proposal_id},
         )
 
-    def _retry_deferred_entries(self, summary: ScanSummary, *, unattended: bool) -> None:
+    def _retry_deferred_entries(self, summary: ScanSummary, *, unattended: bool,
+                                exclude_batch_id=None) -> None:
         rows = self.journal.query(
             "SELECT p.proposal_id FROM trade_proposals p WHERE p.status IN ('proposed','pending_approval') "
+            "AND (? IS NULL OR p.scan_batch_id IS NULL OR p.scan_batch_id != ?) "
             "AND EXISTS (SELECT 1 FROM system_events e WHERE e.category='entry_retry_pending' "
-            "AND json_extract(e.detail_json, '$.proposal_id')=p.proposal_id) ORDER BY p.id LIMIT 200"
+            "AND json_extract(e.detail_json, '$.proposal_id')=p.proposal_id) ORDER BY p.id LIMIT 200",
+            (exclude_batch_id, exclude_batch_id),
         )
         for row in rows:
             ok, detail = self.approve_proposal(row["proposal_id"], _auto_retry=True, _unattended=unattended)

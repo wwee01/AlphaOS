@@ -101,6 +101,20 @@ def test_capture_only_scan_never_retries(paper_entry, monkeypatch):
     assert not attempted and orch.journal.proposal_by_id(row["proposal_id"])["status"] == "pending_approval"
 
 
+def test_campaign_retry_excludes_newly_deferred_current_batch(paper_entry, monkeypatch):
+    orch, _, _, _ = paper_entry
+    row = deferred_proposal(orch, monkeypatch)
+    orch.journal.conn.execute("UPDATE trade_proposals SET scan_batch_id='current' WHERE proposal_id=?", (row["proposal_id"],))
+    orch.journal.conn.commit()
+    seen = []
+    monkeypatch.setattr(orch, "approve_proposal", lambda pid, **kw: (seen.append(pid) or False, "waiting"))
+    orch._retry_deferred_entries(ScanSummary("current"), unattended=True, exclude_batch_id="current")
+    assert seen == []
+    orch._retry_deferred_entries(ScanSummary("next"), unattended=True, exclude_batch_id="next")
+    assert seen == [row["proposal_id"]]
+    assert orch.journal.proposal_by_id(row["proposal_id"])["proposal_expires_at_utc"] == row["proposal_expires_at_utc"]
+
+
 def test_retry_expiry_is_original_and_terminal(paper_entry, monkeypatch):
     orch, clock, exposure, attempted = paper_entry
     row = deferred_proposal(orch, monkeypatch)
