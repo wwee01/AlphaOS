@@ -41,7 +41,7 @@ def test_monitor_becomes_unready_during_scan_blocks_at_actual_submission(failure
         proposal = make_proposal(invalidation_reason="stop invalidates thesis")
         proposal.proposal_expires_at_utc = (start + timedelta(days=1)).isoformat()
         result = orch._execute_checked(proposal)
-        assert result.blocked
+        assert result.deferred and not result.blocked
         assert "monitor not ready" in result.detail
         assert submitted == []
         assert journal.count_rows("paper_orders") == 0
