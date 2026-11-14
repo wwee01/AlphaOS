@@ -646,7 +646,7 @@ class Orchestrator:
             if not handled:
                 summary.rejected += 1
 
-        if self.settings.explore_1_enabled:
+        if self.settings.explore_1_enabled and not ai_degraded:
             self._route_campaign(campaign, summary, scan_batch_id, st.utc, unattended)
 
         # --- Close out the batch + scheduler run (raw UPDATE, like

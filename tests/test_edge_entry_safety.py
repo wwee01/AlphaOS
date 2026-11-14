@@ -92,13 +92,17 @@ def test_next_actual_scan_retries_pending_without_new_candidate(paper_entry, mon
     assert attempted == [row["proposal_id"]] and summary.auto_submitted == 1
 
 
-def test_capture_only_scan_never_retries(paper_entry, monkeypatch):
+@pytest.mark.parametrize("campaign", [False, True])
+def test_capture_only_scan_never_retries(paper_entry, monkeypatch, campaign):
     orch, _, exposure, attempted = paper_entry
     row = deferred_proposal(orch, monkeypatch)
+    orch.settings = replace(orch.settings, explore_1_enabled=campaign, mode="paper")
+    monkeypatch.setattr(orch, "_retry_deferred_entries", lambda *a, **kw: pytest.fail("capture-only scan retried"))
     monkeypatch.setattr(exposure_module, "read_exposure", lambda *a: dict(exposure))
     monkeypatch.setattr(orch.scanner, "scan", lambda **kw: SimpleNamespace(scan_id="empty-degraded", candidates=[]))
     orch.run_scan_once(ai_degraded=True)
     assert not attempted and orch.journal.proposal_by_id(row["proposal_id"])["status"] == "pending_approval"
+    assert orch.journal.one("SELECT COUNT(*) AS n FROM scan_batches WHERE explore_draw_json IS NOT NULL")["n"] == 0
 
 
 def test_campaign_retry_excludes_newly_deferred_current_batch(paper_entry, monkeypatch):
