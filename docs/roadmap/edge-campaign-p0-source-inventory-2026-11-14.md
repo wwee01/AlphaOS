@@ -29,3 +29,8 @@ Base: `de1bfea27e9068da3fc7cd6419580e8767cad7d9`. Each file below is retained an
 | `tests/test_swing_data_policy.py` | Retain; commit exact bytes for Claude audit | `3001ceac6a3265093a2e21797a6916d3b6c82dd263f3536c9f435f8acc746854` |
 
 Follow-up changes are separate commits. Production remains untouched until Claude audits the exact SHA and CK gives the merge instruction.
+
+Required frozen dependencies discovered by the isolated baseline tests (also retained byte-for-byte; initial missing-file failures preserved):
+
+- `docs/research/three-session-freshness-protocol-20261014.json`: `b872a601aaae888c889bc558791be675312ab1535685dd5f51a2350e6c9b6179`
+- `docs/research/swing-research-freshness-policy-v1-20261018.md`: `c32965e9398b584e1a83b60689f723d1f48fe4490107b4e7c370e3ad8c49a8de`
