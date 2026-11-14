@@ -142,6 +142,25 @@ def test_manual_deferral_does_not_schedule_automatic_retry(paper_entry, monkeypa
     assert not attempted and orch.journal.count_rows("approvals") == 0
 
 
+@pytest.mark.parametrize("unreconciled", [False, True])
+def test_initial_high_risk_narrative_never_obtains_automatic_authority(paper_entry, monkeypatch, unreconciled):
+    orch, _, _, attempted = paper_entry
+    orch.settings = replace(orch.settings, last30days_high_risk_narrative_manual_only=True)
+    orch.approvals.settings = orch.settings
+    if unreconciled:
+        monkeypatch.setattr(exposure_module, "read_exposure", transient)
+    monkeypatch.setattr(orch.approvals, "consider", lambda *a, **kw: pytest.fail("manual-only considered automatically"))
+    cand, evaluation, summary = _propose_evaluation(orch)
+    cand.arming_classification = "high_risk_narrative"
+    orch._handle_proposal(cand, evaluation, summary, unattended=True)
+    row = orch.journal.one("SELECT * FROM trade_proposals WHERE candidate_id=?", (cand["candidate_id"],))
+    assert row["status"] == "pending_approval"
+    assert row["arming_classification"] == "high_risk_narrative"
+    assert not orch.journal.one("SELECT 1 FROM system_events WHERE category='entry_retry_pending'")
+    orch._retry_deferred_entries(ScanSummary(scan_id="manual-only"), unattended=True)
+    assert not attempted and orch.journal.count_rows("approvals") == 0
+
+
 @pytest.mark.parametrize("issue", ["protection_blocking", "execution_incident", "health_unavailable", "monitor_fused"])
 def test_monitor_hard_faults_remain_terminal(paper_entry, monkeypatch, issue):
     orch, _, _, attempted = paper_entry
