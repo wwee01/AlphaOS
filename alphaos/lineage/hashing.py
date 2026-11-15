@@ -34,6 +34,7 @@ SECRET_SETTINGS_FIELDS = frozenset({
     "alpaca_api_key",
     "alpaca_secret_key",
     "ntfy_topic",
+    "monitor_deadman_url",
     "last30days_cmd",
     # Private local filesystem paths -- not credentials, but they leak the
     # deployment's directory layout into the config-hash PREIMAGE (the digest

@@ -269,6 +269,7 @@ class JournalStore:
     def record_config_version(self, settings) -> None:
         """Persist a redacted config snapshot. Secrets are never stored."""
         safe = {
+            "explore_1_enabled": settings.explore_1_enabled,
             "mode": settings.mode.value,
             "approval_mode": settings.approval_mode.value,
             "real_trading_enabled_raw": settings.real_trading_enabled_raw,

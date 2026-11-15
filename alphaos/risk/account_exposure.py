@@ -13,6 +13,10 @@ class ExposureUnavailable(ValueError):
     pass
 
 
+class ExposureUnreconciled(ExposureUnavailable):
+    """A snapshot awaits reconciliation; entry remains forbidden until rechecked."""
+
+
 class EntrySubmissionBusy(ExposureUnavailable):
     """Another local entry owns submission; no broker attempt was made."""
 
@@ -48,6 +52,7 @@ def summarize_exposure(account: dict, positions: list[dict], orders: list[dict],
         gross += value
         by_symbol[symbol] = pos
     pending_slots = 0
+    occupied_symbols = set(by_symbol)
     pending = 0.0
     seen = set()
     for order in orders:
@@ -67,6 +72,7 @@ def summarize_exposure(account: dict, positions: list[dict], orders: list[dict],
             row = known_entries[oid]
             if symbol != row["symbol"]:
                 raise ExposureUnavailable("entry order symbol differs from ledger")
+            occupied_symbols.add(symbol)
             # Limit entry remains the worst authorized notional per share.
             price = _number(order.get("limit_price"), "pending entry limit", positive=True)
             pending += remaining * price
@@ -84,8 +90,43 @@ def summarize_exposure(account: dict, positions: list[dict], orders: list[dict],
     return {"equity": equity, "gross_committed_notional": gross + pending,
             "open_positions": len(by_symbol) + pending_slots,
             "broker_position_slots": len(by_symbol), "pending_entry_slots": pending_slots,
+            "occupied_symbols": sorted(occupied_symbols),
             "account_pnl_today": equity - last_equity,
             "pending_entry_notional": pending, "observed_at_utc": timeutils.stamp().utc}
+
+
+def _verify_unreconciled_fill(client, journal, held, local) -> None:
+    """Only an identified, acknowledged and currently protected fill may wait."""
+    from alphaos.execution.entry_submission import EntrySubmission
+    from alphaos.execution.ledger_ops import metadata
+
+    rows = journal.query(
+        "SELECT o.* FROM paper_orders o WHERE o.execution_source='alpaca_paper' "
+        "AND o.order_class='bracket' AND o.symbol=? AND o.proposal_id IS NOT NULL "
+        "AND o.broker_order_id IS NOT NULL AND o.state IN ('accepted','partially_filled','filled') "
+        "AND NOT EXISTS (SELECT 1 FROM positions p WHERE p.order_id=o.order_id AND p.status='closed')",
+        (held.get("symbol"),),
+    )
+    try:
+        eligible = [r for r in rows if metadata(r).get("purpose") == "paper_entry"
+                    and metadata(r).get("phase") == "acknowledged"
+                    and r.get("client_order_id") == r.get("proposal_id")]
+        if len(eligible) != 1:
+            raise ValueError("no unique acknowledged entry")
+        row = eligible[0]
+        if local and local.get("order_id") != row["order_id"]:
+            raise ValueError("local origin differs from entry")
+        parent = client.get_order(row["broker_order_id"])
+        EntrySubmission.validate(row, parent, nested=True)
+        qty = abs(_number(held.get("qty"), "held quantity"))
+        if (_number(parent.get("filled_qty"), "filled quantity", positive=True) != qty
+                or held.get("side") != ("short" if row["direction"] == "short" else "long")):
+            raise ValueError("entry fill does not explain holding")
+        side = "buy" if row["direction"] == "short" else "sell"
+        if verified_live_roles(parent, qty, held["symbol"], side) != {"stop_loss", "take_profit"}:
+            raise ValueError("entry protection is not verified")
+    except Exception as exc:
+        raise ExposureUnavailable("unreconciled position lacks verified entry and protection evidence") from exc
 
 
 def read_exposure(client, journal) -> dict:
@@ -108,7 +149,7 @@ def read_exposure(client, journal) -> dict:
     def quantities(rows):
         return sorted((r.get("symbol"), r.get("side"), r.get("qty")) for r in rows)
     if quantities(positions) != quantities(refreshed_positions):
-        raise ExposureUnavailable("broker position changed during exposure check; retry after reconciliation")
+        raise ExposureUnreconciled("broker position changed during exposure check; retry after reconciliation")
     positions = refreshed_positions
     local_positions = journal.open_positions()
     local_by_symbol: dict[str, list[dict]] = {}
@@ -129,7 +170,8 @@ def read_exposure(client, journal) -> dict:
             continue
         local = origins[0] if origins else None
         if not local or abs(float(local["qty"])) != abs(float(held["qty"])):
-            raise ExposureUnavailable("broker position is not reconciled to the local ledger")
+            _verify_unreconciled_fill(client, journal, held, local)
+            raise ExposureUnreconciled("verified entry fill awaits local position reconciliation")
         if not local.get("broker_order_id"):
             raise ExposureUnavailable("position lacks broker protection lineage")
         parent = client.get_order(local["broker_order_id"])
@@ -143,13 +185,18 @@ def read_exposure(client, journal) -> dict:
         if not {"stop_loss", "take_profit"} <= live_roles:
             raise ExposureUnavailable("current matching stop and target protection is not verified")
     known = {r["broker_order_id"]: r for r in journal.query(
-        "SELECT broker_order_id, symbol FROM paper_orders WHERE proposal_id IS NOT NULL "
+        "SELECT broker_order_id, symbol, state FROM paper_orders WHERE proposal_id IS NOT NULL "
         "AND broker_order_id IS NOT NULL AND order_class = 'bracket'"
     )}
     result = summarize_exposure(account, positions, orders, known, known_reductions)
     # A filled but not yet reconciled position does not erase a slot; broker
     # reality covers missing local fills, local records cover unresolved exits.
     result["open_positions"] = max(result["broker_position_slots"], journal.count_open_positions()) + result["pending_entry_slots"]
+    # A local accepted entry remains reserved until reconciliation makes it
+    # terminal, even if an intermediate broker open-order list omits it.
+    terminal = {"filled", "rejected", "cancelled", "canceled", "expired", "failed"}
+    pending_symbols = {r["symbol"] for r in known.values() if r.get("state") not in terminal}
+    result["occupied_symbols"] = sorted(set(result["occupied_symbols"]) | set(local_by_symbol) | pending_symbols)
     return result
 
 

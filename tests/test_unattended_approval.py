@@ -315,25 +315,8 @@ def test_unattended_born_expired_proposal_never_fills(monkeypatch):
     o.close()
 
 
-# --------------------------------------------- high-risk-narrative ordering
-def test_high_risk_narrative_check_precedes_consider_in_source():
-    """Structural proof (a full live high-risk-narrative scenario needs
-    last30days polarity/arming fixtures well beyond this feature's own
-    scope to set up): the HIGH_RISK_NARRATIVE manual-only check must sit
-    BEFORE the consider() call in _handle_proposal's own source, so it
-    binds the unattended door for free, with zero new code -- confirmed by
-    source position, not just re-reading the (unmodified) surrounding
-    comment."""
-    import inspect
-
-    from alphaos.orchestrator import Orchestrator
-
-    source = inspect.getsource(Orchestrator._handle_proposal)
-    narrative_pos = source.lower().index("high-risk narrative")
-    consider_pos = source.index("self.approvals.consider(")
-    assert narrative_pos < consider_pos
-
-
+# High-risk narrative authority is exercised behaviorally across initial
+# sizing and deferred retry in test_edge_entry_safety.py.
 # ------------------------------------------------------------- settings.py
 def test_unattended_windows_default_empty_and_inert():
     s = make_settings()

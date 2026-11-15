@@ -73,6 +73,7 @@ from alphaos.data.market_data import MarketDataClient
 from alphaos.execution.order_manager import OrderManager, OrderResult
 from alphaos.execution.position_manager import PositionManager
 from alphaos.execution import protection_watchdog
+from alphaos import explore_policy
 from alphaos import lineage
 from alphaos import proposals as proposal_ttl
 from alphaos import tqs
@@ -233,6 +234,8 @@ class Orchestrator:
         survivorship hole in "prune nothing, this IS the dataset" on every
         cost-cap-breach day. Every existing caller omits this parameter and
         is completely unaffected (default False -- byte-identical)."""
+        if self.settings.explore_1_enabled and not self.settings.is_paper:
+            raise RuntimeError("EXPLORE-1 is paper-only")
         self._ensure_startup()
 
         # TRIP-1: evaluator identity tripwire. MUST run here, before this
@@ -346,6 +349,10 @@ class Orchestrator:
             scan_id=scan.scan_id, candidates=len(scan.candidates),
             scan_batch_id=scan_batch_id, scheduler_run_id=scheduler_run_id,
         )
+        # Retry only previously deferred automatic entries, before this scan
+        # creates replacements. Original TTL and all approval gates still apply.
+        if not ai_degraded and not self.settings.explore_1_enabled:
+            self._retry_deferred_entries(summary, unattended=unattended)
 
         # --- REG-1: regime classifier + packet stamping (shadow/measurement
         # only -- no arming, no gating, no allocation changes). Computed (or
@@ -410,6 +417,11 @@ class Orchestrator:
                     f"{self.settings.shadow_tier_universe_file!r} -- run `alphaos universe_build`, "
                     "review, and commit the result first.",
                 )
+
+        if self.settings.explore_1_enabled:
+            self.journal.conn.execute("UPDATE candidates SET policy_version=? WHERE scan_batch_id=?",
+                                      (explore_policy.VERSION, scan_batch_id))
+            self.journal.conn.commit()
 
         if self.kill_switch.is_engaged():
             self.journal.log_system_event(
@@ -482,6 +494,7 @@ class Orchestrator:
             if earnings_enabled else None
         )
 
+        campaign = []
         for cand in scan.candidates:
             # EXP-0 backstop: structurally this can never be true (the shadow-
             # tier pass above returns its own separate ScanResult, never
@@ -580,6 +593,10 @@ class Orchestrator:
                     scan_batch_id=scan_batch_id, lineage_id=eval_lineage_id,
                 )
 
+            if self.settings.explore_1_enabled:
+                campaign.append((cand, evaluation, classification))
+                continue
+
             if decision == Decision.REJECT.value:
                 if (classification is not None
                         and classification.label_decision == Decision.REJECT.value
@@ -628,6 +645,9 @@ class Orchestrator:
             )
             if not handled:
                 summary.rejected += 1
+
+        if self.settings.explore_1_enabled and not ai_degraded:
+            self._route_campaign(campaign, summary, scan_batch_id, st.utc, unattended)
 
         # --- Close out the batch + scheduler run (raw UPDATE, like
         #     _set_proposal_status). -----------------------------------------
@@ -687,8 +707,42 @@ class Orchestrator:
 
         return summary
 
+    def _route_campaign(self, candidates, summary, batch_id, started_at, unattended):
+        default_hold = cards.get_default_card(settings=self.settings)["max_holding_days_default"]
+        routes = [(cand, ev, explore_policy.route(cand, ev, label, self.settings, default_hold))
+                  for cand, ev, label in candidates]
+        chosen = explore_policy.freeze_draw(self.journal, self.settings, batch_id, started_at,
+                                           [c["candidate_id"] for c, _, r in routes if r and not r[0]])
+        staged: list[TradeProposal] = []
+        for cand, original, routing in routes:
+            arm = (routing[0] or ("C" if cand["candidate_id"] == chosen else None)) if routing else None
+            decision = "propose" if arm else "watch" if original.decision == "watch" else "reject"
+            cand["arm"], cand["policy_version"] = arm, explore_policy.VERSION
+            self.journal.conn.execute("UPDATE candidates SET arm=?, policy_version=?, policy_decision=? "
+                                      "WHERE candidate_id=?", (arm, explore_policy.VERSION, decision,
+                                                               cand["candidate_id"]))
+            self.journal.conn.commit()
+            if arm:
+                if getattr(cand.polarity, "arming_classification", None) == ArmingClassification.HIGH_RISK_NARRATIVE.value:
+                    cand.arming_classification = ArmingClassification.HIGH_RISK_NARRATIVE.value
+                    cand.narrative_warning = getattr(cand.polarity, "warning_message", "")
+                handled = self._handle_proposal(cand, routing[1], summary, scan_batch_id=batch_id,
+                                                unattended=unattended, staged=staged)
+                if not handled:
+                    summary.rejected += 1
+            elif decision == "watch":
+                self._set_candidate_status(cand["candidate_id"], CandidateStatus.WATCH.value)
+                summary.watch += 1
+            else:
+                self._reject_candidate(cand, "explore_1", original)
+                summary.rejected += 1
+        # Every pending arm is visible before the first entry fairness check.
+        self._retry_deferred_entries(summary, unattended=unattended, exclude_batch_id=batch_id)
+        for proposal in staged:
+            self._dispatch_proposal(proposal, summary, unattended)
+
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
-                         scan_batch_id=None, unattended: bool = False) -> bool:
+                         scan_batch_id=None, unattended: bool = False, staged=None) -> bool:
         # EXP-0: guards the scan loop's two proposal-creation branches.
         # CORRECTION (scope/safety audit, F-1): this is NOT the one true
         # proposal-creation chokepoint -- _override_open_trade builds and
@@ -711,6 +765,7 @@ class Orchestrator:
         card = cards.get_default_card(settings=self.settings)  # HOLD-2: threaded through the ACTIVE_CARD_ID setting
 
         risk = self._assess_current_risk(
+            symbol=cand["symbol"],
             direction=direction,
             entry=evaluation.entry,
             stop=evaluation.stop,
@@ -724,6 +779,7 @@ class Orchestrator:
         if not risk.approved or risk.sizing is None:
             proposal = self.swing.build_proposal(evaluation, risk.sizing or _zero_sizing(evaluation))
             self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
+            self._tag_campaign_proposal(proposal, cand, evaluation)
             proposal.scan_batch_id = scan_batch_id
             proposal.playbook_name = PLAYBOOK_V1
             proposal.setup_classification = "momentum_continuation"
@@ -735,18 +791,42 @@ class Orchestrator:
             # Persist the risk check (does NOT change whether the trade proceeds).
             rc_id = self._record_risk_check(proposal, evaluation, risk)
             proposal.risk_check_id = rc_id
-            proposal.status = ProposalStatus.BLOCKED.value
+            deferred = self._risk_can_defer(risk)
+            proposal.status = (ProposalStatus.PENDING_APPROVAL.value if deferred
+                               else ProposalStatus.BLOCKED.value)
             self.journal.insert("trade_proposals", {
                 **proposal.to_row(),
+                "arming_classification": cand.arming_classification,
                 **self._earnings_fields_for(cand.earnings, proposal.max_holding_days),
                 "lineage_id": lineage.get_or_create_lineage_id(self.journal, self.settings),
             })
+            if deferred:
+                self.journal.log_system_event(
+                    Severity.INFO, "entry_sizing_deferred", "Initial size awaits fresh exposure",
+                    {"proposal_id": proposal.proposal_id},
+                )
+                self._supersede_open_proposals(cand["symbol"], proposal.proposal_id)
+                self._set_candidate_status(cand["candidate_id"], CandidateStatus.PROPOSED.value)
+                summary.proposed += 1
+                result = self._defer_entry(proposal, "Fresh exposure is awaiting reconciliation; retry while the original TTL is valid.")
+                if result.blocked:
+                    self._record_execution_block(proposal.proposal_id, result)
+                else:
+                    summary.entry_deferred += 1
+                    summary.pending_manual += 1
+                    if (not (cand.arming_classification == ArmingClassification.HIGH_RISK_NARRATIVE.value
+                             and self.settings.last30days_high_risk_narrative_manual_only)
+                            and self.approvals.consider(proposal, risk_ok=True, freshness_ok=True,
+                                                       unattended=unattended, record=False).approved):
+                        self._schedule_entry_retry(proposal)
+                return True
             self._reject_candidate(cand, "risk", evaluation, reason=risk.primary_reason)
             summary.risk_blocked += 1
             return False
 
         proposal = self.swing.build_proposal(evaluation, risk.sizing)
         self._tag_target_profile(proposal, from_config=evaluation.is_mock, evaluation=evaluation)
+        self._tag_campaign_proposal(proposal, cand, evaluation)
         proposal.scan_batch_id = scan_batch_id
         proposal.playbook_name = PLAYBOOK_V1
         proposal.setup_classification = "momentum_continuation"
@@ -787,6 +867,21 @@ class Orchestrator:
         self._set_candidate_status(cand["candidate_id"], CandidateStatus.PROPOSED.value)
         summary.proposed += 1
 
+        if staged is not None:
+            staged.append(proposal)
+            return True
+        return self._dispatch_proposal(proposal, summary, unattended)
+
+    def _tag_campaign_proposal(self, proposal, cand, evaluation):
+        if self.settings.explore_1_enabled:
+            proposal.arm, proposal.policy_version = cand.get("arm"), explore_policy.VERSION
+            if evaluation.stop_source == "config":
+                proposal.target_price_source = proposal.stop_price_source = "config"
+            proposal.proposal_reason = (f"EXPLORE-1 {proposal.arm}; levels={proposal.target_price_source}; "
+                                        f"holding_days={evaluation.max_holding_days}")
+
+    def _dispatch_proposal(self, proposal, summary, unattended):
+        arming_cls = (self.journal.proposal_by_id(proposal.proposal_id) or {}).get("arming_classification")
         # HIGH-RISK narrative (hype/meme/squeeze) is MANUAL-ONLY: never auto-approve,
         # regardless of approval mode. It still went through every risk/freshness gate.
         if (arming_cls == ArmingClassification.HIGH_RISK_NARRATIVE.value
@@ -810,6 +905,7 @@ class Orchestrator:
             result = self._execute(proposal, approval=lambda: self.approvals.consider(
                 proposal, risk_ok=True, freshness_ok=True, unattended=unattended))
             if result.deferred:
+                self._schedule_entry_retry(proposal)
                 summary.entry_deferred += 1
                 summary.pending_manual += 1
                 summary.notes.append(f"{proposal.symbol}: {result.detail}")
@@ -850,8 +946,9 @@ class Orchestrator:
         ``approve_proposal`` already enforces (superseded is not in the
         approvable-status tuple), so no separate check is needed there.
 
-        Deliberately only called from the risk-APPROVED branch of
-        _handle_proposal: a later scan that risk-BLOCKS a fresh evaluation
+        Called for approved or temporarily unreconciled fresh proposals. A
+        transient replacement keeps its original TTL and cannot submit until
+        fresh risk passes. For hard failures in _handle_proposal: a later scan that risk-BLOCKS a fresh evaluation
         does not invalidate an existing, still-good open proposal for the
         same symbol -- that would remove user optionality for reasons
         unrelated to the old proposal's own validity."""
@@ -869,7 +966,8 @@ class Orchestrator:
 
     # --------------------------------------------------- manual approval API
     def approve_proposal(
-        self, proposal_id: str, approver: str = "user", approve_margin: bool = False
+        self, proposal_id: str, approver: str = "user", approve_margin: bool = False,
+        *, _auto_retry: bool = False, _unattended: bool = False,
     ):
         """Manual approval path (dashboard/CLI). Re-validates freshness + risk
         before executing. Returns (ok, message)."""
@@ -918,6 +1016,15 @@ class Orchestrator:
                 "proposal expired (TTL exceeded) — request a fresh scan/evaluation; "
                 f"expired at {proposal.proposal_expires_at_utc}"
             )
+
+        if _auto_retry:
+            if (row.get("arming_classification") == ArmingClassification.HIGH_RISK_NARRATIVE.value
+                    and self.settings.last30days_high_risk_narrative_manual_only):
+                return False, "manual-only narrative requires explicit approval"
+            if not self.approvals.consider(proposal, risk_ok=True, freshness_ok=True,
+                                          unattended=_unattended, record=False).approved:
+                return False, "automatic retry is not currently eligible"
+
 
         # Idempotency (belt-and-suspenders on top of the status guard): if a live
         # entry order already exists for this proposal, never create a duplicate.
@@ -979,6 +1086,7 @@ class Orchestrator:
 
         # Risk re-check.
         risk = self._assess_current_risk(
+            symbol=proposal.symbol,
             direction=proposal.direction,
             entry=proposal.entry,
             stop=proposal.stop,
@@ -1000,6 +1108,11 @@ class Orchestrator:
             self.journal.conn.commit()
             proposal.risk_check_id = rc_id
         if not risk.approved:
+            if self._risk_can_defer(risk):
+                result = self._defer_entry(proposal, "Fresh exposure remains unreconciled; no broker attempt made.")
+                if result.blocked:
+                    self._record_execution_block(proposal_id, result)
+                return False, result.detail
             # Journal the block explicitly (uniform with the freshness/drift
             # blocks above); the risk_check row recorded just above carries the
             # per-gate detail.
@@ -1011,8 +1124,23 @@ class Orchestrator:
             self._set_proposal_status(proposal_id, "blocked")
             return False, f"risk blocked: {risk.primary_reason}"
 
-        result = self._execute(proposal, fill_price=cur, approval=lambda: self.approvals.approve_manually(
-            proposal, approver=approver, freshness_ok=True, risk_ok=True))
+        # Initial reconciliation deferral has no authorized size (qty=0).
+        # Size it only now, against fresh account evidence; never extend TTL.
+        if (proposal.qty == 0 and risk.sizing is not None and self.journal.one(
+                "SELECT 1 FROM system_events WHERE category='entry_sizing_deferred' "
+                "AND json_extract(detail_json, '$.proposal_id')=? LIMIT 1", (proposal_id,))):
+            proposal.qty = risk.sizing.shares
+            proposal.risk_per_share = risk.sizing.risk_per_share
+            proposal.dollar_risk = risk.sizing.dollar_risk
+            self.journal.conn.execute(
+                "UPDATE trade_proposals SET qty=?, risk_per_share=?, dollar_risk=? WHERE proposal_id=?",
+                (proposal.qty, proposal.risk_per_share, proposal.dollar_risk, proposal_id),
+            )
+            self.journal.conn.commit()
+        approval = (lambda: self.approvals.consider(
+            proposal, risk_ok=True, freshness_ok=True, unattended=_unattended)) if _auto_retry else (
+            lambda: self.approvals.approve_manually(proposal, approver=approver, freshness_ok=True, risk_ok=True))
+        result = self._execute(proposal, fill_price=cur, approval=approval)
         if result.deferred:
             return False, f"execution deferred; proposal remains pending for a fresh approval retry: {result.detail}"
         if result.blocked:
@@ -1179,6 +1307,10 @@ class Orchestrator:
         proposal tagged as a user override. NEVER executes here — manual approval is
         still required. On any gate failure the override is recorded with
         execution_allowed=0 + a blocked_reason."""
+        if self.settings.explore_1_enabled:
+            rec["blocked_reason"] = OverrideBlockedReason.OTHER.value
+            rec["execution_result"] = "EXPLORE-1 accepts only arm-routed scan proposals"
+            return "blocked: manual overrides cannot create an unassigned campaign trade"
         symbol = cand.get("symbol")
         # EXP-0: unlike the scan loop's two RuntimeError backstops (genuinely
         # unreachable today -- shadow candidates never enter scan.candidates
@@ -1213,6 +1345,7 @@ class Orchestrator:
 
         # Risk re-check (sizing, spread, liquidity, exposure, daily cap, R:R...).
         risk = self._assess_current_risk(
+            symbol=symbol,
             direction=direction, entry=evaluation.entry, stop=evaluation.stop, snapshot=snap,
             open_positions=self.journal.count_open_positions(),
             trades_today=self.journal.count_paper_orders_today(),
@@ -1979,6 +2112,8 @@ class Orchestrator:
         This is not the runtime scan and never fabricates news. It is gated to
         non-real modes and logged as DEMO_SEED.
         """
+        if self.settings.explore_1_enabled:
+            raise RuntimeError("EXPLORE-1 does not admit demo trades")
         self._ensure_startup()
         symbol = "DEMO"
         # Price from the same symbol the approval path will re-fetch, so the
@@ -2025,13 +2160,22 @@ class Orchestrator:
         return {"proposal_id": proposal.proposal_id, "approved": ok, "message": msg}
 
     # --------------------------------------------------------------- helpers
-    def _assess_current_risk(self, **kwargs):
+    def _assess_current_risk(self, *, symbol=None, **kwargs):
         state = None
         if self.orders.real_paper:
-            from alphaos.risk.account_exposure import read_exposure
+            from alphaos.risk.account_exposure import read_exposure, ExposureUnreconciled
             from alphaos.risk.risk_engine import RiskDecision
             try:
                 state = read_exposure(self.orders.alpaca, self.journal)
+            except ExposureUnreconciled as exc:
+                # Keep hard proposal refusals (invalid stop, margin, spread,
+                # etc.) terminal even when account reconciliation is pending.
+                decision = self.risk.assess(**kwargs)
+                decision.approved = False
+                decision.sizing = None
+                decision.block_reasons.append({"code": ReasonCode.UNVERIFIABLE_DATA.value,
+                                               "detail": str(exc), "retryable": True})
+                return decision
             except Exception as exc:
                 return RiskDecision(approved=False, block_reasons=[{
                     "code": ReasonCode.UNVERIFIABLE_DATA.value,
@@ -2041,7 +2185,40 @@ class Orchestrator:
                 kwargs[key] = state[key]
         decision = self.risk.assess(**kwargs)
         decision.account_context = state
+        if state is not None and symbol in state.get("occupied_symbols", []):
+            decision.approved = False
+            decision.block_reasons.append({"code": ReasonCode.TOO_MANY_POSITIONS.value,
+                                           "detail": f"per-symbol cap: {symbol} already has an open position or pending entry"})
         return decision
+
+    @staticmethod
+    def _risk_can_defer(risk) -> bool:
+        return bool(risk.block_reasons) and all(r.get("retryable") is True for r in risk.block_reasons)
+
+    def _schedule_entry_retry(self, proposal) -> None:
+        self.journal.log_system_event(
+            Severity.INFO, "entry_retry_pending", "Automatic entry deferred until a later eligible scan",
+            {"proposal_id": proposal.proposal_id},
+        )
+
+    def _retry_deferred_entries(self, summary: ScanSummary, *, unattended: bool,
+                                exclude_batch_id=None) -> None:
+        rows = self.journal.query(
+            "SELECT p.proposal_id FROM trade_proposals p WHERE p.status IN ('proposed','pending_approval') "
+            "AND (? IS NULL OR p.scan_batch_id IS NULL OR p.scan_batch_id != ?) "
+            "AND EXISTS (SELECT 1 FROM system_events e WHERE e.category='entry_retry_pending' "
+            "AND json_extract(e.detail_json, '$.proposal_id')=p.proposal_id) ORDER BY p.id LIMIT 200",
+            (exclude_batch_id, exclude_batch_id),
+        )
+        for row in rows:
+            ok, detail = self.approve_proposal(row["proposal_id"], _auto_retry=True, _unattended=unattended)
+            if ok:
+                summary.auto_submitted += 1
+            else:
+                current = self.journal.proposal_by_id(row["proposal_id"])
+                if current and current["status"] in ProposalStatus.approvable():
+                    summary.entry_deferred += 1
+                    summary.notes.append(f"{row['proposal_id']}: {detail}")
 
     def _record_execution_block(self, proposal_id: str, result: OrderResult) -> None:
         # A proposal can be rejected/superseded while an entry waits. Never
@@ -2125,6 +2302,7 @@ class Orchestrator:
                                          ReasonCode.PRICE_DRIFT.value)
             fill_price = current_price
         risk = self._assess_current_risk(
+            symbol=proposal.symbol,
             direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
             snapshot=snapshot,
             requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,
@@ -2132,6 +2310,8 @@ class Orchestrator:
             realized_pnl_today=self.journal.realized_pnl_today(),
         )
         if not risk.approved or not risk.sizing or proposal.qty > risk.sizing.shares:
+            if self._risk_can_defer(risk):
+                return self._defer_entry(proposal, "Fresh exposure is awaiting reconciliation; no broker attempt made.")
             self.journal.log_system_event(Severity.INFO, "entry_risk_snapshot", "Fresh account limits checked before paper submission", {"proposal_id": proposal.proposal_id, "risk": risk.as_dict()})
             detail = risk.block_reasons or [{"code": ReasonCode.RISK_OVERSIZED.value,
                                             "detail": "approved size exceeds current account capacity"}]
@@ -2163,6 +2343,9 @@ class Orchestrator:
 
     def _execute_checked(self, proposal: TradeProposal, fill_price: Optional[float] = None,
                          approval: Optional[Callable[[], ApprovalOutcome]] = None):
+        refusal = explore_policy.entry_refusal(self.journal, self.settings, proposal)
+        if refusal:
+            return self._defer_entry(proposal, refusal, ReasonCode.APPROVAL_REQUIRED.value)
         current = self.journal.proposal_by_id(proposal.proposal_id)
         if current and current["status"] not in ProposalStatus.approvable():
             return OrderResult(blocked=True, block_reason=ReasonCode.APPROVAL_REQUIRED.value,
@@ -2230,6 +2413,12 @@ class Orchestrator:
                     Severity.WARNING, "risk", detail,
                     {"proposal_id": proposal.proposal_id, "monitor_health": health},
                 )
+                hard_health = {"protection_blocking", "execution_incident", "closed_intent_unverified",
+                               "ownership_ambiguous", "health_unavailable", "invalid_monitor_timestamp",
+                               "monitor_fused", "monitor_stalled"}
+                if (not health.get("protection_blocking", False)
+                        and not hard_health.intersection(health.get("issue_codes", []))):
+                    return self._defer_entry(proposal, detail + ": " + health.get("detail", "health unavailable"))
                 return OrderResult(
                     blocked=True, block_reason=ReasonCode.UNVERIFIABLE_DATA.value,
                     detail=detail + ": " + health.get("detail", "health unavailable"),

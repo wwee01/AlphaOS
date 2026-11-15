@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from alphaos.constants import (
@@ -347,6 +347,9 @@ class Settings:
 
     # --- notifications ---
     ntfy_topic: str
+    # Explicit opt-in; the URL is a bearer capability supplied by the operator.
+    monitor_deadman_enabled: bool
+    monitor_deadman_url: str = field(repr=False)
 
     # --- runtime / safety ---
     mode: RuntimeMode
@@ -784,6 +787,8 @@ class Settings:
     # (docs/roadmap/alphaos-time2-broker-time-exit-spec.md) for the full
     # cancel -> verify -> close -> record sequence and its fail directions.
     time_exit_enforcement_enabled: bool
+
+    explore_1_enabled: bool = False
 
     # ------------------------------------------------------------------ helpers
     @property
@@ -1772,6 +1777,8 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_heartbeat_stale_minutes=scheduler_heartbeat_stale_minutes,
         scheduler_benchmark_spine_time=scheduler_benchmark_spine_time,
         ntfy_topic=_get(src, "NTFY_TOPIC"),
+        monitor_deadman_enabled=_get_bool(src, "MONITOR_DEADMAN_ENABLED", False),
+        monitor_deadman_url=_get(src, "MONITOR_DEADMAN_URL"),
         mode=mode,
         approval_mode=approval_mode,
         real_trading_enabled_raw=_get(src, "REAL_TRADING_ENABLED", "false").lower(),
@@ -1932,4 +1939,5 @@ def load_settings(load_env_file: bool = True, env: Optional[dict] = None) -> Set
         scheduler_preflight_time=scheduler_preflight_time,
         time_exit_breach_alert_enabled=time_exit_breach_alert_enabled,
         time_exit_enforcement_enabled=time_exit_enforcement_enabled,
+        explore_1_enabled=_get_bool(src, "EXPLORE_1_ENABLED", False),
     )

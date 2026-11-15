@@ -205,7 +205,7 @@ def test_changed_conditions_during_wait_are_rechecked_before_approval(paper_entr
         ok, _ = orch.approve_proposal(pid)
     assert not ok
     assert orch.journal.count_rows('approvals') == 0 and attempted == []
-    expected_status = 'pending_approval' if change in {'stale_quote', 'price_drift'} else 'blocked'
+    expected_status = 'pending_approval' if change in {'stale_quote', 'price_drift', 'monitor_failed'} else 'blocked'
     assert orch.journal.proposal_by_id(pid)['status'] == expected_status
 
 

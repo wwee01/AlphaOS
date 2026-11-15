@@ -1,0 +1,32 @@
+{
+  "status": "CK approved deployment targets; not applied",
+  "authorization_date_sgt": "2026-11-15",
+  "runtime_changes": {
+    "EXPLORE_1_ENABLED": "true",
+    "MAX_OPEN_POSITIONS": "20",
+    "MAX_RISK_PER_TRADE_PCT": "0.0025",
+    "MAX_AUTO_APPROVALS_PER_DAY": "20",
+    "MAX_UNATTENDED_APPROVALS_PER_DAY": "20",
+    "MAX_PAPER_TRADES_PER_DAY": "20",
+    "SHADOW_LABEL_TOP_K": "20",
+    "SHADOW_AI_CAP_CALLS_PER_DAY": "60",
+    "SHADOW_AI_CAP_CALLS_PER_30D": "1800",
+    "SCHEDULER_AI_COST_CAP_CALLS_PER_30D": "7200"
+  },
+  "preserve": {
+    "paper_only": true,
+    "MAX_DAILY_LOSS_PCT": "0.03",
+    "earnings_behavior": "existing advisory warnings; no new veto",
+    "shadow_budget_share_maximum": "25%",
+    "shadow_coverage_floor": "80%",
+    "MONITOR_DEADMAN_ENABLED": "false",
+    "other_controls": "Existing total heat, maximum notional, freshness/drift, canary, per-symbol cap, brackets, time exits, kill switch and research quarantine remain in force."
+  },
+  "deployment_conditions": [
+    "Claude audits the exact application revision and this configuration record; CK gives the merge instruction.",
+    "Use the reviewed deployment protocol, scratch preservation/restore and fresh broker reconciliation; preserve unrelated production changes.",
+    "Shadow latch release is separately conditional on a fresh preview passing every existing recovery gate. A budget approval does not override a failed coverage gate.",
+    "This JSON is a review artifact, not a complete environment file or an instruction to replace the existing environment."
+  ],
+  "daily_paper_cap_correction": "Existing production cap was 1000000, not below 20. CK's explicit target of 20 tightens this cap; unattended approvals rise from 1 to 20."
+}

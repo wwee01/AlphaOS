@@ -14,9 +14,20 @@ from types import SimpleNamespace
 from alphaos.config.settings import load_settings
 from alphaos.journal.journal_store import JournalStore
 from alphaos.scheduler.job_runner import JobRunner
+from alphaos.scheduler.monitor_deadman import ping_monitor_success
 from alphaos.scheduler.monitor_health import monitor_health
 from alphaos.scheduler.monitor_notifications import notify_monitor_transition
 from alphaos.scheduler.ownership import worker_ownership
+
+
+def _job_fault(result: dict) -> bool:
+    # A healthy monitor currently supervising positions defers research entries.
+    # Keep that refusal in the result, but do not report it as a service failure.
+    if (result.get("job_type") == "scan" and result.get("status") == "blocked"
+            and result.get("reason") == "monitor_not_ready"
+            and result.get("monitor_health", {}).get("ok") is True):
+        return False
+    return result.get("status") in ("failed", "fused", "blocked")
 
 
 def run_role(role: str, settings) -> tuple[dict, int]:
@@ -56,9 +67,20 @@ def run_role(role: str, settings) -> tuple[dict, int]:
         try:
             results = JobRunner(orch, role=role).run_due_jobs()
             health = monitor_health(orch.journal, settings)
-            failed = any(r["status"] in ("failed", "fused", "blocked") for r in results)
-            return {"role": role, "results": results, "monitor_health": health,
-                    "entry_ready": health.get("entry_ready", False)}, int(failed or not health["ok"])
+            failed = any(_job_fault(r) for r in results)
+            result = {"role": role, "results": results, "monitor_health": health,
+                      "entry_ready": health.get("entry_ready", False)}
+            if role == "monitor":
+                result["deadman"] = ping_monitor_success(settings, role=role, results=results, health=health)
+            if role == "research":
+                try:
+                    from alphaos.research.swing_audit_worker import maybe_run
+                    audit = maybe_run(orch)
+                except Exception as exc:
+                    audit = {"status": "blocked", "error_type": type(exc).__name__}
+                if audit is not None:
+                    result["swing_availability_audit"] = audit
+            return result, int(failed or not health["ok"])
         finally:
             orch.close()
 

@@ -27,6 +27,8 @@ class TradeProposal:
     dollar_risk: float
     expected_r: Optional[float]
     same_day_exit_eligible: bool
+    arm: Optional[str] = None
+    policy_version: Optional[str] = None
     candidate_id: str = ""
     eval_id: str = ""
     requires_margin: bool = False
@@ -69,6 +71,8 @@ class TradeProposal:
     def from_row(cls, row: dict) -> "TradeProposal":
         """Rebuild a proposal object from a persisted ``trade_proposals`` row."""
         return cls(
+            arm=row.get("arm"),
+            policy_version=row.get("policy_version"),
             symbol=row["symbol"],
             direction=row["direction"],
             strategy=row["strategy"],
@@ -116,6 +120,8 @@ class TradeProposal:
 
     def to_row(self) -> dict:
         return {
+            "arm": self.arm,
+            "policy_version": self.policy_version,
             "proposal_id": self.proposal_id,
             "candidate_id": self.candidate_id,
             "eval_id": self.eval_id,

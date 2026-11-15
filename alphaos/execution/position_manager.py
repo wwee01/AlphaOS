@@ -78,6 +78,8 @@ class PositionManager:
         self.journal.insert(
             "positions",
             {
+                "arm": order_row.get("arm"),
+                "policy_version": order_row.get("policy_version"),
                 "position_id": position_id,
                 "order_id": order_row["order_id"],
                 "symbol": order_row["symbol"],
@@ -605,6 +607,8 @@ class PositionManager:
         self.journal.insert(
             "trade_outcomes",
             {
+                "arm": pos.get("arm"),
+                "policy_version": pos.get("policy_version"),
                 "outcome_id": new_id("out"),
                 "created_at_utc": now_dt.isoformat(),
                 "created_at_sgt": timeutils.stamp(now_dt).local_sgt,
@@ -769,6 +773,8 @@ class PositionManager:
         self.journal.insert(
             "paper_orders",
             {
+                "arm": pos.get("arm"),
+                "policy_version": pos.get("policy_version"),
                 "order_id": order_id,
                 "broker_order_id": broker_order_id or new_id("sim"),
                 "proposal_id": None,
