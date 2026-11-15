@@ -1,8 +1,8 @@
 # Codex brief — EXPLORE-1 follow-ups, 15 November 2026 SGT
 
-**Drafted by Claude for CK to hand to Codex.** P0 + EXPLORE-1 are deployed and active. Item 1 is CK's
-ruling of 15 November. Items 2 and 3 are Claude's audit recommendations; build them only once CK
-confirms. Same ceremony as before: commit, hand the exact SHA to Claude, no deploy until CK's merge
+**Drafted by Claude for CK to hand to Codex.** P0 + EXPLORE-1 are deployed and active. Items 1 and 2
+and the control-pool change in item 3 are CK's rulings of 15 November. The other small items in 3 are
+Claude's recommendations, low priority. Same ceremony as before: commit, hand the exact SHA to Claude, no deploy until CK's merge
 instruction.
 
 ## Deployed state — rebase onto this before any new work
@@ -60,7 +60,9 @@ The weekly scorecard must report arm A long and arm A short separately.
 **Budget.** About 250 changed application lines. If it needs more, or any safety control has to be
 weakened to make shorts work, stop and report.
 
-## 2. F1 — a deferred entry is never retried (audit finding, medium, fails safe)
+## 2. F1 — a deferred entry is never retried (audit finding, medium, fails safe) — CK: build now
+
+Build this first and hand it over on its own SHA; do not hold it for the shorts work.
 
 Only a scan calls `_retry_deferred_entries`; proposals expire after 1,800 s and scans are at least
 105 minutes apart. When the first staged entry of a pass fills before the next one's exposure read,
@@ -72,8 +74,10 @@ the 5-minute tick alone is weak because of the 50 bps drift limit. Reproduction:
 
 ## 3. Smaller items (one commit is fine)
 
-- F3: exclude symbols already held or pending from the control pool before the draw. **Pending CK's
-  ruling — do not build until CK says.** A redraw after a blocked draw stays out of scope either way.
+- F3 (**CK ruled: yes**): exclude symbols already held or with a pending entry from the control pool
+  before the draw. Persist the filtered pool as the eligible set and record which symbols were
+  excluded and why, so the draw stays reproducible. Still one draw per window; no redraw after a
+  blocked draw.
 - L1: give non-routed campaign candidates a specific rejection reason.
 - L3: add the new keys to `.env.example`.
 - Migration race: on 15 November the first scheduler tick after reload failed once, most likely
@@ -83,6 +87,13 @@ the 5-minute tick alone is weak because of the 50 bps drift limit. Reproduction:
 ## Still due from you
 
 The 28 November scorecard (not built). Shadow latch: fresh preview only.
+
+## Leave alone
+
+- Paper observer: CK keeps it running as a read-only record. It stays frozen — no repairs, no
+  alert changes, no effect on the heartbeat exit code.
+- External heartbeat: stays disabled (`MONITOR_DEADMAN_ENABLED` false, no URL) until CK supplies an
+  endpoint. Do not enable it or add a URL.
 
 ## Not yours
 
