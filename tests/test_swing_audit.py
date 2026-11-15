@@ -423,7 +423,7 @@ def test_existing_research_hook_never_runs_for_monitor(tmp_path, monkeypatch):
     from alphaos.scheduler import worker
     from alphaos import orchestrator
 
-    settings = SimpleNamespace(db_path=str(tmp_path / "source.db"))
+    settings = SimpleNamespace(db_path=str(tmp_path / "source.db"), monitor_deadman_enabled=False)
 
     @contextmanager
     def owned(*args):
