@@ -89,3 +89,17 @@ suite can currently be read as a clean pass. Every other test passed in both run
 Code only. Fast-forward from `378a282`; no migration, no `.env` change. The timed services load code
 per tick; console and dashboard need a restart. First natural exercise is the first scan in which two
 or more arms propose and the first entry fills at once.
+
+## Deployed — 16 November 2026, 13:35 SGT (CK: "Yes merge F1")
+
+- Merge `d78ad87` (`--no-ff` of `13b5645` onto `beca1ae`). Application and tests byte-identical to the
+  audited commit (`git diff 13b5645 d78ad87 -- alphaos tests scripts deploy pyproject.toml` is empty).
+- Pre-flight: flat book, no working order, no pending proposal, no worker running, US market closed.
+- Scheduler, monitor and heartbeat paused for about 20 seconds, reloaded one at a time; console and
+  dashboard restarted. No schema or `.env` change, so no ledger backup beyond the 05:30 daily one.
+- After: all six services enabled, last exit 0; readiness `entry_ready=true`; dashboard health 200;
+  console restarted and listening (its health URL answers 403 to my unauthenticated request, which I
+  did not pursue). On the deployed tree: 156 affected tests pass and my 14 probes pass.
+- Not yet exercised by a real fill. First natural exercise: a scan in which two or more arms propose
+  and the first entry fills at once.
+- Rollback: `git revert -m 1 d78ad87`, restart console and dashboard.
