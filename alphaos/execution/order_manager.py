@@ -348,6 +348,38 @@ class OrderManager:
         )
         return self._entry_result(row)
 
+    def _book_verified_entry_fill(self, proof: dict) -> str:
+        """Book one pass-owned protected fill under entry and monitor ownership.
+
+        The caller supplies evidence from its immediately preceding exposure
+        read, then must repeat the entire read. This performs no broker call,
+        intent recovery, incident clearing, cancellation or exit operation.
+        """
+        from alphaos.risk.account_exposure import _unreconciled_entry
+
+        row, norm = proof["order"], proof["parent"]
+        with ledger_ops.atomic(self.journal) as journal:
+            positions = journal.query("SELECT * FROM positions WHERE symbol=? AND status='open'",
+                                      (row["symbol"],))
+            expected_positions = [proof["position"]] if proof["position"] else []
+            proposal = journal.proposal_by_id(row["proposal_id"])
+            if (positions != expected_positions or pending_entry_intent(journal)
+                    or _unreconciled_entry(journal, row["symbol"], proof["position"]) != row
+                    or proposal != proof["proposal"] or not proposal
+                    or proposal["status"] not in {"approved", "submitted", "filled"}):
+                raise ValueError("verified entry changed before same-pass fill booking")
+            manager = copy(self)
+            manager.journal = journal
+            observed = EntrySubmission(manager).observe(dict(row), norm)
+            pid = manager._open_real_position(observed, norm)
+            journal.conn.execute("UPDATE trade_proposals SET status='filled' WHERE proposal_id=?",
+                                 (row["proposal_id"],))
+            journal.log_system_event(Severity.INFO, "same_pass_entry_fill",
+                                     "Verified protected entry fill booked before fresh exposure reread",
+                                     {"order_id": row["order_id"], "position_id": pid,
+                                      "cumulative_qty": norm["filled_qty"]})
+        return pid
+
     def _open_real_position(self, row: dict, norm: dict) -> str:
         """Atomically reconcile cumulative entry fills and the residual position."""
         with ledger_ops.atomic(self.journal) as journal:

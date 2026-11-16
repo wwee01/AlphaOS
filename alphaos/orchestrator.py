@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -737,9 +738,19 @@ class Orchestrator:
                 self._reject_candidate(cand, "explore_1", original)
                 summary.rejected += 1
         # Every pending arm is visible before the first entry fairness check.
-        self._retry_deferred_entries(summary, unattended=unattended, exclude_batch_id=batch_id)
-        for proposal in staged:
-            self._dispatch_proposal(proposal, summary, unattended)
+        # Only this dispatch pass's acknowledged entries may be booked by a
+        # later owned final exposure check. Never retain that authority across scans.
+        if getattr(self, "_pass_entry_order_ids", None) is not None:
+            raise RuntimeError("campaign dispatch is already active")
+        self._pass_entry_order_ids: Optional[set[str]] = set()
+        self._pass_entry_thread_id: Optional[int] = threading.get_ident()
+        try:
+            self._retry_deferred_entries(summary, unattended=unattended, exclude_batch_id=batch_id)
+            for proposal in staged:
+                self._dispatch_proposal(proposal, summary, unattended)
+        finally:
+            self._pass_entry_order_ids = None
+            self._pass_entry_thread_id = None
 
     def _handle_proposal(self, cand: "ScanContext", evaluation, summary: ScanSummary,
                          scan_batch_id=None, unattended: bool = False, staged=None) -> bool:
@@ -2160,13 +2171,30 @@ class Orchestrator:
         return {"proposal_id": proposal.proposal_id, "approved": ok, "message": msg}
 
     # --------------------------------------------------------------- helpers
-    def _assess_current_risk(self, *, symbol=None, **kwargs):
+    def _current_pass_entry_ids(self):
+        # A concurrent manual entry on this object never inherits scan authority.
+        if getattr(self, "_pass_entry_thread_id", None) == threading.get_ident():
+            return self._pass_entry_order_ids
+        return None
+
+    def _assess_current_risk(self, *, symbol=None, _entry_fill_ids=(), **kwargs):
         state = None
         if self.orders.real_paper:
             from alphaos.risk.account_exposure import read_exposure, ExposureUnreconciled
             from alphaos.risk.risk_engine import RiskDecision
             try:
-                state = read_exposure(self.orders.alpaca, self.journal)
+                remaining = set(_entry_fill_ids or ())
+                while True:
+                    try:
+                        state = read_exposure(self.orders.alpaca, self.journal)
+                        break
+                    except ExposureUnreconciled as exc:
+                        proof = exc.verified_fill
+                        oid = proof["order"]["order_id"] if proof else None
+                        if oid not in remaining:
+                            raise
+                        remaining.remove(oid)  # At most one booking per owned ID per check.
+                        self.orders._book_verified_entry_fill(proof)
             except ExposureUnreconciled as exc:
                 # Keep hard proposal refusals (invalid stop, margin, spread,
                 # etc.) terminal even when account reconciliation is pending.
@@ -2303,6 +2331,7 @@ class Orchestrator:
             fill_price = current_price
         risk = self._assess_current_risk(
             symbol=proposal.symbol,
+            _entry_fill_ids=self._current_pass_entry_ids(),
             direction=proposal.direction, entry=proposal.entry, stop=proposal.stop,
             snapshot=snapshot,
             requires_margin=proposal.requires_margin, margin_approved=proposal.margin_approved,
@@ -2433,7 +2462,13 @@ class Orchestrator:
         # checks. They remain durable if the subsequent broker attempt fails
         # or its response is uncertain; no post-attempt rollback is allowed.
         self._set_proposal_status(proposal.proposal_id, "approved")
-        return self.orders.execute_proposal(proposal, fill_price=fill_price)
+        result = self.orders.execute_proposal(proposal, fill_price=fill_price)
+        owned = self._current_pass_entry_ids()
+        if (owned is not None and self.orders.real_paper and result.order
+                and not result.blocked and not result.submission_uncertain
+                and result.state in {"accepted", "partially_filled", "filled"}):
+            owned.add(result.order["order_id"])
+        return result
 
     def _record_execution_calibration(self, proposal, snap, result) -> None:
         """Persist a cost-calibration row for an approved order (best-effort audit

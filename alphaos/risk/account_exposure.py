@@ -16,6 +16,10 @@ class ExposureUnavailable(ValueError):
 class ExposureUnreconciled(ExposureUnavailable):
     """A snapshot awaits reconciliation; entry remains forbidden until rechecked."""
 
+    def __init__(self, message, *, verified_fill=None):
+        super().__init__(message)
+        self.verified_fill = verified_fill
+
 
 class EntrySubmissionBusy(ExposureUnavailable):
     """Another local entry owns submission; no broker attempt was made."""
@@ -95,27 +99,34 @@ def summarize_exposure(account: dict, positions: list[dict], orders: list[dict],
             "pending_entry_notional": pending, "observed_at_utc": timeutils.stamp().utc}
 
 
-def _verify_unreconciled_fill(client, journal, held, local) -> None:
-    """Only an identified, acknowledged and currently protected fill may wait."""
-    from alphaos.execution.entry_submission import EntrySubmission
+def _unreconciled_entry(journal, symbol, local):
+    """Find one acknowledged origin; also reused inside the booking transaction."""
     from alphaos.execution.ledger_ops import metadata
-
     rows = journal.query(
         "SELECT o.* FROM paper_orders o WHERE o.execution_source='alpaca_paper' "
         "AND o.order_class='bracket' AND o.symbol=? AND o.proposal_id IS NOT NULL "
         "AND o.broker_order_id IS NOT NULL AND o.state IN ('accepted','partially_filled','filled') "
         "AND NOT EXISTS (SELECT 1 FROM positions p WHERE p.order_id=o.order_id AND p.status='closed')",
-        (held.get("symbol"),),
+        (symbol,),
     )
+    eligible = [r for r in rows if metadata(r).get("purpose") == "paper_entry"
+                and metadata(r).get("phase") == "acknowledged"
+                and r.get("client_order_id") == r.get("proposal_id")]
+    if len(eligible) != 1:
+        raise ValueError("no unique acknowledged entry")
+    row = eligible[0]
+    if local and local.get("order_id") != row["order_id"]:
+        raise ValueError("local origin differs from entry")
+    return row
+
+
+def _verify_unreconciled_fill(client, journal, held, local):
+    """Return read-only evidence; no fill is booked and no exposure is waived."""
+    from alphaos.execution.entry_submission import EntrySubmission
+
     try:
-        eligible = [r for r in rows if metadata(r).get("purpose") == "paper_entry"
-                    and metadata(r).get("phase") == "acknowledged"
-                    and r.get("client_order_id") == r.get("proposal_id")]
-        if len(eligible) != 1:
-            raise ValueError("no unique acknowledged entry")
-        row = eligible[0]
-        if local and local.get("order_id") != row["order_id"]:
-            raise ValueError("local origin differs from entry")
+        row = _unreconciled_entry(journal, held.get("symbol"), local)
+        proposal = journal.proposal_by_id(row["proposal_id"])
         parent = client.get_order(row["broker_order_id"])
         EntrySubmission.validate(row, parent, nested=True)
         qty = abs(_number(held.get("qty"), "held quantity"))
@@ -125,6 +136,7 @@ def _verify_unreconciled_fill(client, journal, held, local) -> None:
         side = "buy" if row["direction"] == "short" else "sell"
         if verified_live_roles(parent, qty, held["symbol"], side) != {"stop_loss", "take_profit"}:
             raise ValueError("entry protection is not verified")
+        return {"order": row, "parent": parent, "position": local, "proposal": proposal}
     except Exception as exc:
         raise ExposureUnavailable("unreconciled position lacks verified entry and protection evidence") from exc
 
@@ -170,8 +182,9 @@ def read_exposure(client, journal) -> dict:
             continue
         local = origins[0] if origins else None
         if not local or abs(float(local["qty"])) != abs(float(held["qty"])):
-            _verify_unreconciled_fill(client, journal, held, local)
-            raise ExposureUnreconciled("verified entry fill awaits local position reconciliation")
+            proof = _verify_unreconciled_fill(client, journal, held, local)
+            raise ExposureUnreconciled("verified entry fill awaits local position reconciliation",
+                                      verified_fill=proof)
         if not local.get("broker_order_id"):
             raise ExposureUnavailable("position lacks broker protection lineage")
         parent = client.get_order(local["broker_order_id"])
