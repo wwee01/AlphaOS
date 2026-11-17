@@ -1,5 +1,9 @@
 # EXPLORE-1 — arm governor rule and primary-question registration, v1
 
+> **STATUS CORRECTION, 17 November 2026:** read with `docs/research/explore1-rule-addendum-1-2026-11-17.md`,
+> which corrects this document's sample counts and fixes the measurement and test conventions. Where
+> they differ, the addendum governs.
+
 **Author:** Claude (strategy). **Date:** 16 November 2026 SGT. **Authority:** CK ruling 16 November
 ("agreeable on the arm governor"; loss brake at −10 %). **Builder:** Codex. This document is the
 rule; the build brief is `docs/roadmap/codex-brief-automated-learning-2026-11-16.md`.

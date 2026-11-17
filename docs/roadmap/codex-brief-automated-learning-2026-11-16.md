@@ -1,5 +1,9 @@
 # Codex brief — automated learning, 16 November 2026 SGT
 
+> **STATUS CORRECTION, 17 November 2026:** read with `docs/research/explore1-rule-addendum-1-2026-11-17.md`,
+> which corrects this document's sample counts and fixes the measurement and test conventions. Where
+> they differ, the addendum governs.
+
 **Drafted by Claude on CK's instruction. CK's rulings of 16 November:** the arm governor is approved
 (slot caps move automatically each week within bounds, no approval step); the campaign loss brake is
 −10 %; **all work runs through Codex — Claude writes instructions, strategy and audits and does no
