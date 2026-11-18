@@ -5,8 +5,20 @@
 `docs/roadmap/codex-brief-automated-learning-2026-11-16.md`. **Answers:** Codex
 `CLAUDE-AUTOMATED-LEARNING-CLARIFICATIONS-2026-11-16.md` (diagnosis against `ea036e1`).
 
-Sections marked **[CK]** change what v1 measures or tests and take effect only on CK's approval.
-Everything else fills a gap v1 left open and is frozen by this document. The four claims' wording,
+Sections marked **[CK]** change what v1 measures or tests. **CK approved all five recommendations on
+18 November 2026** ("let's go with your recommendation"); the rulings are listed below and the text
+of each section states the approved option. Everything else fills a gap v1 left open and is frozen by
+this document.
+
+**CK rulings, 18 November 2026:**
+
+| # | Decision | Ruling |
+|---|---|---|
+| 1 | Reference price | `close_ref_v1`: candidate and SPY both from the close of the first session after the decision, to the close of the 5th / 10th session after it |
+| 2 | Classifier ranking test | `H-EXP1-IC-LABEL` dropped from the tested family; classifier numbers reported as descriptive. The family is three tests |
+| 3 | Evaluator ranking score | propose by confidence descending; all watch tied; reject by confidence ascending |
+| 4 | When to look | count-triggered single look: first Saturday 01:00 UTC on or after 16 January 2027 with arm A at 40 matured decisions on 20 sessions; 27 February 2027 01:00 UTC at the latest |
+| 5 | Registration mechanism | immutable records in the existing registry before the 20 November US close (Codex, on CK's instruction); versioned evaluator before 9 January 2027 | The four claims' wording,
 the cohort start, every sample floor, the block length, 10,000 resamples, Benjamini–Hochberg at 10 %
 and the 18-of-22 calibration gate are unchanged.
 
@@ -40,9 +52,9 @@ Consequences, stated before any outcome exists:
   (about 1.2 points) stand, by the accident of a smaller sample and a smaller deviation offsetting.
   They remain planning assumptions, not maturity-qualified estimates.
 
-## 1. Measurement convention **[CK — decision 1]**
+## 1. Measurement convention **[CK — decision 1: approved 18 November]**
 
-**Recommended (Codex's proposal, adopted):** convention `close_ref_v1`.
+**Adopted (Codex's proposal):** convention `close_ref_v1`.
 
 - **Reference session D** of a decision: the first regular session whose close is strictly after the
   decision timestamp. A decision stamped at or after a close, or on a non-session day, takes the next
@@ -128,7 +140,7 @@ A session is **valid** with at least 10 such rows having a matured `r`, and neit
 the returns all equal. Invalid sessions do not count toward the 20-day floor. Spearman with average
 ranks for ties.
 
-**Ranking score [CK — decision 3].** v1 said ties are "broken by its confidence". The prompt defines
+**Ranking score [CK — decision 3: approved 18 November].** v1 said ties are "broken by its confidence". The prompt defines
 confidence only as "number 0..1", and in the ledger it is highest on rejections (median 0.88), so it
 is confidence in the stated decision, not in the candidate. Ranking a confident rejection above an
 unsure one would be backwards. Corrected score, highest first: propose by confidence descending;
@@ -149,29 +161,30 @@ closed and is never re-run. Below-floor tests close as inconclusive.
 standard error an arm holds. Equal `t` values are ordered A, B, C. A one-slot return toward the start
 value is skipped if it would take the caps above 20.
 
-## 3. What is registered, and when it is read **[CK — decisions 2 and 4]**
+## 3. What is registered, and when it is read **[CK — decisions 2 and 4: approved 18 November]**
 
-**Decision 2 — drop `H-EXP1-IC-LABEL` from the tested family.** It is untestable as written. If
-dropped, the family is three and the classifier's numbers are reported as descriptive, like arm B. If
-kept, it will close inconclusive and make the other three harder to pass.
+**Decision 2 — `H-EXP1-IC-LABEL` is dropped from the tested family.** It is untestable as written.
+The registered family is three tests: `H-EXP1-A`, `H-EXP1-POOL`, `H-EXP1-IC-EVAL`. The classifier's
+numbers are reported as descriptive, like arm B. Benjamini–Hochberg is over these three.
 
 **Decision 4 — when to look.**
-- *As v1:* cohort is decisions from the 16 November open to the 7 January close; `T` is
-  2027-01-16 01:00 UTC. Expect `H-EXP1-A` to be inconclusive.
-- *Recommended:* `T` is the first Saturday 01:00 UTC on or after 16 January 2027 on which arm A has
+- *Rejected (v1 as written):* cohort is decisions from the 16 November open to the 7 January close;
+  `T` is 2027-01-16 01:00 UTC.
+- *Adopted:* `T` is the first Saturday 01:00 UTC on or after 16 January 2027 on which arm A has
   at least 40 matured decisions on at least 20 sessions, and 27 February 2027 01:00 UTC at the
   latest. The cohort is every decision from the 16 November open whose 5-day endpoint has closed
   before `T`. The trigger depends only on counts, never on results, so it remains a single
   unconditioned look. It can move the final read by up to six weeks.
 
-## 4. Registration mechanism **[CK — decision 5]**
+## 4. Registration mechanism **[CK — decision 5: approved 18 November]**
 
 Two steps, because the existing evaluator cannot run these tests and a new one cannot be built and
 audited by 20 November.
 
-1. **Before the US close on 20 November:** four (or three) immutable records in the existing
+1. **Before the US close on 20 November:** three immutable records in the existing
    registry, written with the existing `register_hypothesis` function. Each carries its `H-EXP1` ID,
-   the claim, the family, the seed, `analysis_not_before`, and the contract: the commit SHA and
+   the claim, the family, the seed, `analysis_not_before` (2027-01-16T01:00:00Z, the earliest possible `T`), the
+   look rule of section 3, and the contract: the commit SHA and
    SHA-256 of v1 and of this addendum. One committed script; run first on a ledger copy; run once on
    production; refuse if any `H-EXP1` record exists; read back and report IDs and hashes. This is a
    production ledger write and needs CK's instruction. No application code changes. Confirm, before
