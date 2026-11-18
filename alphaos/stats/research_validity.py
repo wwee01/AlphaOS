@@ -1,9 +1,11 @@
-"""Executable quarantine for the contracts invalidated by the September audit.
+"""Legacy finalization guards, including the September audit quarantine.
 
 This is not an alternative statistical verdict or a successor activation
 mechanism. Historical evidence remains readable. No parameter/approval flag
 can remove these identified contract defects from the original registration.
 Pure descriptive calculations remain available outside the writing APIs.
+EXPLORE-1's immutable contract requires a separate versioned evaluator;
+that routing refusal does not quarantine or invalidate its registration.
 """
 
 from __future__ import annotations
@@ -13,6 +15,10 @@ import json
 
 class ResearchContractQuarantinedError(ValueError):
     pass
+
+
+class LegacyFinalizationRefusedError(ValueError):
+    """A valid versioned registration cannot use the legacy evaluator."""
 
 
 _METRIC_REASONS = {
@@ -53,6 +59,13 @@ def registration_validity(row: dict, proposal: dict | None = None) -> dict:
         reason = "PER first-event chronology changed; original/v2 registrations cannot freeze the repaired event population"
     if not reason and params.get("shadow_tier") == 1:
         reason = "shadow selection/cohort and final evaluator contract require review before freezing evidence"
+    if not reason and params.get("registration_version") == "explore1_immutable_contract_v1":
+        return {
+            "quarantined": False,
+            "legacy_finalization_refused": True,
+            "reason_code": "VERSIONED_EVALUATOR_REQUIRED",
+            "reason": "EXPLORE-1 requires its reviewed versioned evaluator; legacy finalization is not allowed",
+        }
     return {
         "quarantined": reason is not None,
         "reason_code": "AUDITED_CONTRACT_REQUIRES_SUCCESSOR" if reason else None,
@@ -74,4 +87,9 @@ def require_finalization_allowed(journal, row: dict) -> None:
         raise ResearchContractQuarantinedError(
             f"{validity['reason_code']}: {validity['reason']}. Preserve this registration; "
             "draft a corrected prospective contract for review. No evidence was written."
+        )
+    if validity.get("legacy_finalization_refused"):
+        raise LegacyFinalizationRefusedError(
+            f"{validity['reason_code']}: {validity['reason']}. "
+            "Preserve this registration. No evaluation look was consumed and no evidence was written."
         )
