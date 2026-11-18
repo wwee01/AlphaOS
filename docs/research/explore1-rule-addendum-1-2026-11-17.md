@@ -10,15 +10,21 @@ Sections marked **[CK]** change what v1 measures or tests. **CK approved all fiv
 of each section states the approved option. Everything else fills a gap v1 left open and is frozen by
 this document.
 
-**CK rulings, 18 November 2026:**
+**CK rulings, 18 November 2026** (row 1 corrected the same day — see the note after the table):
 
 | # | Decision | Ruling |
 |---|---|---|
-| 1 | Reference price | `close_ref_v1`: candidate and SPY both from the close of the first session after the decision, to the close of the 5th / 10th session after it |
+| 1 | Reference price | `close_ref_v1` exactly as defined in section 1: reference session D is the first session whose close is after the decision (for an intraday decision, the decision day itself); endpoints are the closes of the 5th / 10th session after D |
 | 2 | Classifier ranking test | `H-EXP1-IC-LABEL` dropped from the tested family; classifier numbers reported as descriptive. The family is three tests |
 | 3 | Evaluator ranking score | propose by confidence descending; all watch tied; reject by confidence ascending |
 | 4 | When to look | count-triggered single look: first Saturday 01:00 UTC on or after 16 January 2027 with arm A at 40 matured decisions on 20 sessions; 27 February 2027 01:00 UTC at the latest |
-| 5 | Registration mechanism | immutable records in the existing registry before the 20 November US close (Codex, on CK's instruction); versioned evaluator before 9 January 2027 | The four claims' wording,
+| 5 | Registration mechanism | immutable records in the existing registry before the 20 November US close (Codex, on CK's instruction); versioned evaluator before 9 January 2027 |
+
+*Correction, 18 November (raised by Codex):* row 1 first read "from the close of the first session
+after the decision", which for an intraday decision would start the next day and contradicts
+section 1. Section 1 governs, and it is what CK approved: the recommendation put to CK read "both
+priced at the close of the decision day". A 16 November intraday decision has D = 16 November and a
+5-session endpoint at the 23 November close. The four claims' wording,
 the cohort start, every sample floor, the block length, 10,000 resamples, Benjamini–Hochberg at 10 %
 and the 18-of-22 calibration gate are unchanged.
 
@@ -181,7 +187,7 @@ numbers are reported as descriptive, like arm B. Benjamini–Hochberg is over th
 Two steps, because the existing evaluator cannot run these tests and a new one cannot be built and
 audited by 20 November.
 
-1. **Before the US close on 20 November:** three immutable records in the existing
+1. **Before the US close on Friday 20 November 2026 (05:00 SGT Saturday 21 November):** three immutable records in the existing
    registry, written with the existing `register_hypothesis` function. Each carries its `H-EXP1` ID,
    the claim, the family, the seed, `analysis_not_before` (2027-01-16T01:00:00Z, the earliest possible `T`), the
    look rule of section 3, and the contract: the commit SHA and
@@ -189,6 +195,13 @@ audited by 20 November.
    production; refuse if any `H-EXP1` record exists; read back and report IDs and hashes. This is a
    production ledger write and needs CK's instruction. No application code changes. Confirm, before
    writing, that no scheduled resolver can evaluate these records before `analysis_not_before`.
+   The legacy columns `floor_effective_n` and `floor_span_days` cannot be null and do not express
+   these floors. Store **1,000,000 in both**, documented in the parameters as unused legacy
+   placeholders, so that a legacy evaluation can never report a floor as cleared; the real floors
+   (section 2) go in the parameters. Not 0: a zero floor is one every legacy evaluation passes.
+   Until the refusal guard of step 2 is deployed, nothing may call the legacy evaluator on these
+   records — a single call would permanently mark them evaluated and spend the one look. No resolver
+   links are created.
 2. **Before 9 January 2027:** a narrow, versioned evaluator for exactly these contracts, with a guard
    that makes the legacy evaluator refuse them. Old registrations and their quarantine untouched.
    Delivered on its own SHA, audited by Claude, proven on constructed fixtures only.
