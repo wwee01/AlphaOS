@@ -155,18 +155,20 @@ This implements "close" in the contract; it does not change it. Without the tabl
 | 7 | Exact instant 16 Nov 09:29:59 ET | — | would be 16 Nov, but before the open → out of scope | — | — |
 | 7b | Interval with L 09:29:50 and U 09:30:10 on 16 Nov | bounded | **unavailable** `boundary_unproven` | — | — |
 
-## 7. For CK: two interpretations, neither a change to claims, floors, seeds or look
+## 7. Two interpretations — **CK approved both recommendations, 18 November** ("go with both reco")
+
+Neither changes claims, floors, seeds or look. Ruled: (1) the decision key's unit is the reference
+session D; (2) the pool comes only from owning, in-window draws.
 
 1. **Dedupe unit.** v1 §2 says "first qualifying candidate per symbol per ET trading day". I
    recommend the reference session D, which the addendum already uses for the ranking roster. The
    two units give the same result except for decisions at or after a close. Under "ET trading day",
    a Monday 16:02 decision and a Tuesday 09:40 decision on the same symbol both get D = Tuesday, so
-   one window would be counted twice. A Saturday decision also has no ET trading day. Codex can build
-   with D as a single constant; please confirm before 23 November.
+   one window would be counted twice. A Saturday decision also has no ET trading day. **Approved.**
 2. **Pool source.** The pool is the `eligible_ids` of *owning, in-window* draws only. Off-window
    scans make no draw. A non-owner scan's `explore_draw_json` is a copy of the owner's draw, so its
    own eligible candidates are in no draw. This is the literal reading of "persisted eligible set of
-   that day's control draws".
+   that day's control draws". **Approved.**
 
 ## 8. Operational finding, outside this mapping, urgent
 
