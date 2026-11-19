@@ -183,3 +183,11 @@ session D; (2) the pool comes only from owning, in-window draws.
 - The failure signature matches the 7 August outage.
 
 Codex should diagnose, read-only first.
+
+*STATUS CORRECTION to §8, 19 November (raised by Codex's diagnosis, checked by Claude):* the
+evaluator was **not** passing on 17 November. Its exception fallback stores `validation_status='passed'`
+by default, so the 23 rows I counted as passes are safety rejections ("OpenAI call failed; rejected for
+safety.", `OPENAI_REJECT`, no tokens). Cause: API credits exhausted (HTTP 429 `insufficient_quota`)
+since 16 Nov 20:57:52Z, for both the classifier and the evaluator. The draws were empty because
+routing refuses `OPENAI_REJECT` as well as the failed labels. See
+`delivery-history/claude-audit-of-codex-decision-mapping-a641b3c-2026-11-19.md` §4.
