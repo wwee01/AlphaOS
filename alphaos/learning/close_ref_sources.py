@@ -25,9 +25,9 @@ class SliceYielded(RuntimeError):
 
 class CloseRefSources:
     def __init__(self, calendar_client, bars_provider, *, provider: str, feed: str,
-                 adjustment: str = "raw", now=None, should_yield=None):
-        if not provider or not feed or adjustment != "raw":
-            raise ValueError("close_ref source requires a named feed and raw adjustment")
+                 adjustment: str = "split", now=None, should_yield=None):
+        if not provider or not feed or adjustment != "split":
+            raise ValueError("close_ref source requires a named feed and split adjustment")
         self.calendar_client = calendar_client
         self.bars_provider = bars_provider
         self.provider, self.feed, self.adjustment = provider, feed, adjustment
@@ -41,6 +41,8 @@ class CloseRefSources:
         self._check_feed()
 
     def _check_feed(self):
+        if self.adjustment != "split":
+            raise ValueError("close_ref_adjustment_changed")
         settings = getattr(self.bars_provider, "settings", None)
         if settings is not None and settings.market_data_feed != self.feed:
             raise ValueError("close_ref_provider_feed_changed")
@@ -77,7 +79,9 @@ class CloseRefSources:
             self._admit()
             error_type = None
             try:
-                bars = self.bars_provider.get_daily_bars(symbol, start=start, end=end, limit=64)
+                bars = self.bars_provider.get_daily_bars(
+                    symbol, start=start, end=end, limit=64, adjustment=self.adjustment,
+                )
                 if not isinstance(bars, list) or len(bars) > 64:
                     raise ValueError("invalid daily bar response")
                 encoded = json.dumps(bars, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -115,4 +119,4 @@ def make_sources(orch, bars_provider, *, should_yield=None):
         return None
     return CloseRefSources(None, bars_provider,
                            provider="alpaca", feed=orch.settings.market_data_feed,
-                           adjustment="raw", should_yield=should_yield)
+                           adjustment="split", should_yield=should_yield)

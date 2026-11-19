@@ -1,6 +1,9 @@
 """Only injected calendar and daily-bar capabilities; no network or ledger."""
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+import json
+import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -23,8 +26,8 @@ class Bars:
         self.calls = []
         self.settings = SimpleNamespace(market_data_feed="iex")
 
-    def get_daily_bars(self, symbol, *, start, end, limit):
-        self.calls.append((symbol, start, end, limit))
+    def get_daily_bars(self, symbol, *, start, end, limit, adjustment):
+        self.calls.append((symbol, start, end, limit, adjustment))
         return [{"date": start, "close": 100}, {"date": "2026-11-23", "close": 110}]
 
 
@@ -70,8 +73,8 @@ def test_provider_receipt_matches_query_and_separate_spy_cache_is_owned():
     assert again["request"]["feed"] == "iex"
     assert a["request"]["end"] == "2026-11-24"
     assert sources.bars_provider.calls == [
-        ("ABC", "2026-11-16", "2026-11-24", 64),
-        ("SPY", "2026-11-16", "2026-11-24", 64),
+        ("ABC", "2026-11-16", "2026-11-24", 64, "split"),
+        ("SPY", "2026-11-16", "2026-11-24", 64, "split"),
     ]
     # Another invocation has no persistent response cache.
     fresh = source()
@@ -151,3 +154,100 @@ def test_feed_changed_during_fetch_is_not_saved_with_stale_provenance():
     with pytest.raises(ValueError, match="feed_changed"):
         sources.observe(window(), 5, "SPY")
     assert not sources._spy
+
+
+@pytest.mark.parametrize("adjustment", ["raw", "all", "dividend", "split,dividend", ""])
+def test_campaign_refuses_any_other_price_basis(adjustment):
+    with pytest.raises(ValueError, match="split adjustment"):
+        source(adjustment=adjustment)
+
+
+def test_changed_adjustment_cannot_relabel_a_cached_response():
+    sources = source()
+    sources.observe(window(), 5, "SPY")
+    sources.adjustment = "raw"
+    with pytest.raises(ValueError, match="adjustment_changed"):
+        sources.observe(window(), 5, "SPY")
+    assert len(sources.bars_provider.calls) == 1
+
+
+def real_adapter(monkeypatch, responder):
+    """Use the real HTTP adapter with dummy credentials and intercepted I/O."""
+    from alphaos.data.providers import alpaca_bars
+    settings = SimpleNamespace(has_alpaca_keys=True, market_data_feed="iex",
+                               alpaca_api_key="fixture", alpaca_secret_key="fixture")
+    monkeypatch.setattr(alpaca_bars.urllib.request, "urlopen", responder)
+    return alpaca_bars.AlpacaBarsProvider(settings)
+
+
+class Response:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+
+def test_actual_http_split_basis_candidate_and_spy_same_response_endpoints(monkeypatch):
+    requests = []
+
+    def response(req, timeout):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query)
+        requests.append((req.full_url, query))
+        assert query["adjustment"] == ["split"]
+        # Synthetic 4:1 candidate split: raw 400 -> 102 would be -74.5%.
+        # Split-only response 100 -> 102 is +2%, with dividends unadjusted.
+        closes = (500., 505.) if "/SPY/" in req.full_url else (100., 102.)
+        return Response({"bars": [
+            {"t": "2026-11-16T05:00:00Z", "c": closes[0]},
+            {"t": "2026-11-23T05:00:00Z", "c": closes[1]},
+        ]})
+
+    adapter = real_adapter(monkeypatch, response)
+    sources = CloseRefSources(None, adapter, provider="alpaca", feed="iex",
+                              now=lambda: stamp("2026-11-23T21:00:02Z"))
+    asset, spy = [sources.observe(window(), 5, symbol) for symbol in ("ABC", "SPY")]
+    assert asset["leg"]["return_fraction"] == pytest.approx(.02)
+    assert spy["leg"]["return_fraction"] == pytest.approx(.01)
+    assert all(result["request"]["adjustment"] == result["leg"]["adjustment"] == "split"
+               for result in (asset, spy))
+    assert len(requests) == 2  # both endpoints per symbol in one response
+
+
+def test_existing_daily_bar_callers_keep_raw_default(monkeypatch):
+    calls = []
+
+    def response(req, timeout):
+        calls.append(urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query))
+        return Response({"bars": []})
+
+    adapter = real_adapter(monkeypatch, response)
+    adapter.get_daily_bars("ABC", "2026-11-16", "2026-11-24")
+    assert calls[0]["adjustment"] == ["raw"]
+    with pytest.raises(ValueError, match="unsupported"):
+        adapter.get_daily_bars("ABC", "2026-11-16", "2026-11-24", adjustment="all")
+    assert len(calls) == 1
+
+
+def test_split_request_failure_stays_pending_without_raw_fallback(monkeypatch):
+    calls = []
+
+    def refused(req, timeout):
+        calls.append(urllib.parse.parse_qs(urllib.parse.urlsplit(req.full_url).query))
+        raise urllib.error.URLError("fixture refusal")
+
+    adapter = real_adapter(monkeypatch, refused)
+    sources = CloseRefSources(None, adapter, provider="alpaca", feed="iex",
+                              now=lambda: stamp("2026-11-23T21:00:02Z"))
+    for symbol in ("ABC", "SPY"):
+        result = sources.observe(window(), 5, symbol)
+        assert result["leg"]["status"] == "pending"
+        assert result["leg"]["return_fraction"] is None
+        assert result["request"]["adjustment"] == "split"
+    assert [c["adjustment"] for c in calls] == [["split"], ["split"]]

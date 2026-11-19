@@ -33,7 +33,7 @@ def _load(row):
 
 
 def source_records(journal):
-    """No provider calls. Open scans remain pending to avoid incomplete inputs."""
+    """No provider calls. Incomplete scans/proofs produce no frozen enrollment."""
     if journal.conn.in_transaction:
         raise RuntimeError("close_ref requires no caller transaction")
     journal.conn.execute("BEGIN")
@@ -59,30 +59,51 @@ def source_records(journal):
         eval_by_scan[by_candidate.get(e["candidate_id"], {}).get("scan_batch_id")].append(e)
     for p in proposals:
         proposals_by_scan[p.get("scan_batch_id")].append(p)
-    proofs, commits, proven = {}, {}, set()
+    proofs, commits, proven, deferred = {}, {}, set(), set()
     for scan_id, batch in closed.items():
-        proof = scan_proof(by_scan[scan_id], eval_by_scan[scan_id], lineages)
+        try:
+            proof = scan_proof(by_scan[scan_id], eval_by_scan[scan_id], lineages)
+            if type(proof.get("verified")) is not bool:
+                raise ValueError("invalid source proof")
+            # Only established source identity/digest failures are permanent.
+            # Unknown failure results also wait, rather than freezing a verdict
+            # based on a transient or unsupported verification path.
+            retry = proof.get("reason") == "source_commit_unavailable" or (
+                not proof["verified"] and proof.get("reason") not in {
+                    "source_commit_missing", "scan_source_identity_unproven", "source_ordering_unreviewed",
+                }
+            )
+            proof = dict(proof)
+        except Exception as exc:
+            proof = {"verified": False, "reason": "source_proof_exception", "error_type": type(exc).__name__}
+            retry = True
+        if retry:
+            proof["deferred"] = True
+            deferred.add(scan_id)
         proofs[scan_id] = proof
+        if retry:
+            continue
         if proof.get("commit"):
             commits[scan_id] = proof["commit"]
         if proof["verified"]:
             proven.add(scan_id)
+    admitted = {scan_id: batch for scan_id, batch in closed.items() if scan_id not in deferred}
     records = []
-    for scan_id, batch in closed.items():
+    for scan_id, batch in admitted.items():
         if batch.get("explore_draw_json") is not None:
             records.extend(mapping.routing_records(
                 batch, by_scan[scan_id], eval_by_scan[scan_id], proposals_by_scan[scan_id],
                 source_commit=commits.get(scan_id) if scan_id in proven else None,
             ))
-    available = [c for c in candidates if c.get("scan_batch_id") in closed]
-    records += mapping.evaluator_records(available, list(closed.values()), evaluations,
+    available = [c for c in candidates if c.get("scan_batch_id") in admitted]
+    records += mapping.evaluator_records(available, list(admitted.values()), evaluations,
                                           non_degraded_scan_ids=proven, source_commits=commits)
-    records += mapping.shadow_records(available, list(closed.values()), labels, source_commits=commits)
+    records += mapping.shadow_records(available, list(admitted.values()), labels, source_commits=commits)
     return records, proofs, len(batches) - len(closed)
 
 
-def enroll(journal, *, provider, feed, adjustment="raw", limit=500, should_yield=None):
-    if type(limit) is not int or limit < 0 or not provider or not feed or adjustment != "raw":
+def enroll(journal, *, provider, feed, adjustment="split", limit=500, should_yield=None):
+    if type(limit) is not int or limit < 0 or not provider or not feed or adjustment != "split":
         raise ValueError("invalid close_ref enrollment request")
     should_yield = should_yield or (lambda: False)
     if not limit or should_yield():
@@ -138,7 +159,11 @@ def enroll(journal, *, provider, feed, adjustment="raw", limit=500, should_yield
             "status_10d": "pending" if record.status == "ready" else "excluded",
         })
         inserted += 1
+    deferred = {scan_id: proof for scan_id, proof in proofs.items() if proof.get("deferred")}
     return {"inserted": inserted, "newly_excluded": excluded, "open_scans_deferred": open_scans,
+            "source_proof_scans_deferred": len(deferred),
+            "source_proof_deferred_reasons": dict(Counter(p.get("reason") or "source_proof_unavailable" for p in deferred.values())),
+            "source_proof_deferred": deferred,
             "out_of_scope": sum(r.status == "out_of_scope" for r in records),
             "yielded": bool(should_yield()), "summary": summary(journal)}
 
@@ -226,7 +251,20 @@ def update(journal, sources, *, limit=500, should_yield=None):
 
 
 def summary(journal):
-    rows = journal.query(f"SELECT population,arm,enrollment_status,unavailable_reason,status_5d,status_10d FROM {TABLE}")
+    rows = journal.query(f"SELECT population,arm,enrollment_status,unavailable_reason,status_5d,status_10d,decision_json FROM {TABLE}")
+    # Measurement enrollment and evaluator ranking are different denominators.
+    # Read the frozen original qualification, never relabel historical opinions.
+    evaluator_ranking: Counter[str] = Counter()
+    ranking_reasons: Counter[str] = Counter()
+    for row in rows:
+        if row["population"] != "evaluator":
+            continue
+        decision = json.loads(row["decision_json"])
+        eligible = row["enrollment_status"] == "ready" and decision.get("ranking_eligible") is True
+        evaluator_ranking["eligible" if eligible else "excluded"] += 1
+        if not eligible:
+            ranking_reasons[decision.get("ranking_exclusion_reason") or row["unavailable_reason"]
+                            or (row["enrollment_status"] if row["enrollment_status"] != "ready" else "ranking_unproven")] += 1
     populations = {}
     for key in sorted({f"{r['population']}:{r['arm']}" for r in rows}):
         group = [r for r in rows if f"{r['population']}:{r['arm']}" == key]
@@ -238,6 +276,9 @@ def summary(journal):
             "enrollment": dict(Counter(r["enrollment_status"] for r in group)),
         }
     return {"total": len(rows), "populations": populations,
+            "evaluator_ranking": {"total": sum(evaluator_ranking.values()),
+                                  "eligible": evaluator_ranking["eligible"], "excluded": evaluator_ranking["excluded"],
+                                  "exclusion_reasons": dict(ranking_reasons)},
             "enrollment": dict(Counter(r["enrollment_status"] for r in rows)),
             "exclusion_reasons": dict(Counter(r["unavailable_reason"] for r in rows if r["unavailable_reason"])),
             "horizon_5d": dict(Counter(r["status_5d"] for r in rows if r["enrollment_status"] == "ready")),

@@ -344,3 +344,68 @@ def test_upper_bound_uses_every_same_scan_campaign_proposal():
         result = route(b=b, evaluations=[ev], proposals=[changed], source_commit=COMMIT)
         assert result.status == 'ready'
         assert result.upper_bound_utc == b['completed_at_utc']
+
+
+@pytest.mark.parametrize('flags', [
+    '["OPENAI_REJECT"]',
+    '["NO_ATR_DATA", "OPENAI_REJECT"]',
+    ['OPENAI_REJECT'],
+    'malformed ["OPENAI_REJECT"',
+])
+@pytest.mark.parametrize('day', ['2026-11-16', '2026-11-24'])
+def test_evaluator_failsafe_measurement_kept_for_historical_and_future_rows(flags, day):
+    c = candidate()
+    b = batch(day=day)
+    ev = dict(opinion(day=day), decision='reject', confidence=0.0,
+              risk_flags_json=flags, reasoning_summary='OpenAI call failed; rejected for safety.',
+              prompt_hash=None, total_tokens=None)
+    before = dict(ev)
+    [failed] = m.evaluator_records([c], [b], [ev], non_degraded_scan_ids=['scan_1'])
+    [ordinary] = m.evaluator_records([c], [b], [dict(ev, risk_flags_json='[]')],
+                                     non_degraded_scan_ids=['scan_1'])
+    assert failed.status == 'ready' and failed.window is not None
+    assert failed.ranking_eligible is False
+    assert failed.ranking_exclusion_reason == 'evaluator_failsafe'
+    assert replace(failed, ranking_eligible=True, ranking_exclusion_reason=None) == ordinary
+    assert ev == before
+
+
+@pytest.mark.parametrize('flags', [None, '[]', '["REWARD_RISK_TOO_LOW"]', '["NO_ATR_DATA"]'])
+def test_genuine_zero_confidence_reject_is_not_inferred_to_be_failsafe(flags):
+    ev = dict(opinion(), decision='reject', confidence=0.0, risk_flags_json=flags,
+              prompt_hash=None, total_tokens=None)
+    [record] = m.evaluator_records([candidate()], [batch()], [ev],
+                                   non_degraded_scan_ids=['scan_1'])
+    assert record.status == 'ready' and record.ranking_eligible
+    assert record.ranking_exclusion_reason is None
+
+
+def test_failsafe_exclusion_is_explicit_even_with_other_ranking_exclusions():
+    ev = dict(opinion(), risk_flags_json='["OPENAI_REJECT"]', direction='short',
+              validation_status='live_exception', is_mock=1, confidence=None)
+    [record] = m.evaluator_records([candidate()], [batch()], [ev])
+    assert record.status == 'ready' and not record.ranking_eligible
+    assert record.ranking_exclusion_reason == 'evaluator_failsafe'
+
+
+def test_failsafe_original_does_not_promote_same_candidate_reevaluation_or_consume_symbol_key():
+    cs = [candidate(1), candidate(2, scan=2), candidate(3, scan=3)]
+    bs = [batch(1), batch(2), batch(3)]
+    failed = dict(opinion(1, 1, at='10:00:00'), decision='reject', confidence=0.0,
+                  risk_flags_json='["OPENAI_REJECT"]')
+    # This genuine later row is not the original opinion of candidate 1.
+    repeated = opinion(2, 1, at='10:01:00')
+    genuine = opinion(3, 2, at='10:02:00')
+    duplicate = opinion(4, 3, at='10:03:00')
+    records = m.evaluator_records(cs, bs, [duplicate, repeated, genuine, failed],
+                                 non_degraded_scan_ids=['scan_1', 'scan_2', 'scan_3'])
+    final = m.deduplicate(records)
+    assert [record.source_id for record in final] == ['eval_1', 'eval_3', 'eval_4']
+    assert [record.status for record in final] == ['ready', 'ready', 'duplicate_in_session']
+    assert [record.ranking_eligible for record in final] == [False, True, True]
+    assert final[0].ranking_exclusion_reason == 'evaluator_failsafe'
+    assert final[0].decision_at_utc == failed['created_at_utc']
+    assert all(record.window.reference.date == '2026-11-18' for record in final)
+    # The same filter applies when a frozen measured fallback is reloaded first.
+    saved = m.decision_from_dict(m.decision_to_dict(final[0]))
+    assert m.deduplicate([saved, *records]) == final

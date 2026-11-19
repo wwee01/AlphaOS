@@ -23,22 +23,33 @@ _APPROVED_PRODUCERS = {
 
 
 @lru_cache(maxsize=128)
-def committed_ordering(commit: str) -> dict:
-    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
-        return {"verified": False, "reason": "source_commit_missing"}
-    try:
-        proc = subprocess.run(
-            ["git", "show", f"{commit}:alphaos/orchestrator.py"],
-            cwd=Path(__file__).resolve().parents[2], capture_output=True, timeout=2,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return {"verified": False, "reason": "source_commit_unavailable", "commit": commit}
+def _committed_ordering(commit: str) -> dict:
+    # Exceptions are not cached: a missing checkout/object or transient process
+    # failure is not evidence that these committed producer bytes are invalid.
+    proc = subprocess.run(
+        ["git", "show", f"{commit}:alphaos/orchestrator.py"],
+        cwd=Path(__file__).resolve().parents[2], capture_output=True, timeout=2,
+    )
     if proc.returncode:
-        return {"verified": False, "reason": "source_commit_unavailable", "commit": commit}
+        raise OSError("source_commit_unavailable")
     digest = hashlib.sha256(proc.stdout).hexdigest()
     return {"verified": digest in _APPROVED_PRODUCERS, "commit": commit,
             "orchestrator_sha256": digest,
             "reason": None if digest in _APPROVED_PRODUCERS else "source_ordering_unreviewed"}
+
+
+def committed_ordering(commit: str) -> dict:
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return {"verified": False, "reason": "source_commit_missing"}
+    try:
+        return dict(_committed_ordering(commit))
+    except (OSError, subprocess.TimeoutExpired):
+        return {"verified": False, "reason": "source_commit_unavailable", "commit": commit}
+
+
+# Retain the existing diagnostic cache-clear interface; unavailable results no
+# longer need an operator to clear this cache before a healthy retry.
+committed_ordering.cache_clear = _committed_ordering.cache_clear  # type: ignore[attr-defined]
 
 
 def scan_proof(candidates: list[dict], evaluations: list[dict], lineages: dict) -> dict:

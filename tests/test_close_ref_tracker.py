@@ -3,6 +3,8 @@ from datetime import datetime
 from types import SimpleNamespace
 import json
 import sqlite3
+import hashlib
+import subprocess
 
 import pytest
 
@@ -62,7 +64,8 @@ class Bars:
         self.ratio = 1.1
         self.settings = SimpleNamespace(market_data_feed='iex')
 
-    def get_daily_bars(self, symbol, *, start, end, limit):
+    def get_daily_bars(self, symbol, *, start, end, limit, adjustment):
+        assert adjustment == 'split'
         self.calls.append(symbol)
         if symbol in self.missing:
             return []
@@ -210,7 +213,8 @@ def test_later_overlap_marks_whole_key_including_prior_duplicates(j):
 
 def test_source_ordering_checked_without_git_timestamp_in_bounds(j, monkeypatch):
     scan(j, exact=False)
-    monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {'verified': False, 'commit': sha})
+    monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {
+        'verified': False, 'commit': sha, 'reason': 'source_ordering_unreviewed'})
     enroll(j)
     row = j.one("SELECT * FROM explore_close_outcomes WHERE population='arm'")
     assert row['enrollment_status']=='unavailable'
@@ -248,3 +252,219 @@ def test_crash_after_leg_commit_keeps_scalar_atomic(j):
     row = j.one("SELECT * FROM explore_close_outcomes ORDER BY id LIMIT 1")
     assert row["r_5d"] == json.loads(row["candidate_5d_json"])["leg"]["return_fraction"]
     assert row["status_5d"] == "pending" and row["b_5d"] is None
+
+
+def all_populations_scan(j, scan_id='scan', *, exact=True):
+    scan(j, scan_id, arm='A+B', exact=exact)
+    cid = 'shadow_' + scan_id
+    j.insert('candidates', {'candidate_id': cid, 'symbol': 'SHD', 'scan_batch_id': scan_id,
+             'policy_version': 'explore_1', 'direction': 'long', 'lineage_id': 'lineage',
+             'shadow_tier': 1, 'label_frozen_at_utc': '2026-11-16T15:00:00Z'})
+    j.insert('candidate_labels', {'label_id': 'label_'+cid, 'candidate_id': cid,
+             'symbol': 'SHD', 'scan_batch_id': scan_id, 'shadow_tier': 1,
+             'label_frozen_at_utc': '2026-11-16T15:00:00Z', 'relabel_of': None})
+
+
+def test_unavailable_proof_defers_whole_scan_then_healthy_retry(j, monkeypatch):
+    all_populations_scan(j)
+    healthy = lineage.committed_ordering
+    monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {
+        'verified': False, 'commit': sha, 'reason': 'source_commit_unavailable'})
+    first = enroll(j)
+    assert first['inserted'] == j.count_rows('explore_close_outcomes') == 0
+    assert first['source_proof_scans_deferred'] == 1 and first['open_scans_deferred'] == 0
+    assert first['source_proof_deferred_reasons'] == {'source_commit_unavailable': 1}
+    assert first['source_proof_deferred']['scan']['deferred'] is True
+    monkeypatch.setattr(lineage, 'committed_ordering', healthy)
+    second = enroll(j)
+    assert second['inserted'] == 5 and second['source_proof_scans_deferred'] == 0
+    rows = j.query('SELECT * FROM explore_close_outcomes')
+    assert {r['population'] for r in rows} == {'arm', 'pool', 'evaluator', 'shadow'}
+    assert all(r['enrollment_status'] == 'ready' for r in rows)
+    assert enroll(j)['inserted'] == 0
+    assert rows == j.query('SELECT * FROM explore_close_outcomes')
+
+
+@pytest.mark.parametrize('error', [OSError, RuntimeError, ValueError, TypeError, KeyError])
+def test_any_proof_exception_defers_all_populations_without_leaking_error(j, monkeypatch, error):
+    all_populations_scan(j)
+    healthy = tracker.scan_proof
+
+    def broken(*args):
+        raise error('sensitive diagnostic must not be retained')
+
+    monkeypatch.setattr(tracker, 'scan_proof', broken)
+    first = enroll(j)
+    assert first['inserted'] == j.count_rows('explore_close_outcomes') == 0
+    assert first['source_proof_deferred_reasons'] == {'source_proof_exception': 1}
+    assert first['source_proof_deferred']['scan']['error_type'] == error.__name__
+    assert 'sensitive diagnostic' not in json.dumps(first)
+    monkeypatch.setattr(tracker, 'scan_proof', healthy)
+    assert enroll(j)['inserted'] == 5
+
+
+@pytest.mark.parametrize('proof', [None, {}, {'verified': 1},
+                                    {'verified': True, 'reason': 'source_commit_unavailable'},
+                                    {'verified': False, 'reason': 'unexpected_failure'}])
+def test_unknown_or_malformed_proof_cannot_freeze_exclusions(j, monkeypatch, proof):
+    all_populations_scan(j)
+    monkeypatch.setattr(tracker, 'scan_proof', lambda *args: proof)
+    result = enroll(j)
+    assert result['inserted'] == j.count_rows('explore_close_outcomes') == 0
+    assert result['source_proof_scans_deferred'] == 1
+
+
+def test_deferred_scan_does_not_block_healthy_scan_or_rewrite_saved_rows(j, monkeypatch):
+    scan(j, 'healthy', symbol='OK')
+    enroll(j)
+    before = j.query('SELECT * FROM explore_close_outcomes')
+    all_populations_scan(j, 'deferred')
+    healthy = tracker.scan_proof
+
+    def proof(candidates, *args):
+        if any(c['scan_batch_id'] == 'deferred' for c in candidates):
+            raise RuntimeError('temporarily unavailable')
+        return healthy(candidates, *args)
+
+    monkeypatch.setattr(tracker, 'scan_proof', proof)
+    first = enroll(j)
+    assert first['source_proof_scans_deferred'] == 1 and first['inserted'] == 0
+    assert before == j.query('SELECT * FROM explore_close_outcomes')
+    scan(j, 'new_healthy', symbol='NEW')
+    assert enroll(j)['inserted'] == 3
+    assert before == j.query("SELECT * FROM explore_close_outcomes WHERE scan_batch_id='healthy'")
+    assert not j.query("SELECT * FROM explore_close_outcomes WHERE scan_batch_id='deferred'")
+    monkeypatch.setattr(tracker, 'scan_proof', healthy)
+    assert enroll(j)['inserted'] == 5
+
+
+@pytest.mark.parametrize('failure', ['digest', 'missing_lineage', 'disagreeing_lineage', 'missing_commit'])
+def test_definitive_source_failures_stay_permanent_after_healthy_retry(j, monkeypatch, failure):
+    all_populations_scan(j, exact=False)
+    healthy = lineage.committed_ordering
+    if failure == 'digest':
+        monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {
+            'verified': False, 'commit': sha, 'reason': 'source_ordering_unreviewed',
+            'orchestrator_sha256': 'f'*64})
+    elif failure == 'missing_lineage':
+        j.conn.execute("UPDATE candidates SET lineage_id='missing' WHERE candidate_id='cand_scan'")
+    elif failure == 'disagreeing_lineage':
+        j.insert('lineage_snapshots', {'lineage_id': 'other', 'git_commit_sha': 'b'*40, 'git_dirty': 0})
+        j.conn.execute("UPDATE openai_evaluations SET lineage_id='other'")
+    else:
+        j.conn.execute("UPDATE lineage_snapshots SET git_commit_sha=NULL")
+        monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {
+            'verified': False, 'reason': 'source_commit_missing'})
+    j.conn.commit()
+    first = enroll(j)
+    assert first['inserted'] == 5 and first['source_proof_scans_deferred'] == 0
+    before = j.query('SELECT * FROM explore_close_outcomes')
+    assert all(r['enrollment_status'] == 'unavailable' for r in before if r['population'] in ('arm', 'pool'))
+    evaluator = next(r for r in before if r['population'] == 'evaluator')
+    assert evaluator['enrollment_status'] == 'ready'
+    assert not json.loads(evaluator['decision_json'])['ranking_eligible']
+    j.conn.execute("UPDATE candidates SET lineage_id='lineage'")
+    j.conn.execute("UPDATE openai_evaluations SET lineage_id='lineage'")
+    j.conn.execute("UPDATE lineage_snapshots SET git_commit_sha=? WHERE lineage_id='lineage'", ('a'*40,))
+    j.conn.commit()
+    monkeypatch.setattr(lineage, 'committed_ordering', healthy)
+    assert enroll(j)['inserted'] == 0
+    assert before == j.query('SELECT * FROM explore_close_outcomes')
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'oserror', 'nonzero', 'unexpected'])
+def test_actual_git_lookup_transients_are_not_cached(monkeypatch, failure):
+    lineage._committed_ordering.cache_clear()
+    body = b'reviewed committed producer bytes'
+    monkeypatch.setattr(lineage, '_APPROVED_PRODUCERS', {hashlib.sha256(body).hexdigest()})
+    calls = []
+
+    def lookup(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            if failure == 'timeout':
+                raise subprocess.TimeoutExpired('git', 2)
+            if failure == 'oserror':
+                raise OSError('temporary')
+            if failure == 'unexpected':
+                raise RuntimeError('unexpected proof exception')
+            return SimpleNamespace(returncode=128, stdout=b'')
+        return SimpleNamespace(returncode=0, stdout=body)
+
+    monkeypatch.setattr(lineage.subprocess, 'run', lookup)
+    try:
+        if failure == 'unexpected':
+            with pytest.raises(RuntimeError):
+                lineage.committed_ordering('a'*40)
+        else:
+            assert lineage.committed_ordering('a'*40)['reason'] == 'source_commit_unavailable'
+        assert lineage.committed_ordering('a'*40)['verified'] is True
+        assert lineage.committed_ordering('a'*40)['verified'] is True
+        assert len(calls) == 2  # No operator/cache clear between either pass.
+    finally:
+        lineage._committed_ordering.cache_clear()
+
+
+def test_verified_digest_mismatch_is_cached_as_definitive(monkeypatch):
+    lineage._committed_ordering.cache_clear()
+    calls = []
+
+    def lookup(*args, **kwargs):
+        calls.append(1)
+        return SimpleNamespace(returncode=0, stdout=b'unreviewed producer')
+
+    monkeypatch.setattr(lineage.subprocess, 'run', lookup)
+    try:
+        first = lineage.committed_ordering('b'*40)
+        assert first['reason'] == 'source_ordering_unreviewed' and first['verified'] is False
+        first['verified'] = True
+        assert lineage.committed_ordering('b'*40)['verified'] is False
+        assert len(calls) == 1
+    finally:
+        lineage._committed_ordering.cache_clear()
+
+
+def test_summary_separates_measured_failsafes_and_ranking_duplicates(j):
+    scan(j, 'fallback')
+    j.conn.execute("UPDATE openai_evaluations SET risk_flags_json='[\"OPENAI_REJECT\"]',decision='reject',confidence=0")
+    j.conn.commit()
+    scan(j, 'genuine', instant='2026-11-16T15:01:00Z')
+    scan(j, 'duplicate', instant='2026-11-16T15:02:00Z')
+    before = j.query('SELECT * FROM openai_evaluations')
+    result = enroll(j)
+    s = result['summary']
+    assert s['populations']['evaluator:']['eligible'] == 2  # Fallback and genuine record both measured.
+    assert s['evaluator_ranking'] == {
+        'total': 3, 'eligible': 1, 'excluded': 2,
+        'exclusion_reasons': {'evaluator_failsafe': 1, 'duplicate_in_session': 1},
+    }
+    tracker.update(j, sources(Bars()))
+    fallback = j.one("SELECT * FROM explore_close_outcomes WHERE population='evaluator' AND scan_batch_id='fallback'")
+    assert fallback['status_5d'] == 'complete' and fallback['r_5d'] == pytest.approx(.1)
+    assert before == j.query('SELECT * FROM openai_evaluations')
+    assert tracker.summary(j)['evaluator_ranking'] == s['evaluator_ranking']
+
+
+def test_enrollment_requires_split_adjustment(j):
+    scan(j)
+    with pytest.raises(ValueError, match='invalid close_ref enrollment request'):
+        enroll(j, adjustment='raw')
+    assert j.count_rows('explore_close_outcomes') == 0
+    assert enroll(j)['inserted'] == 3
+    assert {r['adjustment'] for r in j.query('SELECT adjustment FROM explore_close_outcomes')} == {'split'}
+
+
+def test_transient_proof_after_enrollment_preserves_all_frozen_records(j, monkeypatch):
+    all_populations_scan(j)
+    enroll(j)
+    before = j.query('SELECT * FROM explore_close_outcomes')
+    healthy = lineage.committed_ordering
+    monkeypatch.setattr(lineage, 'committed_ordering', lambda sha: {
+        'verified': False, 'commit': sha, 'reason': 'source_commit_unavailable'})
+    result = enroll(j)
+    assert result['inserted'] == result['newly_excluded'] == 0
+    assert result['source_proof_scans_deferred'] == 1
+    assert before == j.query('SELECT * FROM explore_close_outcomes')
+    monkeypatch.setattr(lineage, 'committed_ordering', healthy)
+    assert enroll(j)['inserted'] == 0
+    assert before == j.query('SELECT * FROM explore_close_outcomes')

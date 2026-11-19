@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
+from alphaos.ai.labeller_health import is_openai_reject_row
 from alphaos.learning.close_ref_engine import (
     CalendarPending, Window, pinned_calendar, resolve_window, window_from_dict, window_to_dict,
 )
@@ -240,6 +241,10 @@ def _original(rows: list[Mapping], timestamp: str) -> tuple[Mapping, str | None]
 
 
 def _ranking_reason(candidate: Mapping, opinion: Mapping, non_degraded: bool) -> str | None:
+    # CK-approved D1: keep the original measurement, but a provider fail-safe
+    # is not an evaluator opinion and cannot consume the symbol/session key.
+    if is_openai_reject_row(dict(opinion)):
+        return "evaluator_failsafe"
     if not non_degraded:
         return "non_degraded_scan_unproven"
     if candidate.get("direction") != "long" or opinion.get("direction") != "long":

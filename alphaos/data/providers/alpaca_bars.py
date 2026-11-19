@@ -44,10 +44,17 @@ class AlpacaBarsProvider:
         self.settings = settings
         self.journal = journal
 
-    def get_daily_bars(self, symbol: str, start: str, end: str, limit: int = 200) -> list[dict]:
+    def get_daily_bars(self, symbol: str, start: str, end: str, limit: int = 200,
+                       *, adjustment: str = "raw") -> list[dict]:
         """Daily OHLCV bars for ``symbol`` in [start, end] (YYYY-MM-DD, inclusive).
         Returns ``[]`` on any error/missing-creds — callers must treat that as
-        "bars unavailable", never as "zero real bars exist"."""
+        "bars unavailable", never as "zero real bars exist".
+
+        Existing callers retain raw bars. Campaign close-return measurement
+        explicitly requests split-only prices; cash dividends are not adjusted.
+        """
+        if adjustment not in ("raw", "split"):
+            raise ValueError("unsupported daily-bar adjustment")
         if not self.settings.has_alpaca_keys:
             self._log(Severity.WARNING, f"No Alpaca creds; historical bars unavailable for {symbol}.")
             return []
@@ -55,7 +62,7 @@ class AlpacaBarsProvider:
             url = (
                 f"{ALPACA_DATA_BASE_URL}/v2/stocks/{symbol}/bars"
                 f"?timeframe=1Day&start={start}&end={end}&limit={int(limit)}"
-                f"&feed={self.settings.market_data_feed}&adjustment=raw"
+                f"&feed={self.settings.market_data_feed}&adjustment={adjustment}"
             )
             req = urllib.request.Request(
                 url,
