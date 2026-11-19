@@ -10,6 +10,8 @@ VERSION = "outcomes_work_turn_v1"
 DOMAINS = {
     "outer": ("candidate", "attribution_discover", "attribution_resolve", "baseline"),
     "baseline": ("v1", "hold10"),
+    # A new domain preserves already-written legacy continuation receipts.
+    "explore_outer": ("candidate", "close_ref", "attribution_discover", "attribution_resolve", "baseline"),
 }
 
 

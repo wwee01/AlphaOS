@@ -2005,6 +2005,10 @@ class Orchestrator:
         provider = make_bars_provider(self.settings, self.journal)
         updated = update_pending_outcomes(self.journal, bars_provider=provider, limit=limit)
         result = {"seeded": seeded, "updated": updated}
+        if self.settings.explore_1_enabled:
+            from alphaos.learning.close_ref_tracker import run_close_ref
+
+            result["close_ref"] = run_close_ref(self, provider, limit=limit)
 
         # PR8: Attribution v2. MUST run strictly AFTER the outcome ledger above
         # -- attribution only ever READS candidate_outcomes/trade_outcomes as

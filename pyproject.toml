@@ -102,3 +102,6 @@ module = [
     "alphaos.util.timeutils",
 ]
 ignore_errors = true
+
+[tool.setuptools.package-data]
+"alphaos.learning" = ["close_ref_calendar.json"]
