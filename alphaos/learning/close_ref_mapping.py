@@ -159,7 +159,7 @@ def _routing_bounds(batch: Mapping, candidates: list[Mapping], evaluations: Iter
         uppers = ([_instant(batch["completed_at_utc"])]
                   if batch.get("completed_at_utc") is not None else [])
         uppers.extend(_instant(row.get("created_at_utc")) for row in proposals
-                      if row.get("candidate_id") in ids and row.get("scan_batch_id") == batch_id
+                      if row.get("scan_batch_id") == batch_id
                       and row.get("policy_version") == "explore_1")
         if not uppers:
             return lower.isoformat(), None, "timestamp_unavailable"

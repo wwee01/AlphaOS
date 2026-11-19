@@ -328,3 +328,19 @@ def test_upper_bound_requires_same_batch_and_can_use_proposal_before_completion(
     assert route(b,evaluations=[opinion()],proposals=[wrong],source_commit=COMMIT).reason=='timestamp_unavailable'
     correct=dict(wrong,scan_batch_id='scan_1')
     assert route(b,evaluations=[opinion()],proposals=[correct],source_commit=COMMIT).status=='ready'
+
+
+def test_upper_bound_uses_every_same_scan_campaign_proposal():
+    b = batch()
+    b.update(explore_routed_at_utc=None, completed_at_utc=utc('2026-11-18T15:00:00'))
+    early = dict(candidate_id='absent_candidate', scan_batch_id=b['scan_batch_id'],
+                 policy_version='explore_1', created_at_utc=utc('2026-11-18T14:00:00'))
+    ev = opinion(at='14:30:00')
+    result = route(b=b, evaluations=[ev], proposals=[early], source_commit=COMMIT)
+    assert result.upper_bound_utc == early['created_at_utc']
+    assert result.status == 'unavailable' and result.reason == 'session_unproven'
+    # A different scan or policy cannot tighten this scan's upper bound.
+    for changed in (dict(early, scan_batch_id='other'), dict(early, policy_version='other')):
+        result = route(b=b, evaluations=[ev], proposals=[changed], source_commit=COMMIT)
+        assert result.status == 'ready'
+        assert result.upper_bound_utc == b['completed_at_utc']
