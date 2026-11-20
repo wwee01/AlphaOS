@@ -49,14 +49,14 @@ def resolve_due_hypotheses(journal, now: Optional[datetime] = None) -> dict:
     hypothesis's own query bug must never block the other 7 from
     resolving). Returns a summary dict for the caller/report/tests:
     ``{"evaluated", "not_yet_sufficient", "skipped_no_prereg", "synced",
-    "refreshed", "errors"}`` -- each a list of ``hypothesis_id`` (or, for
-    ``errors``, ``{"hypothesis_id", "error"}`` dicts).
+    "refreshed", "errors", "quarantined", "legacy_refused"}`` -- each a
+    list of ``hypothesis_id`` (or error/validity detail dictionaries).
     """
     today = date.fromisoformat(timeutils.stamp(now).local_sgt[:10])
     summary: dict = {
         "evaluated": [], "not_yet_sufficient": [], "skipped_no_prereg": [],
         "synced": [], "refreshed": [], "errors": [],
-        "quarantined": [],
+        "quarantined": [], "legacy_refused": [],
     }
 
     testing_rows = journal.query(
@@ -110,6 +110,9 @@ def _resolve_one(journal, row: dict, today: date, summary: dict) -> None:
     validity = finalization_validity(journal, prereg)
     if validity["quarantined"]:
         summary["quarantined"].append({"hypothesis_id": hid, **validity})
+        return
+    if validity.get("legacy_finalization_refused"):
+        summary["legacy_refused"].append({"hypothesis_id": hid, **validity})
         return
     if row["metric_fn_name"] is None:
         return  # H-AI-1-shaped row, nothing to compute here; wait for BASELINE's own path
