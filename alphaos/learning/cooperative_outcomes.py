@@ -56,6 +56,10 @@ def _baseline(journal, provider, limit, should_yield):
     }
 
 
+def _domain(orch):
+    return "explore_outer" if orch.settings.explore_1_enabled else "outer"
+
+
 def run_cooperative_outcomes(orch, *, limit, should_yield):
     from alphaos.scheduler.ownership import worker_ownership
 
@@ -67,7 +71,7 @@ def run_cooperative_outcomes(orch, *, limit, should_yield):
         return {
             "yielded": True,
             "stages": {},
-            "stages_not_started": list(turns.DOMAINS["outer"]),
+            "stages_not_started": list(turns.DOMAINS[_domain(orch)]),
         }
     with worker_ownership(orch.journal, "research") as acquired:
         if not acquired:
@@ -75,7 +79,7 @@ def run_cooperative_outcomes(orch, *, limit, should_yield):
                 "yielded": True,
                 "reason": "research_owner_busy",
                 "stages": {},
-                "stages_not_started": list(turns.DOMAINS["outer"]),
+                "stages_not_started": list(turns.DOMAINS[_domain(orch)]),
             }
         return _run_owned(orch, limit=limit, should_yield=should_yield)
 
@@ -86,7 +90,7 @@ def _run_owned(orch, *, limit, should_yield):
     result: dict = {
         "yielded": False,
         "stages": {},
-        "stages_not_started": list(turns.DOMAINS["outer"]),
+        "stages_not_started": list(turns.DOMAINS[_domain(orch)]),
     }
     if limit == 0 or should_yield():
         result["yielded"] = bool(should_yield())
@@ -94,11 +98,11 @@ def _run_owned(orch, *, limit, should_yield):
     from alphaos.data.providers.alpaca_bars import make_bars_provider
 
     provider = make_bars_provider(orch.settings, orch.journal)
-    stage, previous, _ = turns.turn(orch.journal, "outer")
-    for _ in range(len(turns.DOMAINS["outer"])):
+    stage, previous, _ = turns.turn(orch.journal, _domain(orch))
+    for _ in range(len(turns.DOMAINS[_domain(orch)])):
         if should_yield():
             break
-        next_stage, previous = turns.claim_turn(orch.journal, "outer", stage, previous)
+        next_stage, previous = turns.claim_turn(orch.journal, _domain(orch), stage, previous)
         detail: dict
         if stage == "candidate":
             seeded = candidate.seed_pending_outcomes(
@@ -113,6 +117,11 @@ def _run_owned(orch, *, limit, should_yield):
             )
             result["seeded"], result["updated"] = seeded, updated
             detail = {"seeded": seeded, "updated": updated}
+        elif stage == "close_ref":
+            from alphaos.learning.close_ref_tracker import run_close_ref
+
+            detail = run_close_ref(orch, provider, limit=limit, should_yield=should_yield)
+            result["close_ref"] = detail
         elif stage.startswith("attribution_"):
             if orch.settings.attribution_enabled:
                 from alphaos import attribution

@@ -7,6 +7,7 @@ import math
 import random
 import sqlite3
 from dataclasses import replace
+from datetime import timezone
 
 from alphaos.constants import ReasonCode
 from alphaos.scheduler.cadence import parse_windows, window_containing
@@ -67,6 +68,8 @@ def freeze_draw(journal, settings, scan_batch_id, started_at, eligible_ids):
 
     A blocked chosen candidate never causes a redraw. Off-window manual scans
     have no C draw. A later scan in the window cannot reuse another scan's C.
+    The event stamp shares the first draw UPDATE, not its later commit time.
+    Re-entry preserves even a legacy draw with no routing stamp.
     """
     parsed = timeutils.parse_iso(started_at)
     if parsed is None or parsed.tzinfo is None:
@@ -74,31 +77,54 @@ def freeze_draw(journal, settings, scan_batch_id, started_at, eligible_ids):
     at = timeutils.to_et(parsed)
     window = window_containing(at.strftime("%H:%M"), parse_windows(settings.scheduler_scan_windows))
     key = f"{VERSION}:{at.date()}:{window[0]}" if window else None
-    previous = journal.one("SELECT explore_draw_json FROM scan_batches WHERE scan_batch_id=?", (scan_batch_id,))
+    previous = journal.one("SELECT explore_draw_json, explore_routed_at_utc FROM scan_batches "
+                           "WHERE scan_batch_id=?", (scan_batch_id,))
     if previous is None:
         raise ValueError("campaign scan batch missing")
     if previous["explore_draw_json"] is not None:
         draw = json.loads(previous["explore_draw_json"])
         return draw["chosen_id"] if draw["scan_batch_id"] == scan_batch_id else None
+    if previous["explore_routed_at_utc"] is not None:
+        raise ValueError("campaign routing stamp exists without its draw")
     seed = hashlib.sha256((key or f"off-window:{scan_batch_id}").encode()).hexdigest()
     pool = sorted(eligible_ids)
     draw = {"policy_version": VERSION, "window_key": key, "scan_batch_id": scan_batch_id,
             "seed": seed, "eligible_ids": pool,
             "chosen_id": random.Random(seed).choice(pool) if key and pool else None}
     try:
-        journal.conn.execute("UPDATE scan_batches SET explore_window_key=?, explore_draw_json=? "
-                             "WHERE scan_batch_id=?", (key, json.dumps(draw, sort_keys=True), scan_batch_id))
-        journal.conn.commit()
+        written = _write_draw(journal, scan_batch_id, key, draw)
     except sqlite3.IntegrityError:
-        journal.conn.rollback()
         previous = journal.one("SELECT explore_draw_json FROM scan_batches WHERE explore_window_key=?", (key,))
         if previous is None:
             raise
         draw = json.loads(previous["explore_draw_json"])
-        journal.conn.execute("UPDATE scan_batches SET explore_draw_json=? WHERE scan_batch_id=?",
-                             (json.dumps(draw, sort_keys=True), scan_batch_id))
-        journal.conn.commit()
+        written = _write_draw(journal, scan_batch_id, None, draw)
+    if not written:
+        # Another call for this same scan won the write-once UPDATE.
+        previous = journal.one("SELECT explore_draw_json FROM scan_batches WHERE scan_batch_id=?", (scan_batch_id,))
+        if previous is None or previous["explore_draw_json"] is None:
+            raise ValueError("campaign draw was not persisted")
+        draw = json.loads(previous["explore_draw_json"])
     return draw["chosen_id"] if draw["scan_batch_id"] == scan_batch_id else None
+
+
+def _write_draw(journal, scan_batch_id, key, draw):
+    encoded = json.dumps(draw, sort_keys=True)
+    event_at = timeutils.now_utc()
+    if event_at.tzinfo is None or event_at.utcoffset() is None:
+        raise ValueError("campaign routing event requires an aware clock")
+    stamp = event_at.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    try:
+        cursor = journal.conn.execute(
+            "UPDATE scan_batches SET explore_window_key=?, explore_draw_json=?, explore_routed_at_utc=? "
+            "WHERE scan_batch_id=? AND explore_draw_json IS NULL AND explore_routed_at_utc IS NULL",
+            (key, encoded, stamp, scan_batch_id),
+        )
+        journal.conn.commit()
+    except BaseException:
+        journal.conn.rollback()
+        raise
+    return cursor.rowcount == 1
 
 
 def entry_refusal(journal, settings, proposal):

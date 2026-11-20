@@ -14,6 +14,56 @@ from __future__ import annotations
 # Ordered list of (name, DDL). Kept as data so tests can assert table presence.
 SCHEMA: list[tuple[str, str]] = [
     (
+        # Independent population windows: never overwrite candidate_outcomes or
+        # registrations. A single candidate may be both an arm and pool member.
+        "explore_close_outcomes",
+        """
+        CREATE TABLE IF NOT EXISTS explore_close_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            outcome_id TEXT NOT NULL UNIQUE,
+            method TEXT NOT NULL,
+            population TEXT NOT NULL,
+            arm TEXT NOT NULL,
+            candidate_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            scan_batch_id TEXT,
+            source_table TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            source_commit TEXT,
+            source_ordering_json TEXT,
+            basis TEXT NOT NULL,
+            decision_instant_utc TEXT,
+            lower_bound_utc TEXT,
+            upper_bound_utc TEXT,
+            reference_session TEXT,
+            endpoint_5d TEXT,
+            endpoint_10d TEXT,
+            calendar_version TEXT NOT NULL,
+            enrollment_status TEXT NOT NULL,
+            unavailable_reason TEXT,
+            decision_json TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            feed TEXT NOT NULL,
+            adjustment TEXT NOT NULL,
+            candidate_5d_json TEXT,
+            benchmark_5d_json TEXT,
+            candidate_10d_json TEXT,
+            benchmark_10d_json TEXT,
+            r_5d REAL,
+            b_5d REAL,
+            r_10d REAL,
+            b_10d REAL,
+            status_5d TEXT NOT NULL DEFAULT 'pending',
+            status_10d TEXT NOT NULL DEFAULT 'pending',
+            last_attempt_at_utc TEXT,
+            created_at_utc TEXT NOT NULL,
+            created_at_sgt TEXT NOT NULL,
+            CHECK(status_5d != 'complete' OR (r_5d IS NOT NULL AND b_5d IS NOT NULL)),
+            CHECK(status_10d != 'complete' OR (r_10d IS NOT NULL AND b_10d IS NOT NULL))
+        )
+        """,
+    ),
+    (
         "trade_learning_records",
         """
         CREATE TABLE IF NOT EXISTS trade_learning_records (
@@ -834,6 +884,7 @@ SCHEMA: list[tuple[str, str]] = [
         CREATE TABLE IF NOT EXISTS scan_batches (
             explore_window_key TEXT,
             explore_draw_json TEXT,
+            explore_routed_at_utc TEXT,
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             scan_batch_id TEXT NOT NULL UNIQUE,
             scheduler_run_id TEXT,
