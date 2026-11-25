@@ -44,3 +44,9 @@ config, registration or broker action. Production DB was read through a `mode=ro
   expire 3 Dec 21:00Z. Next check: after 23 Nov 21:00Z, confirm the D+5 legs for D=16 Nov complete.
 - **`origin/main` lagged production.** It was at `cb3cb2a`, while production ran `fe7e60d`/`049d8bc` locally. This
   record's commit pushes them, so GitHub now matches what is deployed.
+
+## Follow-up check (25 Nov 2026 07:40Z, read-only)
+
+D=16 Nov: 49/49 ready records have complete 5-day legs, 0 complete-with-null. D=17 Nov: 23/23 complete. Later sessions
+are pending, as expected. 101 evaluations since 23 Nov, 0 OPENAI_REJECT. Ranking-eligible rows by session: 16 Nov 3,
+20 Nov 8, 23 Nov 30, 24 Nov 5. No return was examined or evaluated.

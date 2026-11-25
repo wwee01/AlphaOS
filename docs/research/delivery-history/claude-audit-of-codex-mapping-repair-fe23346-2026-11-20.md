@@ -156,3 +156,9 @@ end state matches a healthy single run.
   failure, with the same `unverified` timing path, and the range touches nothing it imports directly.
 - Five runs estimate no rate. Together with Codex's runs, the evidence is: **the failures pre-exist, they are timing-
   dependent, and this SHA does not cause them.** My green run is one lucky-timing pass, not proof of determinism.
+
+## STATUS CORRECTION (25 Nov 2026)
+
+§5 and §8 call the two last30days failures "pre-existing timing flakes". They do pre-exist, and this SHA does not cause
+them, but the underlying cause is a production ordering defect in `last30days_source_policy.py`, not only test timing.
+See `claude-audit-of-codex-partial-flow-tests-7c09f3b-2026-11-25.md` §4 and §6. The acceptance is unchanged.
